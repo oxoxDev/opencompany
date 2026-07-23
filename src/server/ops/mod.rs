@@ -76,6 +76,11 @@ pub struct ConnectionsRuntime {
     /// `SecretStore`, so a tenant never sees this credential. `None` means the
     /// host sends no platform mail.
     pub mail_credentials: Option<MailCredentials>,
+    /// Outbound Telegram transport used by the inbound webhook to deliver a
+    /// reply and by the channel ops to call `setWebhook`. When `None`, Telegram
+    /// delivery is "not wired yet" (the default offline build); the inbound
+    /// webhook still verifies + runs the turn, it just can't post the reply.
+    pub telegram: Option<Arc<dyn crate::company::telegram::TelegramApi>>,
 }
 
 impl ConnectionsRuntime {
@@ -101,6 +106,16 @@ impl ConnectionsRuntime {
         self.mail_credentials = Some(creds);
         self
     }
+
+    /// Injects the outbound Telegram transport (real under `telegram`, a
+    /// recording mock in tests).
+    pub fn with_telegram(
+        mut self,
+        telegram: Arc<dyn crate::company::telegram::TelegramApi>,
+    ) -> Self {
+        self.telegram = Some(telegram);
+        self
+    }
 }
 
 impl std::fmt::Debug for ConnectionsRuntime {
@@ -110,6 +125,7 @@ impl std::fmt::Debug for ConnectionsRuntime {
             .field("dns", &self.dns.is_some())
             .field("mail", &self.mail.is_some())
             .field("mail_credentials", &self.mail_credentials)
+            .field("telegram", &self.telegram.is_some())
             .finish()
     }
 }
