@@ -12,6 +12,7 @@ mod manifest;
 pub mod mcp;
 pub mod runtime;
 mod skill_file;
+pub mod telegram;
 mod types;
 mod workflow_file;
 pub mod workspace_seed;
