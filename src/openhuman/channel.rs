@@ -69,6 +69,7 @@ mod test {
             .send(OutboundMessage {
                 channel: "email".into(),
                 text: "hello".into(),
+                reply_to: None,
             })
             .await
             .unwrap();
@@ -95,6 +96,7 @@ mod test {
             .send(OutboundMessage {
                 channel: "email".into(),
                 text: "hi".into(),
+                reply_to: None,
             })
             .await
             .unwrap_err();

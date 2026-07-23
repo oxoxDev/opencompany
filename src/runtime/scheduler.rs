@@ -271,6 +271,7 @@ mod test {
                     responses.push(OutboundMessage {
                         channel: "operator".into(),
                         text: format!("scheduled: {prompt}"),
+                        reply_to: None,
                     });
                 }
             }

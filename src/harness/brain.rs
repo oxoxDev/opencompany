@@ -153,6 +153,7 @@ impl HarnessBrain {
                     "⚠️ MCP tool issue on '{}': {}",
                     failure.server, failure.scrubbed_message
                 ),
+                reply_to: None,
             });
             if let Some(events) = self.deps.events.as_ref() {
                 events
@@ -214,6 +215,7 @@ impl HarnessBrain {
                 Ok(Some(OutboundMessage {
                     channel: member,
                     text: reply,
+                    reply_to: None,
                 }))
             }
         }
@@ -265,6 +267,7 @@ impl Brain for HarnessBrain {
                     channel_responses.push(OutboundMessage {
                         channel: "operator".to_string(),
                         text: reply,
+                        reply_to: None,
                     });
                     for delegation in self
                         .deps
@@ -290,6 +293,7 @@ impl Brain for HarnessBrain {
             channel_responses.push(OutboundMessage {
                 channel: "operator".to_string(),
                 text: "Acknowledged.".to_string(),
+                reply_to: None,
             });
         }
 
