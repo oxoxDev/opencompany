@@ -27,7 +27,7 @@ use crate::harness::{HarnessDeps, HarnessPool};
 use crate::ports::brain::{Brain, CycleHost};
 use crate::ports::types::{
     CompanyEvent, CompanyRecord, CompressedTrace, CycleRequest, CycleResult, OutboundMessage,
-    TokenUsage,
+    ReplyTo, TokenUsage,
 };
 use crate::ports::{TaskRecord, generate_id, now_millis};
 
@@ -281,6 +281,32 @@ impl Brain for HarnessBrain {
                     // Surface any MCP tool-call failures the turn (or a delegated
                     // desk turn) recorded.
                     self.surface_mcp_failures(&mut channel_responses).await?;
+                }
+                // An inbound Telegram DM routes exactly like a web/chat turn
+                // (OpenHuman treats a bot DM as a web-channel message, not a
+                // bespoke provider): run an ordinary orchestrator turn on the
+                // text, then address the reply back to the originating chat so
+                // the webhook can deliver it into the same conversation.
+                CompanyEvent::WebhookReceived { channel, body }
+                    if channel == crate::company::telegram::TELEGRAM_CHANNEL =>
+                {
+                    if let Some(inbound) = crate::company::telegram::parse_inbound(body) {
+                        let responder = self.responder_for(None);
+                        self.deps.delegations.clear();
+                        self.deps.mcp_failures.clear();
+                        let reply = self
+                            .pool
+                            .run(&self.record.id, &responder, &inbound.text, &self.deps)
+                            .await?;
+                        channel_responses.push(OutboundMessage {
+                            channel: crate::company::telegram::TELEGRAM_CHANNEL.to_string(),
+                            text: reply,
+                            reply_to: Some(ReplyTo {
+                                chat_id: inbound.chat_id.to_string(),
+                            }),
+                        });
+                        self.surface_mcp_failures(&mut channel_responses).await?;
+                    }
                 }
                 CompanyEvent::TaskDispatched { task_id } => {
                     self.run_task(task_id).await?;
