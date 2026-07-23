@@ -61,17 +61,20 @@ pub fn registry_from_decls(decls: &[McpServerDecl]) -> McpServerRegistry {
 /// The MCP registry scoped to one agent, or `None` when the agent is granted no
 /// (enabled) MCP servers.
 ///
-/// An agent reaches a server named `<slug>` only when its manifest `tools`
-/// grants match `mcp:<slug>` (a bare `mcp:*` grants all). Disabled servers are
-/// excluded. Returns `None` (not an empty registry) so the caller can skip
-/// pushing the MCP bridge tools entirely for an agent with no MCP surface.
+/// An agent reaches a server named `<slug>` only when its effective `grants`
+/// (already narrowed by [`agent_effective_grants`]) match `mcp:<slug>` (a bare
+/// `mcp:*` grants all). Disabled servers are excluded. Returns `None` (not an
+/// empty registry) so the caller can skip pushing the MCP bridge tools entirely
+/// for an agent with no MCP surface.
+///
+/// [`agent_effective_grants`]: crate::runtime::builder::agent_effective_grants
 pub fn registry_for_agent(
     decls: &[McpServerDecl],
-    agent: &ManifestAgent,
+    grants: &[String],
 ) -> Option<Arc<McpServerRegistry>> {
     let granted: Vec<McpServerDecl> = decls
         .iter()
-        .filter(|decl| decl.enabled && agent_grants_server(agent, &decl.name))
+        .filter(|decl| decl.enabled && grants_cover_server(grants, &decl.name))
         .cloned()
         .collect();
     if granted.is_empty() {
@@ -83,6 +86,14 @@ pub fn registry_for_agent(
     } else {
         Some(Arc::new(registry))
     }
+}
+
+/// Whether an agent's effective `grants` cover the MCP server named `name`,
+/// using the same glob semantics as every other tool grant (`mcp:*` = all,
+/// `mcp:notion` = exact).
+fn grants_cover_server(grants: &[String], name: &str) -> bool {
+    let want = format!("mcp:{name}");
+    grants.iter().any(|grant| grant_matches(grant, &want))
 }
 
 /// Whether `agent`'s tool grants reach the MCP server named `name`, using the
@@ -585,6 +596,10 @@ mod tests {
         }
     }
 
+    fn grants(g: &[&str]) -> Vec<String> {
+        g.iter().map(|s| s.to_string()).collect()
+    }
+
     fn agent(grants: &[&str]) -> ManifestAgent {
         ManifestAgent {
             id: "ceo".into(),
@@ -598,14 +613,14 @@ mod tests {
 
     #[test]
     fn empty_decls_yield_no_registry() {
-        assert!(registry_for_agent(&[], &agent(&["mcp:*"])).is_none());
+        assert!(registry_for_agent(&[], &grants(&["mcp:*"])).is_none());
     }
 
     #[test]
     fn ungranted_agent_gets_no_registry() {
         let decls = vec![decl("notion", "https://notion.example/mcp")];
         // No mcp grant at all.
-        assert!(registry_for_agent(&decls, &agent(&["email.send"])).is_none());
+        assert!(registry_for_agent(&decls, &grants(&["email.send"])).is_none());
     }
 
     #[test]
@@ -614,7 +629,7 @@ mod tests {
             decl("notion", "https://notion.example/mcp"),
             decl("linear", "https://linear.example/mcp"),
         ];
-        let reg = registry_for_agent(&decls, &agent(&["mcp:*"])).expect("registry");
+        let reg = registry_for_agent(&decls, &grants(&["mcp:*"])).expect("registry");
         let mut names: Vec<&str> = reg.list().iter().map(|s| s.name.as_str()).collect();
         names.sort_unstable();
         assert_eq!(names, vec!["linear", "notion"]);
@@ -626,7 +641,7 @@ mod tests {
             decl("notion", "https://notion.example/mcp"),
             decl("linear", "https://linear.example/mcp"),
         ];
-        let reg = registry_for_agent(&decls, &agent(&["mcp:notion"])).expect("registry");
+        let reg = registry_for_agent(&decls, &grants(&["mcp:notion"])).expect("registry");
         let names: Vec<&str> = reg.list().iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["notion"]);
     }
@@ -635,7 +650,7 @@ mod tests {
     fn disabled_server_is_excluded() {
         let mut d = decl("notion", "https://notion.example/mcp");
         d.enabled = false;
-        assert!(registry_for_agent(&[d], &agent(&["mcp:*"])).is_none());
+        assert!(registry_for_agent(&[d], &grants(&["mcp:*"])).is_none());
     }
 
     #[test]
@@ -643,7 +658,7 @@ mod tests {
         // OpenHuman's Config::default seeds a `gitbooks` server; the registry we
         // build for a tenant agent must NOT contain it.
         let decls = vec![decl("notion", "https://notion.example/mcp")];
-        let reg = registry_for_agent(&decls, &agent(&["mcp:*"])).expect("registry");
+        let reg = registry_for_agent(&decls, &grants(&["mcp:*"])).expect("registry");
         assert!(reg.get("gitbooks").is_none(), "gitbooks must not leak in");
     }
 
@@ -671,7 +686,7 @@ mod tests {
     async fn list_servers_tool_never_emits_a_credential() {
         let mut d = decl("notion", "https://notion.example/mcp");
         d.auth = AuthMaterial::Bearer("sk-super-secret-token".into());
-        let reg = registry_for_agent(&[d], &agent(&["mcp:*"])).expect("registry");
+        let reg = registry_for_agent(&[d], &grants(&["mcp:*"])).expect("registry");
         let tool = OcMcpListServersTool::new(reg);
         let result = tool.execute(json!({})).await.expect("execute");
 
@@ -753,7 +768,7 @@ mod tests {
         let endpoint = format!("http://{addr}/mcp");
         let mut d = decl("fixture", &endpoint);
         d.auth = AuthMaterial::Bearer("sk-super-secret-xyz".into());
-        let registry = registry_for_agent(&[d], &agent(&["mcp:*"])).expect("registry");
+        let registry = registry_for_agent(&[d], &grants(&["mcp:*"])).expect("registry");
         let tool = McpCallTool::new(registry, Arc::new(SecurityPolicy::default()));
 
         let result = tool
@@ -842,7 +857,7 @@ mod tests {
         d.auth = AuthMaterial::Bearer(CANARY.into());
         let agent = agent(&["mcp:*"]);
         let secrets = granted_secrets(std::slice::from_ref(&d), &agent);
-        let registry = registry_for_agent(&[d], &agent).expect("registry");
+        let registry = registry_for_agent(&[d], &grants(&["mcp:*"])).expect("registry");
 
         let queue = McpFailureQueue::default();
         let tool = OcMcpCallTool::new(
@@ -935,7 +950,7 @@ mod tests {
             name: "apiKey".into(),
             value: "qp-secret-abc".into(),
         };
-        let registry = registry_for_agent(&[d], &agent(&["mcp:*"])).expect("registry");
+        let registry = registry_for_agent(&[d], &grants(&["mcp:*"])).expect("registry");
         // list_tools drives initialize + tools/list over the wire.
         let _ = registry
             .list_tools("browserbase")
