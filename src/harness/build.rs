@@ -222,6 +222,14 @@ pub fn build_agent(
             deps.skills_source_dir.clone(),
             deps.workflow_runner.clone(),
         ));
+        // Issue #71 — Active Runtime Teammates (minimal slice): the orchestrator
+        // can bring on a new teammate mid-chat. Writes through the same
+        // `CompanyStore` the console `POST .../team` route uses; the addition
+        // reaches the roster on the next `HarnessPool::ensure` call.
+        tools.push(Box::new(orchestrator::AddAgentTool::new(
+            company.clone(),
+            deps.store.clone(),
+        )));
     }
 
     let prompt_builder = SystemPromptBuilder::for_subagent(
