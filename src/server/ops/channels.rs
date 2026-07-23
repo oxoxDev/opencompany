@@ -119,10 +119,19 @@ async fn put_channel(
     Json(body): Json<TelegramConfigBody>,
 ) -> Result<Json<TelegramChannelStatus>, ApiError> {
     let runtime = &company.runtime;
-    if let Some(token) = body.bot_token.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+    if let Some(token) = body
+        .bot_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
         runtime
             .secrets()
-            .set(runtime.id(), TELEGRAM_TOKEN_KEY, SecretValue(token.to_string()))
+            .set(
+                runtime.id(),
+                TELEGRAM_TOKEN_KEY,
+                SecretValue(token.to_string()),
+            )
             .await?;
     }
     if let Some(secret) = body
@@ -133,7 +142,11 @@ async fn put_channel(
     {
         runtime
             .secrets()
-            .set(runtime.id(), TELEGRAM_SECRET_KEY, SecretValue(secret.to_string()))
+            .set(
+                runtime.id(),
+                TELEGRAM_SECRET_KEY,
+                SecretValue(secret.to_string()),
+            )
             .await?;
     }
     Ok(Json(status_of(&state, runtime).await?))
@@ -158,7 +171,11 @@ async fn delete_channel(
         .await?;
     runtime
         .secrets()
-        .set(runtime.id(), TELEGRAM_SECRET_KEY, SecretValue(String::new()))
+        .set(
+            runtime.id(),
+            TELEGRAM_SECRET_KEY,
+            SecretValue(String::new()),
+        )
         .await?;
     Ok(Json(status_of(&state, runtime).await?))
 }
@@ -210,7 +227,10 @@ async fn set_webhook(company: ScopedCompany, State(state): State<AppState>) -> R
         Err(err) => Json(SetWebhookResult {
             ok: false,
             // Scrub the token in case the transport error echoed the API URL.
-            message: format!("setWebhook failed: {}", scrub_token(&err.to_string(), &token)),
+            message: format!(
+                "setWebhook failed: {}",
+                scrub_token(&err.to_string(), &token)
+            ),
             webhook_url: url,
         })
         .into_response(),

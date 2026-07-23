@@ -865,10 +865,7 @@ use crate::company::telegram::RecordingTelegramApi;
 
 /// A running "acme" company whose host has a recording Telegram transport
 /// injected, so the inbound webhook can actually deliver a reply offline.
-async fn state_with_telegram(
-    home: &std::path::Path,
-    api: RecordingTelegramApi,
-) -> AppState {
+async fn state_with_telegram(home: &std::path::Path, api: RecordingTelegramApi) -> AppState {
     use crate::ports::CompanyStore;
     let store = FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
@@ -968,8 +965,14 @@ async fn telegram_config_is_write_only_and_status_reads_back() {
     assert_eq!(cfg["secret_set"], true);
     // Neither secret is ever echoed back.
     let body = cfg.to_string();
-    assert!(!body.contains(BOT_TOKEN), "bot token leaked into PUT status");
-    assert!(!body.contains(WEBHOOK_SECRET), "secret leaked into PUT status");
+    assert!(
+        !body.contains(BOT_TOKEN),
+        "bot token leaked into PUT status"
+    );
+    assert!(
+        !body.contains(WEBHOOK_SECRET),
+        "secret leaked into PUT status"
+    );
 
     // A partial write rotates the secret without re-sending the token.
     let (status, _) = send(
@@ -1030,14 +1033,21 @@ async fn telegram_inbound_runs_a_turn_and_delivers_the_reply_back() {
 
     // A verified inbound update runs one cycle; the echo brain replies and the
     // reply is delivered back to the ORIGIN chat (555), not any other.
-    let (status, body, raw) =
-        telegram_hook(&state, Some(WEBHOOK_SECRET), telegram_update(555, "status?")).await;
+    let (status, body, raw) = telegram_hook(
+        &state,
+        Some(WEBHOOK_SECRET),
+        telegram_update(555, "status?"),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["ok"], true);
     assert_eq!(body["delivered"], 1);
     assert_eq!(api.sent(), vec![(555, "You said: status?".to_string())]);
     // The bot token never appears in the webhook response.
-    assert!(!raw.contains(BOT_TOKEN), "token leaked into webhook response");
+    assert!(
+        !raw.contains(BOT_TOKEN),
+        "token leaked into webhook response"
+    );
 
     tokio::fs::remove_dir_all(&home).await.ok();
 }
@@ -1091,7 +1101,10 @@ async fn telegram_token_never_leaks_even_when_delivery_fails() {
         telegram_hook(&state, Some(WEBHOOK_SECRET), telegram_update(42, "ping")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["delivered"], 0);
-    assert!(!raw.contains(BOT_TOKEN), "token leaked on a failed delivery");
+    assert!(
+        !raw.contains(BOT_TOKEN),
+        "token leaked on a failed delivery"
+    );
 
     tokio::fs::remove_dir_all(&home).await.ok();
 }

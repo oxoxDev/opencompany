@@ -492,10 +492,7 @@ mod tests {
             "#,
         );
         assert!(
-            !manifest
-                .validate()
-                .iter()
-                .any(|p| p.contains("telegram")),
+            !manifest.validate().iter().any(|p| p.contains("telegram")),
             "telegram is a known channel and must validate"
         );
     }

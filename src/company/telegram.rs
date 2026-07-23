@@ -170,7 +170,10 @@ impl RecordingTelegramApi {
 
     /// Every `(chat_id, text)` delivered so far.
     pub fn sent(&self) -> Vec<(i64, String)> {
-        self.sent.lock().expect("telegram recorder poisoned").clone()
+        self.sent
+            .lock()
+            .expect("telegram recorder poisoned")
+            .clone()
     }
 
     /// Every webhook URL registered so far.
@@ -298,7 +301,10 @@ impl TelegramApi for HttpTelegramApi {
             .send()
             .await
             .map_err(|e| {
-                OpenCompanyError::Store(scrub_token(&format!("telegram setWebhook failed: {e}"), token))
+                OpenCompanyError::Store(scrub_token(
+                    &format!("telegram setWebhook failed: {e}"),
+                    token,
+                ))
             })?;
         if resp.status().is_success() {
             Ok(())
@@ -353,7 +359,9 @@ mod test {
         });
         assert_eq!(parse_inbound(&edited).unwrap().text, "fixed");
         // A sticker/photo (no text) and a callback query are not turns.
-        assert!(parse_inbound(&serde_json::json!({ "message": { "chat": { "id": 3 } } })).is_none());
+        assert!(
+            parse_inbound(&serde_json::json!({ "message": { "chat": { "id": 3 } } })).is_none()
+        );
         assert!(parse_inbound(&serde_json::json!({ "callback_query": { "id": "x" } })).is_none());
         // Empty/whitespace text is not a turn either.
         assert!(
@@ -365,9 +373,13 @@ mod test {
     #[test]
     fn scrub_removes_the_token_everywhere_it_appears() {
         let token = "123456:AAbb_ccDD";
-        let leaked = format!("POST https://api.telegram.org/bot{token}/sendMessage -> 401 ({token})");
+        let leaked =
+            format!("POST https://api.telegram.org/bot{token}/sendMessage -> 401 ({token})");
         let scrubbed = scrub_token(&leaked, token);
-        assert!(!scrubbed.contains(token), "token survived scrub: {scrubbed}");
+        assert!(
+            !scrubbed.contains(token),
+            "token survived scrub: {scrubbed}"
+        );
         assert!(scrubbed.contains("***"));
         // Empty token is a no-op.
         assert_eq!(scrub_token("nothing to do", ""), "nothing to do");
@@ -377,11 +389,18 @@ mod test {
     async fn recording_api_captures_chat_and_text_but_not_token() {
         let api = RecordingTelegramApi::new();
         api.send_message("secret-token", 42, "on it").await.unwrap();
-        api.set_webhook("secret-token", "https://host/hooks/acme/telegram", "wh-secret")
-            .await
-            .unwrap();
+        api.set_webhook(
+            "secret-token",
+            "https://host/hooks/acme/telegram",
+            "wh-secret",
+        )
+        .await
+        .unwrap();
         assert_eq!(api.sent(), vec![(42, "on it".to_string())]);
-        assert_eq!(api.webhooks(), vec!["https://host/hooks/acme/telegram".to_string()]);
+        assert_eq!(
+            api.webhooks(),
+            vec!["https://host/hooks/acme/telegram".to_string()]
+        );
         // The recording never retained the bot token.
         let dump = format!("{:?} {:?}", api.sent(), api.webhooks());
         assert!(!dump.contains("secret-token"));

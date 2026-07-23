@@ -85,7 +85,11 @@ async fn handle_telegram(
 ) -> Response {
     // The stored webhook secret must exist to verify against. An empty stored
     // value counts as "no secret configured" — reject rather than accept blank.
-    let secret = match runtime.secrets().get(runtime.id(), TELEGRAM_SECRET_KEY).await {
+    let secret = match runtime
+        .secrets()
+        .get(runtime.id(), TELEGRAM_SECRET_KEY)
+        .await
+    {
         Ok(Some(secret)) if !secret.expose().is_empty() => secret.expose().to_string(),
         Ok(_) => return unauthorized(),
         Err(err) => return crate::server::error::ApiError(err).into_response(),
@@ -134,7 +138,11 @@ async fn handle_telegram(
         }
     }
 
-    (StatusCode::OK, Json(json!({ "ok": true, "delivered": delivered }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "delivered": delivered })),
+    )
+        .into_response()
 }
 
 /// Posts every `telegram`-channel reply back to its origin chat. Returns how
@@ -164,7 +172,11 @@ async fn deliver_replies(
         return 0;
     };
 
-    let token = match runtime.secrets().get(runtime.id(), TELEGRAM_TOKEN_KEY).await {
+    let token = match runtime
+        .secrets()
+        .get(runtime.id(), TELEGRAM_TOKEN_KEY)
+        .await
+    {
         Ok(Some(token)) if !token.expose().is_empty() => token.expose().to_string(),
         _ => {
             tracing::warn!(
