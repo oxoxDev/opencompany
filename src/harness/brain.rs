@@ -463,6 +463,43 @@ description = "Runs Acme."
     }
 
     #[tokio::test]
+    async fn telegram_inbound_runs_a_turn_addressed_back_to_the_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let brain = brain_over_mock(dir.path());
+        let update = serde_json::json!({
+            "message": { "chat": { "id": 4242 }, "from": { "username": "bob" }, "text": "status?" }
+        });
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::WebhookReceived {
+                    channel: "telegram".into(),
+                    body: update,
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        // Exactly one telegram reply, produced by a real agent turn (mock prefix)
+        // and addressed back to the ORIGIN chat so it lands in the same DM.
+        let telegram: Vec<_> = result
+            .channel_responses
+            .iter()
+            .filter(|m| m.channel == "telegram")
+            .collect();
+        assert_eq!(telegram.len(), 1, "{:?}", result.channel_responses);
+        assert!(
+            telegram[0].text.contains("status?"),
+            "{:?}",
+            telegram[0].text
+        );
+        assert_eq!(
+            telegram[0].reply_to.as_ref().map(|r| r.chat_id.as_str()),
+            Some("4242")
+        );
+    }
+
+    #[tokio::test]
     async fn no_events_still_acknowledges() {
         let dir = tempfile::tempdir().unwrap();
         let brain = brain_over_mock(dir.path());
