@@ -76,6 +76,7 @@ mod test {
                 channel: "operator".into(),
                 text: "hello".into(),
                 reply_to: None,
+                steps: Vec::new(),
             })
             .await
             .unwrap();

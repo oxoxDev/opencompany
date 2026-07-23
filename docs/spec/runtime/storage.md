@@ -39,6 +39,50 @@ MongoDB settings:
 - `OPENCOMPANY_TENANT_ID` — tenant identity for **shared-single-DB** mode
   (default unset). See [Shared single database](#shared-single-database-mode).
 
+## Workspace layout (`src/store/layout.rs`)
+
+`OPENCOMPANY_DATA_DIR` (default `$HOME/.opencompany`; `/data` in a hosted tenant
+container) is the per-instance **workspace root** — everything one running
+instance owns. [`DataLayout`](../../../src/store/layout.rs) names the canonical
+subdirectories under it so stores, agents, and tools resolve well-known
+locations instead of ad-hoc paths:
+
+```text
+<OPENCOMPANY_DATA_DIR>/
+  companies/   ← per-company bundles (companies/<slug>/, owned by the fs store)
+  memory/      ← instance-shared memory artifacts
+  store/       ← instance-shared durable-store artifacts
+  files/       ← instance-shared files (exports, attachments)
+  logs/        ← instance logs
+  tmp/         ← ephemeral scratch, cleared on startup by default
+```
+
+Per-company state (each bundle's own `memory/`/`context/`) lives under
+`companies/<slug>/`; the top-level `memory/`/`store/`/`files/` are the shared,
+instance-level locations. `serve` calls `DataLayout::ensure` at boot: it creates
+the shared subdirectories and — unless `[workspace].clear_tmp_on_startup` is
+`false` — empties `tmp/` so no stale scratch survives a restart. Because the hosting model runs **one container per tenant** with its
+own `OPENCOMPANY_DATA_DIR`, this root *is* the per-tenant workspace — no separate
+per-tenant path prefix is needed.
+
+The `[workspace]` section of `config.toml` (in the data dir) tunes the lifecycle:
+
+```toml
+[workspace]
+clear_tmp_on_startup = true   # default; set false to preserve tmp/ across restarts
+storage_quota_gb = 5          # soft whole-workspace quota; omit or <= 0 = unlimited
+tmp_quota_gb = 1              # soft tmp/ quota; omit or <= 0 = unlimited
+```
+
+**Quotas are soft/advisory in the binary.** At boot `serve` measures the
+workspace (and `tmp/`) and emits an operator-visible `tracing::warn` when either
+exceeds its configured quota. **Hard enforcement** — blocking writes at the
+limit — is the container/StorageClass layer's job (an EFS access point cap or a
+k8s `ResourceQuota`), which is where the deploy manifests wire it; the binary
+surfaces the condition rather than intercepting every write.
+
+Large-file S3 offload remains a follow-up (needs an S3 client + credentials).
+
 ## Memory engine overlay (`OPENCOMPANY_MEMORY`)
 
 Memory is a separable concern. `OPENCOMPANY_STORAGE` picks the durable base for

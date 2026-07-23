@@ -11,10 +11,51 @@ export interface CompanyStatus {
   pending_approvals: number;
 }
 
+/** What kind of processing step this is (drives the timeline icon). */
+export type TurnStepKind = "tool_call" | "thinking" | "note";
+
+/** How a processing step ended. */
+export type TurnStepStatus = "ok" | "error" | "running";
+
+/**
+ * One visible step in an agent turn's processing timeline. Mirrors `TurnStep`
+ * in `src/ports/types.rs`. The host folds and scrubs these from the turn's
+ * progress stream: `label`/`detail` never carry raw tool arguments, tool
+ * output, or call ids — only a safe label and an optional scrubbed detail.
+ */
+export interface TurnStep {
+  kind: TurnStepKind;
+  status: TurnStepStatus;
+  label: string;
+  /** A muted, scrubbed detail (e.g. an MCP `server · tool`, a failure cause). */
+  detail?: string;
+  /** How long a tool call took, in milliseconds, when known. */
+  elapsedMs?: number;
+}
+
 /** One channel reply from a cycle. */
 export interface OutboundMessage {
   channel: string;
   text: string;
+  /**
+   * The visible processing steps behind this reply (tool calls, thinking runs,
+   * surfaced MCP failures). Omitted by the host when empty — a memory-served or
+   * tool-less answer carries no steps, which is the tell that distinguishes it
+   * from a tool-backed one.
+   */
+  steps?: TurnStep[];
+}
+
+/**
+ * `GET {scope}/desks` — one desk (group chat). Mirrors `DeskDto` in
+ * `src/server/operator.rs`. The `id` doubles as the chat thread id; `members[0]`
+ * is the desk's lead.
+ */
+export interface DeskDto {
+  id: string;
+  name: string;
+  description?: string;
+  members: string[];
 }
 
 /**

@@ -278,11 +278,16 @@ fn attach_openhuman(builder: RuntimeBuilder) -> RuntimeBuilder {
     }
 }
 
-/// Attaches the embedded OpenHuman harness brain when the `openhuman` feature
-/// is enabled and a hosted-inference credential is present in the environment
-/// (`TINYHUMANS_API_KEY` / `OPENCOMPANY_INFERENCE_*`). With it, `/company/chat`
-/// routes each operator message through a live company agent on the hosted
-/// brain; without a credential the runtime keeps its hosted/echo brain.
+/// Attaches the embedded OpenHuman harness under the `openhuman` feature.
+///
+/// The harness pool is **always** attached, so cognition routes through a live
+/// company agent whenever *any* inference source is configured — the managed
+/// env default (`TINYHUMANS_API_KEY` / `OPENCOMPANY_INFERENCE_*`), a manifest
+/// `[inference]` section, or a runtime console override (issue #56 — BYOK).
+/// Attaching the pool unconditionally is what unblocks a BYOK-only tenant that
+/// has no platform credential: the builder still constructs the harness brain
+/// from its manifest/runtime config. Without any source, the runtime keeps its
+/// hosted/echo brain.
 ///
 /// Without the feature this is the identity function, so the default build is
 /// unaffected.
@@ -297,10 +302,12 @@ fn attach_harness(builder: RuntimeBuilder) -> RuntimeBuilder {
     use opencompany::harness::HarnessPool;
     use opencompany::harness::provider::harness_inference_from_env;
 
+    let builder = builder.with_harness(Arc::new(HarnessPool::new()));
+    // The managed env default is an *optional*, lowest-precedence source; a
+    // BYOK-only tenant supplies none and still gets a harness brain from its
+    // manifest/runtime config.
     match harness_inference_from_env(&ProcessEnv) {
-        Some((config, model)) => builder
-            .with_harness(Arc::new(HarnessPool::new()))
-            .with_harness_inference(config, model),
+        Some((config, model_override)) => builder.with_harness_inference(config, model_override),
         None => builder,
     }
 }
@@ -553,6 +560,41 @@ async fn main() -> Result<()> {
             discoverable,
         }) => {
             let home = home.unwrap_or_else(default_home);
+            // Materialize the canonical data-dir workspace layout and empty the
+            // ephemeral `tmp/` scratch so nothing stale survives a restart. The
+            // `[workspace]` section of `config.toml` (in the data dir) toggles
+            // the tmp clear; absent config keeps the default (clear on startup).
+            let data_root = opencompany::app::config::data_dir_from_env();
+            let workspace_cfg = ConfigFile::load(&data_root)?
+                .map(|c| c.workspace.resolve())
+                .unwrap_or_default();
+            let layout = opencompany::store::DataLayout::new(&data_root);
+            layout.ensure(workspace_cfg.clear_tmp_on_startup).await?;
+            // Soft disk-quota alerting. Hard enforcement is the container /
+            // StorageClass layer's job (EFS access point, k8s ResourceQuota);
+            // here we surface an operator-visible warning when a workspace
+            // exceeds its configured `[workspace]` quota.
+            if let Some(limit) = workspace_cfg.storage_quota_bytes {
+                let used = layout.usage_bytes().await?;
+                if used > limit {
+                    tracing::warn!(
+                        used_bytes = used,
+                        quota_bytes = limit,
+                        data_dir = %data_root.display(),
+                        "workspace storage over quota — enforce hard limits at the container/StorageClass layer",
+                    );
+                }
+            }
+            if let Some(limit) = workspace_cfg.tmp_quota_bytes {
+                let used = layout.tmp_bytes().await?;
+                if used > limit {
+                    tracing::warn!(
+                        used_bytes = used,
+                        quota_bytes = limit,
+                        "workspace tmp/ scratch over quota",
+                    );
+                }
+            }
             // tiny.place economy + public-card configuration resolved from the
             // environment (with built-in defaults); the a2a routes and boot
             // going-public flow read these off `AppConfig`.
@@ -735,13 +777,7 @@ async fn main() -> Result<()> {
             let env = ProcessEnv;
             // Locate config.toml under the resolved data dir (env override or
             // the default `$HOME/.opencompany`).
-            let config_dir = match std::env::var_os("OPENCOMPANY_DATA_DIR") {
-                Some(dir) => PathBuf::from(dir),
-                None => match std::env::var_os("HOME") {
-                    Some(home) => PathBuf::from(home).join(".opencompany"),
-                    None => PathBuf::from(".opencompany"),
-                },
-            };
+            let config_dir = opencompany::app::config::data_dir_from_env();
             let config_toml = ConfigFile::load(&config_dir)?;
             let manifest = match &company {
                 Some(dir) => CompanyManifest::from_path(dir)?,

@@ -27,7 +27,7 @@ use crate::harness::{HarnessDeps, HarnessPool};
 use crate::ports::brain::{Brain, CycleHost};
 use crate::ports::types::{
     CompanyEvent, CompanyRecord, CompressedTrace, CycleRequest, CycleResult, OutboundMessage,
-    ReplyTo, TokenUsage,
+    ReplyTo, TokenUsage, TurnStep, TurnStepKind, TurnStepStatus,
 };
 use crate::ports::{TaskRecord, generate_id, now_millis};
 
@@ -85,8 +85,13 @@ impl HarnessBrain {
             .run(&self.record.id, &responder, &instruction, &self.deps)
             .await
         {
-            Ok(reply) => {
-                card.note = Some(append_result(card.note.as_deref(), &responder, &reply));
+            // A dispatched task discards its steps — the card note is text-only.
+            Ok(outcome) => {
+                card.note = Some(append_result(
+                    card.note.as_deref(),
+                    &responder,
+                    &outcome.reply,
+                ));
                 card.column = "in_review".to_string();
             }
             Err(err) => {
@@ -140,20 +145,25 @@ impl HarnessBrain {
             .cloned()
     }
 
-    /// Drains the MCP failure queue and surfaces each failure: an
-    /// operator-visible warning bubble (the Activity-trace cell will re-skin it
-    /// as a warning step later), plus a scrubbed
-    /// [`CompanyEvent::McpCallFailed`] audit event when the event log is wired.
-    /// Every string was already scrubbed at the source (`OcMcpCallTool`).
-    async fn surface_mcp_failures(&self, responses: &mut Vec<OutboundMessage>) -> Result<()> {
+    /// Drains the MCP failure queue **onto the operator bubble's step timeline**
+    /// as error steps (the Activity-trace re-skin of the error-hardening cell's
+    /// original fallback bubble), and journals a scrubbed
+    /// [`CompanyEvent::McpCallFailed`] audit event per failure when the event log
+    /// is wired.
+    ///
+    /// One surface, one renderer, one scrub discipline: a silently-failed MCP
+    /// call shows up as a red step in the same timeline as every other tool call
+    /// instead of a separate warning bubble. Every string was already scrubbed at
+    /// the source (`OcMcpCallTool`), so `scrubbed_message` is safe to show and to
+    /// persist.
+    async fn surface_mcp_failures(&self, steps: &mut Vec<TurnStep>) -> Result<()> {
         for failure in self.deps.mcp_failures.drain() {
-            responses.push(OutboundMessage {
-                channel: "operator".to_string(),
-                text: format!(
-                    "⚠️ MCP tool issue on '{}': {}",
-                    failure.server, failure.scrubbed_message
-                ),
-                reply_to: None,
+            steps.push(TurnStep {
+                kind: TurnStepKind::Note,
+                status: TurnStepStatus::Error,
+                label: format!("MCP: {} unavailable", failure.server),
+                detail: Some(failure.scrubbed_message.clone()),
+                elapsed_ms: None,
             });
             if let Some(events) = self.deps.events.as_ref() {
                 events
@@ -208,14 +218,16 @@ impl HarnessBrain {
                 let Some(member) = self.desk_lead(&desk) else {
                     return Ok(None);
                 };
-                let reply = self
+                let outcome = self
                     .pool
                     .run(&self.record.id, &member, &instruction, &self.deps)
                     .await?;
+                // The desk lead's own steps ride on its distinct bubble.
                 Ok(Some(OutboundMessage {
                     channel: member,
-                    text: reply,
+                    text: outcome.reply,
                     reply_to: None,
+                    steps: outcome.steps,
                 }))
             }
         }
@@ -260,27 +272,38 @@ impl Brain for HarnessBrain {
                     // past the cap).
                     self.deps.delegations.clear();
                     self.deps.mcp_failures.clear();
-                    let reply = self
+                    let outcome = self
                         .pool
                         .run(&self.record.id, &responder, text, &self.deps)
                         .await?;
-                    channel_responses.push(OutboundMessage {
-                        channel: "operator".to_string(),
-                        text: reply,
-                        reply_to: None,
-                    });
+                    // The orchestrator's own steps ride on the operator bubble.
+                    let mut operator_steps = outcome.steps;
+                    // Run whatever the orchestrator queued; each delegated desk
+                    // bubble carries its own lead's steps. Collect them first so
+                    // the operator bubble can still be finalized before it is
+                    // pushed (any MCP failure a delegated turn recorded lands on
+                    // the operator timeline).
+                    let mut delegated = Vec::new();
                     for delegation in self
                         .deps
                         .delegations
                         .drain(orchestrator::MAX_DELEGATIONS_PER_TURN)
                     {
                         if let Some(message) = self.run_delegation(delegation).await? {
-                            channel_responses.push(message);
+                            delegated.push(message);
                         }
                     }
-                    // Surface any MCP tool-call failures the turn (or a delegated
-                    // desk turn) recorded.
-                    self.surface_mcp_failures(&mut channel_responses).await?;
+                    // Re-skin any MCP tool-call failures (from the orchestrator
+                    // turn or a delegated desk turn) as error steps on the
+                    // operator bubble — one surface, one renderer.
+                    self.surface_mcp_failures(&mut operator_steps).await?;
+                    channel_responses.push(OutboundMessage {
+                        channel: "operator".to_string(),
+                        text: outcome.reply,
+                        reply_to: None,
+                        steps: operator_steps,
+                    });
+                    channel_responses.extend(delegated);
                 }
                 // An inbound Telegram DM routes exactly like a web/chat turn
                 // (OpenHuman treats a bot DM as a web-channel message, not a
@@ -294,18 +317,24 @@ impl Brain for HarnessBrain {
                         let responder = self.responder_for(None);
                         self.deps.delegations.clear();
                         self.deps.mcp_failures.clear();
-                        let reply = self
+                        let outcome = self
                             .pool
                             .run(&self.record.id, &responder, &inbound.text, &self.deps)
                             .await?;
+                        // The turn's own steps ride on the telegram bubble; any
+                        // MCP tool-call failure re-skins as an error step on that
+                        // same bubble — one surface, one renderer, mirroring the
+                        // operator arm.
+                        let mut telegram_steps = outcome.steps;
+                        self.surface_mcp_failures(&mut telegram_steps).await?;
                         channel_responses.push(OutboundMessage {
                             channel: crate::company::telegram::TELEGRAM_CHANNEL.to_string(),
-                            text: reply,
+                            text: outcome.reply,
                             reply_to: Some(ReplyTo {
                                 chat_id: inbound.chat_id.to_string(),
                             }),
+                            steps: telegram_steps,
                         });
-                        self.surface_mcp_failures(&mut channel_responses).await?;
                     }
                 }
                 CompanyEvent::TaskDispatched { task_id } => {
@@ -320,6 +349,7 @@ impl Brain for HarnessBrain {
                 channel: "operator".to_string(),
                 text: "Acknowledged.".to_string(),
                 reply_to: None,
+                steps: Vec::new(),
             });
         }
 
@@ -456,6 +486,14 @@ description = "Runs Acme."
             result.channel_responses[0].text.contains("status?"),
             "{:?}",
             result.channel_responses[0].text
+        );
+        // The offline mock runs no tools and emits no progress, so the operator
+        // bubble carries zero steps — the tell that distinguishes a tool-less
+        // (here, memory/echo-style) answer from a tool-backed one.
+        assert!(
+            result.channel_responses[0].steps.is_empty(),
+            "a tool-less turn carries no steps: {:?}",
+            result.channel_responses[0].steps
         );
         assert_eq!(result.new_traces.len(), 1);
         // Single cost-accounting site: the cycle result carries no ledger delta.
@@ -862,10 +900,11 @@ members = ["engineer"]
 
     // --- MCP failure drain --------------------------------------------------
 
-    /// A recorded MCP failure surfaces as an operator bubble AND a scrubbed
-    /// `McpCallFailed` audit event when the event log is wired.
+    /// A recorded MCP failure re-skins into an **error step** on the operator
+    /// bubble's timeline AND a scrubbed `McpCallFailed` audit event when the
+    /// event log is wired (the Activity-trace re-skin of the old warning bubble).
     #[tokio::test]
-    async fn mcp_failures_surface_as_bubble_and_event() {
+    async fn mcp_failures_surface_as_error_steps_and_event() {
         use crate::harness::mcp_probe::McpFailure;
         use crate::ports::EventLog;
         use crate::ports::types::EventSeq;
@@ -903,23 +942,21 @@ members = ["engineer"]
             scrubbed_message: "server rejected the call".into(),
         });
 
-        let mut responses = Vec::new();
+        let mut steps: Vec<TurnStep> = Vec::new();
         brain
-            .surface_mcp_failures(&mut responses)
+            .surface_mcp_failures(&mut steps)
             .await
             .expect("drain surfaces failures");
 
-        assert_eq!(responses.len(), 1, "one warning bubble");
+        assert_eq!(steps.len(), 1, "one error step");
+        assert_eq!(steps[0].kind, TurnStepKind::Note);
+        assert_eq!(steps[0].status, TurnStepStatus::Error);
         assert!(
-            responses[0].text.contains("browserbase"),
+            steps[0].label.contains("browserbase"),
             "{:?}",
-            responses[0].text
+            steps[0].label
         );
-        assert!(
-            responses[0].text.contains("rejected the call"),
-            "{:?}",
-            responses[0].text
-        );
+        assert_eq!(steps[0].detail.as_deref(), Some("server rejected the call"));
 
         let logged = events
             .read_from(&CompanyId::new("acme"), EventSeq::new(0), usize::MAX)

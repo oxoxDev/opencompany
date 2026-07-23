@@ -272,6 +272,7 @@ mod test {
                         channel: "operator".into(),
                         text: format!("scheduled: {prompt}"),
                         reply_to: None,
+                        steps: Vec::new(),
                     });
                 }
             }

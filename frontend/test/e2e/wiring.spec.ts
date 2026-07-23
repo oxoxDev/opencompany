@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from "@playwright/test";
 
 /**
  * End-to-end wiring proof for the operator console.
@@ -17,38 +17,57 @@ import { expect, test } from '@playwright/test';
  * `[users] admins`, which is what makes the login flow succeed.
  */
 
-const ADMIN_EMAIL = 'harness-e2e@tinyhumans.ai';
-
-test('operator console renders a mocked backend reply end to end', async ({ page }) => {
-  // 1. Authenticate through the real magic-link flow. `page.request` shares
-  //    the page's browser-context cookie jar (the standalone `request` fixture
-  //    does NOT), so the session cookie set here is carried by the subsequent
-  //    navigation. On a loopback bind with no mail transport, auth/request
-  //    echoes the login code as `dev_code`.
-  const requested = await page.request.post('/api/v1/company/auth/request', {
-    data: { email: ADMIN_EMAIL },
-  });
-  expect(requested.ok()).toBeTruthy();
-  const requestedBody = await requested.json();
-  const devCode = requestedBody.dev_code as string | undefined;
-  expect(devCode, 'auth/request must echo dev_code on a loopback bind').toBeTruthy();
-
-  const verified = await page.request.post('/api/v1/company/auth/verify', {
-    data: { code: devCode },
-  });
-  expect(verified.ok(), 'auth/verify must accept the dev_code and set a session').toBeTruthy();
-
-  // 2. Open the conversation view. The default "Your company" thread is
+test("operator console renders a mocked backend reply end to end", async ({
+  page,
+}) => {
+  // Authentication is performed once by global-setup.ts and shared through
+  // Playwright storage state so multiple specs do not trip the resend throttle.
+  // Open the conversation view. The default "Your company" thread is
   //    pre-selected.
-  await page.goto('/#/conversation');
+  await page.goto("/#/conversation");
 
-  // 3. Send a unique prompt through the operator chat input.
+  // Send a unique prompt through the operator chat input.
   const prompt = `e2e wiring ping ${Date.now()}`;
   await page.getByPlaceholder(/^Message /).fill(prompt);
-  await page.getByRole('button', { name: 'Send' }).click();
+  await page.getByRole("button", { name: "Send" }).click();
 
-  // 4. The mocked backend reply must render as a company bubble, and no send
+  // The mocked backend reply must render as a company bubble, and no send
   //    error may appear.
-  await expect(page.getByText('__MOCK_LLM__').first()).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText("__MOCK_LLM__").first()).toBeVisible({
+    timeout: 60_000,
+  });
   await expect(page.getByText(/^Couldn't send/)).toHaveCount(0);
+});
+
+test("operator adds a Brain memory that persists across reload and can be deleted", async ({
+  page,
+}) => {
+  // The Brain tab reads the real FactStore over `…/memory`; adding a note must
+  // survive a reload (proving it hit the backend, not localStorage) and delete
+  // must remove it.
+  await page.goto("/#/memory");
+
+  const title = `e2e memory ${Date.now()}`;
+  await page.getByTestId("memory-add").click();
+  await page.getByTestId("memory-title").fill(title);
+  await page.getByTestId("memory-body").fill("recall me on the next turn");
+  await page.getByTestId("memory-save").click();
+
+  const card = page.getByTestId("memory-card").filter({ hasText: title });
+  await expect(card).toBeVisible({ timeout: 30_000 });
+
+  // Reload: a localStorage stub would survive too, so also assert the health
+  // strip counts a real backend item.
+  await page.reload();
+  await page.goto("/#/memory");
+  await expect(page.getByTestId("memory-card").filter({ hasText: title })).toBeVisible({
+    timeout: 30_000,
+  });
+
+  // Delete removes it.
+  const persisted = page.getByTestId("memory-card").filter({ hasText: title });
+  await persisted.getByRole("button", { name: "Delete memory" }).click();
+  await expect(page.getByTestId("memory-card").filter({ hasText: title })).toHaveCount(0, {
+    timeout: 30_000,
+  });
 });

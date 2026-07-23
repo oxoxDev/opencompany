@@ -268,6 +268,7 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
                         channel: channel.to_string(),
                         text: text.to_string(),
                         reply_to: None,
+                        steps: Vec::new(),
                     })
                     .await?;
                 break;
@@ -428,6 +429,7 @@ mod test {
                         channel: "operator".into(),
                         text: format!("handled: {text}"),
                         reply_to: None,
+                        steps: Vec::new(),
                     });
                 }
             }

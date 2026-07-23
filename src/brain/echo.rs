@@ -49,6 +49,7 @@ impl Brain for EchoBrain {
                         channel: "operator".to_string(),
                         text: format!("You said: {text}"),
                         reply_to: None,
+                        steps: Vec::new(),
                     });
                 }
                 // An inbound Telegram DM is a web/chat turn tagged with its
@@ -64,6 +65,7 @@ impl Brain for EchoBrain {
                             reply_to: Some(ReplyTo {
                                 chat_id: inbound.chat_id.to_string(),
                             }),
+                            steps: Vec::new(),
                         });
                     }
                 }
@@ -75,6 +77,7 @@ impl Brain for EchoBrain {
                 channel: "operator".to_string(),
                 text: "Acknowledged.".to_string(),
                 reply_to: None,
+                steps: Vec::new(),
             });
         }
 

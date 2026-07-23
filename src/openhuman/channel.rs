@@ -70,6 +70,7 @@ mod test {
                 channel: "email".into(),
                 text: "hello".into(),
                 reply_to: None,
+                steps: Vec::new(),
             })
             .await
             .unwrap();
@@ -97,6 +98,7 @@ mod test {
                 channel: "email".into(),
                 text: "hi".into(),
                 reply_to: None,
+                steps: Vec::new(),
             })
             .await
             .unwrap_err();

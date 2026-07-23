@@ -18,6 +18,7 @@
 pub mod channels;
 pub mod domain;
 pub mod inbox;
+pub mod inference;
 pub mod language;
 pub mod mail;
 pub mod mailer;
@@ -143,6 +144,7 @@ pub fn router() -> Router<AppState> {
         .merge(workspace::router())
         .merge(skills::router())
         .merge(mcp::router())
+        .merge(inference::router())
         .merge(team::router())
         .merge(workflows::router())
         .merge(mail::router());
