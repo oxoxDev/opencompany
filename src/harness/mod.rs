@@ -39,6 +39,7 @@ pub mod brain;
 pub mod build;
 pub mod cost;
 pub mod mcp;
+pub mod mcp_probe;
 pub mod memory;
 pub mod memory_loop;
 pub mod orchestrator;
@@ -62,11 +63,14 @@ use crate::company::Policy;
 use crate::company::mcp::McpServerDecl;
 use crate::error::OpenCompanyError;
 use crate::harness::cost::{TurnUsage, record_turn_cost};
+use crate::harness::mcp_probe::McpFailureQueue;
 use crate::harness::orchestrator::DelegationQueue;
 use crate::harness::policy::ApprovalPolicy;
 use crate::ports::skills_state::{SkillState, SkillStateStore};
 use crate::ports::types::{CompanyId, CompanyRecord};
-use crate::ports::{CompanyStore, ContextStore, EventLog, FactStore, TaskStore, UsageMeter};
+use crate::ports::{
+    CompanyStore, ContextStore, EventLog, FactStore, SecretStore, TaskStore, UsageMeter,
+};
 
 /// Shared dependencies every harness-built agent draws on.
 #[derive(Clone)]
@@ -131,6 +135,18 @@ pub struct HarnessDeps {
     /// handle; cloning `HarnessDeps` shares one queue between the tools built
     /// into the agent and the brain that drains it. Default is an empty queue.
     pub delegations: DelegationQueue,
+    /// The shared MCP failure queue the `OcMcpCallTool` decorator pushes onto and
+    /// the [`HarnessBrain`] drains after a turn (the error-hardening cell). Same
+    /// cheap-shared-handle pattern as [`Self::delegations`]; every string it
+    /// carries is scrubbed at the source. Default is an empty queue.
+    pub mcp_failures: McpFailureQueue,
+    /// The company's [`SecretStore`], so [`HarnessPool::ensure`] can **re-resolve**
+    /// the effective MCP server set on each call and rebuild the roster when a
+    /// console add/remove/enable-toggle changes it — the MCP-freshness fix (a
+    /// runtime-added server reaches the agent on its next turn, no restart).
+    /// `None` (default/tests) keeps the boot-resolved [`Self::mcp_servers`]
+    /// static, exactly as before.
+    pub secrets: Option<Arc<dyn SecretStore>>,
 }
 
 /// One live openhuman agent, keyed by its manifest id.
@@ -144,37 +160,110 @@ pub struct CompanyAgent {
     agent: Mutex<Agent>,
 }
 
+/// The graceful reply returned when a turn yields the transient empty-response
+/// class twice — so chat never shows a bare "Couldn't send" for a model hiccup.
+const GRACEFUL_EMPTY_REPLY: &str = "Sorry — I hit a temporary model hiccup and couldn't produce a reply. Please resend your message.";
+
+/// The outcome of a single `agent.turn`, classified for the retry wrapper.
+enum TurnOutcome {
+    /// A non-empty reply.
+    Reply(String),
+    /// The transient empty-response class (an empty/blank reply, or the model's
+    /// "empty response" error) — retryable.
+    Empty,
+    /// A hard error (budget/auth/build/etc.) — propagated loudly, never swallowed.
+    Hard(OpenCompanyError),
+}
+
 impl CompanyAgent {
-    /// Runs one turn against this agent, returning its reply text and the turn's
-    /// token/cost totals.
+    /// Runs one turn against this agent, returning its reply text and the
+    /// per-attempt token/cost totals.
     ///
-    /// The usage is read from the just-completed turn via openhuman's public
+    /// **Empty-response hardening (the error-hardening cell)**: the hosted brain
+    /// occasionally returns a transient empty completion, which openhuman
+    /// surfaces as an error. Rather than letting the operator see a bare
+    /// "Couldn't send", this wrapper retries **once**; if the second attempt is
+    /// still empty it returns a graceful, scrubbed message instead of an `Err`.
+    /// **Non-transient** errors (budget, auth, build) still propagate loudly — no
+    /// blanket swallow. Every attempt's usage is returned so the cost hook meters
+    /// what the model actually consumed (a burnt empty attempt still costs
+    /// tokens).
+    ///
+    /// The usage is read from each just-completed turn via openhuman's public
     /// [`Agent::last_turn_usage`](oh::agent::Agent::last_turn_usage) accessor
-    /// while the agent lock is still held (so a concurrent turn can't overwrite
-    /// it). An offline provider that reports no usage yields a zero
-    /// [`TurnUsage`], which the cost hook treats as inert.
-    pub async fn run(&self, message: &str) -> crate::Result<(String, TurnUsage)> {
+    /// while the agent lock is still held. An offline provider that reports no
+    /// usage yields a zero [`TurnUsage`], which the cost hook treats as inert.
+    pub async fn run(&self, message: &str) -> crate::Result<(String, Vec<TurnUsage>)> {
         let mut agent = self.agent.lock().await;
-        let reply = agent
-            .turn(message)
-            .await
-            .map_err(|e| OpenCompanyError::Harness(format!("turn for '{}': {e}", self.agent_id)))?;
-        let usage = agent
-            .last_turn_usage()
-            .map(|u| TurnUsage {
-                input_tokens: u.input_tokens,
-                output_tokens: u.output_tokens,
-                cached_input_tokens: u.cached_input_tokens,
-                cost_usd: u.cost_usd,
-            })
-            .unwrap_or_default();
-        Ok((reply, usage))
+        let mut usages: Vec<TurnUsage> = Vec::new();
+
+        // Attempt 1.
+        let first = agent.turn(message).await;
+        usages.push(read_turn_usage(&agent));
+        match self.classify_turn(first) {
+            TurnOutcome::Reply(reply) => return Ok((reply, usages)),
+            TurnOutcome::Hard(err) => return Err(err),
+            TurnOutcome::Empty => {} // fall through to a single retry
+        }
+
+        // Attempt 2 (retry once).
+        let second = agent.turn(message).await;
+        usages.push(read_turn_usage(&agent));
+        match self.classify_turn(second) {
+            TurnOutcome::Reply(reply) => Ok((reply, usages)),
+            // Still empty → graceful, scrubbed text (never an `Err`).
+            TurnOutcome::Empty => Ok((
+                crate::harness::mcp_probe::scrub(GRACEFUL_EMPTY_REPLY, &[]),
+                usages,
+            )),
+            TurnOutcome::Hard(err) => Err(err),
+        }
     }
+
+    /// Classify one `agent.turn` result for the retry wrapper.
+    fn classify_turn(&self, result: anyhow::Result<String>) -> TurnOutcome {
+        match result {
+            Ok(reply) if reply.trim().is_empty() => TurnOutcome::Empty,
+            Ok(reply) => TurnOutcome::Reply(reply),
+            Err(err) if is_transient_empty_response(&err) => TurnOutcome::Empty,
+            Err(err) => TurnOutcome::Hard(OpenCompanyError::Harness(format!(
+                "turn for '{}': {err}",
+                self.agent_id
+            ))),
+        }
+    }
+}
+
+/// Reads the just-completed turn's usage (zero when the provider reported none).
+fn read_turn_usage(agent: &Agent) -> TurnUsage {
+    agent
+        .last_turn_usage()
+        .map(|u| TurnUsage {
+            input_tokens: u.input_tokens,
+            output_tokens: u.output_tokens,
+            cached_input_tokens: u.cached_input_tokens,
+            cost_usd: u.cost_usd,
+        })
+        .unwrap_or_default()
+}
+
+/// Whether a turn error is the transient empty-response class openhuman raises
+/// instead of a silent blank reply. Matched on the error chain's message
+/// (`turn` returns `anyhow::Result`, so the typed `AgentError` is erased):
+/// "The model returned an empty response…".
+fn is_transient_empty_response(err: &anyhow::Error) -> bool {
+    format!("{err:#}")
+        .to_ascii_lowercase()
+        .contains("empty response")
 }
 
 /// A pool of live agents, one roster per company.
 pub struct HarnessPool {
     agents: RwLock<HashMap<CompanyId, Vec<Arc<CompanyAgent>>>>,
+    /// Fingerprint of the effective MCP server set the cached roster was built
+    /// from, keyed by company. Drives MCP-freshness: [`ensure`](Self::ensure)
+    /// rebuilds the roster whenever the fingerprint changes.
+    mcp_fingerprints: RwLock<HashMap<CompanyId, u64>>,
 }
 
 impl Default for HarnessPool {
@@ -188,19 +277,36 @@ impl HarnessPool {
     pub fn new() -> Self {
         Self {
             agents: RwLock::new(HashMap::new()),
+            mcp_fingerprints: RwLock::new(HashMap::new()),
         }
     }
 
-    /// Ensures a company's roster is built and cached. Idempotent: a second call
-    /// for a company already in the pool is a no-op (the roster is rebuilt only
-    /// when absent).
+    /// Ensures a company's roster is built and cached.
+    ///
+    /// **MCP-freshness (the error-hardening cell)**: on every call, the effective
+    /// MCP server set is re-resolved (from the [`SecretStore`] when
+    /// [`HarnessDeps::secrets`] is wired, else the boot-resolved
+    /// [`HarnessDeps::mcp_servers`]) and fingerprinted. The roster is rebuilt when
+    /// it is absent **or** the fingerprint changed — so a console MCP
+    /// add/remove/enable-toggle reaches the agent on its **next turn**, with no
+    /// company restart (the "Parallel Search / BrowserBase" bug). When nothing
+    /// changed, the cached roster is reused (the common fast path), exactly as
+    /// before.
     pub async fn ensure(&self, company: &CompanyRecord, deps: &HarnessDeps) -> crate::Result<()> {
+        // Re-resolve + fingerprint the effective MCP set (cheap; no rebuild yet).
+        let effective_mcp = self.resolve_effective_mcp(company, deps).await;
+        let fingerprint = mcp_fingerprint(&effective_mcp);
+
         {
-            let guard = self.agents.read().await;
-            if guard.contains_key(&company.id) {
+            let agents = self.agents.read().await;
+            let fingerprints = self.mcp_fingerprints.read().await;
+            if agents.contains_key(&company.id)
+                && fingerprints.get(&company.id) == Some(&fingerprint)
+            {
                 return Ok(());
             }
         }
+
         // Fetch the operator skill deltas once (async) before building the
         // roster; `build_roster`/`build_agent` stay synchronous and fold the
         // deltas into each agent's effective skill set.
@@ -208,10 +314,48 @@ impl HarnessPool {
             Some(store) => store.list(&company.id).await?,
             None => Vec::new(),
         };
-        let roster = build_roster(company, deps, &skill_deltas)?;
-        let mut guard = self.agents.write().await;
-        guard.entry(company.id.clone()).or_insert(roster);
+        // Fold the freshly-resolved MCP set into the deps the roster is built
+        // from, so a changed set actually reaches the rebuilt agents. The clone
+        // shares every Arc / queue handle — only `mcp_servers` is overridden.
+        let mut fresh_deps = deps.clone();
+        fresh_deps.mcp_servers = effective_mcp;
+        let roster = build_roster(company, &fresh_deps, &skill_deltas)?;
+
+        let mut agents = self.agents.write().await;
+        agents.insert(company.id.clone(), roster);
+        self.mcp_fingerprints
+            .write()
+            .await
+            .insert(company.id.clone(), fingerprint);
         Ok(())
+    }
+
+    /// Re-resolves the company's effective MCP server set: from the secret store
+    /// when [`HarnessDeps::secrets`] is wired (picking up console changes), else
+    /// the boot-resolved [`HarnessDeps::mcp_servers`] unchanged. A resolution
+    /// error degrades to the boot-resolved set rather than dropping MCP tools.
+    async fn resolve_effective_mcp(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+    ) -> Vec<McpServerDecl> {
+        match &deps.secrets {
+            Some(secrets) => crate::company::mcp::resolve_effective(
+                &company.id,
+                &company.manifest.mcp_servers,
+                secrets.as_ref(),
+            )
+            .await
+            .unwrap_or_else(|_| deps.mcp_servers.clone()),
+            None => deps.mcp_servers.clone(),
+        }
+    }
+
+    /// The current MCP fingerprint for a company (test-only), so a freshness test
+    /// can assert a rebuild happened without introspecting agent internals.
+    #[cfg(test)]
+    pub async fn mcp_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
+        self.mcp_fingerprints.read().await.get(company).copied()
     }
 
     /// Routes a message to one agent and returns its reply, recording the turn's
@@ -251,19 +395,23 @@ impl HarnessPool {
             .await?;
         let augmented = memory_loop::inject(message, &hits);
 
-        // Run the turn and record its real cost. `CompanyAgent::run` reads the
-        // turn's token/cost totals from openhuman's public `last_turn_usage()`
-        // accessor; a zero-usage turn (offline provider) writes nothing.
-        let (reply, turn_cost) = agent.run(&augmented).await?;
-        record_turn_cost(
-            &turn_cost,
-            agent_id,
-            &deps.provider_slug,
-            company,
-            deps.store.as_ref(),
-            deps.meter.as_deref(),
-        )
-        .await?;
+        // Run the turn and record its real cost. `CompanyAgent::run` reads each
+        // attempt's token/cost totals from openhuman's public `last_turn_usage()`
+        // accessor and returns one entry per attempt (two when the empty-response
+        // wrapper retried once). A zero-usage attempt (offline provider) writes
+        // nothing, so the inert-metering contract holds.
+        let (reply, turn_costs) = agent.run(&augmented).await?;
+        for turn_cost in &turn_costs {
+            record_turn_cost(
+                turn_cost,
+                agent_id,
+                &deps.provider_slug,
+                company,
+                deps.store.as_ref(),
+                deps.meter.as_deref(),
+            )
+            .await?;
+        }
 
         // Store: persist the outcome (original task + reply) so it compounds
         // into later turns. Without this the harness never writes memory back.
@@ -280,6 +428,45 @@ impl HarnessPool {
     /// Number of companies currently resident in the pool (test/observability).
     pub async fn resident_companies(&self) -> usize {
         self.agents.read().await.len()
+    }
+}
+
+/// A stable fingerprint of an effective MCP server set, used to detect a console
+/// change (add / remove / enable-toggle / token rotation) between
+/// [`HarnessPool::ensure`] calls. Hashes only non-secret configuration plus the
+/// credential substrings — the resulting `u64` is non-reversible and never
+/// surfaces anywhere, so it is not a credential leak, and hashing the credential
+/// substrings means a rotate-token also invalidates the cached roster.
+fn mcp_fingerprint(decls: &[McpServerDecl]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    decls.len().hash(&mut hasher);
+    for decl in decls {
+        decl.name.hash(&mut hasher);
+        decl.endpoint.hash(&mut hasher);
+        decl.enabled.hash(&mut hasher);
+        decl.description.hash(&mut hasher);
+        decl.allowed_tools.hash(&mut hasher);
+        decl.disallowed_tools.hash(&mut hasher);
+        decl.timeout_secs.hash(&mut hasher);
+        auth_kind(&decl.auth).hash(&mut hasher);
+        for secret in decl.auth.secret_values() {
+            secret.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// A small discriminant for an [`AuthMaterial`] variant, for the fingerprint.
+fn auth_kind(material: &crate::company::mcp::AuthMaterial) -> u8 {
+    use crate::company::mcp::AuthMaterial::*;
+    match material {
+        None => 0,
+        Bearer(_) => 1,
+        Header { .. } => 2,
+        QueryParam { .. } => 3,
     }
 }
 
@@ -499,6 +686,8 @@ description = "Builds the product."
                 facts: None,
                 events: None,
                 delegations: DelegationQueue::default(),
+                mcp_failures: McpFailureQueue::default(),
+                secrets: None,
             },
             store,
             meter,
@@ -546,6 +735,8 @@ description = "Builds the product."
             facts: None,
             events: None,
             delegations: DelegationQueue::default(),
+            mcp_failures: McpFailureQueue::default(),
+            secrets: None,
         };
 
         let roster = build_roster(&record(), &deps, &[]).expect("roster builds with skills");
@@ -701,5 +892,224 @@ description = "Builds the product."
 
         assert!(fx.store.ledger.lock().unwrap().is_empty());
         assert!(fx.meter.samples.lock().unwrap().is_empty());
+    }
+
+    // --- Empty-response turn wrapper ----------------------------------------
+
+    /// A provider that plays back a scripted sequence of outcomes, one per
+    /// `chat_with_system` call, so the empty-response retry wrapper can be driven
+    /// deterministically. `Ok("")` is the transient empty class; `Err(_)` is a
+    /// hard error.
+    struct ScriptedProvider {
+        script: StdMutex<std::collections::VecDeque<Result<String, String>>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ScriptedProvider {
+        fn new(outcomes: Vec<Result<String, String>>) -> Self {
+            Self {
+                script: StdMutex::new(outcomes.into_iter().collect()),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl oh::inference::provider::Provider for ScriptedProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "scripted".to_string()
+        }
+        async fn chat_with_system(
+            &self,
+            _system: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match self.script.lock().unwrap().pop_front() {
+                Some(Ok(reply)) => Ok(reply),
+                Some(Err(err)) => Err(anyhow::anyhow!("{err}")),
+                None => Ok("exhausted".to_string()),
+            }
+        }
+    }
+
+    /// Build a single [`CompanyAgent`] over a scripted provider so the wrapper can
+    /// be exercised directly (its retry logic is the unit under test).
+    fn scripted_agent(outcomes: Vec<Result<String, String>>) -> (Arc<CompanyAgent>, HarnessDeps) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let deps = HarnessDeps {
+            provider: Arc::new(ScriptedProvider::new(outcomes)),
+            provider_slug: "scripted".to_string(),
+            context: Arc::new(MockContext::default()),
+            store: Arc::new(RecordingStore::default()),
+            meter: None,
+            workspace_root: dir.path().to_path_buf(),
+            model_override: None,
+            tasks: None,
+            skills: None,
+            skills_source_dir: None,
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: DelegationQueue::default(),
+            mcp_failures: McpFailureQueue::default(),
+            secrets: None,
+        };
+        let roster = build_roster(&record(), &deps, &[]).expect("roster");
+        // Keep the tempdir alive for the agent's workspace by leaking it into the
+        // test's lifetime — the process ends the test anyway.
+        std::mem::forget(dir);
+        (roster.into_iter().next().expect("one agent"), deps)
+    }
+
+    /// Empty first, real reply on retry → the wrapper returns the recovered reply
+    /// and reports two attempts' usage (so both burnt attempts can be metered).
+    #[tokio::test]
+    async fn turn_wrapper_retries_empty_then_recovers() {
+        let (agent, _deps) = scripted_agent(vec![Ok(String::new()), Ok("recovered".into())]);
+        let (reply, usages) = agent.run("hi").await.expect("wrapper recovers");
+        assert!(reply.contains("recovered"), "got {reply:?}");
+        assert_eq!(usages.len(), 2, "both attempts' usage is returned");
+    }
+
+    /// Empty twice → a graceful, non-error reply (chat never shows "Couldn't
+    /// send" for a transient hiccup), still two attempts.
+    #[tokio::test]
+    async fn turn_wrapper_empty_twice_is_graceful() {
+        let (agent, _deps) = scripted_agent(vec![Ok(String::new()), Ok(String::new())]);
+        let (reply, usages) = agent.run("hi").await.expect("graceful, not an Err");
+        assert!(
+            reply.to_lowercase().contains("temporary model hiccup"),
+            "got {reply:?}"
+        );
+        assert_eq!(usages.len(), 2);
+    }
+
+    /// The Empty-vs-Hard split: only the transient empty-response class is
+    /// retried/softened; every other error is `Hard` and propagates loudly (no
+    /// blanket swallow). Driven at the classifier so it's deterministic — the
+    /// live agent internally retries provider errors, which would make a scripted
+    /// "hard error" non-deterministic.
+    #[test]
+    fn transient_empty_response_is_recognised_but_hard_errors_are_not() {
+        let empty = anyhow::anyhow!("The model returned an empty response. Please try again.");
+        assert!(
+            is_transient_empty_response(&empty),
+            "empty-response is transient"
+        );
+
+        let hard = anyhow::anyhow!("daily budget exceeded for agent 'ceo'");
+        assert!(
+            !is_transient_empty_response(&hard),
+            "a budget error is NOT the transient empty class — it must propagate"
+        );
+    }
+
+    // --- MCP-freshness ------------------------------------------------------
+
+    /// In-memory secret store so `ensure` can re-resolve the runtime MCP index.
+    #[derive(Default)]
+    struct MemSecrets {
+        map: StdMutex<std::collections::HashMap<String, String>>,
+    }
+
+    #[async_trait]
+    impl SecretStore for MemSecrets {
+        async fn get(
+            &self,
+            _c: &CompanyId,
+            key: &str,
+        ) -> crate::Result<Option<crate::ports::types::SecretValue>> {
+            Ok(self
+                .map
+                .lock()
+                .unwrap()
+                .get(key)
+                .map(|v| crate::ports::types::SecretValue(v.clone())))
+        }
+        async fn set(
+            &self,
+            _c: &CompanyId,
+            key: &str,
+            value: crate::ports::types::SecretValue,
+        ) -> crate::Result<()> {
+            self.map.lock().unwrap().insert(key.to_string(), value.0);
+            Ok(())
+        }
+    }
+
+    /// A console-added MCP server reaches the agent on the NEXT `ensure` — the
+    /// roster is rebuilt because the effective set re-resolved from the LIVE
+    /// secret store (not the boot snapshot) changed its fingerprint. This is the
+    /// Parallel-Search / BrowserBase freshness bug, proven end-to-end.
+    #[tokio::test]
+    async fn ensure_rebuilds_when_a_runtime_mcp_server_is_added() {
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+        let dir = tempfile::tempdir().unwrap();
+        let deps = HarnessDeps {
+            provider: Arc::new(MockProvider::new("mock: ")),
+            provider_slug: "mock".to_string(),
+            context: Arc::new(MockContext::default()),
+            store: Arc::new(RecordingStore::default()),
+            meter: None,
+            workspace_root: dir.path().to_path_buf(),
+            model_override: None,
+            tasks: None,
+            skills: None,
+            skills_source_dir: None,
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: DelegationQueue::default(),
+            mcp_failures: McpFailureQueue::default(),
+            secrets: Some(secrets.clone()),
+        };
+        let pool = HarnessPool::new();
+        let rec = record();
+
+        pool.ensure(&rec, &deps).await.expect("first ensure");
+        let before = pool
+            .mcp_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+
+        // Console-add a runtime MCP server directly into the live secret store.
+        crate::company::mcp::save_runtime_index(
+            &rec.id,
+            secrets.as_ref(),
+            &[crate::company::McpServer {
+                name: "browserbase".into(),
+                endpoint: "https://api.browserbase.com/mcp".into(),
+                description: None,
+                command: None,
+                allowed_tools: Vec::new(),
+                disallowed_tools: Vec::new(),
+                timeout_secs: 30,
+                enabled: true,
+                auth_secret: None,
+            }],
+        )
+        .await
+        .unwrap();
+
+        // Next ensure re-resolves from the live store → fingerprint changes →
+        // roster rebuilt, so the new server reaches the agent without a restart.
+        pool.ensure(&rec, &deps).await.expect("second ensure");
+        let after = pool
+            .mcp_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+        assert_ne!(before, after, "adding a server must change the fingerprint");
+        assert_eq!(
+            pool.resident_companies().await,
+            1,
+            "same company, rebuilt in place"
+        );
+
+        // A third ensure with no change is a no-op (fingerprint stable).
+        pool.ensure(&rec, &deps).await.expect("third ensure");
+        assert_eq!(pool.mcp_fingerprint_of(&rec.id).await, Some(after));
     }
 }
