@@ -18,6 +18,7 @@ import {
   type ApiErrorBody,
   type AppSpec,
   type ApprovalSummary,
+  type ChatHistoryMessageDto,
   type ChatResponse,
   type CompanyStatus,
   type ConnectionStart,
@@ -185,6 +186,21 @@ export class OpenCompanyClient {
     return this.request<void>(
       "DELETE",
       `${this.scope(company)}/desks/${encodeURIComponent(deskId)}/members/${encodeURIComponent(agentId)}`,
+    );
+  }
+
+  /**
+   * A desk's persisted transcript (issue #65), so the console can rehydrate a
+   * thread on login/reload instead of always starting empty. `desk` is the
+   * thread id (as passed to {@link chat}); omitted reads the operator/General
+   * line. Hosts that don't expose `.../chat/history` yet return 404 — callers
+   * fall back to an empty transcript.
+   */
+  getChatHistory(desk?: string | null, company?: string | null): Promise<ChatHistoryMessageDto[]> {
+    const qs = desk ? `?desk=${encodeURIComponent(desk)}` : "";
+    return this.request<ChatHistoryMessageDto[]>(
+      "GET",
+      `${this.scope(company)}/chat/history${qs}`,
     );
   }
 
