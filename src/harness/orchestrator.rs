@@ -9,7 +9,7 @@
 //! first agent when none is tagged (so a company without an orchestrator behaves
 //! exactly as before).
 //!
-//! It reaches four tools, all wired only onto the orchestrator agent:
+//! It reaches five tools, all wired only onto the orchestrator agent:
 //!
 //! * [`QueryCompanyTool`] — a read surface over the company's [`FactStore`] and
 //!   recent [`EventLog`] history.
@@ -1254,7 +1254,6 @@ mod tests {
         assert!(result.is_error);
     }
 
-
     use std::sync::Mutex as StdMutex;
 
     use crate::ports::types::{CompanyRecord, CompanySummary, LedgerEntry};
@@ -1374,5 +1373,4 @@ mod tests {
             .expect_err("no record for this company id");
         assert!(err.to_string().contains("ghost"), "{err}");
     }
-
 }
