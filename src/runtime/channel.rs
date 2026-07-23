@@ -75,6 +75,7 @@ mod test {
             .send(OutboundMessage {
                 channel: "operator".into(),
                 text: "hello".into(),
+                reply_to: None,
                 steps: Vec::new(),
             })
             .await

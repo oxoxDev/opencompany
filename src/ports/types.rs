@@ -684,6 +684,20 @@ pub struct InboundMessage {
     pub from: Actor,
 }
 
+/// Channel-specific reply addressing for an [`OutboundMessage`].
+///
+/// Carries the chat/thread a reply must be delivered back to on channels whose
+/// messages are addressed to a specific conversation — chiefly Telegram, where
+/// the reply has to land in the same `chat.id` the inbound update came from.
+/// The operator channel is a single implicit surface and needs none of this.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyTo {
+    /// The chat/thread id to deliver back to. Rendered as a string so it stays
+    /// channel-agnostic (Telegram's numeric `chat.id`, a future channel's
+    /// opaque thread key) without widening the type per channel.
+    pub chat_id: String,
+}
+
 /// A message the company emits on a channel.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OutboundMessage {
@@ -691,6 +705,13 @@ pub struct OutboundMessage {
     pub channel: String,
     /// The message text.
     pub text: String,
+    /// Where to deliver the reply, for channels addressed to a specific
+    /// chat/thread (Telegram). `None` on the operator channel and on every
+    /// message emitted before this field existed; `skip_serializing_if` keeps
+    /// such a message byte-identical on the wire, so no stored record migrates
+    /// (same `by`/`chat`/`McpCallFailed` additive precedent above).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<ReplyTo>,
     /// The visible processing steps behind this bubble — the agent's tool calls,
     /// thinking runs, and any surfaced MCP failures — folded and scrubbed from
     /// the turn's progress stream (see [`crate::harness::steps`] under the
@@ -1105,6 +1126,7 @@ mod test {
         let no_steps = OutboundMessage {
             channel: "operator".to_string(),
             text: "hi".to_string(),
+            reply_to: None,
             steps: Vec::new(),
         };
         let json = serde_json::to_string(&no_steps).unwrap();
@@ -1117,6 +1139,7 @@ mod test {
         let with_steps = OutboundMessage {
             channel: "operator".to_string(),
             text: "done".to_string(),
+            reply_to: None,
             steps: vec![TurnStep {
                 kind: TurnStepKind::Note,
                 status: TurnStepStatus::Error,
@@ -1248,6 +1271,41 @@ mod test {
             serde_json::to_string(&event).unwrap(),
             r#"{"kind":"McpCallFailed","server":"browserbase","tool":"browse","status":"tool_call_rejected","message":"server rejected the call"}"#
         );
+    }
+
+    #[test]
+    fn outbound_without_reply_to_serializes_exactly_as_before() {
+        // `skip_serializing_if` keeps the pre-`reply_to` bytes, so an operator
+        // reply round-trips byte-for-byte and no persisted record migrates.
+        let msg = OutboundMessage {
+            channel: "operator".into(),
+            text: "hi".into(),
+            reply_to: None,
+            steps: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_string(&msg).unwrap(),
+            r#"{"channel":"operator","text":"hi"}"#
+        );
+        // And a legacy record with no `reply_to` key still loads.
+        let legacy: OutboundMessage =
+            serde_json::from_str(r#"{"channel":"operator","text":"hi"}"#).unwrap();
+        assert_eq!(legacy.reply_to, None);
+    }
+
+    #[test]
+    fn outbound_with_reply_to_round_trips() {
+        let msg = OutboundMessage {
+            channel: "telegram".into(),
+            text: "on it".into(),
+            reply_to: Some(ReplyTo {
+                chat_id: "4242".into(),
+            }),
+            steps: Vec::new(),
+        };
+        assert_eq!(round_trip(&msg), msg);
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["reply_to"]["chat_id"], "4242");
     }
 
     #[test]

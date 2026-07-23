@@ -43,6 +43,7 @@ import {
   type ConnectionProvider,
 } from "@/lib/connections";
 import { cn } from "@/lib/utils";
+import { ChannelsSection } from "./connections/ChannelsSection";
 import { InferenceSection } from "@/views/connections/InferenceSection";
 
 interface Props {
@@ -129,6 +130,8 @@ export function ConnectionsView({ client, company }: Props) {
         )}
 
         <McpServersSection client={client} company={company} />
+
+        <ChannelsSection client={client} company={company} />
 
         <InferenceSection client={client} company={company} />
 

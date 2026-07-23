@@ -27,7 +27,7 @@ use crate::harness::{HarnessDeps, HarnessPool};
 use crate::ports::brain::{Brain, CycleHost};
 use crate::ports::types::{
     CompanyEvent, CompanyRecord, CompressedTrace, CycleRequest, CycleResult, OutboundMessage,
-    TokenUsage, TurnStep, TurnStepKind, TurnStepStatus,
+    ReplyTo, TokenUsage, TurnStep, TurnStepKind, TurnStepStatus,
 };
 use crate::ports::{TaskRecord, generate_id, now_millis};
 
@@ -233,6 +233,7 @@ impl HarnessBrain {
                 Ok(Some(OutboundMessage {
                     channel: member,
                     text: outcome.reply,
+                    reply_to: None,
                     steps: outcome.steps,
                 }))
             }
@@ -306,9 +307,42 @@ impl Brain for HarnessBrain {
                     channel_responses.push(OutboundMessage {
                         channel: "operator".to_string(),
                         text: outcome.reply,
+                        reply_to: None,
                         steps: operator_steps,
                     });
                     channel_responses.extend(delegated);
+                }
+                // An inbound Telegram DM routes exactly like a web/chat turn
+                // (OpenHuman treats a bot DM as a web-channel message, not a
+                // bespoke provider): run an ordinary orchestrator turn on the
+                // text, then address the reply back to the originating chat so
+                // the webhook can deliver it into the same conversation.
+                CompanyEvent::WebhookReceived { channel, body }
+                    if channel == crate::company::telegram::TELEGRAM_CHANNEL =>
+                {
+                    if let Some(inbound) = crate::company::telegram::parse_inbound(body) {
+                        let responder = self.responder_for(None);
+                        self.deps.delegations.clear();
+                        self.deps.mcp_failures.clear();
+                        let outcome = self
+                            .pool
+                            .run(&self.record.id, &responder, &inbound.text, &self.deps)
+                            .await?;
+                        // The turn's own steps ride on the telegram bubble; any
+                        // MCP tool-call failure re-skins as an error step on that
+                        // same bubble — one surface, one renderer, mirroring the
+                        // operator arm.
+                        let mut telegram_steps = outcome.steps;
+                        self.surface_mcp_failures(&mut telegram_steps).await?;
+                        channel_responses.push(OutboundMessage {
+                            channel: crate::company::telegram::TELEGRAM_CHANNEL.to_string(),
+                            text: outcome.reply,
+                            reply_to: Some(ReplyTo {
+                                chat_id: inbound.chat_id.to_string(),
+                            }),
+                            steps: telegram_steps,
+                        });
+                    }
                 }
                 CompanyEvent::TaskDispatched { task_id } => {
                     self.run_task(task_id).await?;
@@ -321,6 +355,7 @@ impl Brain for HarnessBrain {
             channel_responses.push(OutboundMessage {
                 channel: "operator".to_string(),
                 text: "Acknowledged.".to_string(),
+                reply_to: None,
                 steps: Vec::new(),
             });
         }
@@ -472,6 +507,43 @@ description = "Runs Acme."
         assert_eq!(result.new_traces.len(), 1);
         // Single cost-accounting site: the cycle result carries no ledger delta.
         assert!(result.ledger_deltas.is_empty());
+    }
+
+    #[tokio::test]
+    async fn telegram_inbound_runs_a_turn_addressed_back_to_the_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let brain = brain_over_mock(dir.path());
+        let update = serde_json::json!({
+            "message": { "chat": { "id": 4242 }, "from": { "username": "bob" }, "text": "status?" }
+        });
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::WebhookReceived {
+                    channel: "telegram".into(),
+                    body: update,
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        // Exactly one telegram reply, produced by a real agent turn (mock prefix)
+        // and addressed back to the ORIGIN chat so it lands in the same DM.
+        let telegram: Vec<_> = result
+            .channel_responses
+            .iter()
+            .filter(|m| m.channel == "telegram")
+            .collect();
+        assert_eq!(telegram.len(), 1, "{:?}", result.channel_responses);
+        assert!(
+            telegram[0].text.contains("status?"),
+            "{:?}",
+            telegram[0].text
+        );
+        assert_eq!(
+            telegram[0].reply_to.as_ref().map(|r| r.chat_id.as_str()),
+            Some("4242")
+        );
     }
 
     #[tokio::test]

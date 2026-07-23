@@ -12,7 +12,7 @@ use crate::Result;
 use crate::ports::brain::{Brain, CycleHost};
 use crate::ports::types::{
     CompanyEvent, CompressedTrace, CycleRequest, CycleResult, Effect, EffectGroup, OutboundMessage,
-    TokenUsage,
+    ReplyTo, TokenUsage,
 };
 
 /// The offline echo brain: turns operator messages into acknowledgements.
@@ -43,18 +43,40 @@ impl Brain for EchoBrain {
     async fn run_cycle(&self, req: CycleRequest, host: &dyn CycleHost) -> Result<CycleResult> {
         let mut channel_responses = Vec::new();
         for event in &req.events {
-            if let CompanyEvent::OperatorMessage { text, .. } = event {
-                channel_responses.push(OutboundMessage {
-                    channel: "operator".to_string(),
-                    text: format!("You said: {text}"),
-                    steps: Vec::new(),
-                });
+            match event {
+                CompanyEvent::OperatorMessage { text, .. } => {
+                    channel_responses.push(OutboundMessage {
+                        channel: "operator".to_string(),
+                        text: format!("You said: {text}"),
+                        reply_to: None,
+                        steps: Vec::new(),
+                    });
+                }
+                // An inbound Telegram DM is a web/chat turn tagged with its
+                // origin chat: echo the reply back, addressed to that chat so
+                // the outbound delivery lands in the same conversation.
+                CompanyEvent::WebhookReceived { channel, body }
+                    if channel == crate::company::telegram::TELEGRAM_CHANNEL =>
+                {
+                    if let Some(inbound) = crate::company::telegram::parse_inbound(body) {
+                        channel_responses.push(OutboundMessage {
+                            channel: crate::company::telegram::TELEGRAM_CHANNEL.to_string(),
+                            text: format!("You said: {}", inbound.text),
+                            reply_to: Some(ReplyTo {
+                                chat_id: inbound.chat_id.to_string(),
+                            }),
+                            steps: Vec::new(),
+                        });
+                    }
+                }
+                _ => {}
             }
         }
         if channel_responses.is_empty() {
             channel_responses.push(OutboundMessage {
                 channel: "operator".to_string(),
                 text: "Acknowledged.".to_string(),
+                reply_to: None,
                 steps: Vec::new(),
             });
         }
