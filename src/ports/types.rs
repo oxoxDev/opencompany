@@ -333,6 +333,24 @@ pub enum CompanyEvent {
         /// A short, scrubbed, operator-facing message.
         message: String,
     },
+    /// A new workflow graph was authored and enabled (issue #112), from either
+    /// the console `POST …/workflows` route or the orchestrator's
+    /// `create_workflow` tool. Journaled best-effort **after** the graph is
+    /// persisted and enabled, so it records a completed create — a journal
+    /// failure never rolls the create back. Additive: old logs never carry it,
+    /// and its presence doesn't change how any existing variant serializes.
+    WorkflowCreated {
+        /// The new workflow's id (its `workflows/<id>.toml` stem).
+        workflow_id: String,
+        /// The new workflow's display name.
+        name: String,
+        /// Who authored it, when known. `None` when created by a surface that
+        /// carries no attributed actor (the current create paths); kept as an
+        /// `Option` so a future attributed create needs no migration, mirroring
+        /// [`OperatorMessage`](Self::OperatorMessage)'s `by`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
 }
 
 /// A `CompanyEvent` durably appended to the log with its sequence and time.
