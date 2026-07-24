@@ -1010,6 +1010,10 @@ impl From<CreateWorkflowArgs> for RawWorkflow {
                     name: n.name,
                     summary: n.summary,
                     agent: n.agent,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
                 })
                 .collect(),
             edges: args
