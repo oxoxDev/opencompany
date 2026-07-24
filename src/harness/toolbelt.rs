@@ -128,15 +128,18 @@ pub fn native_runtime() -> Arc<dyn RuntimeAdapter> {
 /// own workspace dir so audit trails are tenant-isolated.
 ///
 /// Audit must never block agent construction, so a logger-init failure degrades
-/// to [`AuditLogger::disabled`] with a warning rather than propagating.
+/// to [`AuditLogger::disabled`] rather than propagating. The failure is logged
+/// at `error!` (not `warn!`): a consistent init failure means every subsequent
+/// shell command for this agent runs with **no audit record**, so the event
+/// must surface in production error telemetry rather than blend into warnings.
 pub fn workspace_audit(workspace: &Path) -> Arc<AuditLogger> {
     match get_or_create_workspace_audit_logger(AuditConfig::default(), workspace.to_path_buf()) {
         Ok(logger) => logger,
         Err(error) => {
-            tracing::warn!(
+            tracing::error!(
                 workspace = %workspace.display(),
                 %error,
-                "[toolbelt] workspace audit logger init failed; shell audit disabled for this agent"
+                "[toolbelt] workspace audit logger init failed; shell commands for this agent will run UNAUDITED"
             );
             AuditLogger::disabled()
         }
