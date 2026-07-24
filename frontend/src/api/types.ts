@@ -272,6 +272,38 @@ export interface McpToolInfo {
   inputSchema: unknown;
 }
 
+/** One capability tier's budget status (issue #108). */
+export interface CapabilityTierDto {
+  /** The exec tool namespace this tier gates (`shell` / `code` / `web` / `subagent`). */
+  namespace: string;
+  /** Tokens allowed this period. */
+  budgetTokens: number;
+  /** Tokens spent this period (company-wide — no per-tier attribution). */
+  spentTokens: number;
+  /** `budget - spent`, floored at zero. */
+  remainingTokens: number;
+  /** Whether spend has reached the threshold — the tier's tools are disabled. */
+  exhausted: boolean;
+}
+
+/**
+ * The company's capability-budget status. When no `[plan]` is configured only
+ * `configured: false` is present; the other fields accompany a configured plan.
+ */
+export interface CapabilityStatusDto {
+  configured: boolean;
+  /** The configured built-in tier name, or absent for a bare `token_budgets` plan. */
+  plan?: string | null;
+  /** Budget window (`daily` / `monthly`). */
+  period?: string;
+  /** Epoch-millis start of the current budget period. */
+  periodStartMillis?: number;
+  /** Total inference tokens spent this period. */
+  spentTokens?: number;
+  /** One row per configured tier, namespace-sorted. */
+  tiers?: CapabilityTierDto[];
+}
+
 /** Error envelope shape: `{ error, code }`. */
 export interface ApiErrorBody {
   error: string;

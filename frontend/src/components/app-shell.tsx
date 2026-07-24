@@ -434,7 +434,7 @@ export function AppShell({
                 </div>
               }
             >
-              <UsageView />
+              <UsageView client={client} company={company} />
             </Suspense>
           )}
           {view === "finances" && (
