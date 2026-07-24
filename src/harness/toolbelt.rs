@@ -59,6 +59,22 @@ use crate::harness::policy::PolicyMode;
 /// Subdirectory under the agent workspace that `curl` downloads land in.
 const CURL_DEST_SUBDIR: &str = "downloads";
 
+/// Every grant namespace a [`CapabilityFilter`] can gate — "which tool families
+/// are budgeted".
+///
+/// This is the exec-grade surface [`namespace_of`] maps tools onto (`shell`,
+/// `code`, `web`) plus the reserved `subagent` namespace. A capability plan's
+/// budget map keys are validated against this set (a key outside it is a
+/// manifest error), and it is the universe the fail-closed
+/// [`capability_budget`](crate::harness::capability_budget) denies from when no
+/// meter is available. Intrinsic tools (namespace `None`) are never listed here
+/// — they are always kept regardless of the filter.
+///
+/// The canonical list lives in [`crate::company::GATEABLE_NAMESPACES`] (always
+/// compiled, so manifest validation can see it in the default build); this is a
+/// re-export for the harness call sites that key off it.
+pub const GATEABLE_NAMESPACES: [&str; 4] = crate::company::GATEABLE_NAMESPACES;
+
 /// Map a tool's runtime `name()` onto its grant namespace, or `None` when the
 /// tool is **intrinsic** (memory / MCP / orchestrator / file / skill tools),
 /// which are always kept regardless of the capability filter.
@@ -247,18 +263,21 @@ pub fn subagent_tools() -> Vec<Box<dyn Tool>> {
 }
 
 /// Which tools an agent may keep after its grants have already admitted them —
-/// the seam a future capability-tier cell swaps.
+/// the seam the capability-tier gate ([`capability_budget`](crate::harness::capability_budget))
+/// constructs per tenant, per turn.
 ///
-/// Today the production build only ever constructs [`CapabilityFilter::AllowAll`]
-/// (identity). The deny variant exists for tests exercising the filter seam.
+/// [`AllowAll`](Self::AllowAll) is the identity pass (no plan configured, or a
+/// tenant under every tier's budget); [`DenyNamespaces`](Self::DenyNamespaces)
+/// drops the exec families whose per-period token budget the tenant has spent
+/// through — or, fail-closed, every gateable family when the meter can't be
+/// read.
 #[derive(Clone, Debug, Default)]
 pub enum CapabilityFilter {
     /// Keep every tool the grants admitted (identity).
     #[default]
     AllowAll,
     /// Drop every tool whose [`namespace_of`] is in this set; intrinsic tools
-    /// (namespace `None`) are always kept. Test-only for now.
-    #[cfg(test)]
+    /// (namespace `None`) are always kept.
     DenyNamespaces(std::collections::HashSet<&'static str>),
 }
 
@@ -274,7 +293,6 @@ pub fn filter_by_capabilities(
 ) -> Vec<Box<dyn Tool>> {
     match filter {
         CapabilityFilter::AllowAll => tools,
-        #[cfg(test)]
         CapabilityFilter::DenyNamespaces(denied) => tools
             .into_iter()
             .filter(|tool| match namespace_of(tool.name()) {
@@ -406,6 +424,35 @@ mod tests {
         assert_eq!(namespace_of("memory_recall"), None);
         assert_eq!(namespace_of("file_read"), None);
         assert_eq!(namespace_of("mcp_registry_tool_call"), None);
+    }
+
+    /// `GATEABLE_NAMESPACES` must be a superset of every namespace `namespace_of`
+    /// can emit — otherwise an exec family would be ungateable (silently always
+    /// granted). `subagent` is additionally present as the reserved namespace.
+    #[test]
+    fn gateable_namespaces_cover_every_mapped_namespace() {
+        let mapped = [
+            "shell",
+            "read_workspace_state",
+            "apply_patch",
+            "git_operations",
+            "csv_export",
+            "web_fetch",
+            "http_request",
+            "curl",
+            "image_info",
+        ];
+        for tool in mapped {
+            let ns = namespace_of(tool).expect("mapped tool has a namespace");
+            assert!(
+                GATEABLE_NAMESPACES.contains(&ns),
+                "namespace `{ns}` (from `{tool}`) is not gateable"
+            );
+        }
+        assert!(
+            GATEABLE_NAMESPACES.contains(&"subagent"),
+            "the reserved subagent namespace must be gateable"
+        );
     }
 
     #[test]
