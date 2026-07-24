@@ -1,0 +1,502 @@
+//! Coding + web tool wiring for embedded company agents (Cell A).
+//!
+//! This module bridges a curated slice of OpenHuman's tool surface into the
+//! harness's per-agent [`AgentBuilder`](openhuman_core::openhuman::agent::AgentBuilder)
+//! wiring in [`build`](crate::harness::build). Where [`file_tools`] grants an
+//! agent read/write inside its own workspace, this module adds the **exec-grade**
+//! families behind their own grant namespaces:
+//!
+//! * **`shell`** → `shell` (run commands) + `read_workspace_state`.
+//! * **`code`** → `apply_patch`, `git_operations`, `csv_export`.
+//! * **`web`** → `web_fetch`, `http_request`, `curl`, `image_info`.
+//! * **`subagent`** → reserved, **empty in v1** (see [`subagent_tools`]).
+//!
+//! Everything here is scoped **per company/agent workspace** — no
+//! process-global state — so parallel tenants stay isolated:
+//!
+//! * Shell + code tools share one [`SecurityPolicy`] built by [`exec_security`],
+//!   pinned to the agent's workspace with `workspace_only`, high-risk commands
+//!   blocked, tool-install denied, and an autonomy level mapped 1:1 from the
+//!   company's [`PolicyMode`]. This is the *strict* policy — opencompany's own
+//!   [`ApprovalPolicy`](crate::harness::policy::ApprovalPolicy) tool policy stays
+//!   the real fail-closed approval gate on top of it.
+//! * Shell command audit is keyed on the agent's own workspace dir
+//!   ([`workspace_audit`]) so audit trails never cross tenants.
+//! * Web tools reuse OpenHuman's upstream SSRF guard (`url_guard`): every
+//!   request is validated against the per-company allowlist AND has
+//!   private/loopback/link-local/metadata IPs rejected — even in the default
+//!   "allow all public hosts" mode (an empty allowlist). The guard is applied
+//!   inside the tool constructors; it is not re-implemented here.
+//!
+//! A single [`filter_by_capabilities`] pass runs just before the tool vector is
+//! handed to the builder. Today the only [`CapabilityFilter`] is
+//! [`CapabilityFilter::AllowAll`] (identity); a future capability-tier cell only
+//! swaps how the filter is constructed. Tools with no mapped namespace
+//! (memory, MCP, orchestrator, skills) are **intrinsic** and always kept.
+//!
+//! **Deferred** (need infrastructure not present in v1): browser automation
+//! (needs a backend), search tools (need engine keys), Node/NPM exec (need a
+//! managed-runtime bootstrap), and OpenHuman's sub-agent spawn tools (global
+//! registry + budget bypass — unsafe under multi-tenancy).
+
+use std::path::Path;
+use std::sync::Arc;
+
+use openhuman_core::openhuman as oh;
+
+use oh::agent::host_runtime::{NativeRuntime, RuntimeAdapter};
+use oh::config::{AuditConfig, HttpRequestConfig};
+use oh::security::{
+    AuditLogger, AutonomyLevel, SecurityPolicy, get_or_create_workspace_audit_logger,
+};
+use oh::tools::{
+    ApplyPatchTool, CsvExportTool, CurlTool, GitOperationsTool, HttpRequestTool, ImageInfoTool,
+    ShellTool, Tool, WebFetchTool, WorkspaceStateTool,
+};
+
+use crate::harness::policy::PolicyMode;
+
+/// Subdirectory under the agent workspace that `curl` downloads land in.
+const CURL_DEST_SUBDIR: &str = "downloads";
+
+/// Map a tool's runtime `name()` onto its grant namespace, or `None` when the
+/// tool is **intrinsic** (memory / MCP / orchestrator / file / skill tools),
+/// which are always kept regardless of the capability filter.
+///
+/// This is the single source of truth coupling a wired tool to the namespace
+/// that gates it — [`filter_by_capabilities`] and any future capability-tier
+/// logic key off it, so a new exec tool is added here and nowhere else.
+pub fn namespace_of(tool_name: &str) -> Option<&'static str> {
+    match tool_name {
+        "shell" | "read_workspace_state" => Some("shell"),
+        "apply_patch" | "git_operations" | "csv_export" => Some("code"),
+        "web_fetch" | "http_request" | "curl" | "image_info" => Some("web"),
+        _ => None,
+    }
+}
+
+/// Build the exec-grade [`SecurityPolicy`] shared by an agent's shell + code +
+/// web tools, sandboxed to `workspace`.
+///
+/// Extends the same `workspace_only` shape [`file_tools`](crate::harness::build)
+/// uses with the exec-relevant knobs:
+///
+/// * `autonomy` is mapped **1:1** from the company [`PolicyMode`]
+///   (readonly/supervised/full → [`AutonomyLevel`] ReadOnly/Supervised/Full).
+/// * `block_high_risk_commands` is always on — destructive shell commands are
+///   refused before they spawn.
+/// * `require_approval_for_medium_risk` mirrors Supervised mode.
+/// * `allow_tool_install` and `auto_approve_all` are always off — an embedded
+///   company agent never installs OS packages nor blanket-approves itself.
+///
+/// This policy is *advisory-strict*: opencompany's own
+/// [`ApprovalPolicy`](crate::harness::policy::ApprovalPolicy) tool policy is the
+/// authoritative park/deny gate layered above it (unlike the MCP bridge, which
+/// passes a permissive OpenHuman policy).
+pub fn exec_security(workspace: &Path, mode: PolicyMode) -> SecurityPolicy {
+    let dir = workspace.to_path_buf();
+    SecurityPolicy {
+        autonomy: autonomy_for(mode),
+        workspace_dir: dir.clone(),
+        action_dir: dir,
+        workspace_only: true,
+        block_high_risk_commands: true,
+        require_approval_for_medium_risk: mode == PolicyMode::Supervised,
+        allow_tool_install: false,
+        auto_approve_all: false,
+        ..SecurityPolicy::default()
+    }
+}
+
+/// The OpenHuman [`AutonomyLevel`] a company [`PolicyMode`] maps to (1:1).
+fn autonomy_for(mode: PolicyMode) -> AutonomyLevel {
+    match mode {
+        PolicyMode::Readonly => AutonomyLevel::ReadOnly,
+        PolicyMode::Supervised => AutonomyLevel::Supervised,
+        PolicyMode::Full => AutonomyLevel::Full,
+    }
+}
+
+/// A native (host-process) [`RuntimeAdapter`] for the shell tool. Stateless and
+/// cheap — a fresh handle per agent keeps tenants from sharing runtime state.
+pub fn native_runtime() -> Arc<dyn RuntimeAdapter> {
+    Arc::new(NativeRuntime::new())
+}
+
+/// A workspace-scoped [`AuditLogger`] for shell command execution, built the way
+/// OpenHuman's `runtime_node::build_runtime_tools` does. Keyed on the agent's
+/// own workspace dir so audit trails are tenant-isolated.
+///
+/// Audit must never block agent construction, so a logger-init failure degrades
+/// to [`AuditLogger::disabled`] with a warning rather than propagating.
+pub fn workspace_audit(workspace: &Path) -> Arc<AuditLogger> {
+    match get_or_create_workspace_audit_logger(AuditConfig::default(), workspace.to_path_buf()) {
+        Ok(logger) => logger,
+        Err(error) => {
+            tracing::warn!(
+                workspace = %workspace.display(),
+                %error,
+                "[toolbelt] workspace audit logger init failed; shell audit disabled for this agent"
+            );
+            AuditLogger::disabled()
+        }
+    }
+}
+
+/// The `shell` + `code` tools, all sharing the exec-grade `security` policy and
+/// pinned to the agent's `workspace`. Mirrors
+/// [`file_tools`](crate::harness::build): a flat vector the builder extends.
+///
+/// * `shell` — run commands (needs `runtime` + `audit`; plain constructor, no
+///   Node/Python bootstrap in v1).
+/// * `read_workspace_state` — read-only git/tree overview.
+/// * `apply_patch` — structured multi-edit patches.
+/// * `git_operations` — status/diff/log/commit within the workspace.
+/// * `csv_export` — write a CSV into the workspace's `exports/` dir.
+pub fn coding_tools(
+    security: Arc<SecurityPolicy>,
+    runtime: Arc<dyn RuntimeAdapter>,
+    audit: Arc<AuditLogger>,
+    workspace: &Path,
+) -> Vec<Box<dyn Tool>> {
+    vec![
+        Box::new(ShellTool::new(security.clone(), runtime, audit)),
+        Box::new(WorkspaceStateTool::new(workspace.to_path_buf())),
+        Box::new(ApplyPatchTool::new(security.clone())),
+        Box::new(GitOperationsTool::new(
+            security.clone(),
+            workspace.to_path_buf(),
+        )),
+        Box::new(CsvExportTool::new(security)),
+    ]
+}
+
+/// The `web` tools, sharing the exec-grade `security` policy and the
+/// per-company `allowed_domains` SSRF allowlist.
+///
+/// `allowed_domains` semantics (OpenHuman's `url_guard`, applied inside each
+/// constructor): an **empty** list is *open mode* — all public hosts allowed —
+/// while private/loopback/link-local/multicast/metadata IPs are **always**
+/// rejected regardless. A non-empty list is strict (only those hosts +
+/// subdomains); `"*"` is an explicit allow-all-public wildcard.
+///
+/// * `web_fetch` — fetch + return page text (size/timeout defaults).
+/// * `http_request` — arbitrary HTTP method/headers/body.
+/// * `curl` — download a URL into the workspace `downloads/` dir.
+/// * `image_info` — inspect a workspace image's dimensions/format.
+pub fn web_tools(
+    security: Arc<SecurityPolicy>,
+    allowed_domains: Vec<String>,
+    workspace: &Path,
+) -> Vec<Box<dyn Tool>> {
+    // Source size/timeout defaults from OpenHuman's own config so there is one
+    // source of truth (and no `0 → coerced-with-warning` noise on each build).
+    let http_defaults = HttpRequestConfig::default();
+    vec![
+        Box::new(WebFetchTool::new(
+            security.clone(),
+            allowed_domains.clone(),
+            None,
+            None,
+        )),
+        Box::new(HttpRequestTool::new(
+            security.clone(),
+            allowed_domains.clone(),
+            http_defaults.max_response_size,
+            http_defaults.timeout_secs,
+        )),
+        Box::new(CurlTool::new(
+            security.clone(),
+            allowed_domains,
+            workspace.to_path_buf(),
+            CURL_DEST_SUBDIR.to_string(),
+            http_defaults.max_response_size as u64,
+            http_defaults.timeout_secs,
+        )),
+        Box::new(ImageInfoTool::new(security)),
+    ]
+}
+
+/// The `subagent` namespace — **reserved and empty in v1**.
+///
+/// OpenHuman's sub-agent spawn tools (`SpawnSubagentTool` et al.) reach a
+/// process-global agent registry and can bypass per-agent budget accounting —
+/// both unsafe under opencompany's multi-tenant isolation model. The namespace
+/// is reserved so a company can grant `subagent` today without effect, and a
+/// future cell can wire a tenant-safe delegation surface without a grant change.
+pub fn subagent_tools() -> Vec<Box<dyn Tool>> {
+    Vec::new()
+}
+
+/// Which tools an agent may keep after its grants have already admitted them —
+/// the seam a future capability-tier cell swaps.
+///
+/// Today the production build only ever constructs [`CapabilityFilter::AllowAll`]
+/// (identity). The deny variant exists for tests exercising the filter seam.
+#[derive(Clone, Debug, Default)]
+pub enum CapabilityFilter {
+    /// Keep every tool the grants admitted (identity).
+    #[default]
+    AllowAll,
+    /// Drop every tool whose [`namespace_of`] is in this set; intrinsic tools
+    /// (namespace `None`) are always kept. Test-only for now.
+    #[cfg(test)]
+    DenyNamespaces(std::collections::HashSet<&'static str>),
+}
+
+/// Apply a [`CapabilityFilter`] to a built tool vector, just before it is handed
+/// to the [`AgentBuilder`](openhuman_core::openhuman::agent::AgentBuilder).
+///
+/// Intrinsic tools (memory / MCP / orchestrator / file / skill — any tool whose
+/// [`namespace_of`] is `None`) are always kept; only namespaced exec tools can
+/// be dropped. [`CapabilityFilter::AllowAll`] is the identity pass.
+pub fn filter_by_capabilities(
+    tools: Vec<Box<dyn Tool>>,
+    filter: &CapabilityFilter,
+) -> Vec<Box<dyn Tool>> {
+    match filter {
+        CapabilityFilter::AllowAll => tools,
+        #[cfg(test)]
+        CapabilityFilter::DenyNamespaces(denied) => tools
+            .into_iter()
+            .filter(|tool| match namespace_of(tool.name()) {
+                Some(namespace) => !denied.contains(namespace),
+                // Intrinsic tools have no namespace and are never dropped.
+                None => true,
+            })
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::HashSet;
+
+    fn names(tools: &[Box<dyn Tool>]) -> Vec<&str> {
+        tools.iter().map(|t| t.name()).collect()
+    }
+
+    fn test_security(workspace: &Path, mode: PolicyMode) -> Arc<SecurityPolicy> {
+        Arc::new(exec_security(workspace, mode))
+    }
+
+    #[test]
+    fn coding_tools_expose_expected_names() {
+        let ws = Path::new("/tmp/oc-toolbelt-coding");
+        let security = test_security(ws, PolicyMode::Supervised);
+        let tools = coding_tools(security, native_runtime(), AuditLogger::disabled(), ws);
+        let got = names(&tools);
+        for expected in [
+            "shell",
+            "read_workspace_state",
+            "apply_patch",
+            "git_operations",
+            "csv_export",
+        ] {
+            assert!(got.contains(&expected), "missing {expected}: {got:?}");
+        }
+        assert_eq!(got.len(), 5, "coding tools drifted: {got:?}");
+    }
+
+    #[test]
+    fn web_tools_expose_expected_names() {
+        let ws = Path::new("/tmp/oc-toolbelt-web");
+        let security = test_security(ws, PolicyMode::Supervised);
+        // Empty allowlist = open-public mode; the SSRF IP guard still applies.
+        let tools = web_tools(security, Vec::new(), ws);
+        let got = names(&tools);
+        for expected in ["web_fetch", "http_request", "curl", "image_info"] {
+            assert!(got.contains(&expected), "missing {expected}: {got:?}");
+        }
+        assert_eq!(got.len(), 4, "web tools drifted: {got:?}");
+    }
+
+    #[test]
+    fn subagent_tools_are_reserved_empty() {
+        assert!(
+            subagent_tools().is_empty(),
+            "subagent namespace is v1-reserved"
+        );
+    }
+
+    #[test]
+    fn namespace_table_maps_exec_tools_and_leaves_intrinsic_unmapped() {
+        assert_eq!(namespace_of("shell"), Some("shell"));
+        assert_eq!(namespace_of("read_workspace_state"), Some("shell"));
+        assert_eq!(namespace_of("apply_patch"), Some("code"));
+        assert_eq!(namespace_of("git_operations"), Some("code"));
+        assert_eq!(namespace_of("csv_export"), Some("code"));
+        assert_eq!(namespace_of("web_fetch"), Some("web"));
+        assert_eq!(namespace_of("http_request"), Some("web"));
+        assert_eq!(namespace_of("curl"), Some("web"));
+        assert_eq!(namespace_of("image_info"), Some("web"));
+        // Intrinsic tools are unmapped (always kept by the filter).
+        assert_eq!(namespace_of("memory_store"), None);
+        assert_eq!(namespace_of("memory_recall"), None);
+        assert_eq!(namespace_of("file_read"), None);
+        assert_eq!(namespace_of("mcp_registry_tool_call"), None);
+    }
+
+    #[test]
+    fn exec_security_shape_is_workspace_scoped_and_hardened() {
+        let ws = Path::new("/tmp/oc-toolbelt-policy");
+
+        let supervised = exec_security(ws, PolicyMode::Supervised);
+        assert!(supervised.workspace_only, "must be workspace-only");
+        assert_eq!(supervised.workspace_dir, ws);
+        assert_eq!(supervised.action_dir, ws);
+        assert!(
+            supervised.block_high_risk_commands,
+            "high-risk must be blocked"
+        );
+        assert!(
+            !supervised.allow_tool_install,
+            "tool install must be denied"
+        );
+        assert!(
+            !supervised.auto_approve_all,
+            "blanket auto-approve must be off"
+        );
+        assert_eq!(supervised.autonomy, AutonomyLevel::Supervised);
+        assert!(
+            supervised.require_approval_for_medium_risk,
+            "supervised must approve medium-risk"
+        );
+
+        // Autonomy tracks the mode 1:1; medium-risk approval is Supervised-only.
+        let readonly = exec_security(ws, PolicyMode::Readonly);
+        assert_eq!(readonly.autonomy, AutonomyLevel::ReadOnly);
+        assert!(!readonly.require_approval_for_medium_risk);
+
+        let full = exec_security(ws, PolicyMode::Full);
+        assert_eq!(full.autonomy, AutonomyLevel::Full);
+        assert!(!full.require_approval_for_medium_risk);
+    }
+
+    #[tokio::test]
+    async fn shell_rm_rf_denied_under_readonly_parked_under_supervised() {
+        use oh::security::GateDecision;
+        let ws = std::env::temp_dir();
+
+        // Readonly: a destructive command is hard-blocked by the policy — proven
+        // both at the decision layer and end-to-end (the tool refuses before it
+        // spawns; the harmless nonexistent path is a belt-and-braces target).
+        let readonly = test_security(&ws, PolicyMode::Readonly);
+        assert_eq!(
+            readonly.gate_decision(readonly.classify_command("rm -rf /")),
+            GateDecision::Block,
+            "readonly must hard-block destructive commands"
+        );
+        let tool = ShellTool::new(readonly, native_runtime(), AuditLogger::disabled());
+        let result = tool
+            .execute(json!({ "command": "rm -rf /tmp/oc-toolbelt-nonexistent-xyz" }))
+            .await
+            .unwrap();
+        assert!(
+            result.is_error,
+            "readonly rm -rf must error: {}",
+            result.output()
+        );
+        assert!(result.output().to_lowercase().contains("read-only"));
+
+        // Supervised: the destructive command is *parked* (requires approval),
+        // never auto-allowed. The park→resolve step is opencompany's own
+        // `ApprovalPolicy` gate layered above; here we prove OpenHuman's policy
+        // classifies it as approval-required rather than allowed.
+        let supervised = test_security(&ws, PolicyMode::Supervised);
+        assert_eq!(
+            supervised.gate_decision(supervised.classify_command("rm -rf /")),
+            GateDecision::Prompt,
+            "supervised must park (require approval for) destructive commands"
+        );
+    }
+
+    #[tokio::test]
+    async fn web_tools_reject_ssrf_ip_literals() {
+        let ws = std::env::temp_dir();
+        let security = test_security(&ws, PolicyMode::Full);
+        // Open-public allowlist: proves the IP guard fires independently of the
+        // domain allowlist. Both are IP literals, so rejection short-circuits
+        // before any DNS lookup or network I/O.
+        let tools = web_tools(security, Vec::new(), &ws);
+        for tool in &tools {
+            // Only web_fetch / http_request take a plain `url` arg.
+            if !matches!(tool.name(), "web_fetch" | "http_request") {
+                continue;
+            }
+            for url in ["http://169.254.169.254/", "http://127.0.0.1:1/"] {
+                let result = tool.execute(json!({ "url": url })).await.unwrap();
+                assert!(
+                    result.is_error,
+                    "{} must reject SSRF target {url}: {}",
+                    tool.name(),
+                    result.output()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_patch_denied_outside_workspace() {
+        let ws = std::env::temp_dir().join("oc-toolbelt-escape");
+        let _ = tokio::fs::remove_dir_all(&ws).await;
+        tokio::fs::create_dir_all(&ws).await.unwrap();
+        let security = test_security(&ws, PolicyMode::Full);
+        let tool = ApplyPatchTool::new(security);
+        // A path escaping the workspace root must be refused by the policy.
+        let result = tool
+            .execute(json!({
+                "edits": [
+                    { "path": "../outside.txt", "old_string": "x", "new_string": "y" }
+                ]
+            }))
+            .await
+            .unwrap();
+        assert!(
+            result.is_error,
+            "workspace escape must be denied: {}",
+            result.output()
+        );
+        let _ = tokio::fs::remove_dir_all(&ws).await;
+    }
+
+    #[test]
+    fn filter_allow_all_is_identity() {
+        let ws = Path::new("/tmp/oc-toolbelt-filter");
+        let security = test_security(ws, PolicyMode::Supervised);
+        let tools = coding_tools(security, native_runtime(), AuditLogger::disabled(), ws);
+        // Own the names before `tools` moves into the filter.
+        let before: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
+        let after_tools = filter_by_capabilities(tools, &CapabilityFilter::AllowAll);
+        let after: Vec<String> = after_tools.iter().map(|t| t.name().to_string()).collect();
+        assert_eq!(before, after, "AllowAll must be identity");
+    }
+
+    #[test]
+    fn filter_deny_drops_mapped_but_keeps_intrinsic() {
+        // Mix a real intrinsic tool (`file_read`, unmapped) with mapped exec
+        // tools; a full namespace deny must keep only the intrinsic one.
+        let ws = Path::new("/tmp/oc-toolbelt-deny");
+        let security = test_security(ws, PolicyMode::Supervised);
+        let mut tools: Vec<Box<dyn Tool>> = coding_tools(
+            security.clone(),
+            native_runtime(),
+            AuditLogger::disabled(),
+            ws,
+        );
+        tools.extend(web_tools(security.clone(), Vec::new(), ws));
+        // `file_read` has no mapped namespace → intrinsic → always kept.
+        tools.push(Box::new(oh::tools::FileReadTool::new(security)));
+
+        let deny: HashSet<&'static str> = ["shell", "code", "web"].into_iter().collect();
+        let kept = filter_by_capabilities(tools, &CapabilityFilter::DenyNamespaces(deny));
+        let kept_names = names(&kept);
+        assert_eq!(
+            kept_names,
+            vec!["file_read"],
+            "only the intrinsic tool must survive a full deny: {kept_names:?}"
+        );
+    }
+}

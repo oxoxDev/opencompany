@@ -818,6 +818,16 @@ impl RuntimeBuilder {
                                 // snapshot frozen here at boot.
                                 mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
                                 secrets: Some(secrets.clone()),
+                                // Cell A: the `web` toolbelt SSRF allowlist +
+                                // capability-tier filter. Domains come straight
+                                // from the manifest; the filter is `AllowAll`
+                                // until the capability-tier cell lands.
+                                web_allowed_domains: self
+                                    .manifest
+                                    .tools
+                                    .web_allowed_domains
+                                    .clone(),
+                                capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
                             };
                             let record = CompanyRecord {
                                 id: id.clone(),

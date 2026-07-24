@@ -362,6 +362,13 @@ pub struct Tools {
     /// Company-wide grant globs; agents intersect with this.
     #[serde(default)]
     pub allow: Vec<String>,
+    /// SSRF allowlist for the `web` tool namespace (Cell A). Empty (default) is
+    /// *open mode* — all public hosts allowed — while private/loopback/
+    /// link-local/metadata IPs are always rejected by OpenHuman's `url_guard`.
+    /// A non-empty list is strict (only those hosts + subdomains); `"*"` is an
+    /// explicit allow-all-public wildcard.
+    #[serde(default)]
+    pub web_allowed_domains: Vec<String>,
 }
 
 impl Default for Tools {
@@ -369,6 +376,7 @@ impl Default for Tools {
         Self {
             provider: default_tool_provider(),
             allow: Vec::new(),
+            web_allowed_domains: Vec::new(),
         }
     }
 }
