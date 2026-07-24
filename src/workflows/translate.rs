@@ -184,23 +184,30 @@ fn prompt_for(def: &WorkflowNodeDef) -> String {
         .to_string()
 }
 
-/// Maps one OpenCompany edge to a tinyflows [`Edge`]. Edges leaving a
-/// `condition` node carry their branch on `from_port` (`true`/`false`, mapped
-/// from the label); an "error"-labeled edge leaving an `on_error = "route"`
-/// node carries the `error` port (the engine emits the failure item there);
-/// every other edge stays on the default `main` port.
+/// Maps one OpenCompany edge to a tinyflows [`Edge`]. An "error"-labeled edge
+/// leaving an `on_error = "route"` node carries the `error` port (the engine
+/// emits the failure item there); edges leaving a `condition` node carry their
+/// branch on `from_port` (`true`/`false`, mapped from the label); every other
+/// edge stays on the default `main` port.
+///
+/// The error-port check runs **first** so it takes precedence for a node that is
+/// both a `condition` and `on_error = "route"`: without it, the condition branch
+/// would map the `"error"` label through [`condition_port`] onto the `true`
+/// port, silently misrouting the failure item onto the truthy branch instead of
+/// the error edge.
 fn translate_edge(
     edge: &WorkflowEdgeDef,
     condition_ids: &HashSet<&str>,
     route_ids: &HashSet<&str>,
 ) -> Edge {
-    let from_port = if condition_ids.contains(edge.from.as_str()) {
-        condition_port(edge.label.as_deref())
-    } else if route_ids.contains(edge.from.as_str()) && edge.label.as_deref() == Some("error") {
-        "error".to_string()
-    } else {
-        "main".to_string()
-    };
+    let from_port =
+        if route_ids.contains(edge.from.as_str()) && edge.label.as_deref() == Some("error") {
+            "error".to_string()
+        } else if condition_ids.contains(edge.from.as_str()) {
+            condition_port(edge.label.as_deref())
+        } else {
+            "main".to_string()
+        };
     Edge {
         from_node: edge.from.clone(),
         from_port,
@@ -488,5 +495,76 @@ mod tests {
         };
         assert_eq!(port("recover").as_deref(), Some("error"));
         assert_eq!(port("ok").as_deref(), Some("main"));
+    }
+
+    /// A node that is BOTH a `condition` and `on_error = "route"` must route its
+    /// `"error"`-labeled edge onto the `error` port — not the `true` port. The
+    /// error-port check runs before the condition branch precisely so the
+    /// `"error"` label is never funneled through `condition_port` (which maps any
+    /// non-negative label, including `"error"`, to `true`). Its `yes`/`no` branch
+    /// edges must still map to `true`/`false`.
+    #[test]
+    fn condition_node_with_route_sends_error_edge_to_error_port() {
+        use crate::company::{WorkflowFile, WorkflowNodeDef, WorkflowNodeKind};
+        let file = WorkflowFile {
+            id: "wf".into(),
+            name: "WF".into(),
+            description: None,
+            nodes: vec![
+                WorkflowNodeDef {
+                    id: "gate".into(),
+                    kind: WorkflowNodeKind::Condition,
+                    name: "Gate".into(),
+                    summary: None,
+                    agent: None,
+                    config: None,
+                    on_error: Some("route".into()),
+                    retry: None,
+                    requires_approval: None,
+                },
+                node_stub("yes_path"),
+                node_stub("no_path"),
+                node_stub("recover"),
+            ],
+            edges: vec![
+                edge_stub("gate", "yes_path", Some("yes")),
+                edge_stub("gate", "no_path", Some("no")),
+                edge_stub("gate", "recover", Some("error")),
+            ],
+        };
+        let graph = translate(&file);
+        let port = |to: &str| {
+            graph
+                .edges
+                .iter()
+                .find(|e| e.from_node == "gate" && e.to_node == to)
+                .map(|e| e.from_port.clone())
+        };
+        // The error edge wins the error port; the branch edges keep true/false.
+        assert_eq!(port("recover").as_deref(), Some("error"));
+        assert_eq!(port("yes_path").as_deref(), Some("true"));
+        assert_eq!(port("no_path").as_deref(), Some("false"));
+    }
+
+    fn node_stub(id: &str) -> crate::company::WorkflowNodeDef {
+        crate::company::WorkflowNodeDef {
+            id: id.into(),
+            kind: crate::company::WorkflowNodeKind::Output,
+            name: id.into(),
+            summary: None,
+            agent: None,
+            config: None,
+            on_error: None,
+            retry: None,
+            requires_approval: None,
+        }
+    }
+
+    fn edge_stub(from: &str, to: &str, label: Option<&str>) -> crate::company::WorkflowEdgeDef {
+        crate::company::WorkflowEdgeDef {
+            from: from.into(),
+            to: to.into(),
+            label: label.map(Into::into),
+        }
     }
 }
