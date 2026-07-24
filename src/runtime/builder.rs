@@ -818,16 +818,23 @@ impl RuntimeBuilder {
                                 // snapshot frozen here at boot.
                                 mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
                                 secrets: Some(secrets.clone()),
-                                // Cell A: the `web` toolbelt SSRF allowlist +
-                                // capability-tier filter. Domains come straight
-                                // from the manifest; the filter is `AllowAll`
-                                // until the capability-tier cell lands.
+                                // Cell A: the `web` toolbelt SSRF allowlist.
+                                // Domains come straight from the manifest.
                                 web_allowed_domains: self
                                     .manifest
                                     .tools
                                     .web_allowed_domains
                                     .clone(),
+                                // Issue #108: `capabilities` is the no-plan
+                                // fallback (identity). When `[plan]` is set,
+                                // `HarnessPool::ensure` resolves the per-tenant
+                                // filter from the meter each turn and overwrites
+                                // it; `plan` carries the resolved budget so it can.
                                 capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+                                plan:
+                                    crate::harness::capability_budget::CapabilityPlan::from_manifest(
+                                        &self.manifest.plan,
+                                    ),
                             };
                             let record = CompanyRecord {
                                 id: id.clone(),
