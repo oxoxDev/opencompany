@@ -107,6 +107,11 @@ pub fn persona_prompt(company_name: &str, agent: &ManifestAgent) -> String {
 /// `is_orchestrator` marks the company's orchestrator agent (issue #53): it
 /// additionally receives the delegating-orchestrator persona brief and the
 /// `query_company` / `spawn_task` / `delegate_to_desk` tools.
+// Each parameter is a distinct, load-bearing dependency of agent construction;
+// bundling them into a struct would only relocate the surface. (Pre-existing —
+// surfaced only under the full `openhuman,mcp,telegram` clippy combo, which CI
+// does not build; see the OpenCompany full-feature CI-gap note.)
+#[allow(clippy::too_many_arguments)]
 pub fn build_agent(
     company: &CompanyId,
     company_name: &str,
@@ -335,8 +340,10 @@ fn memory_tools(memory: Arc<dyn Memory>) -> Vec<Box<dyn Tool>> {
 /// Whether an agent's effective `grants` cover a tool `namespace`.
 ///
 /// Matches the bare namespace (`docs`), any glob under it (`docs.*`,
-/// `docs.read`), or the catch-all `*`.
-fn grants_cover(grants: &[String], namespace: &str) -> bool {
+/// `docs.read`), or the catch-all `*`. Shared with the workflow toolbelt
+/// ([`crate::workflows::caps`]) so a workflow `tool_call` is gated by the same
+/// namespace-grant rule an agent's exec tools are.
+pub(crate) fn grants_cover(grants: &[String], namespace: &str) -> bool {
     grants.iter().any(|grant| {
         grant == "*" || grant == namespace || grant.starts_with(&format!("{namespace}."))
     })
