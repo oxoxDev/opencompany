@@ -48,6 +48,15 @@ pub struct WorkflowNodeGql {
     pub name: String,
     /// An optional one-line summary.
     pub summary: Option<String>,
+    /// Free-form, kind-specific node config (P1), exposed as a JSON scalar so
+    /// `Company.workflow(id)` does not drop model data.
+    pub config: Option<async_graphql::Json<serde_json::Value>>,
+    /// Per-node error policy: `stop` / `continue` / `route`.
+    pub on_error: Option<String>,
+    /// Per-node retry policy (attempts + backoff), as a JSON scalar.
+    pub retry: Option<async_graphql::Json<crate::company::WorkflowRetryDef>>,
+    /// Whether the node pauses awaiting operator approval before it runs.
+    pub requires_approval: Option<bool>,
 }
 
 /// One directed edge in a workflow graph.
@@ -75,6 +84,10 @@ impl From<WorkflowFile> for WorkflowGql {
                     kind: node.kind.as_str().to_string(),
                     name: node.name,
                     summary: node.summary,
+                    config: node.config.map(async_graphql::Json),
+                    on_error: node.on_error,
+                    retry: node.retry.map(async_graphql::Json),
+                    requires_approval: node.requires_approval,
                 })
                 .collect(),
             edges: file
