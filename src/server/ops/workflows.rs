@@ -50,7 +50,7 @@ use serde_json::Value;
 use crate::AppState;
 use crate::company::{
     RawEdge, RawNode, RawWorkflow, WorkflowEdgeDef, WorkflowFile, WorkflowNodeDef,
-    load_company_workflows, parse_workflow, render_workflow,
+    WorkflowRetryDef, load_company_workflows, parse_workflow, render_workflow,
 };
 use crate::error::OpenCompanyError;
 use crate::server::error::ApiError;
@@ -111,7 +111,9 @@ impl From<WorkflowFile> for WorkflowGraph {
 
 /// A single graph node. `kind` is the on-disk string
 /// (`trigger`/`agent`/`tool_call`/`http_request`/`condition`/`output`); `agent`
-/// is only meaningful on `agent` nodes.
+/// is only meaningful on `agent` nodes. The P1 fields (`config` / `onError` /
+/// `retry` / `requiresApproval`) are serialized so `GET …/workflows/{wid}` does
+/// not drop model data (they are omitted entirely when unset).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkflowNode {
@@ -122,6 +124,38 @@ struct WorkflowNode {
     summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    on_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry: Option<WorkflowRetryOut>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requires_approval: Option<bool>,
+}
+
+/// The camelCase retry policy shape the console reads back (`maxAttempts` /
+/// `backoffMs` / `backoff`). Distinct from the snake_case
+/// [`WorkflowRetryDef`] the model/TOML use.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowRetryOut {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_attempts: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backoff_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backoff: Option<String>,
+}
+
+impl From<WorkflowRetryDef> for WorkflowRetryOut {
+    fn from(r: WorkflowRetryDef) -> Self {
+        Self {
+            max_attempts: r.max_attempts,
+            backoff_ms: r.backoff_ms,
+            backoff: r.backoff,
+        }
+    }
 }
 
 impl From<WorkflowNodeDef> for WorkflowNode {
@@ -132,6 +166,10 @@ impl From<WorkflowNodeDef> for WorkflowNode {
             name: n.name,
             summary: n.summary,
             agent: n.agent,
+            config: n.config,
+            on_error: n.on_error,
+            retry: n.retry.map(WorkflowRetryOut::from),
+            requires_approval: n.requires_approval,
         }
     }
 }
@@ -288,6 +326,13 @@ impl From<CreateWorkflowBody> for RawWorkflow {
                     name: n.name,
                     summary: n.summary,
                     agent: n.agent,
+                    // The create endpoint (#69/#112) does not author per-node
+                    // config/error/retry policy yet — a P2/P4 concern. Left unset
+                    // here so an authored graph round-trips unchanged.
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
                 })
                 .collect(),
             edges: body
@@ -685,6 +730,41 @@ mod tests {
         assert!(done.get("agent").is_none());
         assert!(done.get("summary").is_none());
         assert_eq!(done["kind"], "output");
+    }
+
+    #[test]
+    fn json_serializes_p1_node_fields_in_camelcase() {
+        use crate::company::{WorkflowNodeDef, WorkflowNodeKind, WorkflowRetryDef};
+
+        let file = WorkflowFile {
+            id: "wf".into(),
+            name: "WF".into(),
+            description: None,
+            nodes: vec![WorkflowNodeDef {
+                id: "call".into(),
+                kind: WorkflowNodeKind::ToolCall,
+                name: "Call".into(),
+                summary: None,
+                agent: None,
+                config: Some(serde_json::json!({ "slug": "csv_export" })),
+                on_error: Some("continue".into()),
+                retry: Some(WorkflowRetryDef {
+                    max_attempts: Some(3),
+                    backoff_ms: Some(250),
+                    backoff: Some("exponential".into()),
+                }),
+                requires_approval: Some(true),
+            }],
+            edges: Vec::new(),
+        };
+        let json = serde_json::to_value(WorkflowGraph::from(file)).unwrap();
+        let node = &json["nodes"][0];
+        assert_eq!(node["config"]["slug"], "csv_export");
+        assert_eq!(node["onError"], "continue");
+        assert_eq!(node["retry"]["maxAttempts"], 3);
+        assert_eq!(node["retry"]["backoffMs"], 250);
+        assert_eq!(node["retry"]["backoff"], "exponential");
+        assert_eq!(node["requiresApproval"], true);
     }
 
     #[test]
