@@ -6,13 +6,18 @@
 //!
 //! * **Tools**: every agent gets the intrinsic [`memory_tools`] (`memory_store`
 //!   + `memory_recall`) over its own company memory. **File tools** (read,
-//!   write, edit, list, grep, glob) are granted per-agent when the effective
-//!   `tools ∩ agent.tools` grants cover the `files`/`docs` namespace, and are
-//!   sandboxed to the agent's own workspace via a `workspace_only`
-//!   [`SecurityPolicy`] ([`file_tools`]). Network (`web.*`) and shell (`shell.*`)
-//!   tools are a tracked follow-up — they need an HTTP domain-allowlist config
-//!   and a runtime/audit sandbox respectively; the builder extends the same
-//!   vector, so they slot in beside the file tools.
+//!     write, edit, list, grep, glob) are granted per-agent when the effective
+//!     `tools ∩ agent.tools` grants cover the `files`/`docs` namespace, and are
+//!     sandboxed to the agent's own workspace via a `workspace_only`
+//!     [`SecurityPolicy`] ([`file_tools`]). **Exec-grade tools** (Cell A) now
+//!     slot in beside them via [`toolbelt`](crate::harness::toolbelt): `shell`
+//!     (shell + `read_workspace_state`) and `code` (`apply_patch`,
+//!     `git_operations`, `csv_export`) behind a strict [`toolbelt::exec_security`]
+//!     policy + native runtime + per-workspace audit; `web` (`web_fetch`,
+//!     `http_request`, `curl`, `image_info`) behind the same policy plus a
+//!     per-company SSRF domain allowlist. The `subagent` namespace is reserved
+//!     but empty in v1. Still deferred: browser automation (needs a backend),
+//!     search (needs engine keys), and Node/NPM exec (need a managed bootstrap).
 //! * **Workflows/skills** start empty. Parsing enabled `SKILL.md` bodies via
 //!   `openhuman::skills::ops_parse` depends on WS1's skill parsing; the seam is
 //!   the `.workflows(...)` setter.
@@ -48,6 +53,7 @@ use crate::harness::memory::OcMemory;
 use crate::harness::orchestrator;
 use crate::harness::policy::ApprovalPolicy;
 use crate::harness::skills::EffectiveSkills;
+use crate::harness::toolbelt;
 use crate::ports::skills_state::SkillState;
 use crate::ports::types::CompanyId;
 
@@ -146,6 +152,49 @@ pub fn build_agent(
         tools.extend(file_tools(&workspace));
     }
 
+    // Exec-grade coding + web tools (Cell A), each behind its own grant
+    // namespace and sandboxed to this agent's workspace by ONE strict
+    // `exec_security` policy shared across the shell/code/web tool constructors.
+    // Unlike the MCP bridge (which hands OpenHuman a permissive Supervised
+    // policy), shell/code/web receive the strict policy directly — the company's
+    // own `ApprovalPolicy` (`tool_policy` below) stays the authoritative
+    // per-call park/deny gate on top of it. The autonomy tier is mapped 1:1 from
+    // the manifest `[policy].mode`.
+    let wants_shell = grants_cover(grants, "shell");
+    let wants_code = grants_cover(grants, "code");
+    let wants_web = grants_cover(grants, "web");
+    if wants_shell || wants_code || wants_web {
+        let exec_security = Arc::new(toolbelt::exec_security(&workspace, policy.mode()));
+        // The shell + code bundle needs a host runtime and a per-workspace audit
+        // logger (tenant-isolated); build them only when granted.
+        if wants_shell || wants_code {
+            let runtime = toolbelt::native_runtime();
+            let audit = toolbelt::workspace_audit(&workspace);
+            tools.extend(toolbelt::coding_tools(
+                exec_security.clone(),
+                runtime,
+                audit,
+                &workspace,
+            ));
+        }
+        // Web tools reuse OpenHuman's upstream SSRF `url_guard` internally; the
+        // per-company allowlist comes from the manifest `[tools].web_allowed_domains`
+        // (empty = allow-public with private/metadata IPs always rejected).
+        if wants_web {
+            tools.extend(toolbelt::web_tools(
+                exec_security,
+                deps.web_allowed_domains.clone(),
+                &workspace,
+            ));
+        }
+    }
+    // The `subagent` namespace is reserved but intentionally wires no tools in
+    // v1 — OpenHuman's spawn tools use a process-global registry + budget bypass
+    // unsafe under multi-tenancy. Reserved so a grant can land without effect.
+    if grants_cover(grants, "subagent") {
+        tools.extend(toolbelt::subagent_tools());
+    }
+
     // Persona over openhuman's own identity: `omit_identity = true` drops the
     // "you are OpenHuman" preamble so the agent speaks as its company role.
     let mut persona = persona_prompt(company_name, manifest_agent);
@@ -237,6 +286,14 @@ pub fn build_agent(
         .model_override
         .clone()
         .unwrap_or_else(|| model_for_tier(manifest_agent.tier.as_deref()));
+
+    // Capability-tier seam (Cell A): one filtering pass over the fully assembled
+    // tool vector, just before it is handed to the builder. Today `AllowAll` is
+    // the only production variant (identity); a future capability-tier cell only
+    // swaps how `deps.capabilities` is constructed. Intrinsic tools
+    // (memory/MCP/orchestrator/file/skill) have no mapped namespace and are
+    // always kept.
+    let tools = toolbelt::filter_by_capabilities(tools, &deps.capabilities);
 
     AgentBuilder::default()
         .provider_arc(deps.provider.clone())
