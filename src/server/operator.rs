@@ -381,6 +381,18 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             o["memo"] = json!(memo);
             o
         }
+        // Issue #112: surface a newly authored workflow so the console can react
+        // live (e.g. refresh the Workflows tab). Only the id + display name go on
+        // the wire — the actor (`by`) is omitted, matching the deny-by-default
+        // projection of the other attributed events.
+        CompanyEvent::WorkflowCreated {
+            workflow_id, name, ..
+        } => {
+            let mut o = envelope("workflow_created");
+            o["workflowId"] = json!(workflow_id);
+            o["name"] = json!(name);
+            o
+        }
         // Not an attention signal, or carries a raw payload we never put on the
         // wire — dropped.
         _ => return None,

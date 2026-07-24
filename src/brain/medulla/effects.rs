@@ -119,6 +119,14 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             format!("MCP call to {server}/{tool} failed ({status}): {message}"),
             "mcp.call_failed",
         ),
+        CompanyEvent::WorkflowCreated {
+            workflow_id, name, ..
+        } => (
+            Role::System,
+            "workflow".to_string(),
+            format!("Created workflow {name} ({workflow_id})"),
+            "workflow.created",
+        ),
     };
     WireEvent {
         seq,
