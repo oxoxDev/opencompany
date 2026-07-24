@@ -165,17 +165,24 @@ pub fn build_agent(
     let wants_web = grants_cover(grants, "web");
     if wants_shell || wants_code || wants_web {
         let exec_security = Arc::new(toolbelt::exec_security(&workspace, policy.mode()));
-        // The shell + code bundle needs a host runtime and a per-workspace audit
-        // logger (tenant-isolated); build them only when granted.
-        if wants_shell || wants_code {
+        // `shell` and `code` are separate grant namespaces and are wired from
+        // separate tool vectors — a company granting only one MUST NOT receive
+        // the other's tools (the production `CapabilityFilter` is identity and
+        // does not re-trim namespaces after construction). Only the `shell`
+        // tools need a host runtime + per-workspace audit logger (tenant-
+        // isolated), so those handles are built only under `wants_shell`.
+        if wants_shell {
             let runtime = toolbelt::native_runtime();
             let audit = toolbelt::workspace_audit(&workspace);
-            tools.extend(toolbelt::coding_tools(
+            tools.extend(toolbelt::shell_tools(
                 exec_security.clone(),
                 runtime,
                 audit,
                 &workspace,
             ));
+        }
+        if wants_code {
+            tools.extend(toolbelt::code_tools(exec_security.clone(), &workspace));
         }
         // Web tools reuse OpenHuman's upstream SSRF `url_guard` internally; the
         // per-company allowlist comes from the manifest `[tools].web_allowed_domains`

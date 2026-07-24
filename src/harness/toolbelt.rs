@@ -143,25 +143,40 @@ pub fn workspace_audit(workspace: &Path) -> Arc<AuditLogger> {
     }
 }
 
-/// The `shell` + `code` tools, all sharing the exec-grade `security` policy and
+/// The `shell` namespace tools, sharing the exec-grade `security` policy and
 /// pinned to the agent's `workspace`. Mirrors
 /// [`file_tools`](crate::harness::build): a flat vector the builder extends.
+///
+/// Kept **disjoint** from [`code_tools`] so the builder can gate each grant
+/// namespace independently — a company granting only `code` must never receive
+/// a live [`ShellTool`], and vice versa (the production [`CapabilityFilter`] is
+/// `AllowAll`/identity and does not re-trim namespaces post-construction).
 ///
 /// * `shell` — run commands (needs `runtime` + `audit`; plain constructor, no
 ///   Node/Python bootstrap in v1).
 /// * `read_workspace_state` — read-only git/tree overview.
-/// * `apply_patch` — structured multi-edit patches.
-/// * `git_operations` — status/diff/log/commit within the workspace.
-/// * `csv_export` — write a CSV into the workspace's `exports/` dir.
-pub fn coding_tools(
+pub fn shell_tools(
     security: Arc<SecurityPolicy>,
     runtime: Arc<dyn RuntimeAdapter>,
     audit: Arc<AuditLogger>,
     workspace: &Path,
 ) -> Vec<Box<dyn Tool>> {
     vec![
-        Box::new(ShellTool::new(security.clone(), runtime, audit)),
+        Box::new(ShellTool::new(security, runtime, audit)),
         Box::new(WorkspaceStateTool::new(workspace.to_path_buf())),
+    ]
+}
+
+/// The `code` namespace tools, sharing the exec-grade `security` policy and
+/// pinned to the agent's `workspace`. Disjoint from [`shell_tools`] (see there
+/// for why the split is a security boundary, not just cosmetics). Unlike shell,
+/// these need neither a host runtime nor an audit logger.
+///
+/// * `apply_patch` — structured multi-edit patches.
+/// * `git_operations` — status/diff/log/commit within the workspace.
+/// * `csv_export` — write a CSV into the workspace's `exports/` dir.
+pub fn code_tools(security: Arc<SecurityPolicy>, workspace: &Path) -> Vec<Box<dyn Tool>> {
+    vec![
         Box::new(ApplyPatchTool::new(security.clone())),
         Box::new(GitOperationsTool::new(
             security.clone(),
@@ -283,21 +298,72 @@ mod tests {
     }
 
     #[test]
-    fn coding_tools_expose_expected_names() {
-        let ws = Path::new("/tmp/oc-toolbelt-coding");
+    fn shell_tools_expose_expected_names() {
+        let ws = Path::new("/tmp/oc-toolbelt-shell");
         let security = test_security(ws, PolicyMode::Supervised);
-        let tools = coding_tools(security, native_runtime(), AuditLogger::disabled(), ws);
+        let tools = shell_tools(security, native_runtime(), AuditLogger::disabled(), ws);
         let got = names(&tools);
-        for expected in [
-            "shell",
-            "read_workspace_state",
-            "apply_patch",
-            "git_operations",
-            "csv_export",
-        ] {
+        for expected in ["shell", "read_workspace_state"] {
             assert!(got.contains(&expected), "missing {expected}: {got:?}");
         }
-        assert_eq!(got.len(), 5, "coding tools drifted: {got:?}");
+        assert_eq!(got.len(), 2, "shell tools drifted: {got:?}");
+    }
+
+    #[test]
+    fn code_tools_expose_expected_names() {
+        let ws = Path::new("/tmp/oc-toolbelt-code");
+        let security = test_security(ws, PolicyMode::Supervised);
+        let tools = code_tools(security, ws);
+        let got = names(&tools);
+        for expected in ["apply_patch", "git_operations", "csv_export"] {
+            assert!(got.contains(&expected), "missing {expected}: {got:?}");
+        }
+        assert_eq!(got.len(), 3, "code tools drifted: {got:?}");
+    }
+
+    /// The `shell` and `code` grant namespaces must build from **disjoint** tool
+    /// vectors: granting `code` alone must never hand an agent a live `ShellTool`
+    /// (and vice versa). The production `CapabilityFilter` is identity, so this
+    /// tool-vector split is the only thing enforcing the boundary — pin it.
+    #[test]
+    fn shell_and_code_tool_sets_are_disjoint_and_correctly_namespaced() {
+        let ws = Path::new("/tmp/oc-toolbelt-isolation");
+        let security = test_security(ws, PolicyMode::Supervised);
+
+        let shell = shell_tools(
+            security.clone(),
+            native_runtime(),
+            AuditLogger::disabled(),
+            ws,
+        );
+        let code = code_tools(security, ws);
+
+        // Every shell tool maps to the `shell` namespace and none to `code`.
+        for tool in &shell {
+            assert_eq!(
+                namespace_of(tool.name()),
+                Some("shell"),
+                "shell_tools leaked a non-shell tool: {}",
+                tool.name()
+            );
+        }
+        // Every code tool maps to the `code` namespace and none to `shell`.
+        for tool in &code {
+            assert_eq!(
+                namespace_of(tool.name()),
+                Some("code"),
+                "code_tools leaked a non-code tool: {}",
+                tool.name()
+            );
+        }
+
+        // No tool name appears in both vectors.
+        let shell_names: HashSet<&str> = names(&shell).into_iter().collect();
+        let code_names: HashSet<&str> = names(&code).into_iter().collect();
+        assert!(
+            shell_names.is_disjoint(&code_names),
+            "shell/code tool sets overlap: {shell_names:?} ∩ {code_names:?}"
+        );
     }
 
     #[test]
@@ -466,7 +532,13 @@ mod tests {
     fn filter_allow_all_is_identity() {
         let ws = Path::new("/tmp/oc-toolbelt-filter");
         let security = test_security(ws, PolicyMode::Supervised);
-        let tools = coding_tools(security, native_runtime(), AuditLogger::disabled(), ws);
+        let mut tools = shell_tools(
+            security.clone(),
+            native_runtime(),
+            AuditLogger::disabled(),
+            ws,
+        );
+        tools.extend(code_tools(security, ws));
         // Own the names before `tools` moves into the filter.
         let before: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
         let after_tools = filter_by_capabilities(tools, &CapabilityFilter::AllowAll);
@@ -480,12 +552,13 @@ mod tests {
         // tools; a full namespace deny must keep only the intrinsic one.
         let ws = Path::new("/tmp/oc-toolbelt-deny");
         let security = test_security(ws, PolicyMode::Supervised);
-        let mut tools: Vec<Box<dyn Tool>> = coding_tools(
+        let mut tools: Vec<Box<dyn Tool>> = shell_tools(
             security.clone(),
             native_runtime(),
             AuditLogger::disabled(),
             ws,
         );
+        tools.extend(code_tools(security.clone(), ws));
         tools.extend(web_tools(security.clone(), Vec::new(), ws));
         // `file_read` has no mapped namespace → intrinsic → always kept.
         tools.push(Box::new(oh::tools::FileReadTool::new(security)));
