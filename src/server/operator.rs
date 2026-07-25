@@ -393,6 +393,18 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             o["name"] = json!(name);
             o
         }
+        // Issue #111: surface an accepted operator steer so the console's
+        // in-flight strip can refresh live. Only the task id + action word go on
+        // the wire — the actor (`by`) and the operator's redirect `instruction`
+        // are dropped, matching the deny-by-default projection.
+        CompanyEvent::TaskSteered {
+            task_id, action, ..
+        } => {
+            let mut o = envelope("task_steered");
+            o["taskId"] = json!(task_id);
+            o["action"] = json!(action);
+            o
+        }
         // Not an attention signal, or carries a raw payload we never put on the
         // wire — dropped.
         _ => return None,
@@ -1021,6 +1033,7 @@ mod test {
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
             plan: None,
             media: None,
+            steer: crate::company::steer::InflightRegistry::default(),
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record);
 

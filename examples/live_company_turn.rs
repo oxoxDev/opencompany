@@ -114,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
         capabilities: opencompany::harness::toolbelt::CapabilityFilter::AllowAll,
         plan: None,
         media: None,
+        steer: opencompany::company::steer::InflightRegistry::default(),
     };
 
     let pool = HarnessPool::new();
