@@ -127,6 +127,15 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             format!("Created workflow {name} ({workflow_id})"),
             "workflow.created",
         ),
+        // Action-only body: the operator's redirect instruction is never wired.
+        CompanyEvent::TaskSteered {
+            task_id, action, ..
+        } => (
+            Role::System,
+            "operator".to_string(),
+            format!("Steered task {task_id} ({action})"),
+            "task.steered",
+        ),
     };
     WireEvent {
         seq,
