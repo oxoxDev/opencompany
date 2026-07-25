@@ -62,7 +62,22 @@ pub const CONNECTION_PRIORITIES: &[&str] = &["low", "medium", "high"];
 /// maps individual tools onto these namespaces. A `[plan].token_budgets` key
 /// outside this set is a manifest error. Lives here (not the feature-gated
 /// harness) so manifest validation can see it in the default build.
-pub const GATEABLE_NAMESPACES: [&str; 4] = ["shell", "code", "web", "subagent"];
+pub const GATEABLE_NAMESPACES: [&str; 5] = ["shell", "code", "web", "subagent", "media"];
+
+/// Whether a tool-grant list **explicitly** grants the real-money `media`
+/// namespace (issue #109).
+///
+/// Unlike the ordinary namespace match, the catch-all `*` does **not** grant
+/// `media`: a capability that spends real money on image/video generation must
+/// be opted into by name, never ridden in on a wildcard. Matches the bare
+/// `media` grant or any `media.*` sub-grant. Lives here (always compiled) so
+/// both the feature-gated harness wiring (`build::build_agent`) and the
+/// always-compiled console capability route key off one source of truth.
+pub fn grants_media_explicit(grants: &[String]) -> bool {
+    grants
+        .iter()
+        .any(|grant| grant == "media" || grant.starts_with("media."))
+}
 
 /// Built-in capability tier names selectable in `[plan].name` (issue #108). The
 /// name → budget-map table lives in
@@ -545,6 +560,23 @@ pub struct Schedule {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// Real-money `media` (issue #109) is granted ONLY by an explicit `media` /
+    /// `media.*` grant — never by the catch-all `*`. This wildcard exclusion is
+    /// the security property that keeps a broadly-permissioned company from
+    /// accidentally handing its agents a paid image/video generator.
+    #[test]
+    fn media_grant_requires_explicit_namespace_not_wildcard() {
+        assert!(grants_media_explicit(&["media".into()]));
+        assert!(grants_media_explicit(&["media.image".into()]));
+        assert!(grants_media_explicit(&["web.*".into(), "media".into()]));
+        // The catch-all `*` must NOT grant media.
+        assert!(!grants_media_explicit(&["*".into()]));
+        assert!(!grants_media_explicit(&["web.*".into()]));
+        assert!(!grants_media_explicit(&[]));
+        // A substring match ("mediation") must not count as the media namespace.
+        assert!(!grants_media_explicit(&["mediation".into()]));
+    }
 
     // Guards the newly-added `Serialize` derive: a manifest with renamed
     // `[[agent]]`/`[[schedule]]` arrays must survive a serialize→deserialize

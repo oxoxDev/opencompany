@@ -31,7 +31,7 @@ pub use types::{
     Agent, BRAIN_MODES, Brain, Budget, ChannelConfig, Company, CompanyManifest, Connection,
     DEFAULT_ALWAYS_APPROVE, GATEABLE_NAMESPACES, INFERENCE_PROVIDERS, INFERENCE_TIERS, Inference,
     KNOWN_CHANNELS, McpServer, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, Place, Plan, Policy,
-    Schedule, Skill, TIERS, TOOL_PROVIDERS, Tools,
+    Schedule, Skill, TIERS, TOOL_PROVIDERS, Tools, grants_media_explicit,
 };
 pub use workflow_file::{
     WORKFLOW_NODE_KINDS, WorkflowEdgeDef, WorkflowFile, WorkflowNodeDef, WorkflowNodeKind,
