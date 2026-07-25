@@ -1191,7 +1191,12 @@ name = "Design"
             workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
             secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            plan: None,
+            media: None,
             steer,
+            workflow_source_dir: None,
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record()),

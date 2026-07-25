@@ -1895,6 +1895,8 @@ description = "Sets direction."
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
             plan: Some(plan),
             media: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+            workflow_source_dir: None,
         };
         let pool = HarnessPool::new();
         let rec = granting_record();
