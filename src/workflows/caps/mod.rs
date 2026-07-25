@@ -67,9 +67,10 @@ use self::tools::WorkflowToolInvoker;
 /// id, the `[policy].mode` (the exec-security autonomy tier), the `[tools].allow`
 /// grants (the fail-closed `tool_call` gate), and the `[tools].web_allowed_domains`
 /// SSRF allowlist. The tool_call / http_request capabilities are scoped to a
-/// dedicated per-company workflow workspace
-/// (`{workspace_root}/{company}/_workflow/workspace`) — the `_` prefix keeps it
-/// from ever colliding with a roster agent's own workspace directory.
+/// dedicated per-run workflow workspace
+/// (`{workspace_root}/{company}/_workflow/{workflow}/{run}/workspace`) — the
+/// `_` prefix keeps it from ever colliding with a roster agent's own workspace
+/// directory.
 ///
 /// `pool`/`deps` are shared with the rest of the harness surface — the roster the
 /// agent nodes address is the one already resident in `pool`.
@@ -78,27 +79,11 @@ pub fn build_capabilities(
     deps: HarnessDeps,
     record: &CompanyRecord,
     workflow_id: &str,
+    run_id: &str,
 ) -> Capabilities {
     let company = record.id.clone();
     let mode = PolicyMode::parse(&record.manifest.policy.mode);
-    // A dedicated per-company workflow workspace. The `_workflow` segment is
-    // underscore-prefixed so it can never collide with a roster agent's id (and
-    // hence its `{company}/{agent}/workspace`).
-    let workflow_ws = deps
-        .workspace_root
-        .join(company.as_ref())
-        .join("_workflow")
-        .join("workspace");
-    // Best-effort: the toolbelt tools create their own sub-dirs, but seeding the
-    // root avoids a first-write race on the very first tool_call of a run.
-    if let Err(err) = std::fs::create_dir_all(&workflow_ws) {
-        tracing::warn!(
-            company = %company,
-            workspace = %workflow_ws.display(),
-            %err,
-            "workflow: could not pre-create the workflow workspace; tools will create it on demand"
-        );
-    }
+    let workflow_ws = workflow_workspace(&deps.workspace_root, &company, workflow_id, run_id);
 
     // ONE exec-security policy shared by the tool_call toolbelt and the
     // http_request client, sandboxed to the workflow workspace with the
@@ -158,6 +143,32 @@ pub fn build_capabilities(
         // all done by here.
         agent: Some(Arc::new(HarnessAgentRunner::new(pool, deps, company))),
     }
+}
+
+/// Builds a traversal-safe workspace path unique to one workflow execution.
+fn workflow_workspace(
+    root: &std::path::Path,
+    company: &CompanyId,
+    workflow_id: &str,
+    run_id: &str,
+) -> std::path::PathBuf {
+    root.join(company.as_ref())
+        .join("_workflow")
+        .join(hex_segment(workflow_id))
+        .join(hex_segment(run_id))
+        .join("workspace")
+}
+
+/// Encodes an arbitrary identifier as one safe, reversible path segment.
+fn hex_segment(value: &str) -> String {
+    use std::fmt::Write;
+    value
+        .as_bytes()
+        .iter()
+        .fold(String::with_capacity(value.len() * 2), |mut out, byte| {
+            write!(out, "{byte:02x}").expect("writing to String cannot fail");
+            out
+        })
 }
 
 /// A tinyflows [`AgentRunner`] that executes an `agent` node on the company's
@@ -288,5 +299,21 @@ mod tests {
         // No known string key: fall back to the serialized object.
         let out = message_from_request(&json!({ "agent_ref": "x" }));
         assert!(out.contains("agent_ref"));
+    }
+
+    #[test]
+    fn workflow_workspace_is_unique_per_run_and_traversal_safe() {
+        let root = std::path::Path::new("/tmp/workspaces");
+        let company = CompanyId::new("acme");
+        let first = workflow_workspace(root, &company, "../billing", "run:1");
+        let second = workflow_workspace(root, &company, "../billing", "run:2");
+
+        assert_ne!(first, second);
+        assert!(first.starts_with(root.join("acme").join("_workflow")));
+        assert!(!first.to_string_lossy().contains("../billing"));
+        assert_eq!(
+            first.file_name().and_then(|part| part.to_str()),
+            Some("workspace")
+        );
     }
 }

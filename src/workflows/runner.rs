@@ -40,7 +40,8 @@ pub async fn run_workflow(
 ) -> Result<WorkflowRun> {
     let graph = super::translate::translate(workflow);
     let compiled = tinyflows::compiler::compile(&graph).map_err(map_engine_error)?;
-    let capabilities = super::caps::build_capabilities(pool, deps, record, &workflow.id);
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let capabilities = super::caps::build_capabilities(pool, deps, record, &workflow.id, &run_id);
     let outcome = tinyflows::engine::run(&compiled, input, &capabilities)
         .await
         .map_err(map_engine_error)?;
