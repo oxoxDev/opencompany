@@ -4,8 +4,8 @@
 //! OpenCompany has no dedicated workflow-state store; the secret store is the
 //! per-company durable key/value seam (the same one `DomainStatus` rides on at
 //! `__domain`, see [`crate::company::dns`]). Keys are namespaced
-//! `__wf_state:{workflow_id}:{key}` so one workflow's state can never read or
-//! clobber another's, and values are JSON.
+//! `__wf_state:{workflow_id_len}:{workflow_id}:{key_len}:{key}` so one
+//! workflow's state can never read or clobber another's, and values are JSON.
 //!
 //! **Honest note**: no tinyflows node OpenCompany emits reads or writes
 //! `caps.state` in P1 — this is deliberate contract-plumbing that a later phase
@@ -42,7 +42,13 @@ impl CompanyStateStore {
 
     /// The namespaced secret key backing run state `key`.
     fn namespaced(&self, key: &str) -> String {
-        format!("__wf_state:{}:{}", self.workflow_id, key)
+        format!(
+            "__wf_state:{}:{}:{}:{}",
+            self.workflow_id.len(),
+            self.workflow_id,
+            key.len(),
+            key
+        )
     }
 }
 
@@ -126,6 +132,18 @@ mod tests {
             wf_b.load("cursor").await.unwrap(),
             Some(json!({ "page": 9 }))
         );
+    }
+
+    #[test]
+    fn namespace_is_unambiguous_when_segments_contain_colons() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(FsSecretStore::new(dir.path().to_path_buf()));
+        let company = CompanyId::new("acme");
+        let left =
+            CompanyStateStore::new(secrets.clone(), company.clone(), "workflow:a".to_string());
+        let right = CompanyStateStore::new(secrets, company, "workflow".to_string());
+
+        assert_ne!(left.namespaced("cursor"), right.namespaced("a:cursor"));
     }
 
     #[tokio::test]
