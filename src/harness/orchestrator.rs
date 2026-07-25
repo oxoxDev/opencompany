@@ -1013,6 +1013,14 @@ impl From<CreateWorkflowArgs> for RawWorkflow {
                     name: n.name,
                     summary: n.summary,
                     agent: n.agent,
+                    // Issue #113-p1 added per-node config/error-handling fields.
+                    // The chat create-workflow tool (issue #112) predates them and
+                    // authors only structural nodes; config/retry/approval flow in
+                    // through the console create route instead.
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
                 })
                 .collect(),
             edges: args

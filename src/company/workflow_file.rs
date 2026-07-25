@@ -93,6 +93,43 @@ pub struct WorkflowNodeDef {
     pub summary: Option<String>,
     /// The roster agent id — only meaningful on `agent` nodes.
     pub agent: Option<String>,
+    /// Free-form, kind-specific node configuration ([`tool_call`] slug/args,
+    /// [`http_request`] descriptor, …). Layered under the derived defaults and
+    /// the first-class fields below by [`translate`](crate::workflows::translate)
+    /// before it reaches the engine. Reserved keys (`on_error` / `retry` /
+    /// `requires_approval`, plus `agent_ref` on `agent` nodes) are rejected at
+    /// validation so they cannot silently shadow a first-class field.
+    ///
+    /// [`tool_call`]: WorkflowNodeKind::ToolCall
+    /// [`http_request`]: WorkflowNodeKind::HttpRequest
+    pub config: Option<serde_json::Value>,
+    /// Per-node error policy once retries are exhausted: `stop` (default — fail
+    /// the run), `continue` (turn the failure into a data item on the default
+    /// port), or `route` (emit the failure on the `error` port for a recovery
+    /// sub-graph). The tinyflows engine reads this from node config.
+    pub on_error: Option<String>,
+    /// Per-node retry policy (attempt count + backoff) the engine honors.
+    pub retry: Option<WorkflowRetryDef>,
+    /// When `true`, the node pauses awaiting operator approval before it runs —
+    /// the engine surfaces it on `WorkflowRun.pending_approvals`.
+    pub requires_approval: Option<bool>,
+}
+
+/// A node's typed retry policy. Mirrors the free-form `retry.*` keys the
+/// tinyflows engine reads from node config (`max_attempts` / `backoff_ms` /
+/// `backoff`); carried as first-class model data so the console and validation
+/// see one shape.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct WorkflowRetryDef {
+    /// Total attempts (≥ 1). The engine bounds retries at `max_attempts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
+    /// Base delay between attempts in milliseconds (default `0` = no wait).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backoff_ms: Option<u64>,
+    /// Backoff curve: `fixed` (default, constant delay) or `exponential`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backoff: Option<String>,
 }
 
 /// A directed edge between two nodes.
@@ -139,6 +176,19 @@ pub(crate) struct RawNode {
     pub(crate) summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) agent: Option<String>,
+    /// Free-form node config, read as a TOML value (not `serde_json`) so the
+    /// `Serialize` half — used by the workflow creator's
+    /// [`render_workflow`] round-trip — stays representable in TOML (TOML has no
+    /// `null`). Converted to `serde_json::Value` on the way into
+    /// [`WorkflowNodeDef::config`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) config: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) on_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) retry: Option<WorkflowRetryDef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) requires_approval: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -200,6 +250,15 @@ pub fn parse_workflow(toml_src: &str) -> Result<WorkflowFile> {
                 name: node.name,
                 summary: node.summary,
                 agent: node.agent,
+                // TOML value → serde_json value. `toml::Value` implements
+                // `Serialize`, so this is a total, allocation-only conversion
+                // (TOML has no null, so it never fails on our validated input).
+                config: node
+                    .config
+                    .and_then(|value| serde_json::to_value(value).ok()),
+                on_error: node.on_error,
+                retry: node.retry,
+                requires_approval: node.requires_approval,
             })
             .collect(),
         edges: raw
@@ -254,8 +313,12 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
     }
 
     // Node ids: present, unique. Kinds known. `agent` only on `agent` nodes.
+    // Per-node config/error/retry policy is validated in the same pass.
     let mut seen = std::collections::HashSet::new();
     let mut trigger_count = 0usize;
+    // Ids of nodes whose `on_error = "route"` — an "error"-labeled edge must
+    // leave one, and only one, of these (checked in the edge pass below).
+    let mut route_nodes = std::collections::HashSet::new();
     for (index, node) in raw.nodes.iter().enumerate() {
         let label = if node.id.trim().is_empty() {
             format!("node #{}", index + 1)
@@ -272,7 +335,8 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
             ));
         }
 
-        match WorkflowNodeKind::parse(&node.kind) {
+        let kind = WorkflowNodeKind::parse(&node.kind);
+        match kind {
             Some(WorkflowNodeKind::Trigger) => trigger_count += 1,
             Some(kind) => {
                 if kind != WorkflowNodeKind::Agent && node.agent.is_some() {
@@ -288,13 +352,64 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
                 WORKFLOW_NODE_KINDS.join(", ")
             )),
         }
+
+        // `on_error` ∈ {stop, continue, route}. Remember route nodes for the
+        // edge-coupling check.
+        if let Some(on_error) = node.on_error.as_deref() {
+            if !matches!(on_error, "stop" | "continue" | "route") {
+                problems.push(format!(
+                    "{label} has an unknown `on_error` `{on_error}` — use one of stop, continue, route."
+                ));
+            } else if on_error == "route" && !node.id.trim().is_empty() {
+                route_nodes.insert(node.id.as_str());
+            }
+        }
+
+        // `retry`: at least one attempt; a known backoff curve.
+        if let Some(retry) = &node.retry {
+            if let Some(max_attempts) = retry.max_attempts
+                && max_attempts < 1
+            {
+                problems.push(format!(
+                    "{label} sets `retry.max_attempts` to {max_attempts} — it must be at least 1."
+                ));
+            }
+            if let Some(backoff) = retry.backoff.as_deref()
+                && !matches!(backoff, "fixed" | "exponential")
+            {
+                problems.push(format!(
+                    "{label} has an unknown `retry.backoff` `{backoff}` — use fixed or exponential."
+                ));
+            }
+        }
+
+        // Reserved config keys: the first-class fields above are written into
+        // the engine config LAST, so a `config` entry naming one would be
+        // silently ignored — reject it as a footgun instead. `agent_ref` is
+        // reserved on `agent` nodes (translation binds it from `agent`).
+        if let Some(toml::Value::Table(table)) = &node.config {
+            for reserved in ["on_error", "retry", "requires_approval"] {
+                if table.contains_key(reserved) {
+                    problems.push(format!(
+                        "{label} puts `{reserved}` inside `config` — set it as a first-class node field, not in `config`."
+                    ));
+                }
+            }
+            if kind == Some(WorkflowNodeKind::Agent) && table.contains_key("agent_ref") {
+                problems.push(format!(
+                    "{label} puts `agent_ref` inside `config` — name the teammate with the node's `agent` field instead."
+                ));
+            }
+        }
     }
 
     if trigger_count == 0 {
         problems.push("a workflow needs at least one `trigger` node to say what starts it.".into());
     }
 
-    // Edges: endpoints must reference existing nodes; no self-loops.
+    // Edges: endpoints must reference existing nodes; no self-loops. An
+    // "error"-labeled edge and an `on_error = "route"` node imply each other.
+    let mut route_nodes_with_error_edge = std::collections::HashSet::new();
     for (index, edge) in raw.edges.iter().enumerate() {
         let label = format!("edge #{}", index + 1);
 
@@ -322,6 +437,27 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
                 edge.from
             ));
         }
+
+        // An "error"-labeled edge is the recovery route out of a routing node.
+        if edge.label.as_deref() == Some("error") {
+            if route_nodes.contains(edge.from.as_str()) {
+                route_nodes_with_error_edge.insert(edge.from.as_str());
+            } else if seen.contains(edge.from.as_str()) {
+                problems.push(format!(
+                    "{label} is labeled `error` but its source `{}` is not `on_error = \"route\"` — only a routing node emits an error edge.",
+                    edge.from
+                ));
+            }
+        }
+    }
+
+    // Every routing node must actually have somewhere to route its error to.
+    for node_id in &route_nodes {
+        if !route_nodes_with_error_edge.contains(node_id) {
+            problems.push(format!(
+                "node `{node_id}` sets `on_error = \"route\"` but has no outgoing edge labeled `error` to route the failure to."
+            ));
+        }
     }
 
     problems
@@ -344,6 +480,10 @@ mod tests {
                     name: "Start".to_string(),
                     summary: None,
                     agent: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
                 },
                 RawNode {
                     id: "worker".to_string(),
@@ -351,6 +491,10 @@ mod tests {
                     name: "Worker".to_string(),
                     summary: Some("Does the thing.".to_string()),
                     agent: Some("ceo".to_string()),
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
                 },
             ],
             edges: vec![RawEdge {
@@ -384,6 +528,10 @@ mod tests {
                 name: "Only".to_string(),
                 summary: None,
                 agent: None,
+                config: None,
+                on_error: None,
+                retry: None,
+                requires_approval: None,
             }],
             edges: vec![],
         };
@@ -522,5 +670,255 @@ mod tests {
             extra = "ignored"
         "#;
         assert!(parse_workflow(src).is_ok());
+    }
+
+    // --- Per-node config / error / retry policy (P1) -----------------------
+
+    #[test]
+    fn node_config_parses_including_nested_tables() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "call"
+            kind = "tool_call"
+            name = "Export"
+            [node.config]
+            slug = "csv_export"
+            [node.config.args]
+            filename = "out.csv"
+            data = "[]"
+        "#;
+        let file = parse_workflow(src).expect("config parses");
+        let call = file.nodes.iter().find(|n| n.id == "call").unwrap();
+        let config = call.config.as_ref().expect("config present");
+        assert_eq!(config["slug"], "csv_export");
+        // Nested table survives the TOML → JSON conversion.
+        assert_eq!(config["args"]["filename"], "out.csv");
+    }
+
+    #[test]
+    fn typed_error_retry_and_approval_fields_parse() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "call"
+            kind = "tool_call"
+            name = "Export"
+            on_error = "continue"
+            requires_approval = true
+            [node.retry]
+            max_attempts = 3
+            backoff_ms = 100
+            backoff = "exponential"
+        "#;
+        let file = parse_workflow(src).expect("parses");
+        let call = file.nodes.iter().find(|n| n.id == "call").unwrap();
+        assert_eq!(call.on_error.as_deref(), Some("continue"));
+        assert_eq!(call.requires_approval, Some(true));
+        let retry = call.retry.as_ref().expect("retry present");
+        assert_eq!(retry.max_attempts, Some(3));
+        assert_eq!(retry.backoff_ms, Some(100));
+        assert_eq!(retry.backoff.as_deref(), Some("exponential"));
+    }
+
+    #[test]
+    fn bad_on_error_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            on_error = "explode"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("unknown `on_error`"), "{message}");
+    }
+
+    #[test]
+    fn retry_max_attempts_zero_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [node.retry]
+            max_attempts = 0
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(err.to_string().contains("at least 1"), "{err}");
+    }
+
+    #[test]
+    fn bad_retry_backoff_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [node.retry]
+            backoff = "linear"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(err.to_string().contains("unknown `retry.backoff`"), "{err}");
+    }
+
+    #[test]
+    fn reserved_config_keys_are_rejected() {
+        // `on_error` inside `config` (not as a first-class field) is a footgun.
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [node.config]
+            on_error = "route"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(err.to_string().contains("inside `config`"), "{err}");
+    }
+
+    #[test]
+    fn config_agent_ref_on_agent_node_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "worker"
+            kind = "agent"
+            name = "Worker"
+            agent = "ceo"
+            [node.config]
+            agent_ref = "impostor"
+            [[edge]]
+            from = "start"
+            to = "worker"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(err.to_string().contains("agent_ref"), "{err}");
+    }
+
+    #[test]
+    fn route_without_error_edge_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "call"
+            kind = "tool_call"
+            name = "Call"
+            on_error = "route"
+            [[edge]]
+            from = "start"
+            to = "call"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(
+            err.to_string().contains("no outgoing edge labeled `error`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn error_edge_without_route_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "call"
+            kind = "tool_call"
+            name = "Call"
+            [[node]]
+            id = "recover"
+            kind = "output"
+            name = "Recover"
+            [[edge]]
+            from = "start"
+            to = "call"
+            [[edge]]
+            from = "call"
+            to = "recover"
+            label = "error"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(err.to_string().contains("only a routing node"), "{err}");
+    }
+
+    #[test]
+    fn route_with_matching_error_edge_is_valid() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "call"
+            kind = "tool_call"
+            name = "Call"
+            on_error = "route"
+            [[node]]
+            id = "recover"
+            kind = "output"
+            name = "Recover"
+            [[edge]]
+            from = "start"
+            to = "call"
+            [[edge]]
+            from = "call"
+            to = "recover"
+            label = "error"
+        "#;
+        assert!(parse_workflow(src).is_ok());
+    }
+
+    #[test]
+    fn legacy_files_without_new_fields_parse_unchanged() {
+        // A graph authored before the P1 fields existed: every new field is None.
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+        "#;
+        let file = parse_workflow(src).expect("legacy parses");
+        let start = &file.nodes[0];
+        assert!(start.config.is_none());
+        assert!(start.on_error.is_none());
+        assert!(start.retry.is_none());
+        assert!(start.requires_approval.is_none());
     }
 }
