@@ -25,7 +25,7 @@
 - Add an explicit run identifier to `build_capabilities`.
 - Generate it once per `run_workflow` invocation.
 - Build workspaces beneath the company, workflow, and run identifiers.
-- Remove synchronous directory pre-creation.
+- Replace synchronous directory pre-creation with Tokio filesystem I/O.
 - Update focused capability/runner tests and commit the touched files.
 
 ## 5. Keep cycle scanning off the async executor

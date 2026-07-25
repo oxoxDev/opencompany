@@ -74,7 +74,7 @@ use self::tools::WorkflowToolInvoker;
 ///
 /// `pool`/`deps` are shared with the rest of the harness surface — the roster the
 /// agent nodes address is the one already resident in `pool`.
-pub fn build_capabilities(
+pub async fn build_capabilities(
     pool: Arc<HarnessPool>,
     deps: HarnessDeps,
     record: &CompanyRecord,
@@ -84,6 +84,14 @@ pub fn build_capabilities(
     let company = record.id.clone();
     let mode = PolicyMode::parse(&record.manifest.policy.mode);
     let workflow_ws = workflow_workspace(&deps.workspace_root, &company, workflow_id, run_id);
+    if let Err(err) = tokio::fs::create_dir_all(&workflow_ws).await {
+        tracing::warn!(
+            company = %company,
+            workspace = %workflow_ws.display(),
+            %err,
+            "workflow: could not create the per-run workspace"
+        );
+    }
 
     // ONE exec-security policy shared by the tool_call toolbelt and the
     // http_request client, sandboxed to the workflow workspace with the

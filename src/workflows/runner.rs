@@ -41,7 +41,8 @@ pub async fn run_workflow(
     let graph = super::translate::translate(workflow);
     let compiled = tinyflows::compiler::compile(&graph).map_err(map_engine_error)?;
     let run_id = uuid::Uuid::new_v4().to_string();
-    let capabilities = super::caps::build_capabilities(pool, deps, record, &workflow.id, &run_id);
+    let capabilities =
+        super::caps::build_capabilities(pool, deps, record, &workflow.id, &run_id).await;
     let outcome = tinyflows::engine::run(&compiled, input, &capabilities)
         .await
         .map_err(map_engine_error)?;
@@ -209,7 +210,20 @@ allow = ["*"]
 
     /// The workflow workspace directory the tool_call toolbelt is sandboxed to.
     fn workflow_workspace(home: &std::path::Path, company: &str) -> std::path::PathBuf {
-        home.join(company).join("_workflow").join("workspace")
+        let workflows = home.join(company).join("_workflow");
+        let workflow = std::fs::read_dir(workflows)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let run = std::fs::read_dir(workflow)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        run.join("workspace")
     }
 
     /// A three-node workflow (trigger → agent → output) runs to completion with

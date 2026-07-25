@@ -16,8 +16,9 @@ workflow model or weakening existing validation and security boundaries.
 - Each workflow execution supplies a unique run identifier to capability
   construction. Tool workspaces remain company-scoped but are isolated beneath
   the workflow and run identifiers.
-- Capability construction does not synchronously pre-create directories; the
-  tool implementations retain responsibility for their own directories.
+- Capability construction asynchronously creates the sandbox root required by
+  the security policy; tool implementations retain responsibility for their
+  own subdirectories.
 - Static sub-workflow cycle scanning runs on Tokio's blocking pool and starts
   from the child already parsed by `resolve`, avoiding both executor blocking
   and the duplicate first load.
