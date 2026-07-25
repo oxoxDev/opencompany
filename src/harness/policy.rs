@@ -201,6 +201,18 @@ fn is_external_effect(tool_name: &str) -> bool {
     if tool_name.eq_ignore_ascii_case("media_list_models") {
         return false;
     }
+    // The Composio read tools (issue #110) are read-only GETs: listing toolkits,
+    // connections, or action schemas reaches no third party and must never park
+    // for approval, even though the `composio_*` name has no read-only prefix.
+    // `composio_authorize` / `composio_execute` are NOT listed here — they begin
+    // an OAuth handoff / run a real action, so they fall through to the external-
+    // effect default (park under supervised, deny under readonly).
+    if matches!(
+        tool_name.to_ascii_lowercase().as_str(),
+        "composio_list_toolkits" | "composio_list_connections" | "composio_list_tools"
+    ) {
+        return false;
+    }
     const READ_ONLY_PREFIXES: &[&str] = &[
         "read",
         "list",
@@ -223,6 +235,15 @@ fn classify_group(tool_name: &str) -> EffectGroup {
     let name = tool_name.to_ascii_lowercase();
     if name == "mcp_registry_tool_call" {
         EffectGroup::Other
+    } else if name == "composio_authorize" {
+        // Beginning an OAuth handoff establishes an account identity for the
+        // company (issue #110) — an identity effect, parked before it lands.
+        EffectGroup::Identity
+    } else if name == "composio_execute" {
+        // Running a Composio action reaches a third-party account (send an
+        // email, post a message, open a PR) — a send effect. Placed before the
+        // generic `contains` heuristics so the slug can't be misclassified.
+        EffectGroup::Send
     } else if name.starts_with("media_generate") {
         // Image/video generation is billed by the backend on submit (issue
         // #109), so it is a spend effect — parked for approval before money
@@ -416,6 +437,75 @@ mod tests {
             p.effect_for("media_generate_video", &serde_json::json!({}))
                 .group,
             EffectGroup::Spend
+        );
+    }
+
+    /// Per-tenant Composio (issue #110): the read tools are read-only (allowed
+    /// even under supervised/readonly), while `composio_authorize` /
+    /// `composio_execute` are external — parked under supervised, denied under
+    /// readonly.
+    #[tokio::test]
+    async fn composio_reads_allowed_but_authorize_execute_park_or_deny() {
+        let supervised = policy("supervised", &[], None);
+        for tool in [
+            "composio_list_toolkits",
+            "composio_list_connections",
+            "composio_list_tools",
+        ] {
+            assert_eq!(
+                supervised
+                    .check(&request(tool, serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::Allow,
+                "{tool} is read-only and must be allowed"
+            );
+        }
+        for tool in ["composio_authorize", "composio_execute"] {
+            assert!(
+                matches!(
+                    supervised
+                        .check(&request(tool, serde_json::json!({})))
+                        .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "{tool} must park under supervised"
+            );
+        }
+
+        let readonly = policy("readonly", &[], None);
+        // A read-only desk may still browse the Composio surface.
+        assert_eq!(
+            readonly
+                .check(&request("composio_list_connections", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::Allow
+        );
+        for tool in ["composio_authorize", "composio_execute"] {
+            assert!(
+                matches!(
+                    readonly.check(&request(tool, serde_json::json!({}))).await,
+                    ToolPolicyDecision::Deny { .. }
+                ),
+                "{tool} must be denied under readonly"
+            );
+        }
+    }
+
+    /// Composio effect groups (issue #110): authorize is an Identity effect,
+    /// execute is a Send effect — pinned before the generic `contains`
+    /// heuristics could misclassify the slug.
+    #[test]
+    fn composio_classifies_authorize_identity_and_execute_send() {
+        let p = policy("supervised", &[], None);
+        assert_eq!(
+            p.effect_for("composio_authorize", &serde_json::json!({}))
+                .group,
+            EffectGroup::Identity
+        );
+        assert_eq!(
+            p.effect_for("composio_execute", &serde_json::json!({}))
+                .group,
+            EffectGroup::Send
         );
     }
 
