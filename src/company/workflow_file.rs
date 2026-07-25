@@ -286,12 +286,12 @@ pub fn parse_workflow(toml_src: &str) -> Result<WorkflowFile> {
                 name: node.name,
                 summary: node.summary,
                 agent: node.agent,
-                // TOML value → serde_json value. `toml::Value` implements
-                // `Serialize`, so this is a total, allocation-only conversion
-                // (TOML has no null, so it never fails on our validated input).
-                config: node
-                    .config
-                    .and_then(|value| serde_json::to_value(value).ok()),
+                // Validation rejects TOML's non-finite floats before this
+                // conversion because JSON cannot represent them.
+                config: node.config.map(|value| {
+                    serde_json::to_value(value)
+                        .expect("validated TOML config always converts to JSON")
+                }),
                 on_error: node.on_error,
                 retry: node.retry,
                 requires_approval: node.requires_approval,
@@ -396,6 +396,12 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
 
         if kind == Some(WorkflowNodeKind::Switch) && !node.id.trim().is_empty() {
             switch_nodes.insert(node.id.as_str());
+        }
+
+        if node.config.as_ref().is_some_and(contains_non_finite_float) {
+            problems.push(format!(
+                "{label} has a non-finite number in `config` — JSON workflow config only supports finite numbers."
+            ));
         }
 
         // A `sub_workflow` node references a saved workflow by id. Its whole
@@ -548,6 +554,16 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
     }
 
     problems
+}
+
+/// Whether a TOML config contains a float JSON cannot represent.
+fn contains_non_finite_float(value: &toml::Value) -> bool {
+    match value {
+        toml::Value::Float(value) => !value.is_finite(),
+        toml::Value::Array(values) => values.iter().any(contains_non_finite_float),
+        toml::Value::Table(values) => values.values().any(contains_non_finite_float),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -786,6 +802,22 @@ mod tests {
         assert_eq!(config["slug"], "csv_export");
         // Nested table survives the TOML → JSON conversion.
         assert_eq!(config["args"]["filename"], "out.csv");
+    }
+
+    #[test]
+    fn non_finite_config_number_is_rejected_instead_of_dropped() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [node.config]
+            threshold = nan
+        "#;
+        let err = parse_workflow(src).expect_err("non-JSON config must fail");
+        assert!(err.to_string().contains("config"), "{err}");
     }
 
     #[test]
