@@ -1143,7 +1143,17 @@ name = "Design"
         ) -> anyhow::Result<String> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Some(action) = self.actions.lock().unwrap().pop_front() {
-                let _ = self.steer.steer(&self.company, &self.key, action);
+                let key = if self.key.is_empty() {
+                    self.steer
+                        .list(&self.company)
+                        .into_iter()
+                        .next()
+                        .map(|entry| entry.key)
+                        .unwrap_or_default()
+                } else {
+                    self.key.clone()
+                };
+                let _ = self.steer.steer(&self.company, &key, action);
             }
             Ok(format!("did: {message}"))
         }
@@ -1156,7 +1166,7 @@ name = "Design"
         dir: &std::path::Path,
         key: &str,
         actions: Vec<SteerAction>,
-    ) -> (HarnessBrain, Arc<FsOps>) {
+    ) -> (HarnessBrain, Arc<FsOps>, Arc<SteeringProvider>) {
         let steer = InflightRegistry::new();
         let tasks = Arc::new(FsOps::new(dir));
         let provider = Arc::new(SteeringProvider {
@@ -1167,7 +1177,7 @@ name = "Design"
             calls: std::sync::atomic::AtomicUsize::new(0),
         });
         let deps = HarnessDeps {
-            provider,
+            provider: provider.clone(),
             provider_slug: "steering".to_string(),
             context: Arc::new(FsContextStore::new(dir)),
             store: Arc::new(FsCompanyStore::new(dir)),
@@ -1193,6 +1203,7 @@ name = "Design"
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record()),
             tasks,
+            provider,
         )
     }
 
@@ -1201,7 +1212,8 @@ name = "Design"
     #[tokio::test]
     async fn steer_cancel_returns_to_backlog_and_discards_partial() {
         let dir = tempfile::tempdir().unwrap();
-        let (brain, tasks) = brain_that_steers_itself(dir.path(), "t1", vec![SteerAction::Cancel]);
+        let (brain, tasks, _) =
+            brain_that_steers_itself(dir.path(), "t1", vec![SteerAction::Cancel]);
         tasks
             .upsert(&CompanyId::new("acme"), &card("t1", ""))
             .await
@@ -1233,7 +1245,8 @@ name = "Design"
     #[tokio::test]
     async fn steer_pause_parks_in_paused_and_preserves_partial() {
         let dir = tempfile::tempdir().unwrap();
-        let (brain, tasks) = brain_that_steers_itself(dir.path(), "t1", vec![SteerAction::Pause]);
+        let (brain, tasks, _) =
+            brain_that_steers_itself(dir.path(), "t1", vec![SteerAction::Pause]);
         tasks
             .upsert(&CompanyId::new("acme"), &card("t1", ""))
             .await
@@ -1269,7 +1282,7 @@ name = "Design"
             instruction: "focus on the API".to_string(),
         };
         // Steer a redirect on the first several turns; the cap should stop it.
-        let (brain, tasks) = brain_that_steers_itself(
+        let (brain, tasks, provider) = brain_that_steers_itself(
             dir.path(),
             "t1",
             vec![redirect(), redirect(), redirect(), redirect()],
@@ -1300,5 +1313,26 @@ name = "Design"
             note.contains("Operator redirect:"),
             "the rerun carried the operator instruction: {note:?}"
         );
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "one initial turn plus three reruns"
+        );
+    }
+
+    #[tokio::test]
+    async fn steer_cancelled_delegation_returns_no_bubble() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _, _) = brain_that_steers_itself(dir.path(), "", vec![SteerAction::Cancel]);
+
+        let result = brain
+            .run_delegation(Delegation::DelegateToDesk {
+                desk: "engineering".to_string(),
+                instruction: "investigate".to_string(),
+            })
+            .await
+            .expect("cancellation is handled");
+
+        assert!(result.is_none(), "cancelled delegation must not bubble");
     }
 }

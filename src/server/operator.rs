@@ -1727,6 +1727,43 @@ mod test {
     }
 
     #[test]
+    fn projects_task_steered_without_actor_or_instruction() {
+        let v = super::project_event(&stored(CompanyEvent::TaskSteered {
+            task_id: "t-9".into(),
+            action: "redirect".into(),
+            instruction: Some("focus on the API".into()),
+            by: Some(Actor {
+                kind: ActorKind::User,
+                id: "secret-user-id".into(),
+            }),
+        }))
+        .expect("task_steered is an attention signal");
+        assert_eq!(v["type"], "task_steered");
+        assert_eq!(v["taskId"], "t-9");
+        assert_eq!(v["action"], "redirect");
+        let wire = v.to_string();
+        assert!(!wire.contains("secret-user-id"));
+        assert!(!wire.contains("focus on the API"));
+    }
+
+    #[test]
+    fn projects_workflow_created_without_the_actor() {
+        let v = super::project_event(&stored(CompanyEvent::WorkflowCreated {
+            workflow_id: "greeter".into(),
+            name: "Greeter".into(),
+            by: Some(Actor {
+                kind: ActorKind::User,
+                id: "secret-user-id".into(),
+            }),
+        }))
+        .expect("workflow_created is an attention signal");
+        assert_eq!(v["type"], "workflow_created");
+        assert_eq!(v["workflowId"], "greeter");
+        assert_eq!(v["name"], "Greeter");
+        assert!(!v.to_string().contains("secret-user-id"));
+    }
+
+    #[test]
     fn projects_lifecycle_changed_without_the_actor() {
         let v = super::project_event(&stored(CompanyEvent::LifecycleChanged {
             from: "running".into(),
