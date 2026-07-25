@@ -51,6 +51,18 @@ struct CapabilityStatusDto {
     /// One row per configured tier, namespace-sorted. Omitted when unconfigured.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tiers: Vec<TierDto>,
+    /// Media generation (issue #109): whether this company **explicitly** grants
+    /// the real-money `media` namespace (a `*` wildcard does NOT count). Sent
+    /// regardless of whether a `[plan]` is configured, since media is opt-in per
+    /// tool grant, not per plan.
+    media_granted: bool,
+    /// Whether the `media` feature is compiled into this build at all (the tools
+    /// only exist under it). `false` lets the console show a "not in this build"
+    /// state rather than implying a missing credential.
+    media_in_build: bool,
+    /// Whether a MANAGED media credential is resolvable from the environment on
+    /// this build (feature on + env present). Never reflects a tenant secret.
+    media_credential_configured: bool,
 }
 
 /// One tier's budget row.
@@ -70,8 +82,9 @@ struct TierDto {
     exhausted: bool,
 }
 
-/// The unconfigured response: `{ configured: false }`.
-fn unconfigured() -> CapabilityStatusDto {
+/// The unconfigured response: `{ configured: false }` plus the media-status
+/// flags (media is opt-in per tool grant, independent of a `[plan]`).
+fn unconfigured(media_granted: bool) -> CapabilityStatusDto {
     CapabilityStatusDto {
         configured: false,
         plan: None,
@@ -79,6 +92,25 @@ fn unconfigured() -> CapabilityStatusDto {
         period_start_millis: None,
         spent_tokens: None,
         tiers: Vec::new(),
+        media_granted,
+        media_in_build: cfg!(feature = "media"),
+        media_credential_configured: media_credential_configured(),
+    }
+}
+
+/// Whether a MANAGED media credential (issue #109) is resolvable from the
+/// environment on this build. `true` only under the `media` feature with a
+/// credential present — env-only, never a tenant secret, matching the harness's
+/// fail-closed resolution. Off the feature this is always `false`.
+fn media_credential_configured() -> bool {
+    #[cfg(feature = "media")]
+    {
+        use crate::app::config::ProcessEnv;
+        crate::harness::provider::media_backend_from_env(&ProcessEnv).is_some()
+    }
+    #[cfg(not(feature = "media"))]
+    {
+        false
     }
 }
 
@@ -86,11 +118,14 @@ fn unconfigured() -> CapabilityStatusDto {
 async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDto, ApiError> {
     let record = runtime.store().load(runtime.id()).await.map_err(ApiError)?;
     let Some(record) = record else {
-        return Ok(unconfigured());
+        return Ok(unconfigured(false));
     };
+    // Media is opt-in per tool grant (explicit `media`, never `*`) and lives on
+    // the manifest regardless of whether a capability `[plan]` is configured.
+    let media_granted = crate::company::grants_media_explicit(&record.manifest.tools.allow);
     let manifest_plan = &record.manifest.plan;
     let Some(plan) = CapabilityPlan::from_manifest(manifest_plan) else {
-        return Ok(unconfigured());
+        return Ok(unconfigured(media_granted));
     };
 
     let now = now_millis();
@@ -121,6 +156,9 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         period_start_millis: Some(since),
         spent_tokens: Some(spent),
         tiers,
+        media_granted,
+        media_in_build: cfg!(feature = "media"),
+        media_credential_configured: media_credential_configured(),
     })
 }
 
@@ -212,6 +250,41 @@ mod tests {
         assert!(dto.get("plan").is_none());
 
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Media generation (issue #109): the route surfaces `mediaGranted` from the
+    /// manifest tool grants (explicit `media`, never `*`), even with no `[plan]`.
+    #[tokio::test]
+    async fn reports_media_granted_from_explicit_grant_only() {
+        // Explicit `media` grant, no `[plan]` → unconfigured but mediaGranted.
+        let home_a = home();
+        let state = state_with_manifest(
+            &home_a,
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"media\"]\n",
+        )
+        .await;
+        let (status, dto) = get_capabilities(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(dto["configured"], false);
+        assert_eq!(dto["mediaGranted"], true, "{dto}");
+        // The flags are always present so the console can render every state.
+        assert!(dto.get("mediaInBuild").is_some(), "{dto}");
+        assert!(dto.get("mediaCredentialConfigured").is_some(), "{dto}");
+        std::fs::remove_dir_all(&home_a).ok();
+
+        // A `*` wildcard grant must NOT count as a media grant.
+        let home_b = home();
+        let state2 = state_with_manifest(
+            &home_b,
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"*\"]\n",
+        )
+        .await;
+        let (_, dto2) = get_capabilities(&state2).await;
+        assert_eq!(
+            dto2["mediaGranted"], false,
+            "the `*` wildcard must not grant the real-money media family: {dto2}"
+        );
+        std::fs::remove_dir_all(&home_b).ok();
     }
 
     #[tokio::test]

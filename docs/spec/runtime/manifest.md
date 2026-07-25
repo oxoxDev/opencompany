@@ -142,6 +142,21 @@ prompt = "Weekly review and operator digest"
   switches off on the **next** turn (a turn already in flight finishes). An
   absent `[plan]` leaves gating off entirely. The console's Usage view shows a
   live per-tier budget card (`GET …/capabilities`).
+  - **`media`** (issue #109) is a fifth gateable namespace covering the
+    image/video generation tools (`media_generate_image`,
+    `media_generate_video`, `media_list_models`), but it is **real-money and
+    opt-in**: it is granted only by an **explicit** `media` / `media.*` entry in
+    `[tools].allow` — the `*` wildcard deliberately does **not** grant it — and
+    it runs exclusively on a **managed platform credential** (resolved from the
+    environment, never a tenant BYOK key or secret). It is absent from the
+    `free` / `starter` / `pro` tiers (denied there) and uncapped only under
+    `unlimited`; a company opts in per-namespace with
+    `token_budgets = { media = N }`. Every generation additionally **parks for
+    operator approval** before the backend bills it, and the whole family is
+    compiled out unless the build enables the `media` feature. With no managed
+    credential configured, a `media` grant wires no tools (fail-closed). The
+    Usage view surfaces a dedicated media status row (active / awaiting
+    credential / not granted / not in this build).
 - **`[[schedule]]`** entries become `ScheduleFired` events; cron syntax is
   standard 5-field.
 

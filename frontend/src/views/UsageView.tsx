@@ -200,7 +200,7 @@ export function UsageView({ client, company }: Props) {
               switch off until the next period.
             </CardDescription>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-4">
             {capsLoaded && caps?.configured && caps.tiers && caps.tiers.length > 0 ? (
               <div className="space-y-4">
                 {caps.tiers.map((tier) => (
@@ -212,6 +212,9 @@ export function UsageView({ client, company }: Props) {
                 {capsLoaded ? "No token plan configured." : "Loading budgets…"}
               </p>
             )}
+            {/* Media generation (issue #109): opt-in, managed-credential-gated —
+                its own status row, separate from the token-budget bars. */}
+            {capsLoaded && caps ? <MediaStatusRow caps={caps} /> : null}
           </CardContent>
         </Card>
       </div>
@@ -225,7 +228,44 @@ const NAMESPACE_LABELS: Record<string, string> = {
   code: "Code & patches",
   web: "Web & HTTP",
   subagent: "Sub-agents",
+  media: "Media generation",
 };
+
+// Badge variant subset the media status row uses.
+type BadgeVariant = "default" | "secondary" | "destructive" | "outline";
+
+/**
+ * The media-generation capability (issue #109) is opt-in per tool grant and
+ * gated on a managed platform credential, so it gets its own status row rather
+ * than a token-budget bar. Four states: not compiled into this build, not
+ * granted, granted-but-awaiting-credential, and active. A `media` token budget,
+ * if set, still surfaces as its own bar above via the tiers loop.
+ */
+function MediaStatusRow({ caps }: { caps: CapabilityStatusDto }) {
+  const { label, variant } = mediaStatus(caps);
+  return (
+    <div className="flex items-center justify-between gap-3 border-t pt-4 text-sm">
+      <div className="space-y-0.5">
+        <span className="font-medium">Media generation</span>
+        <p className="text-xs text-muted-foreground">
+          Image &amp; video generation — opt-in, runs on the managed platform credential, and
+          every generation is approved before it bills.
+        </p>
+      </div>
+      <Badge variant={variant} className="shrink-0">
+        {label}
+      </Badge>
+    </div>
+  );
+}
+
+function mediaStatus(caps: CapabilityStatusDto): { label: string; variant: BadgeVariant } {
+  if (caps.mediaInBuild === false) return { label: "Not in this build", variant: "outline" };
+  if (!caps.mediaGranted) return { label: "Not granted", variant: "secondary" };
+  if (!caps.mediaCredentialConfigured)
+    return { label: "Awaiting credential", variant: "destructive" };
+  return { label: "Active", variant: "default" };
+}
 
 // A budget large enough that we treat it as effectively unlimited (the backend
 // sends u64::MAX for the `unlimited` tier, which arrives as a huge float).

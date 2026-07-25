@@ -152,7 +152,10 @@ impl CapabilityPlan {
 /// * `free` — no exec tiers (every gateable namespace denied).
 /// * `starter` — `shell` + `code` at 200k tokens/day.
 /// * `pro` — `shell` + `code` + `web` at 1M tokens/day.
-/// * `unlimited` — every gateable namespace at `u64::MAX` (effectively uncapped).
+/// * `unlimited` — every gateable namespace at `u64::MAX` (effectively
+///   uncapped), including the real-money `media` tier (issue #109). `media` is
+///   absent from `free` / `starter` / `pro`, so those tiers deny it outright
+///   unless the manifest opts in with an explicit `token_budgets = { media = N }`.
 ///
 /// Every built-in is daily; the manifest `[plan].period` can widen the window.
 pub fn plan_named(name: &str) -> Option<CapabilityPlan> {
@@ -169,6 +172,7 @@ pub fn plan_named(name: &str) -> Option<CapabilityPlan> {
             ("code", u64::MAX),
             ("web", u64::MAX),
             ("subagent", u64::MAX),
+            ("media", u64::MAX),
         ],
         _ => return None,
     };
@@ -334,6 +338,29 @@ mod tests {
     fn unlimited_plan_grants_everything() {
         let plan = plan_named("unlimited").unwrap();
         assert!(plan.denied_namespaces(u64::MAX - 1).is_empty());
+    }
+
+    /// The real-money `media` tier (issue #109) is uncapped under `unlimited`
+    /// but denied by every other built-in tier — a company must opt into it via
+    /// an explicit `token_budgets = { media = N }`, never a wildcard.
+    #[test]
+    fn media_tier_is_unlimited_only_and_denied_elsewhere() {
+        assert!(
+            !plan_named("unlimited")
+                .unwrap()
+                .denied_namespaces(0)
+                .contains("media"),
+            "unlimited grants media"
+        );
+        for tier in ["free", "starter", "pro"] {
+            assert!(
+                plan_named(tier)
+                    .unwrap()
+                    .denied_namespaces(0)
+                    .contains("media"),
+                "{tier} must deny the real-money media tier by default"
+            );
+        }
     }
 
     #[test]
