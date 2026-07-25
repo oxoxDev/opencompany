@@ -160,7 +160,23 @@ description = "Runs Acme."
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
             plan: None,
             media: None,
+            workflow_source_dir: None,
         }
+    }
+
+    /// Deps with a `workflow_source_dir` wired, so `sub_workflow`-by-id resolves
+    /// children from `source`'s `workflows/` directory.
+    fn deps_with_source(dir: &std::path::Path, source: &std::path::Path) -> HarnessDeps {
+        let mut deps = deps(dir);
+        deps.workflow_source_dir = Some(source.to_path_buf());
+        deps
+    }
+
+    /// Writes `src` to `<source>/workflows/<id>.toml`.
+    fn write_wf(source: &std::path::Path, id: &str, src: &str) {
+        let workflows = source.join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(workflows.join(format!("{id}.toml")), src).unwrap();
     }
 
     /// A record whose `[tools].allow` grants every namespace, so the workflow
@@ -581,6 +597,456 @@ to = "done"
         assert!(
             err.to_string().contains("http_request"),
             "the failure should come from the guarded http client: {err}"
+        );
+    }
+
+    // --- P2: the six new node kinds, end to end through the engine -----------
+
+    /// Runs `src` through the full translate → compile → engine pipeline with a
+    /// tools-granting record and the given `input`.
+    async fn run_src(dir: &std::path::Path, src: &str, input: Value) -> Result<WorkflowRun> {
+        let file = parse_workflow(src).expect("parses");
+        run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps(dir),
+            &tools_record(),
+            &file,
+            input,
+        )
+        .await
+    }
+
+    /// T-switch — each edge label is a case name; the matched case receives the
+    /// item and the others don't. A missing field routes to the `default` port.
+    #[tokio::test]
+    async fn t_switch_routes_each_case_and_default() {
+        let src = r#"
+id = "sw_wf"
+name = "Switch WF"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "route"
+kind = "switch"
+name = "Route"
+[node.config]
+field = "kind"
+[[node]]
+id = "paid_out"
+kind = "output"
+name = "Paid"
+[[node]]
+id = "free_out"
+kind = "output"
+name = "Free"
+[[node]]
+id = "default_out"
+kind = "output"
+name = "Default"
+[[edge]]
+from = "start"
+to = "route"
+[[edge]]
+from = "route"
+to = "paid_out"
+label = "paid"
+[[edge]]
+from = "route"
+to = "free_out"
+label = "free"
+[[edge]]
+from = "route"
+to = "default_out"
+label = "default"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+
+        // A matching case value routes to just that branch.
+        let run = run_src(dir.path(), src, serde_json::json!({ "kind": "paid" }))
+            .await
+            .expect("matched run completes");
+        assert!(
+            !run.output["nodes"]["paid_out"]["items"].is_null(),
+            "the `paid` case should receive the item: {}",
+            run.output
+        );
+        assert!(
+            run.output["nodes"]["free_out"].is_null(),
+            "the unmatched `free` case should never run: {}",
+            run.output
+        );
+
+        // A missing field falls to the engine's `default` fallback port.
+        let run = run_src(dir.path(), src, serde_json::json!({ "other": 1 }))
+            .await
+            .expect("default run completes");
+        assert!(
+            !run.output["nodes"]["default_out"]["items"].is_null(),
+            "a null discriminant should route to the `default` branch: {}",
+            run.output
+        );
+    }
+
+    /// T-split_out → transform → merge over a 3-element list: the list fans out
+    /// into three items, each transformed, then merged back into one stream.
+    #[tokio::test]
+    async fn t_split_out_transform_merge_over_a_list() {
+        let src = r#"
+id = "fan_wf"
+name = "Fan WF"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "split"
+kind = "split_out"
+name = "Split"
+[node.config]
+path = "values"
+[[node]]
+id = "double"
+kind = "transform"
+name = "Double"
+[node.config.set]
+wrapped = "=item"
+[[node]]
+id = "join"
+kind = "merge"
+name = "Merge"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "split"
+[[edge]]
+from = "split"
+to = "double"
+[[edge]]
+from = "double"
+to = "join"
+[[edge]]
+from = "join"
+to = "done"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let run = run_src(dir.path(), src, serde_json::json!({ "values": [1, 2, 3] }))
+            .await
+            .expect("fan-out run completes");
+        let merged = run.output["nodes"]["join"]["items"]
+            .as_array()
+            .expect("merge emitted items");
+        assert_eq!(
+            merged.len(),
+            3,
+            "3 list elements → 3 merged items: {}",
+            run.output
+        );
+        // Each transformed item wrapped its scalar under `wrapped`.
+        let wrapped: Vec<i64> = merged
+            .iter()
+            .filter_map(|i| i["json"]["wrapped"].as_i64())
+            .collect();
+        assert_eq!(wrapped, vec![1, 2, 3], "{}", run.output);
+    }
+
+    /// T-transform — the REQUIRED proof that `=`-bindings resolve engine-side
+    /// with ZERO OpenCompany evaluation: a dotted shorthand (`=item.brief`) and a
+    /// jq program (`=.items | length`) both resolve against the run scope.
+    #[tokio::test]
+    async fn t_transform_resolves_expr_bindings_engine_side() {
+        let src = r#"
+id = "tf_wf"
+name = "Transform WF"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "tf"
+kind = "transform"
+name = "Reshape"
+[node.config.set]
+topic = "=item.brief"
+count = "=.items | length"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "tf"
+[[edge]]
+from = "tf"
+to = "done"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let run = run_src(dir.path(), src, serde_json::json!({ "brief": "launch" }))
+            .await
+            .expect("transform run completes");
+        let item = &run.output["nodes"]["tf"]["items"][0]["json"];
+        assert_eq!(
+            item["topic"], "launch",
+            "dotted =item.brief: {}",
+            run.output
+        );
+        assert_eq!(item["count"], 1, "jq =.items | length: {}", run.output);
+    }
+
+    /// T-output_parser — a valid item passes the schema; a malformed one with
+    /// `auto_fix = false` surfaces a capability error routed by `on_error =
+    /// continue` into a data item, so the run completes carrying the failure.
+    #[tokio::test]
+    async fn t_output_parser_validates_and_routes_failure() {
+        let base = r#"
+id = "op_wf"
+name = "Parser WF"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "parse"
+kind = "output_parser"
+name = "Parse"
+on_error = "continue"
+[node.config]
+auto_fix = false
+[node.config.schema]
+type = "object"
+required = ["name"]
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "parse"
+[[edge]]
+from = "parse"
+to = "done"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+
+        // A schema-valid item passes straight through.
+        let run = run_src(dir.path(), base, serde_json::json!({ "name": "Ada" }))
+            .await
+            .expect("valid item passes");
+        assert!(
+            run.output.to_string().contains("Ada"),
+            "the validated item should flow through: {}",
+            run.output
+        );
+
+        // A malformed item (missing `name`) fails validation; `auto_fix = false`
+        // makes it a hard error, which `on_error = continue` turns into a data
+        // item so the run still completes.
+        let run = run_src(dir.path(), base, serde_json::json!({ "other": 1 }))
+            .await
+            .expect("run completes despite the schema failure");
+        assert!(
+            run.output.to_string().contains("name"),
+            "the continued error item should name the missing property: {}",
+            run.output
+        );
+    }
+
+    /// T-sub_workflow — a `sub_workflow` node runs a child saved on disk (depth
+    /// 1), resolved by id through the wired source directory.
+    #[tokio::test]
+    async fn t_sub_workflow_runs_a_disk_child() {
+        let source = tempfile::tempdir().unwrap();
+        // The child stamps a distinctive marker so we can prove it ran.
+        write_wf(
+            source.path(),
+            "child",
+            r#"
+id = "child"
+name = "Child"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "mark"
+kind = "transform"
+name = "Mark"
+[node.config.set]
+child_marker = "=42"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "mark"
+[[edge]]
+from = "mark"
+to = "done"
+"#,
+        );
+        let parent = r#"
+id = "parent"
+name = "Parent"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "sub"
+kind = "sub_workflow"
+name = "Sub"
+[node.config]
+workflow_id = "child"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "sub"
+[[edge]]
+from = "sub"
+to = "done"
+"#;
+        let home = tempfile::tempdir().unwrap();
+        let file = parse_workflow(parent).expect("parent parses");
+        let run = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps_with_source(home.path(), source.path()),
+            &tools_record(),
+            &file,
+            serde_json::json!({ "seed": 1 }),
+        )
+        .await
+        .expect("sub_workflow run completes");
+        assert!(
+            run.output.to_string().contains("child_marker"),
+            "the child workflow should have run and stamped its marker: {}",
+            run.output
+        );
+    }
+
+    /// T-cycle — two on-disk workflows referencing each other by id hard-reject
+    /// with the static cycle message, not the depth backstop.
+    #[tokio::test]
+    async fn t_mutual_sub_workflows_hard_reject() {
+        let source = tempfile::tempdir().unwrap();
+        let flow = |id: &str, other: &str| {
+            format!(
+                r#"
+id = "{id}"
+name = "{id}"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "sub"
+kind = "sub_workflow"
+name = "Sub"
+[node.config]
+workflow_id = "{other}"
+[[edge]]
+from = "start"
+to = "sub"
+"#
+            )
+        };
+        write_wf(source.path(), "flow_a", &flow("flow_a", "flow_b"));
+        write_wf(source.path(), "flow_b", &flow("flow_b", "flow_a"));
+
+        let home = tempfile::tempdir().unwrap();
+        let file = parse_workflow(&flow("flow_a", "flow_b")).expect("parent parses");
+        let err = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps_with_source(home.path(), source.path()),
+            &tools_record(),
+            &file,
+            serde_json::json!({}),
+        )
+        .await
+        .expect_err("a mutual sub_workflow reference must be refused");
+        assert!(err.to_string().contains("cycle"), "{err}");
+    }
+
+    /// T-dynamic-id — a `=expr`-bound `workflow_id` resolves the child at run
+    /// time from the trigger input, proving dynamic references work.
+    #[tokio::test]
+    async fn t_expr_bound_workflow_id_resolves_dynamically() {
+        let source = tempfile::tempdir().unwrap();
+        write_wf(
+            source.path(),
+            "greet_child",
+            r#"
+id = "greet_child"
+name = "Greet child"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "mark"
+kind = "transform"
+name = "Mark"
+[node.config.set]
+dynamic_marker = "=99"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "mark"
+[[edge]]
+from = "mark"
+to = "done"
+"#,
+        );
+        // The parent's sub_workflow reads its child id from the trigger input.
+        let parent = r#"
+id = "dyn_parent"
+name = "Dynamic parent"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "sub"
+kind = "sub_workflow"
+name = "Sub"
+[node.config]
+workflow_id = "=item.target"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "sub"
+[[edge]]
+from = "sub"
+to = "done"
+"#;
+        let home = tempfile::tempdir().unwrap();
+        let file = parse_workflow(parent).expect("parent parses");
+        let run = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps_with_source(home.path(), source.path()),
+            &tools_record(),
+            &file,
+            serde_json::json!({ "target": "greet_child" }),
+        )
+        .await
+        .expect("dynamic sub_workflow run completes");
+        assert!(
+            run.output.to_string().contains("dynamic_marker"),
+            "the expr-resolved child should have run: {}",
+            run.output
         );
     }
 }

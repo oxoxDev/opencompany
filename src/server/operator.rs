@@ -1009,6 +1009,7 @@ mod test {
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
             plan: None,
             media: None,
+            workflow_source_dir: None,
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record);
 

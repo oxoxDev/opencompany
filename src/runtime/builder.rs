@@ -866,6 +866,11 @@ impl RuntimeBuilder {
                                 // closed — `build_agent` wires no media tools even
                                 // for a company that grants `media`.
                                 media: self.media_backend.clone(),
+                                // #113 P2: the company source dir so a workflow's
+                                // `sub_workflow` node resolves a child by id from
+                                // `workflows/<id>.toml`. Same origin as the skills
+                                // source dir but a distinct seam.
+                                workflow_source_dir: self.seed_dir.clone(),
                             };
                             let record = CompanyRecord {
                                 id: id.clone(),

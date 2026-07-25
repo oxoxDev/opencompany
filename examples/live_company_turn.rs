@@ -114,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
         capabilities: opencompany::harness::toolbelt::CapabilityFilter::AllowAll,
         plan: None,
         media: None,
+        workflow_source_dir: None,
     };
 
     let pool = HarnessPool::new();
