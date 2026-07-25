@@ -426,6 +426,8 @@ description = "Runs Acme."
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
             workflow_source_dir: None,
+            plan: None,
+            media: None,
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -562,6 +564,8 @@ description = "Builds it."
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
             workflow_source_dir: None,
+            plan: None,
+            media: None,
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
@@ -762,6 +766,8 @@ members = ["engineer"]
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
             workflow_source_dir: None,
+            plan: None,
+            media: None,
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record),
@@ -940,6 +946,8 @@ name = "Design"
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
             workflow_source_dir: None,
+            plan: None,
+            media: None,
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record());
 
