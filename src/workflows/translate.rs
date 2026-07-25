@@ -59,6 +59,16 @@ pub fn translate(file: &WorkflowFile) -> WorkflowGraph {
         .filter(|n| n.on_error.as_deref() == Some("route"))
         .map(|n| n.id.as_str())
         .collect();
+    // The ids of every `switch` node, so an edge leaving one carries its label
+    // VERBATIM as the branch port — the engine's switch node routes to the port
+    // whose name equals the computed case value (an unlabeled edge → `default`,
+    // the same fallback the engine emits for a null/non-scalar discriminant).
+    let switch_ids: HashSet<&str> = file
+        .nodes
+        .iter()
+        .filter(|n| n.kind == WorkflowNodeKind::Switch)
+        .map(|n| n.id.as_str())
+        .collect();
 
     WorkflowGraph {
         id: Some(file.id.clone()),
@@ -67,7 +77,7 @@ pub fn translate(file: &WorkflowFile) -> WorkflowGraph {
         edges: file
             .edges
             .iter()
-            .map(|edge| translate_edge(edge, &condition_ids, &route_ids))
+            .map(|edge| translate_edge(edge, &condition_ids, &route_ids, &switch_ids))
             .collect(),
         ..WorkflowGraph::default()
     }
@@ -84,6 +94,15 @@ fn tinyflows_kind(kind: WorkflowNodeKind) -> NodeKind {
         WorkflowNodeKind::HttpRequest => NodeKind::HttpRequest,
         WorkflowNodeKind::Condition => NodeKind::Condition,
         WorkflowNodeKind::Output => NodeKind::Transform,
+        // The P2 catalog maps one-to-one onto tinyflows' own kinds; all of their
+        // contract rides in the node `config` overlay (P1), so `translate_node`
+        // needs no per-kind handling.
+        WorkflowNodeKind::Switch => NodeKind::Switch,
+        WorkflowNodeKind::Merge => NodeKind::Merge,
+        WorkflowNodeKind::SplitOut => NodeKind::SplitOut,
+        WorkflowNodeKind::Transform => NodeKind::Transform,
+        WorkflowNodeKind::OutputParser => NodeKind::OutputParser,
+        WorkflowNodeKind::SubWorkflow => NodeKind::SubWorkflow,
     }
 }
 
@@ -199,10 +218,21 @@ fn translate_edge(
     edge: &WorkflowEdgeDef,
     condition_ids: &HashSet<&str>,
     route_ids: &HashSet<&str>,
+    switch_ids: &HashSet<&str>,
 ) -> Edge {
     let from_port =
         if route_ids.contains(edge.from.as_str()) && edge.label.as_deref() == Some("error") {
+            // The error-port check stays FIRST so a node that is both a routing
+            // node and a condition/switch routes its `"error"` edge to the error
+            // port rather than through the branch mapping below.
             "error".to_string()
+        } else if switch_ids.contains(edge.from.as_str()) {
+            // A switch edge's label is the case name, carried verbatim; an
+            // unlabeled edge falls to the engine's `default` fallback port.
+            edge.label
+                .as_deref()
+                .map(str::to_string)
+                .unwrap_or_else(|| "default".to_string())
         } else if condition_ids.contains(edge.from.as_str()) {
             condition_port(edge.label.as_deref())
         } else {
@@ -544,6 +574,95 @@ mod tests {
         assert_eq!(port("recover").as_deref(), Some("error"));
         assert_eq!(port("yes_path").as_deref(), Some("true"));
         assert_eq!(port("no_path").as_deref(), Some("false"));
+    }
+
+    // --- P2: the twelve-kind map + switch ports ----------------------------
+
+    /// Every OpenCompany kind lowers to its tinyflows counterpart; the P2 kinds
+    /// map one-to-one and `output` still lowers to a pass-through `transform`.
+    #[test]
+    fn twelve_kind_map_is_total() {
+        use crate::company::{WorkflowFile, WorkflowNodeDef, WorkflowNodeKind};
+        let kinds = [
+            (WorkflowNodeKind::Trigger, NodeKind::Trigger),
+            (WorkflowNodeKind::Agent, NodeKind::Agent),
+            (WorkflowNodeKind::ToolCall, NodeKind::ToolCall),
+            (WorkflowNodeKind::HttpRequest, NodeKind::HttpRequest),
+            (WorkflowNodeKind::Condition, NodeKind::Condition),
+            (WorkflowNodeKind::Output, NodeKind::Transform),
+            (WorkflowNodeKind::Switch, NodeKind::Switch),
+            (WorkflowNodeKind::Merge, NodeKind::Merge),
+            (WorkflowNodeKind::SplitOut, NodeKind::SplitOut),
+            (WorkflowNodeKind::Transform, NodeKind::Transform),
+            (WorkflowNodeKind::OutputParser, NodeKind::OutputParser),
+            (WorkflowNodeKind::SubWorkflow, NodeKind::SubWorkflow),
+        ];
+        for (oc, tf) in kinds {
+            let file = WorkflowFile {
+                id: "wf".into(),
+                name: "WF".into(),
+                description: None,
+                nodes: vec![WorkflowNodeDef {
+                    id: "n".into(),
+                    kind: oc,
+                    name: "N".into(),
+                    summary: None,
+                    agent: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                }],
+                edges: Vec::new(),
+            };
+            assert_eq!(translate(&file).nodes[0].kind, tf, "{oc:?} → {tf:?}");
+        }
+    }
+
+    /// An edge leaving a `switch` carries its label VERBATIM as the branch port;
+    /// an unlabeled switch edge falls to the engine's `default` fallback port.
+    #[test]
+    fn switch_labels_map_to_verbatim_ports() {
+        use crate::company::{WorkflowFile, WorkflowNodeDef, WorkflowNodeKind};
+        let file = WorkflowFile {
+            id: "wf".into(),
+            name: "WF".into(),
+            description: None,
+            nodes: vec![
+                WorkflowNodeDef {
+                    id: "sw".into(),
+                    kind: WorkflowNodeKind::Switch,
+                    name: "Switch".into(),
+                    summary: None,
+                    agent: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                },
+                node_stub("paid"),
+                node_stub("error_case"),
+                node_stub("fallthrough"),
+            ],
+            edges: vec![
+                edge_stub("sw", "paid", Some("paid")),
+                // `error` is a legitimate case name on a switch — carried verbatim,
+                // NOT mapped onto the engine's `error` port.
+                edge_stub("sw", "error_case", Some("error")),
+                edge_stub("sw", "fallthrough", None),
+            ],
+        };
+        let graph = translate(&file);
+        let port = |to: &str| {
+            graph
+                .edges
+                .iter()
+                .find(|e| e.from_node == "sw" && e.to_node == to)
+                .map(|e| e.from_port.clone())
+        };
+        assert_eq!(port("paid").as_deref(), Some("paid"));
+        assert_eq!(port("error_case").as_deref(), Some("error"));
+        assert_eq!(port("fallthrough").as_deref(), Some("default"));
     }
 
     fn node_stub(id: &str) -> crate::company::WorkflowNodeDef {
