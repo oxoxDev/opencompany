@@ -49,21 +49,27 @@ impl WorkflowToolInvoker {
         grants: Vec<String>,
         filter: &CapabilityFilter,
     ) -> Self {
-        // The full Cell A surface, built the way `build::build_agent` builds it:
-        // shell needs a host runtime + a workspace-scoped audit logger; code and
-        // web reuse the same exec-security policy.
-        let mut tools: Vec<Box<dyn Tool>> = toolbelt::shell_tools(
-            security.clone(),
-            toolbelt::native_runtime(),
-            toolbelt::workspace_audit(workspace),
-            workspace,
-        );
-        tools.extend(toolbelt::code_tools(security.clone(), workspace));
-        tools.extend(toolbelt::web_tools(
-            security,
-            web_allowed_domains,
-            workspace,
-        ));
+        // Mirror `build_agent`: do not initialize a tool family (or its audit
+        // state) unless the company's grants can invoke that namespace.
+        let mut tools: Vec<Box<dyn Tool>> = Vec::new();
+        if crate::harness::build::grants_cover(&grants, "shell") {
+            tools.extend(toolbelt::shell_tools(
+                security.clone(),
+                toolbelt::native_runtime(),
+                toolbelt::workspace_audit(workspace),
+                workspace,
+            ));
+        }
+        if crate::harness::build::grants_cover(&grants, "code") {
+            tools.extend(toolbelt::code_tools(security.clone(), workspace));
+        }
+        if crate::harness::build::grants_cover(&grants, "web") {
+            tools.extend(toolbelt::web_tools(
+                security,
+                web_allowed_domains,
+                workspace,
+            ));
+        }
         // Apply the capability-tier filter (identity in production) just as the
         // agent builder does, so the workflow surface never exceeds the agent one.
         let tools = toolbelt::filter_by_capabilities(tools, filter);
@@ -183,6 +189,36 @@ mod tests {
             matches!(unwired, Err(EngineError::Capability(ref m)) if m.contains("not a wired")),
             "{unwired:?}"
         );
+    }
+
+    #[test]
+    fn construction_only_initializes_granted_tool_families() {
+        let dir = tempfile::tempdir().unwrap();
+        let security = Arc::new(toolbelt::exec_security(
+            dir.path(),
+            crate::harness::policy::PolicyMode::Supervised,
+        ));
+
+        let none = WorkflowToolInvoker::new(
+            security.clone(),
+            dir.path(),
+            Vec::new(),
+            Vec::new(),
+            &CapabilityFilter::AllowAll,
+        );
+        assert!(none.tools.is_empty());
+
+        let code = WorkflowToolInvoker::new(
+            security,
+            dir.path(),
+            Vec::new(),
+            vec!["code.*".to_string()],
+            &CapabilityFilter::AllowAll,
+        );
+        assert!(code.tools.contains_key("apply_patch"));
+        assert!(code.tools.contains_key("csv_export"));
+        assert!(!code.tools.contains_key("shell"));
+        assert!(!code.tools.contains_key("web_fetch"));
     }
 
     /// Minimal blocking bridge so the fail-closed checks (which never touch the
