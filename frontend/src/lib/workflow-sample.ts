@@ -1,7 +1,9 @@
 // Presentation metadata for the workflow canvas, keyed by the tinyflows node
-// kinds (trigger / agent / tool_call / http_request / condition / output). The
-// live graph comes from the host (`@/api/workflows`); this module only maps each
-// kind to its emoji + accent so `WorkflowsView` and `WorkflowNode` render it.
+// kinds (the six originals — trigger / agent / tool_call / http_request /
+// condition / output — plus the P2 catalog: switch / merge / split_out /
+// transform / output_parser / sub_workflow). The live graph comes from the host
+// (`@/api/workflows`); this module only maps each kind to its emoji + accent so
+// `WorkflowsView` and `WorkflowNode` render it.
 
 export type NodeColor = "primary" | "sage" | "amber" | "coral" | "neutral";
 
@@ -21,6 +23,13 @@ export const NODE_KIND_META: Record<string, { emoji: string; color: NodeColor }>
   http_request: { emoji: "🌐", color: "coral" },
   condition: { emoji: "🔀", color: "primary" },
   output: { emoji: "📋", color: "amber" },
+  // P2 catalog.
+  switch: { emoji: "🔱", color: "primary" },
+  merge: { emoji: "🔗", color: "sage" },
+  split_out: { emoji: "✂️", color: "coral" },
+  transform: { emoji: "🧬", color: "amber" },
+  output_parser: { emoji: "🧾", color: "amber" },
+  sub_workflow: { emoji: "📦", color: "primary" },
 };
 
 /** Tailwind classes per accent, so light/dark theming comes from tokens. */
