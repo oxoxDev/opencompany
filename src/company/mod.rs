@@ -18,6 +18,10 @@ pub mod mcp;
 pub mod mcp_oauth;
 pub mod runtime;
 mod skill_file;
+// Steer (issue #111): pause / cancel / redirect an in-flight task or delegation
+// from the operator chat. Always compiled + openhuman-free so the operator
+// control plane can steer in any build and no agent tool can ever reach it.
+pub mod steer;
 pub mod telegram;
 mod types;
 mod workflow_create;
