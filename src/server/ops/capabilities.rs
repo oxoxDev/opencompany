@@ -156,12 +156,15 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
     let flags = OptInFlags {
         media_granted: crate::company::grants_media_explicit(&record.manifest.tools.allow),
         composio_granted: crate::company::grants_composio_explicit(&record.manifest.tools.allow),
+        // Degrade to "unconfigured" on a transient secret-store error rather
+        // than failing the whole /capabilities response (budget/tier data is
+        // unrelated to Composio). Mirrors other opt-in-credential probes.
         composio_token_configured: crate::company::composio::token_configured(
             runtime.id(),
             runtime.secrets().as_ref(),
         )
         .await
-        .map_err(ApiError)?,
+        .unwrap_or(false),
     };
     let manifest_plan = &record.manifest.plan;
     let Some(plan) = CapabilityPlan::from_manifest(manifest_plan) else {
