@@ -34,7 +34,7 @@ impl ApiError {
     pub fn status(&self) -> StatusCode {
         match &self.0 {
             OpenCompanyError::CompanyNotFound(_) => StatusCode::NOT_FOUND,
-            #[cfg(feature = "mcp")]
+            #[cfg(any(feature = "openhuman", feature = "mcp"))]
             OpenCompanyError::McpServerNotFound(_) => StatusCode::NOT_FOUND,
             OpenCompanyError::ManifestInvalid { .. }
             | OpenCompanyError::ManifestParse(_, _)

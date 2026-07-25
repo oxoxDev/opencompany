@@ -1772,6 +1772,7 @@ description = "Sets direction."
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
             plan: Some(plan),
             media: None,
         };
