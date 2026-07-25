@@ -12,6 +12,7 @@ import type { OpenCompanyClient } from "@/api/client";
 export type CompanyStreamEvent =
   | { type: "agent_reply"; seq: number; atMillis: number; chatId: string; agentId: string; text: string }
   | { type: "task_dispatched"; seq: number; atMillis: number; taskId: string }
+  | { type: "task_steered"; seq: number; atMillis: number; taskId: string; action: string }
   | {
       type: "mcp_call_failed";
       seq: number;
@@ -45,6 +46,12 @@ interface Options {
    * chat's transcript. The shell dedupes against its own optimistic echo.
    */
   onAgentReply?: (event: AgentReplyEvent) => void;
+  /**
+   * Called for each task-lifecycle event (`task_dispatched`, `task_steered`) so
+   * a surface showing in-flight runs — the company-chat steer strip (issue #111)
+   * — can refetch live off the existing SSE stream instead of only on a poll.
+   */
+  onTaskEvent?: (event: CompanyStreamEvent) => void;
 }
 
 /**
@@ -59,13 +66,17 @@ interface Options {
 export function useEvents(
   client: OpenCompanyClient,
   company: string | null,
-  { pendingApprovals, onAgentReply }: Options,
+  { pendingApprovals, onAgentReply, onTaskEvent }: Options,
 ): void {
-  // Keep the latest callback without re-opening the stream when it changes.
+  // Keep the latest callbacks without re-opening the stream when they change.
   const onAgentReplyRef = useRef(onAgentReply);
   useEffect(() => {
     onAgentReplyRef.current = onAgentReply;
   }, [onAgentReply]);
+  const onTaskEventRef = useRef(onTaskEvent);
+  useEffect(() => {
+    onTaskEventRef.current = onTaskEvent;
+  }, [onTaskEvent]);
 
   // The rising-edge detector for pending approvals. Seeded with the current
   // value so we only toast on an *increase* observed while mounted, never on the
@@ -112,7 +123,7 @@ export function useEvents(
         console.debug("[events] dropping unparseable event", err);
         return;
       }
-      handleEvent(event, onAgentReplyRef.current);
+      handleEvent(event, onAgentReplyRef.current, onTaskEventRef.current);
     };
 
     source.onerror = () => {
@@ -135,7 +146,11 @@ export function useEvents(
 }
 
 /** Routes one parsed event to its toast / transcript side effect. */
-function handleEvent(event: CompanyStreamEvent, onAgentReply?: (e: AgentReplyEvent) => void): void {
+function handleEvent(
+  event: CompanyStreamEvent,
+  onAgentReply?: (e: AgentReplyEvent) => void,
+  onTaskEvent?: (e: CompanyStreamEvent) => void,
+): void {
   switch (event.type) {
     case "mcp_call_failed":
       toast.error(`MCP ${event.server} failed`, {
@@ -146,6 +161,13 @@ function handleEvent(event: CompanyStreamEvent, onAgentReply?: (e: AgentReplyEve
       toast("A task is on the move", {
         description: "Your company picked up a task.",
       });
+      onTaskEvent?.(event);
+      break;
+    case "task_steered":
+      toast("A task was steered", {
+        description: `Your company ${steeredVerb(event.action)} a task.`,
+      });
+      onTaskEvent?.(event);
       break;
     case "agent_reply":
       onAgentReply?.({ chatId: event.chatId, agentId: event.agentId, text: event.text });
@@ -168,5 +190,19 @@ function handleEvent(event: CompanyStreamEvent, onAgentReply?: (e: AgentReplyEve
     default:
       // An unknown/forward event kind: ignore rather than surface noise.
       break;
+  }
+}
+
+/** Past-tense phrasing for a `task_steered` action, for the toast copy. */
+function steeredVerb(action: string): string {
+  switch (action) {
+    case "pause":
+      return "paused";
+    case "cancel":
+      return "cancelled";
+    case "redirect":
+      return "redirected";
+    default:
+      return "steered";
   }
 }

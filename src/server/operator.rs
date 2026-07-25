@@ -381,6 +381,30 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             o["memo"] = json!(memo);
             o
         }
+        // Issue #112: surface a newly authored workflow so the console can react
+        // live (e.g. refresh the Workflows tab). Only the id + display name go on
+        // the wire — the actor (`by`) is omitted, matching the deny-by-default
+        // projection of the other attributed events.
+        CompanyEvent::WorkflowCreated {
+            workflow_id, name, ..
+        } => {
+            let mut o = envelope("workflow_created");
+            o["workflowId"] = json!(workflow_id);
+            o["name"] = json!(name);
+            o
+        }
+        // Issue #111: surface an accepted operator steer so the console's
+        // in-flight strip can refresh live. Only the task id + action word go on
+        // the wire — the actor (`by`) and the operator's redirect `instruction`
+        // are dropped, matching the deny-by-default projection.
+        CompanyEvent::TaskSteered {
+            task_id, action, ..
+        } => {
+            let mut o = envelope("task_steered");
+            o["taskId"] = json!(task_id);
+            o["action"] = json!(action);
+            o
+        }
         // Not an attention signal, or carries a raw payload we never put on the
         // wire — dropped.
         _ => return None,
@@ -1010,7 +1034,7 @@ mod test {
             workflow_source_dir: None,
             plan: None,
             media: None,
-            workflow_source_dir: None,
+            steer: crate::company::steer::InflightRegistry::default(),
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record);
 
@@ -1701,6 +1725,43 @@ mod test {
             !v.to_string().contains("secret-user-id"),
             "user id leaked onto the wire"
         );
+    }
+
+    #[test]
+    fn projects_task_steered_without_actor_or_instruction() {
+        let v = super::project_event(&stored(CompanyEvent::TaskSteered {
+            task_id: "t-9".into(),
+            action: "redirect".into(),
+            instruction: Some("focus on the API".into()),
+            by: Some(Actor {
+                kind: ActorKind::User,
+                id: "secret-user-id".into(),
+            }),
+        }))
+        .expect("task_steered is an attention signal");
+        assert_eq!(v["type"], "task_steered");
+        assert_eq!(v["taskId"], "t-9");
+        assert_eq!(v["action"], "redirect");
+        let wire = v.to_string();
+        assert!(!wire.contains("secret-user-id"));
+        assert!(!wire.contains("focus on the API"));
+    }
+
+    #[test]
+    fn projects_workflow_created_without_the_actor() {
+        let v = super::project_event(&stored(CompanyEvent::WorkflowCreated {
+            workflow_id: "greeter".into(),
+            name: "Greeter".into(),
+            by: Some(Actor {
+                kind: ActorKind::User,
+                id: "secret-user-id".into(),
+            }),
+        }))
+        .expect("workflow_created is an attention signal");
+        assert_eq!(v["type"], "workflow_created");
+        assert_eq!(v["workflowId"], "greeter");
+        assert_eq!(v["name"], "Greeter");
+        assert!(!v.to_string().contains("secret-user-id"));
     }
 
     #[test]

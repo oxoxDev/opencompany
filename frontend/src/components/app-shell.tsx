@@ -188,6 +188,9 @@ export function AppShell({
   const [threads, setThreads] = useState(defaultThreads);
   const [activeThreadId, setActiveThreadId] = useState("main");
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  // A monotonic nonce bumped on every task-lifecycle SSE event, so the
+  // company-chat in-flight steer strip (issue #111) refetches live.
+  const [taskEventTick, setTaskEventTick] = useState(0);
   const feed = useCompany(client, company, initialStatus);
 
   const pending = feed.status.pending_approvals;
@@ -294,6 +297,7 @@ export function AppShell({
   useEvents(client, company, {
     pendingApprovals: pending,
     onAgentReply: injectAgentReply,
+    onTaskEvent: useCallback(() => setTaskEventTick((n) => n + 1), []),
   });
 
   return (
@@ -386,6 +390,7 @@ export function AppShell({
               onSelect={setActiveThreadId}
               setMessages={setThreadMessages}
               onReply={() => void feed.refresh()}
+              taskEventTick={taskEventTick}
             />
           )}
           {view === "inbox" && <InboxView company={company} />}

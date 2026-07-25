@@ -9,7 +9,7 @@
 //! first agent when none is tagged (so a company without an orchestrator behaves
 //! exactly as before).
 //!
-//! It reaches five tools, all wired only onto the orchestrator agent:
+//! It reaches six tools, all wired only onto the orchestrator agent:
 //!
 //! * [`QueryCompanyTool`] — a read surface over the company's [`FactStore`] and
 //!   recent [`EventLog`] history.
@@ -25,6 +25,11 @@
 //!   task waiting on a workflow can actually be run to completion. Unlike the
 //!   delegation tools it runs the graph inline and returns a concise summary of
 //!   the run rather than enqueuing deferred work.
+//! * [`CreateWorkflowTool`] (issue #112) — authors and saves a brand-new
+//!   workflow graph through the same validated-persist core the console
+//!   `POST .../workflows` route runs, so the orchestrator can capture a
+//!   repeatable process mid-chat; it lands enabled and runnable by
+//!   [`RunWorkflowTool`] the same turn.
 //! * [`AddAgentTool`] (issue #71) — writes a new [`OverlayAgent`] through the
 //!   same store path the console `POST .../team` route uses, so the
 //!   orchestrator can bring on a teammate mid-chat.
@@ -43,7 +48,10 @@ use openhuman_core::openhuman as oh;
 
 use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
 
-use crate::company::{Agent as ManifestAgent, WorkflowFile, load_company_workflows};
+use crate::company::{
+    Agent as ManifestAgent, RawEdge, RawNode, RawWorkflow, WorkflowFile, create_company_workflow,
+    load_company_workflows,
+};
 use crate::error::OpenCompanyError;
 use crate::ports::events::EventLog;
 use crate::ports::facts::FactStore;
@@ -73,6 +81,8 @@ pub const DELEGATE_TO_DESK_TOOL: &str = "delegate_to_desk";
 pub const RUN_WORKFLOW_TOOL: &str = "run_workflow";
 /// The `add_agent` tool name (issue #71 — Active Runtime Teammates).
 pub const ADD_AGENT_TOOL: &str = "add_agent";
+/// The `create_workflow` tool name (issue #112 — author a saved workflow graph).
+pub const CREATE_WORKFLOW_TOOL: &str = "create_workflow";
 
 /// The id of the orchestrator agent for a roster: the first agent tagged
 /// `tier = "orchestrator"`, else the first roster agent, else `None` (empty
@@ -95,7 +105,10 @@ pub fn orchestrator_id(agents: &[ManifestAgent]) -> Option<String> {
 /// [`ApprovalPolicy`](crate::harness::policy::ApprovalPolicy) classifies them as
 /// internal — never an external effect to park or deny.
 pub fn is_delegation_tool(tool: &str) -> bool {
-    tool == SPAWN_TASK_TOOL || tool == DELEGATE_TO_DESK_TOOL || tool == ADD_AGENT_TOOL
+    tool == SPAWN_TASK_TOOL
+        || tool == DELEGATE_TO_DESK_TOOL
+        || tool == ADD_AGENT_TOOL
+        || tool == CREATE_WORKFLOW_TOOL
 }
 
 /// The orchestrator persona brief, appended to the orchestrator agent's persona.
@@ -107,10 +120,13 @@ company's durable facts and recent activity, `delegate_to_desk` to hand a turn t
 member, `spawn_task` to open a tracked task card, `run_workflow` to execute one of the \
 company's saved workflows by id (for example to advance or finish a task that is waiting on a \
 workflow run) — you can run workflows yourself; never claim the run_workflow tool is unavailable — \
-and `add_agent` to bring on a new teammate (a name, role, and optional mandate) when the company \
-genuinely needs one — it becomes a real, addressable member of the team starting next turn. \
-Delegate, run a workflow, or add a teammate only when it genuinely helps — otherwise answer \
-directly and concisely."
+`create_workflow` to author and save a brand-new workflow graph (a trigger plus agent / tool / \
+condition / output steps) when a repeatable process is worth capturing — it's enabled immediately \
+and runnable with run_workflow — and `add_agent` to bring on a new teammate (a name, role, and \
+optional mandate) when the company genuinely needs one — it becomes a real, addressable member of \
+the team starting next turn. \
+Delegate, run or create a workflow, or add a teammate only when it genuinely helps — otherwise \
+answer directly and concisely."
         .to_string()
 }
 
@@ -317,6 +333,12 @@ fn summarize_event(event: &CompanyEvent) -> String {
         CompanyEvent::McpCallFailed { server, tool, .. } => {
             format!("MCP call failed: {server}/{tool}")
         }
+        CompanyEvent::WorkflowCreated {
+            workflow_id, name, ..
+        } => format!("workflow created: {name} ({workflow_id})"),
+        CompanyEvent::TaskSteered {
+            task_id, action, ..
+        } => format!("task steered ({action}): {task_id}"),
     }
 }
 
@@ -605,9 +627,10 @@ impl Tool for AddAgentTool {
 // ---------------------------------------------------------------------------
 
 /// The complete tool set wired onto the company's orchestrator agent (issues
-/// #53, #67, and #71), in order: the `query_company` read surface, the
+/// #53, #67, #71, and #112), in order: the `query_company` read surface, the
 /// `spawn_task` and `delegate_to_desk` delegation tools, the `run_workflow`
-/// execution tool, and the `add_agent` roster-write tool.
+/// execution tool, the `create_workflow` authoring tool, and the `add_agent`
+/// roster-write tool.
 ///
 /// [`build_agent`](crate::harness::build::build_agent) extends the orchestrator
 /// agent's tools with exactly this vector, so a test over this function is the
@@ -628,13 +651,22 @@ pub fn orchestrator_tools(
     let mut tools: Vec<Box<dyn Tool>> = vec![Box::new(QueryCompanyTool::new(
         company.clone(),
         facts,
-        events,
+        events.clone(),
     ))];
     tools.extend(delegation_tools(queue));
     tools.push(Box::new(RunWorkflowTool::new(
         company.clone(),
-        workflow_source_dir,
+        workflow_source_dir.clone(),
         workflow_runner,
+    )));
+    // `create_workflow` (issue #112) shares the same source dir the run tool
+    // reads graphs from, plus the store it enables the new id on and the event
+    // log it journals the audit event to.
+    tools.push(Box::new(CreateWorkflowTool::new(
+        company.clone(),
+        workflow_source_dir,
+        store.clone(),
+        events,
     )));
     tools.push(Box::new(AddAgentTool::new(company, store)));
     tools
@@ -917,6 +949,263 @@ fn preview_item(item: &Value) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// create_workflow (issue #112)
+// ---------------------------------------------------------------------------
+
+/// The camelCase request shape the `create_workflow` tool accepts — the same
+/// graph shape the console's creator posts to `POST …/workflows` and the read
+/// routes return (`id`/`name`/`description?`/`nodes`/`edges`), so a graph the
+/// orchestrator authors is indistinguishable from one authored in the console.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateWorkflowArgs {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    nodes: Vec<CreateWorkflowArgNode>,
+    #[serde(default)]
+    edges: Vec<CreateWorkflowArgEdge>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateWorkflowArgNode {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    agent: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateWorkflowArgEdge {
+    #[serde(default)]
+    from: String,
+    #[serde(default)]
+    to: String,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+impl From<CreateWorkflowArgs> for RawWorkflow {
+    fn from(args: CreateWorkflowArgs) -> Self {
+        Self {
+            id: args.id,
+            name: args.name,
+            description: args.description,
+            nodes: args
+                .nodes
+                .into_iter()
+                .map(|n| RawNode {
+                    id: n.id,
+                    kind: n.kind,
+                    name: n.name,
+                    summary: n.summary,
+                    agent: n.agent,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                })
+                .collect(),
+            edges: args
+                .edges
+                .into_iter()
+                .map(|e| RawEdge {
+                    from: e.from,
+                    to: e.to,
+                    label: e.label,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// A tool that lets the orchestrator author and save a brand-new workflow graph
+/// mid-chat (issue #112).
+///
+/// It runs the exact same validated-persist core the console's
+/// `POST …/workflows` route runs
+/// ([`create_company_workflow`](crate::company::create_company_workflow)): safe
+/// id + size caps, exactly one trigger, roster cross-check, case-insensitive
+/// name uniqueness, [`parse_workflow`](crate::company::parse_workflow)
+/// revalidation, atomic write, enable-on-record, best-effort audit event. So a
+/// workflow the orchestrator creates is byte-identical to one created in the
+/// console, immediately enabled, and runnable via `run_workflow` the same turn.
+///
+/// Every failure mode — no source directory, an invalid graph, a duplicate id
+/// or name, a store write error — is an agent-actionable [`ToolResult::error`]
+/// (the [`RunWorkflowTool`] convention), never a panic, so the orchestrator can
+/// reason about and report exactly what to fix.
+pub struct CreateWorkflowTool {
+    company: CompanyId,
+    source_dir: Option<PathBuf>,
+    store: Arc<dyn CompanyStore>,
+    events: Option<Arc<dyn EventLog>>,
+}
+
+impl CreateWorkflowTool {
+    /// Builds the tool over the company id, its on-disk source directory
+    /// (`companies/<name>`, whose `workflows/` subtree the graph lands in), the
+    /// company store (to enable the new id), and the event log (to journal the
+    /// audit event).
+    pub fn new(
+        company: CompanyId,
+        source_dir: Option<PathBuf>,
+        store: Arc<dyn CompanyStore>,
+        events: Option<Arc<dyn EventLog>>,
+    ) -> Self {
+        Self {
+            company,
+            source_dir,
+            store,
+            events,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for CreateWorkflowTool {
+    fn name(&self) -> &str {
+        CREATE_WORKFLOW_TOOL
+    }
+
+    fn description(&self) -> &str {
+        "Author and save a new workflow graph for the company, then enable it so it can be run with run_workflow. A workflow is a directed graph: exactly one `trigger` node (what starts it) plus any of `agent` (a roster teammate does a step — set `agent` to that teammate's id), `tool_call`, `http_request`, `condition`, and `output` nodes, joined by `edges` ({from, to, optional label}). Node ids must be unique; every `agent` node must name a real teammate. Use this to capture a repeatable process; then run it with run_workflow."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "A short unique id (the on-disk filename stem): no spaces, slashes, or `..`."
+                },
+                "name": {
+                    "type": "string",
+                    "description": "A human-readable name, unique among the company's workflows (case-insensitive)."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "An optional one-line description of what the workflow does."
+                },
+                "nodes": {
+                    "type": "array",
+                    "description": "The graph's nodes. Exactly one must be a `trigger`.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string", "description": "Node id, unique within the graph." },
+                            "kind": {
+                                "type": "string",
+                                "enum": ["trigger", "agent", "tool_call", "http_request", "condition", "output"],
+                                "description": "One of the six node kinds."
+                            },
+                            "name": { "type": "string", "description": "Human-readable node name." },
+                            "summary": { "type": "string", "description": "Optional short description of the step." },
+                            "agent": { "type": "string", "description": "On an `agent` node only: the roster teammate id that performs the step." }
+                        },
+                        "required": ["id", "kind", "name"],
+                        "additionalProperties": false
+                    }
+                },
+                "edges": {
+                    "type": "array",
+                    "description": "Directed edges between node ids.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "from": { "type": "string", "description": "Source node id." },
+                            "to": { "type": "string", "description": "Destination node id." },
+                            "label": { "type": "string", "description": "Optional branch label (e.g. `yes`/`no` off a condition)." }
+                        },
+                        "required": ["from", "to"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["id", "name", "nodes"],
+            "additionalProperties": false
+        })
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Write
+    }
+
+    fn supports_markdown(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
+        let draft: RawWorkflow = match serde_json::from_value::<CreateWorkflowArgs>(args) {
+            Ok(args) => args.into(),
+            Err(err) => {
+                tracing::debug!(company = %self.company, error = %err, "create_workflow: unreadable args");
+                return Ok(ToolResult::error(format!(
+                    "Couldn't read the workflow definition: {err}. Provide `id`, `name`, and `nodes` (with an `edges` list)."
+                )));
+            }
+        };
+
+        // A deployment with no source directory has nowhere to write the graph.
+        let Some(source_dir) = self.source_dir.as_deref() else {
+            tracing::debug!(company = %self.company, "create_workflow: no source dir");
+            return Ok(ToolResult::error(
+                "This company has no on-disk workflow definitions on this deployment, so there's nowhere to save a new workflow.",
+            ));
+        };
+
+        tracing::debug!(company = %self.company, workflow = %draft.id, "create_workflow: authoring");
+        match create_company_workflow(
+            &self.company,
+            source_dir,
+            &self.store,
+            self.events.as_ref(),
+            draft,
+        )
+        .await
+        {
+            Ok(file) => {
+                tracing::debug!(company = %self.company, workflow = %file.id, "create_workflow: created");
+                let md = format!(
+                    "Created workflow **{}** (`{}`). It's enabled and ready to run — use `run_workflow` with id `{}` to execute it.",
+                    file.name.trim(),
+                    file.id,
+                    file.id
+                );
+                Ok(ToolResult::success_with_markdown(
+                    json!({ "workflow": file.id }),
+                    md,
+                ))
+            }
+            Err(err) => {
+                tracing::debug!(company = %self.company, error = %err, "create_workflow: rejected");
+                let detail = match &err {
+                    OpenCompanyError::InvalidRequest(message)
+                    | OpenCompanyError::Conflict(message) => message.clone(),
+                    _ => "the company couldn't save it right now; try again.".to_string(),
+                };
+                Ok(ToolResult::error(format!(
+                    "Couldn't create the workflow: {detail}"
+                )))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -961,6 +1250,7 @@ mod tests {
         assert!(is_delegation_tool(SPAWN_TASK_TOOL));
         assert!(is_delegation_tool(DELEGATE_TO_DESK_TOOL));
         assert!(is_delegation_tool(ADD_AGENT_TOOL));
+        assert!(is_delegation_tool(CREATE_WORKFLOW_TOOL));
         // The read tool is NOT a delegation tool.
         assert!(!is_delegation_tool(QUERY_COMPANY_TOOL));
         assert!(!is_delegation_tool("send_email"));
@@ -1270,7 +1560,7 @@ mod tests {
     }
 
     #[test]
-    fn orchestrator_tools_includes_all_five() {
+    fn orchestrator_tools_includes_all_six() {
         let queue = DelegationQueue::default();
         let tools = orchestrator_tools(
             CompanyId::new("acme"),
@@ -1282,7 +1572,9 @@ mod tests {
             Arc::new(MemStore::default()),
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert_eq!(names.len(), 6, "got {names:?}");
         assert!(names.contains(&RUN_WORKFLOW_TOOL), "got {names:?}");
+        assert!(names.contains(&CREATE_WORKFLOW_TOOL), "got {names:?}");
         assert!(names.contains(&ADD_AGENT_TOOL), "got {names:?}");
         assert!(names.contains(&QUERY_COMPANY_TOOL), "got {names:?}");
         assert!(names.contains(&SPAWN_TASK_TOOL), "got {names:?}");
@@ -1423,5 +1715,151 @@ mod tests {
             .await
             .expect("execute");
         assert!(result.is_error);
+    }
+
+    // ---- create_workflow (issue #112) ----
+
+    /// A record with an `assistant` roster agent so an `agent`-node graph passes
+    /// the roster cross-check inside the create core.
+    fn record_with_assistant(company: &CompanyId) -> CompanyRecord {
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[[agent]]\nid = \"assistant\"\nrole = \"Assistant\"\n",
+        )
+        .expect("valid manifest");
+        CompanyRecord {
+            id: company.clone(),
+            manifest,
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+        }
+    }
+
+    /// The canonical happy graph the create tool accepts (camelCase body).
+    fn greeter_body() -> Value {
+        json!({
+            "id": "greeter",
+            "name": "Greeter",
+            "description": "Says hi.",
+            "nodes": [
+                { "id": "start", "kind": "trigger", "name": "Start" },
+                { "id": "worker", "kind": "agent", "name": "Worker", "agent": "assistant" },
+                { "id": "done", "kind": "output", "name": "Report" }
+            ],
+            "edges": [
+                { "from": "start", "to": "worker" },
+                { "from": "worker", "to": "done", "label": "ok" }
+            ]
+        })
+    }
+
+    #[tokio::test]
+    async fn create_workflow_tool_then_run_workflow_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+
+        // Author the graph.
+        let create = CreateWorkflowTool::new(
+            company.clone(),
+            Some(dir.path().to_path_buf()),
+            store.clone(),
+            None,
+        );
+        let created = create.execute(greeter_body()).await.expect("execute");
+        assert!(!created.is_error, "create should succeed: {created:?}");
+        assert!(
+            created.output_for_llm(true).contains("run_workflow"),
+            "{created:?}"
+        );
+
+        // It's enabled on the record.
+        let record = store.load(&company).await.unwrap().unwrap();
+        assert!(
+            record
+                .manifest
+                .workflows
+                .enabled
+                .contains(&"greeter".to_string())
+        );
+
+        // And immediately runnable via the run tool over the same source dir.
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(StubRunner::new(WorkflowRun {
+            output: json!({ "nodes": { "worker": { "items": ["hi"] } } }),
+            pending_approvals: Vec::new(),
+        }));
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+        let run = RunWorkflowTool::new(company.clone(), Some(dir.path().to_path_buf()), handle);
+        let result = run
+            .execute(json!({ "id": "greeter" }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "run should succeed: {result:?}");
+        assert!(
+            result.output_for_llm(true).contains("Greeter"),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_workflow_tool_guardrail_failure_is_error_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(company, Some(dir.path().to_path_buf()), store, None);
+        // Zero triggers — a guardrail failure must be an is_error ToolResult, not
+        // a raised anyhow error.
+        let result = tool
+            .execute(json!({
+                "id": "bad",
+                "name": "Bad",
+                "nodes": [ { "id": "a", "kind": "output", "name": "A" } ],
+                "edges": []
+            }))
+            .await
+            .expect("execute returns a result, not an error");
+        assert!(result.is_error, "{result:?}");
+        assert!(
+            result.output_for_llm(false).contains("trigger"),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_workflow_tool_errors_without_source_dir() {
+        let store: Arc<dyn CompanyStore> = Arc::new(MemStore::default());
+        let tool = CreateWorkflowTool::new(CompanyId::new("acme"), None, store, None);
+        let result = tool
+            .execute(json!({ "id": "x", "name": "X", "nodes": [] }))
+            .await
+            .expect("execute");
+        assert!(result.is_error);
+        assert!(
+            result.output_for_llm(false).contains("nowhere to save"),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_workflow_tool_errors_on_unreadable_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn CompanyStore> = Arc::new(MemStore::default());
+        let tool = CreateWorkflowTool::new(
+            CompanyId::new("acme"),
+            Some(dir.path().to_path_buf()),
+            store,
+            None,
+        );
+        // A non-object payload can't deserialize into the create body.
+        let result = tool.execute(json!(42)).await.expect("execute");
+        assert!(result.is_error);
+        assert!(
+            result.output_for_llm(false).contains("Couldn't read"),
+            "{result:?}"
+        );
     }
 }

@@ -148,21 +148,21 @@ pub fn native_runtime() -> Arc<dyn RuntimeAdapter> {
 /// OpenHuman's `runtime_node::build_runtime_tools` does. Keyed on the agent's
 /// own workspace dir so audit trails are tenant-isolated.
 ///
-/// Audit must never block agent construction, so a logger-init failure degrades
-/// to [`AuditLogger::disabled`] rather than propagating. The failure is logged
-/// at `error!` (not `warn!`): a consistent init failure means every subsequent
-/// shell command for this agent runs with **no audit record**, so the event
-/// must surface in production error telemetry rather than blend into warnings.
-pub fn workspace_audit(workspace: &Path) -> Arc<AuditLogger> {
+/// Returns `None` when the logger cannot be initialized. Callers **must** treat
+/// `None` as fail-closed: [`shell_tools`] withholds the `ShellTool` entirely
+/// rather than register it unaudited (see there). The failure is logged at
+/// `error!` (not `warn!`): losing the audit logger drops shell capability for
+/// the agent, so the event must surface in production error telemetry.
+pub fn workspace_audit(workspace: &Path) -> Option<Arc<AuditLogger>> {
     match get_or_create_workspace_audit_logger(AuditConfig::default(), workspace.to_path_buf()) {
-        Ok(logger) => logger,
+        Ok(logger) => Some(logger),
         Err(error) => {
             tracing::error!(
                 workspace = %workspace.display(),
                 %error,
-                "[toolbelt] workspace audit logger init failed; shell commands for this agent will run UNAUDITED"
+                "[toolbelt] workspace audit logger init failed; withholding shell capability (fail-closed) — this agent gets NO shell tool"
             );
-            AuditLogger::disabled()
+            None
         }
     }
 }
@@ -179,12 +179,21 @@ pub fn workspace_audit(workspace: &Path) -> Arc<AuditLogger> {
 /// * `shell` — run commands (needs `runtime` + `audit`; plain constructor, no
 ///   Node/Python bootstrap in v1).
 /// * `read_workspace_state` — read-only git/tree overview.
+///
+/// **Fail closed on audit:** `audit` is `None` only when the per-workspace audit
+/// logger could not be initialized (see [`workspace_audit`]). In that case the
+/// whole `shell` namespace is withheld — an empty vector — so a `ShellTool` can
+/// never run commands with no audit record. Dropping the capability is the safe
+/// failure mode; registering an unaudited shell is not.
 pub fn shell_tools(
     security: Arc<SecurityPolicy>,
     runtime: Arc<dyn RuntimeAdapter>,
-    audit: Arc<AuditLogger>,
+    audit: Option<Arc<AuditLogger>>,
     workspace: &Path,
 ) -> Vec<Box<dyn Tool>> {
+    let Some(audit) = audit else {
+        return Vec::new();
+    };
     vec![
         Box::new(ShellTool::new(security, runtime, audit)),
         Box::new(WorkspaceStateTool::new(workspace.to_path_buf())),
@@ -405,12 +414,33 @@ mod tests {
     fn shell_tools_expose_expected_names() {
         let ws = Path::new("/tmp/oc-toolbelt-shell");
         let security = test_security(ws, PolicyMode::Supervised);
-        let tools = shell_tools(security, native_runtime(), AuditLogger::disabled(), ws);
+        let tools = shell_tools(
+            security,
+            native_runtime(),
+            Some(AuditLogger::disabled()),
+            ws,
+        );
         let got = names(&tools);
         for expected in ["shell", "read_workspace_state"] {
             assert!(got.contains(&expected), "missing {expected}: {got:?}");
         }
         assert_eq!(got.len(), 2, "shell tools drifted: {got:?}");
+    }
+
+    /// Fail-closed guard: when the workspace audit logger cannot be built
+    /// (`workspace_audit` → `None`), `shell_tools` MUST withhold the entire
+    /// `shell` namespace rather than register a `ShellTool` that would execute
+    /// commands with no audit record. This is the security boundary — pin it.
+    #[test]
+    fn shell_tools_absent_when_audit_init_fails() {
+        let ws = Path::new("/tmp/oc-toolbelt-shell-noaudit");
+        let security = test_security(ws, PolicyMode::Supervised);
+        let tools = shell_tools(security, native_runtime(), None, ws);
+        assert!(
+            tools.is_empty(),
+            "shell namespace must be withheld when audit init fails, got: {:?}",
+            names(&tools)
+        );
     }
 
     #[test]
@@ -437,7 +467,7 @@ mod tests {
         let shell = shell_tools(
             security.clone(),
             native_runtime(),
-            AuditLogger::disabled(),
+            Some(AuditLogger::disabled()),
             ws,
         );
         let code = code_tools(security, ws);
@@ -679,7 +709,7 @@ mod tests {
         let mut tools = shell_tools(
             security.clone(),
             native_runtime(),
-            AuditLogger::disabled(),
+            Some(AuditLogger::disabled()),
             ws,
         );
         tools.extend(code_tools(security, ws));
@@ -743,7 +773,7 @@ mod tests {
         let mut tools: Vec<Box<dyn Tool>> = shell_tools(
             security.clone(),
             native_runtime(),
-            AuditLogger::disabled(),
+            Some(AuditLogger::disabled()),
             ws,
         );
         tools.extend(code_tools(security.clone(), ws));

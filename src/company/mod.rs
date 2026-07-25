@@ -18,8 +18,14 @@ pub mod mcp;
 pub mod mcp_oauth;
 pub mod runtime;
 mod skill_file;
+// Steer (issue #111): pause / cancel / redirect an in-flight task or delegation
+// from the operator chat. Always compiled + openhuman-free so the operator
+// control plane can steer in any build and no agent tool can ever reach it.
+pub mod steer;
 pub mod telegram;
 mod types;
+#[cfg(feature = "openhuman")]
+mod workflow_create;
 mod workflow_file;
 pub mod workspace_seed;
 
@@ -41,6 +47,10 @@ pub use workflow_file::{
 // from its request body, renders it to TOML, and re-parses it through
 // `parse_workflow` above for validation before writing to disk.
 pub(crate) use workflow_file::{RawEdge, RawNode, RawWorkflow, render_workflow};
+// Crate-internal only: the shared validated-persist core (issue #112) both the
+// REST `POST …/workflows` route and the orchestrator `create_workflow` tool run.
+#[cfg(feature = "openhuman")]
+pub(crate) use workflow_create::create_company_workflow;
 pub use workspace_seed::{NodeKind, SeedNode, extract_wikilinks, walk_workspace};
 
 use crate::{Result, VERSION};

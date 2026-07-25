@@ -178,6 +178,11 @@ pub fn build_agent(
         // isolated), so those handles are built only under `wants_shell`.
         if wants_shell {
             let runtime = toolbelt::native_runtime();
+            // Fail closed: `workspace_audit` returns `None` if the per-workspace
+            // audit logger cannot be initialized, and `shell_tools` then withholds
+            // the shell namespace entirely rather than register an unaudited
+            // `ShellTool`. A granted agent silently loses shell here — the
+            // error-level log in `workspace_audit` surfaces why.
             let audit = toolbelt::workspace_audit(&workspace);
             tools.extend(toolbelt::shell_tools(
                 exec_security.clone(),

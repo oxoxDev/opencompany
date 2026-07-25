@@ -75,7 +75,12 @@ pub trait EventLog: Send + Sync {
 
 `CompanyEvent` variants: `OperatorMessage`, `WebhookReceived`,
 `ScheduleFired`, `A2aTaskReceived`, `ApprovalResolved`, `FeedbackFiled`,
-`PaymentReceived`.
+`PaymentReceived`, `LifecycleChanged`, `AgentReply`, `MemoryFactDeleted`,
+`TaskDispatched`, `McpCallFailed`, `WorkflowCreated` (a new saved workflow
+graph was authored + enabled via the console `POST …/workflows` route or the
+orchestrator's `create_workflow` tool; journaled best-effort after persist),
+`TaskSteered` (an operator paused, cancelled, or redirected an in-flight task
+or delegation).
 
 ## MemoryStore
 

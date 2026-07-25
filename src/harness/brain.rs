@@ -22,8 +22,15 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::Result;
+use crate::company::steer::{InflightEntry, InflightKind, SteerAction, cap_redirect};
 use crate::harness::orchestrator::{self, Delegation};
 use crate::harness::{HarnessDeps, HarnessPool};
+
+/// The most operator redirects honored within a single task dispatch (issue
+/// #111). A redirect re-runs the turn in-loop with the fresh instruction
+/// appended; past this cap the run is finalized to `in_review` so a redirect
+/// storm can't loop forever.
+const MAX_REDIRECTS_PER_DISPATCH: u32 = 3;
 use crate::ports::brain::{Brain, CycleHost};
 use crate::ports::types::{
     CompanyEvent, CompanyRecord, CompressedTrace, CycleRequest, CycleResult, OutboundMessage,
@@ -79,32 +86,124 @@ impl HarnessBrain {
         };
 
         let responder = self.task_responder(&card.assignee);
-        let instruction = task_instruction(&card);
-        match self
-            .pool
-            .run(&self.record.id, &responder, &instruction, &self.deps)
-            .await
-        {
-            // A dispatched task discards its steps — the card note is text-only.
-            Ok(outcome) => {
-                card.note = Some(append_result(
-                    card.note.as_deref(),
+
+        // Register the run so an operator can steer it mid-flight. The guard's
+        // RAII `Drop` deregisters on every exit path (success, error, redirect
+        // exhaustion), so a crashed turn never leaves a ghost row in the strip.
+        let guard = self.deps.steer.register(
+            &self.record.id,
+            InflightEntry {
+                key: card.id.clone(),
+                task_id: Some(card.id.clone()),
+                kind: InflightKind::Task,
+                title: card.title.clone(),
+                agent_id: responder.clone(),
+                started_at_millis: now_millis(),
+                pending_action: None,
+            },
+        );
+        let control = guard.control().clone();
+
+        // The base turn instruction is frozen at dispatch (the card's note keeps
+        // accumulating operator/agent blocks, but a redirect always re-runs from
+        // the original brief plus the fresh instruction — last redirect wins).
+        let base_instruction = task_instruction(&card);
+        let mut instruction = base_instruction.clone();
+        let mut redirects: u32 = 0;
+
+        loop {
+            let outcome = self
+                .pool
+                .run_steered(
+                    &self.record.id,
                     &responder,
-                    &outcome.reply,
-                ));
-                card.column = "in_review".to_string();
-            }
-            Err(err) => {
-                card.note = Some(append_result(
-                    card.note.as_deref(),
-                    &responder,
-                    &format!("dispatch failed: {err}"),
-                ));
-                card.column = "backlog".to_string();
+                    &instruction,
+                    &self.deps,
+                    &control,
+                )
+                .await;
+            // One-shot read of what (if anything) the operator asked for. `None`
+            // is the ordinary, unsteered path.
+            match control.take() {
+                None => {
+                    // A dispatched task discards its steps — the note is text-only.
+                    match outcome {
+                        Ok(outcome) => {
+                            card.note = Some(append_result(
+                                card.note.as_deref(),
+                                &responder,
+                                &outcome.reply,
+                            ));
+                            card.column = "in_review".to_string();
+                        }
+                        Err(err) => {
+                            card.note = Some(append_result(
+                                card.note.as_deref(),
+                                &responder,
+                                &format!("dispatch failed: {err}"),
+                            ));
+                            card.column = "backlog".to_string();
+                        }
+                    }
+                    break;
+                }
+                Some(SteerAction::Cancel) => {
+                    // Partial work is DISCARDED — only a cancellation note lands,
+                    // and the card returns to `backlog`.
+                    card.note = Some(append_result(
+                        card.note.as_deref(),
+                        "operator",
+                        "cancelled while in flight",
+                    ));
+                    card.column = "backlog".to_string();
+                    break;
+                }
+                Some(SteerAction::Pause) => {
+                    // Partial work is PRESERVED in the note; the card parks in the
+                    // `paused` column. The cycle ends normally, so the per-tenant
+                    // serial lock releases while parked — resume is a plain
+                    // `column → in_progress` PATCH that re-triggers dispatch.
+                    let partial = match &outcome {
+                        Ok(outcome) => format!("[paused] {}", outcome.reply),
+                        Err(err) => format!("[paused] dispatch failed: {err}"),
+                    };
+                    card.note = Some(append_result(card.note.as_deref(), &responder, &partial));
+                    card.column = "paused".to_string();
+                    break;
+                }
+                Some(SteerAction::Redirect { instruction: fresh }) => {
+                    redirects += 1;
+                    card.note = Some(append_result(
+                        card.note.as_deref(),
+                        "operator redirect",
+                        &fresh,
+                    ));
+                    if redirects > MAX_REDIRECTS_PER_DISPATCH {
+                        // Exhausted the redirect budget — finalize the last run's
+                        // reply to `in_review` rather than looping forever.
+                        let last = match &outcome {
+                            Ok(outcome) => outcome.reply.clone(),
+                            Err(err) => format!("dispatch failed: {err}"),
+                        };
+                        card.note = Some(append_result(card.note.as_deref(), &responder, &last));
+                        card.column = "in_review".to_string();
+                        break;
+                    }
+                    // Re-run from the original brief plus the (codepoint-capped)
+                    // operator instruction.
+                    instruction = format!(
+                        "{base_instruction}\n\nOperator redirect: {}",
+                        cap_redirect(&fresh)
+                    );
+                    continue;
+                }
             }
         }
+
         card.updated_at_millis = now_millis();
         tasks.upsert(&self.record.id, &card).await?;
+        // `guard` drops here → the run leaves the in-flight strip.
+        drop(guard);
         Ok(())
     }
 
@@ -225,10 +324,31 @@ impl HarnessBrain {
                 let Some(member) = self.desk_lead(&desk) else {
                     return Ok(None);
                 };
+                // Register the delegated turn so an operator can CANCEL it
+                // mid-flight (cancel-only in v1 — pause/redirect are rejected at
+                // the route). RAII guard deregisters on every exit path.
+                let guard = self.deps.steer.register(
+                    &self.record.id,
+                    InflightEntry {
+                        key: generate_id(),
+                        task_id: None,
+                        kind: InflightKind::Delegation,
+                        title: desk.clone(),
+                        agent_id: member.clone(),
+                        started_at_millis: now_millis(),
+                        pending_action: None,
+                    },
+                );
+                let control = guard.control().clone();
                 let outcome = self
                     .pool
-                    .run(&self.record.id, &member, &instruction, &self.deps)
+                    .run_steered(&self.record.id, &member, &instruction, &self.deps, &control)
                     .await?;
+                // A cancel issued mid-flight discards the delegated reply — no
+                // bubble surfaces.
+                if matches!(control.take(), Some(SteerAction::Cancel)) {
+                    return Ok(None);
+                }
                 // The desk lead's own steps ride on its distinct bubble.
                 Ok(Some(OutboundMessage {
                     channel: member,
@@ -428,7 +548,7 @@ description = "Runs Acme."
             workflow_source_dir: None,
             plan: None,
             media: None,
-            workflow_source_dir: None,
+            steer: crate::company::steer::InflightRegistry::default(),
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -567,7 +687,7 @@ description = "Builds it."
             workflow_source_dir: None,
             plan: None,
             media: None,
-            workflow_source_dir: None,
+            steer: crate::company::steer::InflightRegistry::default(),
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
@@ -770,7 +890,7 @@ members = ["engineer"]
             workflow_source_dir: None,
             plan: None,
             media: None,
-            workflow_source_dir: None,
+            steer: crate::company::steer::InflightRegistry::default(),
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record),
@@ -951,7 +1071,7 @@ name = "Design"
             workflow_source_dir: None,
             plan: None,
             media: None,
-            workflow_source_dir: None,
+            steer: crate::company::steer::InflightRegistry::default(),
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record());
 
@@ -992,5 +1112,231 @@ name = "Design"
             )),
             "an McpCallFailed audit event was journaled"
         );
+    }
+
+    // --- Steer disposition (issue #111) -------------------------------------
+
+    use crate::company::steer::InflightRegistry;
+    use openhuman_core::openhuman as oh;
+    use std::collections::VecDeque;
+    use std::sync::Mutex as StdMutex;
+
+    /// A provider that steers its OWN in-flight run on selected turns (via the
+    /// shared registry), so the disposition matrix can be driven deterministically
+    /// over an offline turn. It pops one queued action per `chat_with_system`
+    /// call and applies it against `key`, then echoes the message.
+    struct SteeringProvider {
+        steer: InflightRegistry,
+        company: CompanyId,
+        key: String,
+        actions: StdMutex<VecDeque<SteerAction>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl oh::inference::provider::Provider for SteeringProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "steering".to_string()
+        }
+        async fn chat_with_system(
+            &self,
+            _system: Option<&str>,
+            message: &str,
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(action) = self.actions.lock().unwrap().pop_front() {
+                let key = if self.key.is_empty() {
+                    self.steer
+                        .list(&self.company)
+                        .into_iter()
+                        .next()
+                        .map(|entry| entry.key)
+                        .unwrap_or_default()
+                } else {
+                    self.key.clone()
+                };
+                let _ = self.steer.steer(&self.company, &key, action);
+            }
+            Ok(format!("did: {message}"))
+        }
+    }
+
+    /// A brain whose provider steers the dispatched card `key` with `actions`
+    /// (one per turn). Returns the brain + its task store so a test can seed the
+    /// card and read the disposition back.
+    fn brain_that_steers_itself(
+        dir: &std::path::Path,
+        key: &str,
+        actions: Vec<SteerAction>,
+    ) -> (HarnessBrain, Arc<FsOps>, Arc<SteeringProvider>) {
+        let steer = InflightRegistry::new();
+        let tasks = Arc::new(FsOps::new(dir));
+        let provider = Arc::new(SteeringProvider {
+            steer: steer.clone(),
+            company: CompanyId::new("acme"),
+            key: key.to_string(),
+            actions: StdMutex::new(actions.into_iter().collect()),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let deps = HarnessDeps {
+            provider: provider.clone(),
+            provider_slug: "steering".to_string(),
+            context: Arc::new(FsContextStore::new(dir)),
+            store: Arc::new(FsCompanyStore::new(dir)),
+            meter: None,
+            workspace_root: dir.to_path_buf(),
+            model_override: None,
+            tasks: Some(tasks.clone()),
+            skills: None,
+            skills_source_dir: None,
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: orchestrator::DelegationQueue::default(),
+            workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            plan: None,
+            media: None,
+            steer,
+        };
+        (
+            HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record()),
+            tasks,
+            provider,
+        )
+    }
+
+    /// Cancel mid-flight → the card returns to `backlog`, the partial reply is
+    /// DISCARDED, and only the operator cancellation note lands.
+    #[tokio::test]
+    async fn steer_cancel_returns_to_backlog_and_discards_partial() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, tasks, _) =
+            brain_that_steers_itself(dir.path(), "t1", vec![SteerAction::Cancel]);
+        tasks
+            .upsert(&CompanyId::new("acme"), &card("t1", ""))
+            .await
+            .unwrap();
+
+        brain
+            .run_cycle(
+                request(vec![CompanyEvent::TaskDispatched {
+                    task_id: "t1".into(),
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        let moved = only_card(&tasks).await;
+        assert_eq!(moved.column, "backlog");
+        let note = moved.note.expect("note");
+        assert!(note.contains("cancelled while in flight"), "{note:?}");
+        // The agent's partial reply must NOT be preserved on a cancel.
+        assert!(
+            !note.contains("did: "),
+            "cancel discards the partial: {note:?}"
+        );
+    }
+
+    /// Pause mid-flight → the card parks in the new `paused` column and the
+    /// partial reply is PRESERVED in the note.
+    #[tokio::test]
+    async fn steer_pause_parks_in_paused_and_preserves_partial() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, tasks, _) =
+            brain_that_steers_itself(dir.path(), "t1", vec![SteerAction::Pause]);
+        tasks
+            .upsert(&CompanyId::new("acme"), &card("t1", ""))
+            .await
+            .unwrap();
+
+        brain
+            .run_cycle(
+                request(vec![CompanyEvent::TaskDispatched {
+                    task_id: "t1".into(),
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        let moved = only_card(&tasks).await;
+        assert_eq!(moved.column, "paused");
+        let note = moved.note.expect("note");
+        assert!(note.contains("[paused]"), "{note:?}");
+        assert!(
+            note.contains("did: "),
+            "pause preserves the partial: {note:?}"
+        );
+    }
+
+    /// Redirect on every turn → the run re-runs in-loop carrying the operator
+    /// instruction, and the per-dispatch redirect cap (3) finalizes it to
+    /// `in_review` instead of looping forever.
+    #[tokio::test]
+    async fn steer_redirect_reruns_and_the_cap_finalizes_to_in_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let redirect = || SteerAction::Redirect {
+            instruction: "focus on the API".to_string(),
+        };
+        // Steer a redirect on the first several turns; the cap should stop it.
+        let (brain, tasks, provider) = brain_that_steers_itself(
+            dir.path(),
+            "t1",
+            vec![redirect(), redirect(), redirect(), redirect()],
+        );
+        tasks
+            .upsert(&CompanyId::new("acme"), &card("t1", ""))
+            .await
+            .unwrap();
+
+        brain
+            .run_cycle(
+                request(vec![CompanyEvent::TaskDispatched {
+                    task_id: "t1".into(),
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        let moved = only_card(&tasks).await;
+        // Redirect budget exhausted → finalized, not looping.
+        assert_eq!(moved.column, "in_review");
+        let note = moved.note.expect("note");
+        // The operator instruction was carried into the rerun, and the reruns
+        // echoed it back through the "Operator redirect:" preamble.
+        assert!(note.contains("focus on the API"), "{note:?}");
+        assert!(
+            note.contains("Operator redirect:"),
+            "the rerun carried the operator instruction: {note:?}"
+        );
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "one initial turn plus three reruns"
+        );
+    }
+
+    #[tokio::test]
+    async fn steer_cancelled_delegation_returns_no_bubble() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _, _) = brain_that_steers_itself(dir.path(), "", vec![SteerAction::Cancel]);
+
+        let result = brain
+            .run_delegation(Delegation::DelegateToDesk {
+                desk: "engineering".to_string(),
+                instruction: "investigate".to_string(),
+            })
+            .await
+            .expect("cancellation is handled");
+
+        assert!(result.is_none(), "cancelled delegation must not bubble");
     }
 }

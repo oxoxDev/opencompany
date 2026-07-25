@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, Plus, Trash2 } from "lucide-react";
+import { Loader2, Play, Plus, Trash2 } from "lucide-react";
 
 import {
   createTask,
@@ -118,6 +118,23 @@ export function TasksView({
     }
   }
 
+  // Re-dispatch a paused card (issue #111): a Resume moves it back into
+  // "In progress", which is what hands it to its assignee again. Optimistic,
+  // reconciled against the server echo — the same shape as a drag-move.
+  async function resume(task: Task) {
+    setTasks((ts) => ts.map((t) => (t.id === task.id ? { ...t, column: "in_progress" } : t)));
+    try {
+      const saved = await patchTask(client, company, task.id, { column: "in_progress" });
+      setTasks((ts) => ts.map((t) => (t.id === task.id ? saved : t)));
+      toast.success("Resumed — the assignee is working on it.");
+      // The turn runs server-side; poll a touch sooner so the result shows.
+      setTimeout(() => void refresh(), 1500);
+    } catch (e) {
+      setTasks((ts) => ts.map((t) => (t.id === task.id ? { ...t, column: task.column } : t)));
+      toast.error(e instanceof Error ? e.message : "could not resume the card");
+    }
+  }
+
   function openCard(task: Task) {
     if (dragged.current) {
       dragged.current = false;
@@ -186,6 +203,7 @@ export function TasksView({
                       task={t}
                       dragging={dragId === t.id}
                       onOpen={() => openCard(t)}
+                      onResume={() => void resume(t)}
                       onDragStart={() => {
                         dragged.current = true;
                         setDragId(t.id);
@@ -244,12 +262,14 @@ function TaskItem({
   task,
   dragging,
   onOpen,
+  onResume,
   onDragStart,
   onDragEnd,
 }: {
   task: Task;
   dragging: boolean;
   onOpen: () => void;
+  onResume: () => void;
   onDragStart: () => void;
   onDragEnd: () => void;
 }) {
@@ -262,6 +282,7 @@ function TaskItem({
       role="button"
       tabIndex={0}
       onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           onOpen();
@@ -293,6 +314,21 @@ function TaskItem({
           </span>
           <span className="truncate text-xs text-muted-foreground">{task.assignee}</span>
         </div>
+      )}
+      {task.column === "paused" && (
+        <Button
+          variant="outline"
+          size="sm"
+          className="mt-3 h-7 w-full"
+          onClick={(e) => {
+            // Don't let the click bubble to the card's open handler.
+            e.stopPropagation();
+            onResume();
+          }}
+        >
+          <Play className="mr-1.5 size-3.5" />
+          Resume
+        </Button>
       )}
     </div>
   );
