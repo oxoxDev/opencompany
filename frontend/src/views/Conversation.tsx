@@ -353,7 +353,7 @@ function InflightRow({
   const [instruction, setInstruction] = useState("");
 
   // A pending server-side steer, or an optimistic local one, freezes the row.
-  const pending = run.pendingAction;
+  const pending = run.pendingAction ?? null;
   const disabled = busy || pending !== null;
 
   async function steer(action: SteerAction, opts?: { instruction?: string; confirm?: boolean }) {
@@ -452,6 +452,7 @@ function InflightRow({
               }
             }}
             placeholder="New instruction for this task…"
+            aria-label={`New instruction for ${run.title}`}
             className="h-7 flex-1 text-xs"
             autoFocus
           />

@@ -781,6 +781,10 @@ impl RuntimeBuilder {
                         .is_some();
 
                         if configured {
+                            // One shared steer registry; the same handle is wired
+                            // onto the runtime below.
+                            let steer = crate::company::steer::InflightRegistry::new();
+                            steer_registry = Some(steer.clone());
                             // Resolve the company's effective MCP servers to data
                             // (manifest ∪ runtime index, credentials materialized)
                             // before building sync deps. A corrupt index degrades
@@ -872,15 +876,7 @@ impl RuntimeBuilder {
                                 // closed — `build_agent` wires no media tools even
                                 // for a company that grants `media`.
                                 media: self.media_backend.clone(),
-                                // Issue #111: the shared steer registry; the same
-                                // handle is wired onto the runtime below so the
-                                // operator steer routes reach the runs this brain
-                                // registers.
-                                steer: {
-                                    let reg = crate::company::steer::InflightRegistry::new();
-                                    steer_registry = Some(reg.clone());
-                                    reg
-                                },
+                                steer,
                             };
                             let record = CompanyRecord {
                                 id: id.clone(),
