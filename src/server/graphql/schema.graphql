@@ -849,7 +849,9 @@ type WorkflowNode {
 	"""
 	onError: String
 	"""
-	Per-node retry policy (attempts + backoff), as a JSON scalar.
+	Per-node retry policy (attempts + backoff), as a JSON scalar. Keys are
+	camelCase (`maxAttempts` / `backoffMs`) to match the REST read shape;
+	see [`RetryGql`].
 	"""
 	retry: JSON
 	"""
