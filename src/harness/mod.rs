@@ -204,6 +204,15 @@ pub struct HarnessDeps {
     /// [`delegations`](Self::delegations)); the default is an empty registry,
     /// which simply lists nothing and rejects every steer as `not in flight`.
     pub steer: crate::company::steer::InflightRegistry,
+    /// The company's source directory (`companies/<name>`), from which a
+    /// workflow's `sub_workflow` nodes resolve a child by `workflow_id`
+    /// (`workflows/<id>.toml`). Distinct from
+    /// [`Self::skills_source_dir`](Self::skills_source_dir) so the two seams stay
+    /// independent even though both currently derive from the same `seed_dir`.
+    /// `None` (default/tests, and platform-provisioned tenants with nothing on
+    /// disk) keeps the loud `UnwiredResolver`, so a reached `sub_workflow` node
+    /// fails clearly instead of resolving nothing.
+    pub workflow_source_dir: Option<PathBuf>,
 }
 
 /// One live openhuman agent, keyed by its manifest id.
@@ -1145,6 +1154,7 @@ description = "Builds the product."
                 plan: None,
                 media: None,
                 steer: crate::company::steer::InflightRegistry::default(),
+                workflow_source_dir: None,
             },
             store,
             meter,
@@ -1200,6 +1210,7 @@ description = "Builds the product."
             plan: None,
             media: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            workflow_source_dir: None,
         };
 
         let roster = build_roster(&record(), &deps, &[]).expect("roster builds with skills");
@@ -1478,6 +1489,7 @@ description = "Builds the product."
             plan: None,
             media: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            workflow_source_dir: None,
         };
         let roster = build_roster(&record(), &deps, &[]).expect("roster");
         // Keep the tempdir alive for the agent's workspace by leaking it into the
@@ -1631,6 +1643,7 @@ description = "Builds the product."
             plan: None,
             media: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            workflow_source_dir: None,
         };
         let pool = HarnessPool::new();
         let rec = record();
@@ -1741,6 +1754,7 @@ description = "Builds the product."
             plan: None,
             media: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            workflow_source_dir: None,
         };
         let pool = HarnessPool::new();
 

@@ -15,7 +15,11 @@ export interface WorkflowSummary {
 /** A single graph node. `kind` is one of the tinyflows node kinds. */
 export interface WorkflowNode {
   id: string;
-  /** `trigger` | `agent` | `tool_call` | `http_request` | `condition` | `output`. */
+  /**
+   * `trigger` | `agent` | `tool_call` | `http_request` | `condition` |
+   * `output` | `switch` | `merge` | `split_out` | `transform` |
+   * `output_parser` | `sub_workflow`.
+   */
   kind: string;
   name: string;
   summary?: string;
@@ -92,16 +96,23 @@ export function createWorkflow(
 }
 
 /**
- * The node kinds the form creator's palette offers. `tool_call` and
- * `http_request` are real graph kinds the engine stores and the canvas
- * renders, but the runtime only executes `trigger`/`agent`/`condition`/
- * `output` today — the other two are `Unwired*` stubs that error at run time
- * (see `src/workflows/caps.rs`). Creating one from scratch would silently
- * produce a workflow that can never finish, so the creator doesn't offer them.
+ * The node kinds the form creator's palette offers. These are the kinds that
+ * are meaningful to author from a bare form — no per-node config required to do
+ * something useful: `merge` fans several inputs into one stream and `transform`
+ * passes items through (a config-less `set` is an identity pass-through).
+ *
+ * Deliberately withheld until the P4 config forms land: `tool_call`,
+ * `http_request`, `switch`, `output_parser`, and `sub_workflow` all need config
+ * (a slug, a URL, case labels, a schema, a `workflow_id`) to run — creating one
+ * from a bare palette would silently produce a node that errors at run time — so
+ * the creator doesn't offer them yet. All of these kinds still render on the
+ * canvas and can be authored by hand in `workflows/<id>.toml`.
  */
 export const CREATABLE_NODE_KINDS: { value: string; label: string }[] = [
   { value: "trigger", label: "Trigger — starts the workflow" },
   { value: "agent", label: "Agent — a teammate performs a step" },
   { value: "condition", label: "Condition — branches on something" },
+  { value: "merge", label: "Merge — combines several inputs into one" },
+  { value: "transform", label: "Transform — reshapes the data" },
   { value: "output", label: "Output — reports the result back" },
 ];

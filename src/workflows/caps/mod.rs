@@ -22,12 +22,23 @@
 //!   No tinyflows node OpenCompany emits consumes it yet; it is deliberate
 //!   contract-plumbing a later phase (P3) consumes.
 //!
-//! Still **not wired**: the bare-completion `LlmProvider` fallback, `code`
-//! nodes, and `sub_workflow`-by-id. They are explicit stubs that return a clear
-//! capability error rather than a silent no-op, so a workflow that reaches one
-//! fails loudly; a workflow that never reaches one is unaffected.
+//! Wired in P2:
+//!
+//! * **sub_workflow** ([`StoreWorkflowResolver`](resolver::StoreWorkflowResolver))
+//!   — a `sub_workflow` node referencing a child by `workflow_id` resolves it
+//!   from the company's on-disk `workflows/` directory (full validation + a
+//!   static cycle guard), when a source directory is wired
+//!   ([`HarnessDeps::workflow_source_dir`](crate::harness::HarnessDeps)). A
+//!   platform-provisioned tenant with no source directory keeps the
+//!   [`UnwiredResolver`] stub.
+//!
+//! Still **not wired**: the bare-completion `LlmProvider` fallback and `code`
+//! nodes. They are explicit stubs that return a clear capability error rather
+//! than a silent no-op, so a workflow that reaches one fails loudly; a workflow
+//! that never reaches one is unaffected.
 
 mod http;
+mod resolver;
 mod state;
 mod tools;
 
@@ -46,6 +57,7 @@ use crate::harness::{HarnessDeps, HarnessPool, toolbelt};
 use crate::ports::types::{CompanyId, CompanyRecord};
 
 use self::http::GuardedHttpClient;
+use self::resolver::StoreWorkflowResolver;
 use self::state::{CompanyStateStore, NoopState};
 use self::tools::WorkflowToolInvoker;
 
@@ -123,15 +135,27 @@ pub fn build_capabilities(
         }
     };
 
+    // sub_workflow-by-id resolves children from the company's on-disk
+    // `workflows/` directory when a source dir is wired; a platform tenant with
+    // none keeps the loud stub. Read before `deps` moves into the agent runner.
+    let resolver: Arc<dyn WorkflowResolver> = match &deps.workflow_source_dir {
+        Some(source_dir) => Arc::new(StoreWorkflowResolver::new(
+            source_dir.clone(),
+            workflow_id.to_string(),
+        )),
+        None => Arc::new(UnwiredResolver),
+    };
+
     Capabilities {
         llm: Arc::new(UnwiredLlm),
         tools: Arc::new(tools),
         http: Arc::new(http),
         code: Arc::new(UnwiredCode),
         state,
-        resolver: Arc::new(UnwiredResolver),
+        resolver,
         // `deps` moves in last — the borrows above (`deps.capabilities`,
-        // `deps.secrets`, `deps.workspace_root`) are all done by here.
+        // `deps.secrets`, `deps.workspace_root`, `deps.workflow_source_dir`) are
+        // all done by here.
         agent: Some(Arc::new(HarnessAgentRunner::new(pool, deps, company))),
     }
 }
@@ -229,8 +253,11 @@ impl CodeRunner for UnwiredCode {
     }
 }
 
-/// `sub_workflow`-by-id is never emitted by translation (OpenCompany has no such
-/// node kind); wired to an error for completeness.
+/// The `sub_workflow`-by-id fallback for a deployment with no source directory
+/// (platform-provisioned mode): there is nowhere on disk to resolve a child
+/// graph from, so a reached `sub_workflow` node fails loudly rather than
+/// silently. A deployment WITH a source directory uses
+/// [`StoreWorkflowResolver`](resolver::StoreWorkflowResolver) instead.
 struct UnwiredResolver;
 
 #[async_trait]

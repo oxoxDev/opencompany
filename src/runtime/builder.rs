@@ -881,6 +881,11 @@ impl RuntimeBuilder {
                                     steer_registry = Some(reg.clone());
                                     reg
                                 },
+                                // #113 P2: the company source dir so a workflow's
+                                // `sub_workflow` node resolves a child by id from
+                                // `workflows/<id>.toml`. Same origin as the skills
+                                // source dir but a distinct seam.
+                                workflow_source_dir: self.seed_dir.clone(),
                             };
                             let record = CompanyRecord {
                                 id: id.clone(),
