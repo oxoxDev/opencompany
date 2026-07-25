@@ -114,6 +114,16 @@ url = { version = "2", optional = true }
 # rhai + the builder tools, defeating the point of running tinyflows directly.
 tinyflows = { version = "0.5", optional = true }
 
+# Issue #105: attribute-tolerant `<tool_call>` tag normalization in the harness
+# tool dispatcher. The staging model emits `<tool_call id="…">…</tool_call>`
+# with an attribute on the open tag, which OpenHuman's bare-literal parser never
+# matches, so the whole call leaks into chat as text and the tool never runs.
+# `AttrTolerantXmlDispatcher` (`src/harness/tool_dispatcher.rs`) strips those
+# attributes before delegating. Only links under the `openhuman` feature; regex
+# is already in the tree via `openhuman_core`, so this adds no new Cargo.lock
+# entry — it is a direct-use declaration.
+regex = { version = "1", optional = true }
+
 # Optional network client shared by the feature-gated integrations below; the
 # default build links no network crates.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
@@ -185,7 +195,7 @@ tiny = ["tinyagents"]
 # the default build stays offline and echo-brained (byte-for-byte unaffected).
 # `reqwest` is pulled in for the hosted Medulla inference `Provider`; the
 # `MockProvider` and every adapter compile without touching the network.
-openhuman = ["dep:openhuman_core", "dep:reqwest", "dep:anyhow", "dep:log", "dep:tinyflows"]
+openhuman = ["dep:openhuman_core", "dep:reqwest", "dep:anyhow", "dep:log", "dep:tinyflows", "dep:regex"]
 # MCP server management and agent tools share OpenHuman's in-process registry.
 # Enabling it necessarily enables the embedded harness and OpenHuman MCP
 # domain, while the default build remains unchanged.

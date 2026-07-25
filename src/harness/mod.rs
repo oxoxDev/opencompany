@@ -48,6 +48,7 @@ pub mod policy;
 pub mod provider;
 pub mod skills;
 pub mod steps;
+pub mod tool_dispatcher;
 pub mod toolbelt;
 
 pub use brain::HarnessBrain;
