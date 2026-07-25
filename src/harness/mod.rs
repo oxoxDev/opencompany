@@ -47,6 +47,7 @@ pub mod policy;
 pub mod provider;
 pub mod skills;
 pub mod steps;
+pub mod toolbelt;
 
 pub use brain::HarnessBrain;
 
@@ -160,6 +161,18 @@ pub struct HarnessDeps {
     /// `None` (default/tests) keeps the boot-resolved [`Self::mcp_servers`]
     /// static, exactly as before.
     pub secrets: Option<Arc<dyn SecretStore>>,
+    /// The per-company SSRF allowlist for the `web` toolbelt (Cell A), from the
+    /// manifest `[tools].web_allowed_domains`. Empty (the default) is *open
+    /// mode* — all public hosts allowed — while OpenHuman's upstream `url_guard`
+    /// still rejects private/loopback/link-local/metadata IPs regardless. A
+    /// non-empty list is strict (only those hosts + subdomains); `"*"` is an
+    /// explicit allow-all-public wildcard. Threaded verbatim into
+    /// [`toolbelt::web_tools`](crate::harness::toolbelt::web_tools).
+    pub web_allowed_domains: Vec<String>,
+    /// The capability-tier filter applied to each agent's assembled tool vector
+    /// (Cell A seam). [`AllowAll`](crate::harness::toolbelt::CapabilityFilter::AllowAll)
+    /// (the default) is identity; a future tier cell swaps this construction.
+    pub capabilities: toolbelt::CapabilityFilter,
 }
 
 /// One live openhuman agent, keyed by its manifest id.
@@ -955,6 +968,8 @@ description = "Builds the product."
                 workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
                 mcp_failures: McpFailureQueue::default(),
                 secrets: None,
+                web_allowed_domains: Vec::new(),
+                capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
             },
             store,
             meter,
@@ -1005,6 +1020,8 @@ description = "Builds the product."
             workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: McpFailureQueue::default(),
             secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
         };
 
         let roster = build_roster(&record(), &deps, &[]).expect("roster builds with skills");
@@ -1278,6 +1295,8 @@ description = "Builds the product."
             workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: McpFailureQueue::default(),
             secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
         };
         let roster = build_roster(&record(), &deps, &[]).expect("roster");
         // Keep the tempdir alive for the agent's workspace by leaking it into the
@@ -1396,6 +1415,8 @@ description = "Builds the product."
             workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: McpFailureQueue::default(),
             secrets: Some(secrets.clone()),
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
         };
         let pool = HarnessPool::new();
         let rec = record();
@@ -1501,6 +1522,8 @@ description = "Builds the product."
             workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: McpFailureQueue::default(),
             secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
         };
         let pool = HarnessPool::new();
 

@@ -423,6 +423,8 @@ description = "Runs Acme."
             workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
             secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -556,6 +558,8 @@ description = "Builds it."
             workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
             secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
@@ -753,6 +757,8 @@ members = ["engineer"]
             workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
             secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record),
@@ -928,6 +934,8 @@ name = "Design"
             workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: failures.clone(),
             secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record());
 
