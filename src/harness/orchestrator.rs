@@ -1189,8 +1189,13 @@ impl Tool for CreateWorkflowTool {
             }
             Err(err) => {
                 tracing::debug!(company = %self.company, error = %err, "create_workflow: rejected");
+                let detail = match &err {
+                    OpenCompanyError::InvalidRequest(message)
+                    | OpenCompanyError::Conflict(message) => message.clone(),
+                    _ => "the company couldn't save it right now; try again.".to_string(),
+                };
                 Ok(ToolResult::error(format!(
-                    "Couldn't create the workflow: {err}"
+                    "Couldn't create the workflow: {detail}"
                 )))
             }
         }

@@ -215,7 +215,7 @@ pub(crate) async fn create_company_workflow(
         .open(&path)
         .map_err(|e| match e.kind() {
             std::io::ErrorKind::AlreadyExists => OpenCompanyError::Conflict(format!(
-                "A workflow named `{}` already exists.",
+                "A workflow with id `{}` already exists. Pick a different id.",
                 file.id
             )),
             _ => OpenCompanyError::StoreIo {

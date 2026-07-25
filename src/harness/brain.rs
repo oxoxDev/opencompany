@@ -163,12 +163,11 @@ impl HarnessBrain {
                     // `paused` column. The cycle ends normally, so the per-tenant
                     // serial lock releases while parked — resume is a plain
                     // `column → in_progress` PATCH that re-triggers dispatch.
-                    let partial = outcome.as_ref().map(|o| o.reply.as_str()).unwrap_or("");
-                    card.note = Some(append_result(
-                        card.note.as_deref(),
-                        &responder,
-                        &format!("[paused] {partial}"),
-                    ));
+                    let partial = match &outcome {
+                        Ok(outcome) => format!("[paused] {}", outcome.reply),
+                        Err(err) => format!("[paused] dispatch failed: {err}"),
+                    };
+                    card.note = Some(append_result(card.note.as_deref(), &responder, &partial));
                     card.column = "paused".to_string();
                     break;
                 }
@@ -179,16 +178,14 @@ impl HarnessBrain {
                         "operator redirect",
                         &fresh,
                     ));
-                    if redirects >= MAX_REDIRECTS_PER_DISPATCH {
+                    if redirects > MAX_REDIRECTS_PER_DISPATCH {
                         // Exhausted the redirect budget — finalize the last run's
                         // reply to `in_review` rather than looping forever.
-                        if let Ok(outcome) = &outcome {
-                            card.note = Some(append_result(
-                                card.note.as_deref(),
-                                &responder,
-                                &outcome.reply,
-                            ));
-                        }
+                        let last = match &outcome {
+                            Ok(outcome) => outcome.reply.clone(),
+                            Err(err) => format!("dispatch failed: {err}"),
+                        };
+                        card.note = Some(append_result(card.note.as_deref(), &responder, &last));
                         card.column = "in_review".to_string();
                         break;
                     }

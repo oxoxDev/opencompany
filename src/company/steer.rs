@@ -100,6 +100,11 @@ impl SteerControl {
         self.inner.lock().expect("steer control poisoned").is_some()
     }
 
+    /// Clones the pending action without clearing it.
+    pub fn pending(&self) -> Option<SteerAction> {
+        self.inner.lock().expect("steer control poisoned").clone()
+    }
+
     /// Takes the pending action, clearing it. The disposition site's one-shot
     /// read after a turn ends.
     pub fn take(&self) -> Option<SteerAction> {

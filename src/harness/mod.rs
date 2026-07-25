@@ -734,12 +734,17 @@ impl HarnessPool {
         // SECURITY: the reply **text only** — the scrubbed `outcome.steps` never
         // enter the memory store, so a step detail can never be retrieved and
         // re-injected into a later turn.
-        deps.context
-            .put(
-                company,
-                memory_loop::outcome_chunk(agent_id, message, &outcome.reply),
-            )
-            .await?;
+        if !matches!(
+            steer.and_then(SteerControl::pending),
+            Some(SteerAction::Cancel)
+        ) {
+            deps.context
+                .put(
+                    company,
+                    memory_loop::outcome_chunk(agent_id, message, &outcome.reply),
+                )
+                .await?;
+        }
 
         Ok(outcome)
     }
