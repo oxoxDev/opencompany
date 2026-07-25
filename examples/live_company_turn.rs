@@ -110,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
         workflow_runner: opencompany::harness::orchestrator::WorkflowRunnerHandle::default(),
         mcp_failures: opencompany::harness::mcp_probe::McpFailureQueue::default(),
         secrets: None,
+        steer: opencompany::company::steer::InflightRegistry::default(),
     };
 
     let pool = HarnessPool::new();
