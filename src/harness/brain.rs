@@ -428,6 +428,7 @@ description = "Runs Acme."
             workflow_source_dir: None,
             plan: None,
             media: None,
+            workflow_source_dir: None,
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -566,6 +567,7 @@ description = "Builds it."
             workflow_source_dir: None,
             plan: None,
             media: None,
+            workflow_source_dir: None,
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
@@ -768,6 +770,7 @@ members = ["engineer"]
             workflow_source_dir: None,
             plan: None,
             media: None,
+            workflow_source_dir: None,
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record),
@@ -948,6 +951,7 @@ name = "Design"
             workflow_source_dir: None,
             plan: None,
             media: None,
+            workflow_source_dir: None,
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record());
 
