@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, KeyRound, Loader2, Plug, Save, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -31,18 +31,25 @@ export function ComposioSection({ client, company }: Props) {
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState<"save" | "clear" | null>(null);
 
+  const requestGeneration = useRef(0);
+
   const refresh = useCallback(async () => {
+    const generation = ++requestGeneration.current;
     try {
       const s = await getComposioStatus(client, company);
+      if (generation !== requestGeneration.current) return;
       setStatus(s);
       // Hide the whole section when the feature is not compiled into this build.
       setLoad(s.inBuild ? "ready" : "unavailable");
     } catch {
+      if (generation !== requestGeneration.current) return;
       setLoad("unavailable");
     }
   }, [client, company]);
 
   useEffect(() => {
+    setStatus(null);
+    setLoad("loading");
     void refresh();
   }, [refresh]);
 
