@@ -152,6 +152,7 @@ description = "Runs Acme."
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            plan: None,
         }
     }
 
