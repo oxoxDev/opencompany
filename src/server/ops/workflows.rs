@@ -300,6 +300,46 @@ struct CreateNode {
     summary: Option<String>,
     #[serde(default)]
     agent: Option<String>,
+    /// Free-form, kind-specific node config (P2): `switch`/`transform`
+    /// `=expr` bindings, a `sub_workflow` `workflow_id`, a `tool_call` slug/args,
+    /// … . Carried as JSON on the wire and converted to a `toml::Value` on the
+    /// way to disk; a JSON `null` anywhere inside is rejected as a 4xx (TOML has
+    /// no null to represent it).
+    #[serde(default)]
+    config: Option<serde_json::Value>,
+    /// Per-node error policy: `stop` (default) / `continue` / `route`.
+    #[serde(default)]
+    on_error: Option<String>,
+    /// Per-node retry policy the engine honors.
+    #[serde(default)]
+    retry: Option<CreateRetry>,
+    /// When `true`, the node pauses awaiting operator approval before it runs.
+    #[serde(default)]
+    requires_approval: Option<bool>,
+}
+
+/// The camelCase retry policy the create body carries (`maxAttempts` /
+/// `backoffMs` / `backoff`), mapped to the snake_case [`WorkflowRetryDef`] the
+/// model + TOML use — the inverse of the [`WorkflowRetryOut`] read shape.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateRetry {
+    #[serde(default)]
+    max_attempts: Option<u32>,
+    #[serde(default)]
+    backoff_ms: Option<u64>,
+    #[serde(default)]
+    backoff: Option<String>,
+}
+
+impl From<CreateRetry> for WorkflowRetryDef {
+    fn from(r: CreateRetry) -> Self {
+        Self {
+            max_attempts: r.max_attempts,
+            backoff_ms: r.backoff_ms,
+            backoff: r.backoff,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -311,30 +351,40 @@ struct CreateEdge {
     label: Option<String>,
 }
 
-impl From<CreateWorkflowBody> for RawWorkflow {
-    fn from(body: CreateWorkflowBody) -> Self {
-        Self {
+impl TryFrom<CreateWorkflowBody> for RawWorkflow {
+    type Error = ApiError;
+
+    fn try_from(body: CreateWorkflowBody) -> Result<Self, ApiError> {
+        let mut nodes = Vec::with_capacity(body.nodes.len());
+        for n in body.nodes {
+            // JSON config → TOML value. TOML has no `null`, so a `null` anywhere
+            // in the config is a caller error (400), not a 500 on write.
+            let config = match n.config {
+                Some(json) => Some(toml::Value::try_from(json).map_err(|err| {
+                    ApiError(OpenCompanyError::InvalidRequest(format!(
+                        "node `{}` has config that can't be stored ({err}) — TOML has no null; drop null-valued keys.",
+                        n.id
+                    )))
+                })?),
+                None => None,
+            };
+            nodes.push(RawNode {
+                id: n.id,
+                kind: n.kind,
+                name: n.name,
+                summary: n.summary,
+                agent: n.agent,
+                config,
+                on_error: n.on_error,
+                retry: n.retry.map(WorkflowRetryDef::from),
+                requires_approval: n.requires_approval,
+            });
+        }
+        Ok(Self {
             id: body.id,
             name: body.name,
             description: body.description,
-            nodes: body
-                .nodes
-                .into_iter()
-                .map(|n| RawNode {
-                    id: n.id,
-                    kind: n.kind,
-                    name: n.name,
-                    summary: n.summary,
-                    agent: n.agent,
-                    // The create endpoint (#69/#112) does not author per-node
-                    // config/error/retry policy yet — a P2/P4 concern. Left unset
-                    // here so an authored graph round-trips unchanged.
-                    config: None,
-                    on_error: None,
-                    retry: None,
-                    requires_approval: None,
-                })
-                .collect(),
+            nodes,
             edges: body
                 .edges
                 .into_iter()
@@ -344,7 +394,7 @@ impl From<CreateWorkflowBody> for RawWorkflow {
                     label: e.label,
                 })
                 .collect(),
-        }
+        })
     }
 }
 
@@ -440,7 +490,7 @@ async fn create_workflow(
     // validate its structure end to end — the same rules a hand-authored
     // `workflows/<id>.toml` must satisfy. Any problem becomes a 400, never the
     // 500 a malformed on-disk file gets from the read routes.
-    let toml_src = render_workflow(&body.into())?;
+    let toml_src = render_workflow(&RawWorkflow::try_from(body)?)?;
     let file = parse_workflow(&toml_src).map_err(|err| match err {
         OpenCompanyError::DataInvalid { problems, .. } => {
             ApiError(OpenCompanyError::InvalidRequest(problems.join(" ")))
@@ -765,6 +815,96 @@ mod tests {
         assert_eq!(node["retry"]["backoffMs"], 250);
         assert_eq!(node["retry"]["backoff"], "exponential");
         assert_eq!(node["requiresApproval"], true);
+    }
+
+    // --- P2: create body maps the new node fields (config/error/retry/approval)
+
+    /// A create body carrying P2 node fields round-trips them through the
+    /// render → parse pipeline the endpoint uses before writing to disk: config
+    /// (with an `=expr` binding), `onError`, `retry` (camelCase → snake), and
+    /// `requiresApproval` all survive.
+    #[test]
+    fn create_body_round_trips_p2_node_fields() {
+        use crate::company::WorkflowNodeKind;
+
+        let body: CreateWorkflowBody = serde_json::from_value(serde_json::json!({
+            "id": "wf",
+            "name": "WF",
+            "nodes": [
+                { "id": "start", "kind": "trigger", "name": "Start" },
+                {
+                    "id": "tf", "kind": "transform", "name": "Transform",
+                    "config": { "set": { "count": "=items | length" } },
+                    "onError": "continue",
+                    "retry": { "maxAttempts": 3, "backoffMs": 250, "backoff": "exponential" },
+                    "requiresApproval": true
+                }
+            ],
+            "edges": [ { "from": "start", "to": "tf" } ]
+        }))
+        .expect("body deserializes");
+
+        let raw = RawWorkflow::try_from(body).expect("converts");
+        let toml_src = render_workflow(&raw).expect("renders");
+        let file = parse_workflow(&toml_src).expect("re-parses");
+
+        let tf = file.nodes.iter().find(|n| n.id == "tf").unwrap();
+        assert_eq!(tf.kind, WorkflowNodeKind::Transform);
+        assert_eq!(tf.on_error.as_deref(), Some("continue"));
+        assert_eq!(tf.requires_approval, Some(true));
+        let retry = tf.retry.as_ref().expect("retry present");
+        assert_eq!(retry.max_attempts, Some(3));
+        assert_eq!(retry.backoff_ms, Some(250));
+        assert_eq!(retry.backoff.as_deref(), Some("exponential"));
+        // The `=expr` binding is preserved verbatim for the engine to evaluate.
+        assert_eq!(
+            tf.config.as_ref().unwrap()["set"]["count"],
+            "=items | length"
+        );
+    }
+
+    /// An old create body (no P2 fields) still produces a bare node — every new
+    /// field unset — so nothing changes for existing callers.
+    #[test]
+    fn create_body_without_new_fields_is_unchanged() {
+        let body: CreateWorkflowBody = serde_json::from_value(serde_json::json!({
+            "id": "wf",
+            "name": "WF",
+            "nodes": [ { "id": "start", "kind": "trigger", "name": "Start" } ],
+            "edges": []
+        }))
+        .unwrap();
+        let raw = RawWorkflow::try_from(body).expect("converts");
+        let node = &raw.nodes[0];
+        assert!(node.config.is_none());
+        assert!(node.on_error.is_none());
+        assert!(node.retry.is_none());
+        assert!(node.requires_approval.is_none());
+    }
+
+    /// A JSON `null` inside node config is a 400 — TOML has no null to store it,
+    /// so it is rejected before anything touches disk.
+    #[test]
+    fn create_body_with_null_config_is_a_bad_request() {
+        use axum::http::StatusCode;
+
+        let body: CreateWorkflowBody = serde_json::from_value(serde_json::json!({
+            "id": "wf",
+            "name": "WF",
+            "nodes": [
+                { "id": "call", "kind": "tool_call", "name": "Call", "config": { "slug": null } }
+            ],
+            "edges": []
+        }))
+        .unwrap();
+        // `RawWorkflow` is not `Debug`, so unwrap the error by hand rather than
+        // via `expect_err`.
+        let err = match RawWorkflow::try_from(body) {
+            Ok(_) => panic!("a null config value must be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(matches!(err.0, OpenCompanyError::InvalidRequest(_)));
     }
 
     #[test]
