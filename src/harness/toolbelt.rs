@@ -73,7 +73,7 @@ const CURL_DEST_SUBDIR: &str = "downloads";
 /// The canonical list lives in [`crate::company::GATEABLE_NAMESPACES`] (always
 /// compiled, so manifest validation can see it in the default build); this is a
 /// re-export for the harness call sites that key off it.
-pub const GATEABLE_NAMESPACES: [&str; 5] = crate::company::GATEABLE_NAMESPACES;
+pub const GATEABLE_NAMESPACES: [&str; 6] = crate::company::GATEABLE_NAMESPACES;
 
 /// Map a tool's runtime `name()` onto its grant namespace, or `None` when the
 /// tool is **intrinsic** (memory / MCP / orchestrator / file / skill tools),
@@ -92,6 +92,16 @@ pub fn namespace_of(tool_name: &str) -> Option<&'static str> {
         // namespace mapping is a pure string match so the capability filter and
         // the gateable-coverage invariant see `media` in every build.
         "media_generate_image" | "media_generate_video" | "media_list_models" => Some("media"),
+        // Per-tenant Composio (issue #110). Mapped unconditionally for the same
+        // reason as `media`: the arm is inert without the `composio` feature (the
+        // tools are never built), but the namespace mapping is a pure string
+        // match so the capability filter and the gateable-coverage invariant see
+        // `composio` in every build.
+        "composio_list_toolkits"
+        | "composio_list_connections"
+        | "composio_list_tools"
+        | "composio_authorize"
+        | "composio_execute" => Some("composio"),
         _ => None,
     }
 }
@@ -536,6 +546,12 @@ mod tests {
         assert_eq!(namespace_of("media_generate_image"), Some("media"));
         assert_eq!(namespace_of("media_generate_video"), Some("media"));
         assert_eq!(namespace_of("media_list_models"), Some("media"));
+        // Per-tenant Composio (issue #110) maps to the `composio` namespace.
+        assert_eq!(namespace_of("composio_list_toolkits"), Some("composio"));
+        assert_eq!(namespace_of("composio_list_connections"), Some("composio"));
+        assert_eq!(namespace_of("composio_list_tools"), Some("composio"));
+        assert_eq!(namespace_of("composio_authorize"), Some("composio"));
+        assert_eq!(namespace_of("composio_execute"), Some("composio"));
         // Intrinsic tools are unmapped (always kept by the filter).
         assert_eq!(namespace_of("memory_store"), None);
         assert_eq!(namespace_of("memory_recall"), None);
@@ -561,6 +577,11 @@ mod tests {
             "media_generate_image",
             "media_generate_video",
             "media_list_models",
+            "composio_list_toolkits",
+            "composio_list_connections",
+            "composio_list_tools",
+            "composio_authorize",
+            "composio_execute",
         ];
         for tool in mapped {
             let ns = namespace_of(tool).expect("mapped tool has a namespace");
@@ -576,6 +597,10 @@ mod tests {
         assert!(
             GATEABLE_NAMESPACES.contains(&"media"),
             "the real-money media namespace must be gateable"
+        );
+        assert!(
+            GATEABLE_NAMESPACES.contains(&"composio"),
+            "the per-tenant composio namespace must be gateable"
         );
     }
 

@@ -62,7 +62,8 @@ pub const CONNECTION_PRIORITIES: &[&str] = &["low", "medium", "high"];
 /// maps individual tools onto these namespaces. A `[plan].token_budgets` key
 /// outside this set is a manifest error. Lives here (not the feature-gated
 /// harness) so manifest validation can see it in the default build.
-pub const GATEABLE_NAMESPACES: [&str; 5] = ["shell", "code", "web", "subagent", "media"];
+pub const GATEABLE_NAMESPACES: [&str; 6] =
+    ["shell", "code", "web", "subagent", "media", "composio"];
 
 /// Whether a tool-grant list **explicitly** grants the real-money `media`
 /// namespace (issue #109).
@@ -77,6 +78,23 @@ pub fn grants_media_explicit(grants: &[String]) -> bool {
     grants
         .iter()
         .any(|grant| grant == "media" || grant.starts_with("media."))
+}
+
+/// Whether a tool-grant list **explicitly** grants the per-tenant `composio`
+/// namespace (issue #110).
+///
+/// Like [`grants_media_explicit`], the catch-all `*` does **not** grant
+/// `composio`: the Composio tools reach third-party accounts (Gmail / Slack /
+/// GitHub) over a tenant OAuth token and move real side effects (send email,
+/// open PRs), so they must be opted into by name, never ridden in on a
+/// wildcard. Matches the bare `composio` grant or any `composio.*` sub-grant.
+/// Lives here (always compiled) so both the feature-gated harness wiring
+/// (`build::build_agent`) and the always-compiled console capability route key
+/// off one source of truth.
+pub fn grants_composio_explicit(grants: &[String]) -> bool {
+    grants
+        .iter()
+        .any(|grant| grant == "composio" || grant.starts_with("composio."))
 }
 
 /// Built-in capability tier names selectable in `[plan].name` (issue #108). The
@@ -410,6 +428,26 @@ pub struct Tools {
     /// explicit allow-all-public wildcard.
     #[serde(default)]
     pub web_allowed_domains: Vec<String>,
+    /// Per-tenant Composio tools (issue #110, Cell D): the `[tools.composio]`
+    /// sub-section. The `toolkits` allowlist narrows which Composio toolkits the
+    /// agent may target (Gmail / Slack / GitHub, …). Empty (the default) DEFERS
+    /// to the backend's own server-enforced allowlist — *open mode*, mirroring
+    /// [`web_allowed_domains`]; a non-empty list is strict client-side narrowing
+    /// (a toolkit outside it is rejected before any network call). Independent of
+    /// the `composio` grant: the grant admits the tool family, this narrows what
+    /// it can reach.
+    #[serde(default)]
+    pub composio: ComposioTools,
+}
+
+/// `[tools.composio]` — the per-tenant Composio toolkit allowlist (issue #110).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ComposioTools {
+    /// Toolkit slugs the agent may target (e.g. `gmail`, `slack`, `github`).
+    /// Empty defers to the backend's server-enforced allowlist (open mode);
+    /// non-empty narrows strictly, client-side, before any network round-trip.
+    #[serde(default)]
+    pub toolkits: Vec<String>,
 }
 
 impl Default for Tools {
@@ -418,6 +456,7 @@ impl Default for Tools {
             provider: default_tool_provider(),
             allow: Vec::new(),
             web_allowed_domains: Vec::new(),
+            composio: ComposioTools::default(),
         }
     }
 }
@@ -576,6 +615,42 @@ mod test {
         assert!(!grants_media_explicit(&[]));
         // A substring match ("mediation") must not count as the media namespace.
         assert!(!grants_media_explicit(&["mediation".into()]));
+    }
+
+    /// Per-tenant `composio` (issue #110) is granted ONLY by an explicit
+    /// `composio` / `composio.*` grant — never by the catch-all `*`. The tools
+    /// reach third-party accounts over a tenant OAuth token, so a broadly-
+    /// permissioned company must still opt into them by name.
+    #[test]
+    fn composio_grant_requires_explicit_namespace_not_wildcard() {
+        assert!(grants_composio_explicit(&["composio".into()]));
+        assert!(grants_composio_explicit(&["composio.gmail".into()]));
+        assert!(grants_composio_explicit(&[
+            "web.*".into(),
+            "composio".into()
+        ]));
+        // The catch-all `*` must NOT grant composio.
+        assert!(!grants_composio_explicit(&["*".into()]));
+        assert!(!grants_composio_explicit(&["web.*".into()]));
+        assert!(!grants_composio_explicit(&[]));
+        // A substring match must not count as the composio namespace.
+        assert!(!grants_composio_explicit(&["composiotools".into()]));
+    }
+
+    /// The `[tools.composio]` sub-section parses its toolkit allowlist and an
+    /// absent section defaults to open mode (empty list).
+    #[test]
+    fn tools_composio_section_parses_toolkits_and_defaults_empty() {
+        let with_section: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[tools.composio]\ntoolkits = [\"gmail\", \"slack\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            with_section.tools.composio.toolkits,
+            vec!["gmail".to_string(), "slack".to_string()]
+        );
+        let without: CompanyManifest = toml::from_str("[company]\nname = \"Acme\"\n").unwrap();
+        assert!(without.tools.composio.toolkits.is_empty());
     }
 
     // Guards the newly-added `Serialize` derive: a manifest with renamed

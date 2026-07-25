@@ -199,6 +199,18 @@ mcp = ["openhuman", "openhuman_core/mcp", "dep:uuid", "dep:base64", "dep:url"]
 # these tools, so they are wired only when a company explicitly grants `media`
 # (never via the `*` wildcard) AND a managed credential is configured.
 media = ["openhuman", "openhuman_core/media"]
+# Per-tenant Composio tools (issue #110, epic #26 Cell D). Bridges OpenHuman's
+# backend-mode Composio surface (Gmail / Slack / GitHub via
+# `composio_list_toolkits`, `composio_list_connections`, `composio_list_tools`,
+# `composio_authorize`, `composio_execute`) into a company agent's toolbelt
+# behind the opt-in `composio` grant namespace and a per-tenant OAuth bearer
+# token. The upstream `composio` domain is not itself feature-gated, so no
+# `openhuman_core/*` subfeature is needed — enabling this only pulls in the
+# embedded harness. The default build links none of it. Tenant isolation is the
+# server-side-constructed bearer token (the backend derives the Composio entity
+# from the JWT); the token has NO env fallback and a missing token fails closed
+# (no tools wired), so a company can never reach another tenant's connections.
+composio = ["openhuman"]
 # Real HTTP transport to openhuman-core. The trait + offline mock + providers
 # compile without this; only `HttpOpenHumanRpc` is gated behind it.
 openhuman-rpc = ["dep:reqwest"]

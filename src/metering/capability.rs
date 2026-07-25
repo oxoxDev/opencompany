@@ -153,9 +153,11 @@ impl CapabilityPlan {
 /// * `starter` — `shell` + `code` at 200k tokens/day.
 /// * `pro` — `shell` + `code` + `web` at 1M tokens/day.
 /// * `unlimited` — every gateable namespace at `u64::MAX` (effectively
-///   uncapped), including the real-money `media` tier (issue #109). `media` is
-///   absent from `free` / `starter` / `pro`, so those tiers deny it outright
-///   unless the manifest opts in with an explicit `token_budgets = { media = N }`.
+///   uncapped), including the real-money `media` tier (issue #109) and the
+///   per-tenant `composio` tier (issue #110). `media` / `composio` are absent
+///   from `free` / `starter` / `pro`, so those tiers deny them outright unless
+///   the manifest opts in with an explicit `token_budgets = { media = N }` /
+///   `{ composio = N }`.
 ///
 /// Every built-in is daily; the manifest `[plan].period` can widen the window.
 pub fn plan_named(name: &str) -> Option<CapabilityPlan> {
@@ -173,6 +175,7 @@ pub fn plan_named(name: &str) -> Option<CapabilityPlan> {
             ("web", u64::MAX),
             ("subagent", u64::MAX),
             ("media", u64::MAX),
+            ("composio", u64::MAX),
         ],
         _ => return None,
     };
@@ -361,6 +364,52 @@ mod tests {
                 "{tier} must deny the real-money media tier by default"
             );
         }
+    }
+
+    /// The per-tenant `composio` tier (issue #110) is uncapped under `unlimited`
+    /// but denied by every other built-in tier — a company opts into it via an
+    /// explicit `token_budgets = { composio = N }`, never a wildcard.
+    #[test]
+    fn composio_tier_is_unlimited_only_and_denied_elsewhere() {
+        assert!(
+            !plan_named("unlimited")
+                .unwrap()
+                .denied_namespaces(0)
+                .contains("composio"),
+            "unlimited grants composio"
+        );
+        for tier in ["free", "starter", "pro"] {
+            assert!(
+                plan_named(tier)
+                    .unwrap()
+                    .denied_namespaces(0)
+                    .contains("composio"),
+                "{tier} must deny the composio tier by default"
+            );
+        }
+    }
+
+    /// A manifest can opt a non-`unlimited` plan into `composio` with an explicit
+    /// token budget; exhausting that budget drops exactly `composio`.
+    #[test]
+    fn explicit_composio_budget_grants_then_exhausts_only_composio() {
+        let mut token_budgets = BTreeMap::new();
+        token_budgets.insert("composio".to_string(), 100_000);
+        let plan = CapabilityPlan::from_manifest(&Plan {
+            name: Some("starter".into()),
+            period: "daily".into(),
+            token_budgets,
+        })
+        .unwrap();
+        // Under budget: composio granted, shell/code still granted.
+        let under = plan.denied_namespaces(50_000);
+        assert!(!under.contains("composio"));
+        assert!(!under.contains("shell"));
+        // At the composio budget but under starter's 200k shell/code: only
+        // composio drops.
+        let at = plan.denied_namespaces(100_000);
+        assert!(at.contains("composio"), "composio exhausted at its budget");
+        assert!(!at.contains("shell"), "shell still under its 200k budget");
     }
 
     #[test]
