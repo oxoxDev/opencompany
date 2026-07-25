@@ -63,6 +63,15 @@ struct CapabilityStatusDto {
     /// Whether a MANAGED media credential is resolvable from the environment on
     /// this build (feature on + env present). Never reflects a tenant secret.
     media_credential_configured: bool,
+    /// Per-tenant Composio (issue #110): whether this company **explicitly**
+    /// grants the `composio` namespace (a `*` wildcard does NOT count). Opt-in
+    /// per tool grant, independent of a `[plan]`.
+    composio_granted: bool,
+    /// Whether the `composio` feature is compiled into this build at all.
+    composio_in_build: bool,
+    /// Whether a non-empty per-tenant Composio token is stored — never the token
+    /// itself. Unlike media's env credential, this is a tenant secret.
+    composio_token_configured: bool,
 }
 
 /// One tier's budget row.
@@ -82,9 +91,28 @@ struct TierDto {
     exhausted: bool,
 }
 
-/// The unconfigured response: `{ configured: false }` plus the media-status
-/// flags (media is opt-in per tool grant, independent of a `[plan]`).
-fn unconfigured(media_granted: bool) -> CapabilityStatusDto {
+/// The opt-in-capability status flags carried on every response (media +
+/// composio), independent of whether a `[plan]` is configured.
+struct OptInFlags {
+    media_granted: bool,
+    composio_granted: bool,
+    composio_token_configured: bool,
+}
+
+impl OptInFlags {
+    /// All-false — used when no company record is present.
+    fn none() -> Self {
+        Self {
+            media_granted: false,
+            composio_granted: false,
+            composio_token_configured: false,
+        }
+    }
+}
+
+/// The unconfigured response: `{ configured: false }` plus the opt-in-capability
+/// flags (media + composio are opt-in per tool grant, independent of a `[plan]`).
+fn unconfigured(flags: OptInFlags) -> CapabilityStatusDto {
     CapabilityStatusDto {
         configured: false,
         plan: None,
@@ -92,9 +120,12 @@ fn unconfigured(media_granted: bool) -> CapabilityStatusDto {
         period_start_millis: None,
         spent_tokens: None,
         tiers: Vec::new(),
-        media_granted,
+        media_granted: flags.media_granted,
         media_in_build: cfg!(feature = "media"),
         media_credential_configured: media_credential_configured(),
+        composio_granted: flags.composio_granted,
+        composio_in_build: cfg!(feature = "composio"),
+        composio_token_configured: flags.composio_token_configured,
     }
 }
 
@@ -118,14 +149,23 @@ fn media_credential_configured() -> bool {
 async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDto, ApiError> {
     let record = runtime.store().load(runtime.id()).await.map_err(ApiError)?;
     let Some(record) = record else {
-        return Ok(unconfigured(false));
+        return Ok(unconfigured(OptInFlags::none()));
     };
-    // Media is opt-in per tool grant (explicit `media`, never `*`) and lives on
-    // the manifest regardless of whether a capability `[plan]` is configured.
-    let media_granted = crate::company::grants_media_explicit(&record.manifest.tools.allow);
+    // Media + composio are opt-in per tool grant (explicit namespace, never `*`)
+    // and live on the manifest regardless of whether a `[plan]` is configured.
+    let flags = OptInFlags {
+        media_granted: crate::company::grants_media_explicit(&record.manifest.tools.allow),
+        composio_granted: crate::company::grants_composio_explicit(&record.manifest.tools.allow),
+        composio_token_configured: crate::company::composio::token_configured(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+        )
+        .await
+        .map_err(ApiError)?,
+    };
     let manifest_plan = &record.manifest.plan;
     let Some(plan) = CapabilityPlan::from_manifest(manifest_plan) else {
-        return Ok(unconfigured(media_granted));
+        return Ok(unconfigured(flags));
     };
 
     let now = now_millis();
@@ -156,9 +196,12 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         period_start_millis: Some(since),
         spent_tokens: Some(spent),
         tiers,
-        media_granted,
+        media_granted: flags.media_granted,
         media_in_build: cfg!(feature = "media"),
         media_credential_configured: media_credential_configured(),
+        composio_granted: flags.composio_granted,
+        composio_in_build: cfg!(feature = "composio"),
+        composio_token_configured: flags.composio_token_configured,
     })
 }
 
@@ -283,6 +326,39 @@ mod tests {
         assert_eq!(
             dto2["mediaGranted"], false,
             "the `*` wildcard must not grant the real-money media family: {dto2}"
+        );
+        std::fs::remove_dir_all(&home_b).ok();
+    }
+
+    /// Per-tenant Composio (issue #110): the route surfaces `composioGranted`
+    /// from the explicit grant (never `*`) and the trio flags, even with no
+    /// `[plan]`.
+    #[tokio::test]
+    async fn reports_composio_flags_from_explicit_grant_only() {
+        let home_a = home();
+        let state = state_with_manifest(
+            &home_a,
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"composio\"]\n",
+        )
+        .await;
+        let (status, dto) = get_capabilities(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(dto["composioGranted"], true, "{dto}");
+        assert_eq!(dto["composioTokenConfigured"], false, "no token yet: {dto}");
+        assert!(dto.get("composioInBuild").is_some(), "{dto}");
+        std::fs::remove_dir_all(&home_a).ok();
+
+        // A `*` wildcard grant must NOT count as a composio grant.
+        let home_b = home();
+        let state2 = state_with_manifest(
+            &home_b,
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"*\"]\n",
+        )
+        .await;
+        let (_, dto2) = get_capabilities(&state2).await;
+        assert_eq!(
+            dto2["composioGranted"], false,
+            "the `*` wildcard must not grant composio: {dto2}"
         );
         std::fs::remove_dir_all(&home_b).ok();
     }
