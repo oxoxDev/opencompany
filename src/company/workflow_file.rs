@@ -11,7 +11,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{OpenCompanyError, Result};
 
-/// The six node kinds a workflow graph may use, mirroring the tinyflows model.
+/// The node kinds a workflow graph may use, mirroring the tinyflows model. The
+/// first six are the original OpenCompany set; the trailing six (P2) complete
+/// the tinyflows node catalog: data-shape nodes (`switch` / `merge` /
+/// `split_out` / `transform` / `output_parser`) and `sub_workflow` composition.
+/// Each string is tinyflows' snake_case wire kind verbatim.
 pub const WORKFLOW_NODE_KINDS: &[&str] = &[
     "trigger",
     "agent",
@@ -19,6 +23,12 @@ pub const WORKFLOW_NODE_KINDS: &[&str] = &[
     "http_request",
     "condition",
     "output",
+    "switch",
+    "merge",
+    "split_out",
+    "transform",
+    "output_parser",
+    "sub_workflow",
 ];
 
 /// A node kind in a workflow graph.
@@ -36,6 +46,20 @@ pub enum WorkflowNodeKind {
     Condition,
     /// A terminal report-back node.
     Output,
+    /// A multi-way branch: each outgoing edge label is a case name the engine
+    /// matches against the routed value (like a `match`).
+    Switch,
+    /// Fan-in: concatenates the items arriving on its inputs into one stream.
+    Merge,
+    /// Fan-out: splits a list-valued item into one item per element.
+    SplitOut,
+    /// Reshapes items via `=expr` bindings evaluated by the engine.
+    Transform,
+    /// Parses/validates an upstream item against a schema (optionally LLM
+    /// auto-fixing a malformed value).
+    OutputParser,
+    /// Runs another saved workflow (referenced by id) as a nested step.
+    SubWorkflow,
 }
 
 impl WorkflowNodeKind {
@@ -48,6 +72,12 @@ impl WorkflowNodeKind {
             Self::HttpRequest => "http_request",
             Self::Condition => "condition",
             Self::Output => "output",
+            Self::Switch => "switch",
+            Self::Merge => "merge",
+            Self::SplitOut => "split_out",
+            Self::Transform => "transform",
+            Self::OutputParser => "output_parser",
+            Self::SubWorkflow => "sub_workflow",
         }
     }
 
@@ -60,6 +90,12 @@ impl WorkflowNodeKind {
             "http_request" => Some(Self::HttpRequest),
             "condition" => Some(Self::Condition),
             "output" => Some(Self::Output),
+            "switch" => Some(Self::Switch),
+            "merge" => Some(Self::Merge),
+            "split_out" => Some(Self::SplitOut),
+            "transform" => Some(Self::Transform),
+            "output_parser" => Some(Self::OutputParser),
+            "sub_workflow" => Some(Self::SubWorkflow),
             _ => None,
         }
     }
@@ -319,6 +355,11 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
     // Ids of nodes whose `on_error = "route"` — an "error"-labeled edge must
     // leave one, and only one, of these (checked in the edge pass below).
     let mut route_nodes = std::collections::HashSet::new();
+    // Ids of every `switch` node. On a switch, an edge label is a case name (the
+    // engine keys the branch port on it), so a label of `error` is a legitimate
+    // case — it must NOT be caught by the `error`-label ⇔ `on_error = "route"`
+    // coupling check in the edge pass.
+    let mut switch_nodes = std::collections::HashSet::new();
     for (index, node) in raw.nodes.iter().enumerate() {
         let label = if node.id.trim().is_empty() {
             format!("node #{}", index + 1)
@@ -351,6 +392,48 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
                 node.kind,
                 WORKFLOW_NODE_KINDS.join(", ")
             )),
+        }
+
+        if kind == Some(WorkflowNodeKind::Switch) && !node.id.trim().is_empty() {
+            switch_nodes.insert(node.id.as_str());
+        }
+
+        // A `sub_workflow` node references a saved workflow by id. Its whole
+        // contract rides in `config`: require a non-empty `workflow_id` string,
+        // reject an inline `workflow` child graph (which would bypass OpenCompany
+        // validation of the child), and reject a static self-reference (a graph
+        // naming its own id) — the runtime cycle guard backstops dynamic ids.
+        if kind == Some(WorkflowNodeKind::SubWorkflow) {
+            match node.config.as_ref() {
+                Some(toml::Value::Table(table)) => {
+                    if table.contains_key("workflow") {
+                        problems.push(format!(
+                            "{label} sets an inline `workflow` in `config` — a sub_workflow must reference a saved workflow with `workflow_id`, not inline a child graph."
+                        ));
+                    }
+                    match table.get("workflow_id") {
+                        Some(toml::Value::String(id)) if id.trim().is_empty() => problems.push(
+                            format!("{label} has an empty `workflow_id` — name the saved workflow to run."),
+                        ),
+                        Some(toml::Value::String(id)) => {
+                            if !raw.id.trim().is_empty() && id == &raw.id {
+                                problems.push(format!(
+                                    "{label} references its own workflow id `{id}` — a workflow cannot run itself as a sub_workflow."
+                                ));
+                            }
+                        }
+                        Some(_) => problems.push(format!(
+                            "{label} has a non-string `workflow_id` — it must be the id of a saved workflow."
+                        )),
+                        None => problems.push(format!(
+                            "{label} is a sub_workflow node but names no `workflow_id` to run."
+                        )),
+                    }
+                }
+                _ => problems.push(format!(
+                    "{label} is a sub_workflow node but has no `config` naming a `workflow_id` to run."
+                )),
+            }
         }
 
         // `on_error` ∈ {stop, continue, route}. Remember route nodes for the
@@ -438,11 +521,15 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
             ));
         }
 
-        // An "error"-labeled edge is the recovery route out of a routing node.
+        // An "error"-labeled edge is the recovery route out of a routing node —
+        // UNLESS it leaves a `switch`, where every label (including `error`) is a
+        // case name the engine keys the branch port on, not an error route.
         if edge.label.as_deref() == Some("error") {
             if route_nodes.contains(edge.from.as_str()) {
                 route_nodes_with_error_edge.insert(edge.from.as_str());
-            } else if seen.contains(edge.from.as_str()) {
+            } else if seen.contains(edge.from.as_str())
+                && !switch_nodes.contains(edge.from.as_str())
+            {
                 problems.push(format!(
                     "{label} is labeled `error` but its source `{}` is not `on_error = \"route\"` — only a routing node emits an error edge.",
                     edge.from
@@ -901,6 +988,206 @@ mod tests {
             label = "error"
         "#;
         assert!(parse_workflow(src).is_ok());
+    }
+
+    // --- P2: the six new node kinds ----------------------------------------
+
+    /// Each new node kind parses to its enum variant, and `WORKFLOW_NODE_KINDS`
+    /// advertises all twelve.
+    #[test]
+    fn new_node_kinds_parse() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "sw"
+            kind = "switch"
+            name = "Switch"
+            [[node]]
+            id = "mg"
+            kind = "merge"
+            name = "Merge"
+            [[node]]
+            id = "so"
+            kind = "split_out"
+            name = "Split"
+            [[node]]
+            id = "tf"
+            kind = "transform"
+            name = "Transform"
+            [[node]]
+            id = "op"
+            kind = "output_parser"
+            name = "Parse"
+        "#;
+        let file = parse_workflow(src).expect("new kinds parse");
+        let kind = |id: &str| file.nodes.iter().find(|n| n.id == id).unwrap().kind;
+        assert_eq!(kind("sw"), WorkflowNodeKind::Switch);
+        assert_eq!(kind("mg"), WorkflowNodeKind::Merge);
+        assert_eq!(kind("so"), WorkflowNodeKind::SplitOut);
+        assert_eq!(kind("tf"), WorkflowNodeKind::Transform);
+        assert_eq!(kind("op"), WorkflowNodeKind::OutputParser);
+        assert_eq!(WORKFLOW_NODE_KINDS.len(), 12);
+        assert!(WORKFLOW_NODE_KINDS.contains(&"sub_workflow"));
+    }
+
+    /// A `sub_workflow` node with a non-empty `workflow_id` string is valid.
+    #[test]
+    fn sub_workflow_with_workflow_id_is_valid() {
+        let src = r#"
+            id = "parent"
+            name = "Parent"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "child"
+            kind = "sub_workflow"
+            name = "Child"
+            [node.config]
+            workflow_id = "greet"
+            [[edge]]
+            from = "start"
+            to = "child"
+        "#;
+        let file = parse_workflow(src).expect("sub_workflow parses");
+        let child = file.nodes.iter().find(|n| n.id == "child").unwrap();
+        assert_eq!(child.kind, WorkflowNodeKind::SubWorkflow);
+        assert_eq!(child.config.as_ref().unwrap()["workflow_id"], "greet");
+    }
+
+    /// A `sub_workflow` node with no `config` is rejected — it names nothing to run.
+    #[test]
+    fn sub_workflow_without_config_is_rejected() {
+        let src = r#"
+            id = "parent"
+            name = "Parent"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "child"
+            kind = "sub_workflow"
+            name = "Child"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(err.to_string().contains("workflow_id"), "{err}");
+    }
+
+    /// A `sub_workflow` node with an empty `workflow_id` is rejected.
+    #[test]
+    fn sub_workflow_with_empty_workflow_id_is_rejected() {
+        let src = r#"
+            id = "parent"
+            name = "Parent"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "child"
+            kind = "sub_workflow"
+            name = "Child"
+            [node.config]
+            workflow_id = ""
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(err.to_string().contains("empty `workflow_id`"), "{err}");
+    }
+
+    /// A `sub_workflow` node naming its own workflow id is a static self-reference.
+    #[test]
+    fn sub_workflow_self_reference_is_rejected() {
+        let src = r#"
+            id = "loopy"
+            name = "Loopy"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "child"
+            kind = "sub_workflow"
+            name = "Child"
+            [node.config]
+            workflow_id = "loopy"
+            [[edge]]
+            from = "start"
+            to = "child"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(err.to_string().contains("its own workflow id"), "{err}");
+    }
+
+    /// An inline `workflow` child graph is reserved — a sub_workflow must
+    /// reference a saved workflow by id so the child passes OpenCompany validation.
+    #[test]
+    fn sub_workflow_inline_child_graph_is_rejected() {
+        let src = r#"
+            id = "parent"
+            name = "Parent"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "child"
+            kind = "sub_workflow"
+            name = "Child"
+            [node.config]
+            workflow_id = "greet"
+            [node.config.workflow]
+            id = "inlined"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(err.to_string().contains("inline `workflow`"), "{err}");
+    }
+
+    /// On a `switch`, an `error`-labeled edge is a legitimate case name — it must
+    /// NOT trip the `error`-label ⇔ `on_error = "route"` coupling check.
+    #[test]
+    fn switch_error_label_is_a_case_not_a_route() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "sw"
+            kind = "switch"
+            name = "Switch"
+            [[node]]
+            id = "err_case"
+            kind = "output"
+            name = "Error case"
+            [[node]]
+            id = "ok_case"
+            kind = "output"
+            name = "OK case"
+            [[edge]]
+            from = "start"
+            to = "sw"
+            [[edge]]
+            from = "sw"
+            to = "err_case"
+            label = "error"
+            [[edge]]
+            from = "sw"
+            to = "ok_case"
+            label = "ok"
+        "#;
+        assert!(
+            parse_workflow(src).is_ok(),
+            "an error-labeled switch case must be valid without on_error = route"
+        );
     }
 
     #[test]
