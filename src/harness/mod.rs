@@ -184,6 +184,15 @@ pub struct HarnessDeps {
     /// from the [`UsageMeter`] before each turn and installs it on the roster it
     /// builds. Resolved from the manifest `[plan]` section by the runtime builder.
     pub plan: Option<capability_budget::CapabilityPlan>,
+    /// The MANAGED media-generation backend (issue #109). `None` (the default at
+    /// every construction site) fails closed — no image/video tools are wired.
+    /// Only the production runtime builder sets it, from
+    /// [`media_backend_from_env`](crate::harness::provider::media_backend_from_env)
+    /// (env-only — never a tenant secret). When `Some` **and** a company
+    /// explicitly grants `media`, [`build::build_agent`] wires the
+    /// [`toolbelt::media_tools`]; a grant with no credential wires nothing and
+    /// warns.
+    pub media: Option<toolbelt::MediaBackend>,
 }
 
 /// One live openhuman agent, keyed by its manifest id.
@@ -1048,6 +1057,7 @@ description = "Builds the product."
                 web_allowed_domains: Vec::new(),
                 capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
                 plan: None,
+                media: None,
             },
             store,
             meter,
@@ -1101,6 +1111,7 @@ description = "Builds the product."
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
             plan: None,
+            media: None,
         };
 
         let roster = build_roster(&record(), &deps, &[]).expect("roster builds with skills");
@@ -1377,6 +1388,7 @@ description = "Builds the product."
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
             plan: None,
+            media: None,
         };
         let roster = build_roster(&record(), &deps, &[]).expect("roster");
         // Keep the tempdir alive for the agent's workspace by leaking it into the
@@ -1498,6 +1510,7 @@ description = "Builds the product."
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
             plan: None,
+            media: None,
         };
         let pool = HarnessPool::new();
         let rec = record();
@@ -1606,6 +1619,7 @@ description = "Builds the product."
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
             plan: None,
+            media: None,
         };
         let pool = HarnessPool::new();
 
@@ -1745,6 +1759,7 @@ description = "Sets direction."
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
             plan: Some(plan),
+            media: None,
         };
         let pool = HarnessPool::new();
         let rec = granting_record();
