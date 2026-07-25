@@ -73,7 +73,7 @@ const CURL_DEST_SUBDIR: &str = "downloads";
 /// The canonical list lives in [`crate::company::GATEABLE_NAMESPACES`] (always
 /// compiled, so manifest validation can see it in the default build); this is a
 /// re-export for the harness call sites that key off it.
-pub const GATEABLE_NAMESPACES: [&str; 4] = crate::company::GATEABLE_NAMESPACES;
+pub const GATEABLE_NAMESPACES: [&str; 5] = crate::company::GATEABLE_NAMESPACES;
 
 /// Map a tool's runtime `name()` onto its grant namespace, or `None` when the
 /// tool is **intrinsic** (memory / MCP / orchestrator / file / skill tools),
@@ -87,6 +87,11 @@ pub fn namespace_of(tool_name: &str) -> Option<&'static str> {
         "shell" | "read_workspace_state" => Some("shell"),
         "apply_patch" | "git_operations" | "csv_export" => Some("code"),
         "web_fetch" | "http_request" | "curl" | "image_info" => Some("web"),
+        // Media generation (issue #109). Mapped unconditionally — the arm is
+        // inert without the `media` feature (the tools are never built), but the
+        // namespace mapping is a pure string match so the capability filter and
+        // the gateable-coverage invariant see `media` in every build.
+        "media_generate_image" | "media_generate_video" | "media_list_models" => Some("media"),
         _ => None,
     }
 }
@@ -248,6 +253,84 @@ pub fn web_tools(
             http_defaults.timeout_secs,
         )),
         Box::new(ImageInfoTool::new(security)),
+    ]
+}
+
+/// The managed platform credential for the media-generation backend (issue
+/// #109) — the OpenHuman backend URL + the platform's own bearer token.
+///
+/// **Security invariant**: this holds ONLY the managed platform credential,
+/// never a tenant BYOK key. The tenant identity that the backend bills is
+/// derived server-side from this managed credential, so a company can never
+/// point media generation at a key it controls. Threaded onto
+/// [`HarnessDeps`](crate::harness::HarnessDeps) and consumed by [`media_tools`].
+///
+/// Always compiled (so the deps field exists in every `openhuman` build and
+/// every construction site fails closed with `None`); the live tool
+/// constructors in [`media_tools`] are gated behind the `media` feature.
+#[derive(Clone)]
+pub struct MediaBackend {
+    /// The media-generation backend base URL (e.g. `https://api.tinyhumans.ai`).
+    pub backend_url: String,
+    /// The managed platform bearer credential. Never a tenant key.
+    pub auth_token: String,
+}
+
+impl std::fmt::Debug for MediaBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never let the managed credential land in a trace.
+        f.debug_struct("MediaBackend")
+            .field("backend_url", &self.backend_url)
+            .field(
+                "auth_token",
+                &if self.auth_token.is_empty() {
+                    "<unset>"
+                } else {
+                    "<redacted>"
+                },
+            )
+            .finish()
+    }
+}
+
+/// The `media` namespace tools (issue #109): image + video generation plus the
+/// model catalog, built over the MANAGED platform credential in `backend` with
+/// generated artifacts pinned to the agent's `workspace` (the tools' persistence
+/// `action_dir`, so nothing escapes the sandbox).
+///
+/// These spend real money — the backend charges on submit — so
+/// [`build_agent`](crate::harness::build::build_agent) only calls this when the
+/// company **explicitly** grants `media` (never via the `*` wildcard) AND a
+/// managed credential is present; the generate tools additionally park for
+/// operator approval through the [`ApprovalPolicy`](crate::harness::policy).
+///
+/// * `media_generate_image` / `media_generate_video` — submit → poll → persist,
+///   billed by the backend.
+/// * `media_list_models` — read-only catalog GET (needs no `action_dir`).
+///
+/// Gated on the `media` feature; enabling it necessarily enables
+/// `openhuman_core/media`, so the upstream tool types are in scope.
+#[cfg(feature = "media")]
+pub fn media_tools(backend: &MediaBackend, workspace: &Path) -> Vec<Box<dyn Tool>> {
+    use oh::integrations::IntegrationClient;
+    use oh::media_generation::{
+        MediaGenerateImageTool, MediaGenerateVideoTool, MediaListModelsTool,
+    };
+
+    // The Config-free seam: `IntegrationClient::new(backend_url, auth_token)`
+    // takes the managed credential directly, with no OpenHuman global `Config`.
+    let client = Arc::new(IntegrationClient::new(
+        backend.backend_url.clone(),
+        backend.auth_token.clone(),
+    ));
+    let action_dir = workspace.to_path_buf();
+    vec![
+        Box::new(MediaGenerateImageTool::new(
+            Arc::clone(&client),
+            action_dir.clone(),
+        )),
+        Box::new(MediaGenerateVideoTool::new(Arc::clone(&client), action_dir)),
+        Box::new(MediaListModelsTool::new(client)),
     ]
 }
 
@@ -419,6 +502,10 @@ mod tests {
         assert_eq!(namespace_of("http_request"), Some("web"));
         assert_eq!(namespace_of("curl"), Some("web"));
         assert_eq!(namespace_of("image_info"), Some("web"));
+        // Media generation (issue #109) maps to the `media` namespace.
+        assert_eq!(namespace_of("media_generate_image"), Some("media"));
+        assert_eq!(namespace_of("media_generate_video"), Some("media"));
+        assert_eq!(namespace_of("media_list_models"), Some("media"));
         // Intrinsic tools are unmapped (always kept by the filter).
         assert_eq!(namespace_of("memory_store"), None);
         assert_eq!(namespace_of("memory_recall"), None);
@@ -441,6 +528,9 @@ mod tests {
             "http_request",
             "curl",
             "image_info",
+            "media_generate_image",
+            "media_generate_video",
+            "media_list_models",
         ];
         for tool in mapped {
             let ns = namespace_of(tool).expect("mapped tool has a namespace");
@@ -452,6 +542,10 @@ mod tests {
         assert!(
             GATEABLE_NAMESPACES.contains(&"subagent"),
             "the reserved subagent namespace must be gateable"
+        );
+        assert!(
+            GATEABLE_NAMESPACES.contains(&"media"),
+            "the real-money media namespace must be gateable"
         );
     }
 
@@ -594,6 +688,50 @@ mod tests {
         let after_tools = filter_by_capabilities(tools, &CapabilityFilter::AllowAll);
         let after: Vec<String> = after_tools.iter().map(|t| t.name().to_string()).collect();
         assert_eq!(before, after, "AllowAll must be identity");
+    }
+
+    /// The `media` toolbelt (issue #109) exposes exactly the three OpenHuman
+    /// media tools, each mapped to the `media` namespace so the capability filter
+    /// gates them as one real-money family. Only built under the `media` feature.
+    #[cfg(feature = "media")]
+    #[test]
+    fn media_tools_expose_expected_names_and_namespace() {
+        let ws = Path::new("/tmp/oc-toolbelt-media");
+        let backend = MediaBackend {
+            backend_url: "https://api.tinyhumans.ai".to_string(),
+            auth_token: "managed-token".to_string(),
+        };
+        let tools = media_tools(&backend, ws);
+        let got = names(&tools);
+        for expected in [
+            "media_generate_image",
+            "media_generate_video",
+            "media_list_models",
+        ] {
+            assert!(got.contains(&expected), "missing {expected}: {got:?}");
+        }
+        assert_eq!(got.len(), 3, "media tools drifted: {got:?}");
+        for tool in &tools {
+            assert_eq!(
+                namespace_of(tool.name()),
+                Some("media"),
+                "media_tools leaked a non-media tool: {}",
+                tool.name()
+            );
+        }
+    }
+
+    /// The managed credential never lands in a `MediaBackend` debug trace.
+    #[test]
+    fn media_backend_debug_redacts_the_token() {
+        let backend = MediaBackend {
+            backend_url: "https://api.tinyhumans.ai".to_string(),
+            auth_token: "super-secret".to_string(),
+        };
+        let shown = format!("{backend:?}");
+        assert!(!shown.contains("super-secret"), "token leaked: {shown}");
+        assert!(shown.contains("<redacted>"), "{shown}");
+        assert!(shown.contains("api.tinyhumans.ai"), "{shown}");
     }
 
     #[test]
