@@ -174,3 +174,46 @@ pub(crate) async fn resolve_one(
 ) -> async_graphql::Result<Option<WorkflowGql>> {
     Ok(load_one(runtime.source_dir(), id).map(WorkflowGql::from))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn node_conversion_preserves_p1_fields_and_camelcases_retry() {
+        let file = parse_workflow(
+            r#"
+            id = "wf"
+            name = "Workflow"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            on_error = "continue"
+            requires_approval = true
+            [node.config]
+            message = "hello"
+            [node.retry]
+            max_attempts = 3
+            backoff_ms = 250
+            backoff = "exponential"
+            "#,
+        )
+        .expect("workflow parses");
+
+        let gql = WorkflowGql::from(file);
+        let node = &gql.nodes[0];
+        assert_eq!(node.config.as_ref().unwrap().0, json!({"message": "hello"}));
+        assert_eq!(node.on_error.as_deref(), Some("continue"));
+        assert_eq!(node.requires_approval, Some(true));
+        assert_eq!(
+            serde_json::to_value(&node.retry.as_ref().unwrap().0).unwrap(),
+            json!({
+                "maxAttempts": 3,
+                "backoffMs": 250,
+                "backoff": "exponential"
+            })
+        );
+    }
+}
