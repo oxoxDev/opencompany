@@ -22,15 +22,18 @@
 //!   `openhuman::skills::ops_parse` depends on WS1's skill parsing; the seam is
 //!   the `.workflows(...)` setter.
 //!
-//! The tool dispatcher is the text-based [`XmlToolDispatcher`], which needs no
-//! global tool registry — the harness stays self-contained.
+//! The tool dispatcher is the attribute-tolerant
+//! [`AttrTolerantXmlDispatcher`](crate::harness::tool_dispatcher::AttrTolerantXmlDispatcher),
+//! a thin wrapper over OpenHuman's text-based `XmlToolDispatcher` that first
+//! strips attributes off `tool_call`-family open tags (issue #105) so the
+//! vendored bare-literal parser matches them. It needs no global tool registry —
+//! the harness stays self-contained.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use openhuman_core::openhuman as oh;
 
-use oh::agent::dispatcher::XmlToolDispatcher;
 use oh::agent::{Agent, AgentBuilder};
 use oh::context::prompt::SystemPromptBuilder;
 use oh::memory::tools::{MemoryRecallTool, MemoryStoreTool};
@@ -53,6 +56,7 @@ use crate::harness::memory::OcMemory;
 use crate::harness::orchestrator;
 use crate::harness::policy::ApprovalPolicy;
 use crate::harness::skills::EffectiveSkills;
+use crate::harness::tool_dispatcher::AttrTolerantXmlDispatcher;
 use crate::harness::toolbelt;
 use crate::ports::skills_state::SkillState;
 use crate::ports::types::CompanyId;
@@ -337,7 +341,7 @@ pub fn build_agent(
         .provider_arc(deps.provider.clone())
         .memory(memory)
         .tools(tools)
-        .tool_dispatcher(Box::new(XmlToolDispatcher))
+        .tool_dispatcher(Box::new(AttrTolerantXmlDispatcher::default()))
         .tool_policy(Arc::new(policy))
         .prompt_builder(prompt_builder)
         .model_name(model)
