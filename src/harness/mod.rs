@@ -38,6 +38,7 @@
 pub mod brain;
 pub mod build;
 pub mod capability_budget;
+pub mod composio;
 pub mod cost;
 pub mod mcp;
 pub mod mcp_probe;
@@ -66,7 +67,7 @@ use oh::inference::provider::Provider;
 use crate::company::Agent as ManifestAgent;
 use crate::company::Policy;
 use crate::company::mcp::McpServerDecl;
-use crate::company::steer::SteerControl;
+use crate::company::steer::{SteerAction, SteerControl};
 use crate::error::OpenCompanyError;
 use crate::harness::cost::{TurnUsage, record_turn_cost};
 use crate::harness::mcp_probe::McpFailureQueue;
@@ -204,6 +205,16 @@ pub struct HarnessDeps {
     /// [`toolbelt::media_tools`]; a grant with no credential wires nothing and
     /// warns.
     pub media: Option<toolbelt::MediaBackend>,
+    /// The per-tenant Composio configuration (issue #110). `None` (the default
+    /// at every construction site) fails closed — no Composio tools are wired.
+    /// [`HarnessPool::ensure`] re-resolves it from the [`SecretStore`] under
+    /// [`composio::TOKEN_KEY`](crate::harness::composio::TOKEN_KEY) each turn
+    /// (folded into the roster fingerprint) so a console token set/rotate takes
+    /// effect next turn with no restart. Only wired when a company **explicitly**
+    /// grants `composio` **and** a non-empty token is stored; the token has no
+    /// env fallback, so an absent token means no tools (never a borrowed
+    /// identity).
+    pub composio: Option<composio::TenantComposio>,
     /// Issue #111 — the shared registry of in-flight, steerable runs. The
     /// [`HarnessBrain`] registers a dispatched task / desk delegation here before
     /// running it (and installs the steer stop-hook over the slot's control), so
@@ -446,6 +457,15 @@ pub struct HarnessPool {
     /// [`HarnessDeps::capabilities`], whose fingerprint never moves — no rebuild,
     /// byte-identical to Cell A.
     capability_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// Fingerprint of the resolved per-tenant [`TenantComposio`](composio::TenantComposio)
+    /// config the cached roster was built from, keyed by company (issue #110).
+    /// Drives Composio-freshness: [`ensure`](Self::ensure) re-resolves the token
+    /// (+ toolkit allowlist) from the [`SecretStore`] on every call and rebuilds
+    /// the roster whenever it changes — so a console token set/rotate/clear takes
+    /// effect on the company's **next** turn with no restart. With no secret
+    /// store wired the config is the static [`HarnessDeps::composio`], whose
+    /// fingerprint never moves.
+    composio_fingerprints: RwLock<HashMap<CompanyId, u64>>,
 }
 
 impl Default for HarnessPool {
@@ -462,6 +482,7 @@ impl HarnessPool {
             mcp_fingerprints: RwLock::new(HashMap::new()),
             overlay_fingerprints: RwLock::new(HashMap::new()),
             capability_fingerprints: RwLock::new(HashMap::new()),
+            composio_fingerprints: RwLock::new(HashMap::new()),
         }
     }
 
@@ -499,15 +520,25 @@ impl HarnessPool {
         let capability_filter = self.resolve_capability_filter(company, deps).await;
         let capability_fp = capability_budget::filter_fingerprint(&capability_filter);
 
+        // Re-resolve + fingerprint the per-tenant Composio config (issue #110):
+        // the token (+ toolkit allowlist) read live from the secret store, so a
+        // console token set/rotate/clear takes effect on the next turn. With no
+        // secret store wired this is the static `deps.composio`, whose
+        // fingerprint is stable — so that company never rebuilds on this axis.
+        let composio_config = self.resolve_composio(company, deps).await;
+        let composio_fp = composio::TenantComposio::fingerprint(&composio_config);
+
         {
             let agents = self.agents.read().await;
             let mcp_fingerprints = self.mcp_fingerprints.read().await;
             let overlay_fingerprints = self.overlay_fingerprints.read().await;
             let capability_fingerprints = self.capability_fingerprints.read().await;
+            let composio_fingerprints = self.composio_fingerprints.read().await;
             if agents.contains_key(&company.id)
                 && mcp_fingerprints.get(&company.id) == Some(&mcp_fp)
                 && overlay_fingerprints.get(&company.id) == Some(&overlay_fp)
                 && capability_fingerprints.get(&company.id) == Some(&capability_fp)
+                && composio_fingerprints.get(&company.id) == Some(&composio_fp)
             {
                 return Ok(());
             }
@@ -530,6 +561,9 @@ impl HarnessPool {
         // crossed a tier budget gets a roster whose exec tools are actually
         // trimmed. With no plan this is just `deps.capabilities` unchanged.
         fresh_deps.capabilities = capability_filter;
+        // Install the freshly-resolved Composio config the same way, so a token
+        // set/rotate/clear reaches the rebuilt agents (issue #110).
+        fresh_deps.composio = composio_config;
         // Same treatment for the overlay-agent set: `company` may be a stale
         // boot-time snapshot (e.g. `HarnessBrain::record`), so the roster is
         // built from the live-resolved overlay set, not `company.overlay_agents`.
@@ -551,6 +585,10 @@ impl HarnessPool {
             .write()
             .await
             .insert(company.id.clone(), capability_fp);
+        self.composio_fingerprints
+            .write()
+            .await
+            .insert(company.id.clone(), composio_fp);
         Ok(())
     }
 
@@ -577,6 +615,36 @@ impl HarnessPool {
                 .await
             }
             None => deps.capabilities.clone(),
+        }
+    }
+
+    /// Re-resolves the company's per-tenant Composio config (issue #110) from the
+    /// [`SecretStore`], so a console token set/rotate/clear takes effect on the
+    /// next turn. Only companies that **explicitly** grant `composio` touch the
+    /// secret store on this axis; others resolve to `None` (no tools). With no
+    /// secret store wired this degrades to the static [`HarnessDeps::composio`].
+    ///
+    /// The token has no env fallback — an absent/empty secret yields `None` (fail
+    /// closed). The backend URL honors [`composio::COMPOSIO_BACKEND_URL_ENV`],
+    /// read process-globally so a live re-resolution keeps the override even when
+    /// no token was stored at boot.
+    async fn resolve_composio(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+    ) -> Option<composio::TenantComposio> {
+        if !crate::company::grants_composio_explicit(&company.manifest.tools.allow) {
+            return None;
+        }
+        let toolkits = company.manifest.tools.composio.toolkits.clone();
+        match &deps.secrets {
+            Some(secrets) => {
+                use crate::app::config::EnvSource;
+                let url = crate::app::config::ProcessEnv.get(composio::COMPOSIO_BACKEND_URL_ENV);
+                composio::TenantComposio::resolve(&company.id, secrets.as_ref(), toolkits, url)
+                    .await
+            }
+            None => deps.composio.clone(),
         }
     }
 
@@ -1159,6 +1227,7 @@ description = "Builds the product."
                 workflow_source_dir: None,
                 plan: None,
                 media: None,
+                composio: None,
                 steer: crate::company::steer::InflightRegistry::default(),
             },
             store,
@@ -1215,6 +1284,7 @@ description = "Builds the product."
             workflow_source_dir: None,
             plan: None,
             media: None,
+            composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
         };
 
@@ -1494,6 +1564,7 @@ description = "Builds the product."
             workflow_source_dir: None,
             plan: None,
             media: None,
+            composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
         };
         let roster = build_roster(&record(), &deps, &[]).expect("roster");
@@ -1523,7 +1594,6 @@ description = "Builds the product."
     /// steered-empty turn therefore makes EXACTLY ONE attempt.
     #[tokio::test]
     async fn steered_empty_turn_makes_exactly_one_attempt() {
-        use crate::company::steer::SteerAction;
         // Attempt 1 is empty; a normal `run` would retry and consume the second
         // script entry. With a steer pending, the retry must not fire.
         let (agent, _deps) = scripted_agent(vec![Ok(String::new()), Ok("second".into())]);
@@ -1648,6 +1718,7 @@ description = "Builds the product."
             workflow_source_dir: None,
             plan: None,
             media: None,
+            composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
         };
         let pool = HarnessPool::new();
@@ -1759,6 +1830,7 @@ description = "Builds the product."
             workflow_source_dir: None,
             plan: None,
             media: None,
+            composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
         };
         let pool = HarnessPool::new();
@@ -1901,6 +1973,7 @@ description = "Sets direction."
             workflow_source_dir: None,
             plan: Some(plan),
             media: None,
+            composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
         };
         let pool = HarnessPool::new();

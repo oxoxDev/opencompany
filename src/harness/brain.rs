@@ -548,6 +548,7 @@ description = "Runs Acme."
             workflow_source_dir: None,
             plan: None,
             media: None,
+            composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
@@ -687,6 +688,7 @@ description = "Builds it."
             workflow_source_dir: None,
             plan: None,
             media: None,
+            composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
         };
         (
@@ -890,6 +892,7 @@ members = ["engineer"]
             workflow_source_dir: None,
             plan: None,
             media: None,
+            composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
         };
         (
@@ -1071,6 +1074,7 @@ name = "Design"
             workflow_source_dir: None,
             plan: None,
             media: None,
+            composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record());
@@ -1200,8 +1204,10 @@ name = "Design"
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
             plan: None,
             media: None,
+            composio: None,
             steer,
         };
         (
