@@ -312,6 +312,16 @@ export interface CapabilityStatusDto {
   mediaInBuild?: boolean;
   /** Whether a managed media credential is configured on this build (env-only). */
   mediaCredentialConfigured?: boolean;
+  /**
+   * Per-tenant Composio (issue #110): whether the company **explicitly** grants
+   * the `composio` namespace (a `*` wildcard does not count). Opt-in per tool
+   * grant, independent of a `[plan]`.
+   */
+  composioGranted?: boolean;
+  /** Whether the `composio` feature is compiled into this build at all. */
+  composioInBuild?: boolean;
+  /** Whether a per-tenant Composio token is stored — never the token itself. */
+  composioTokenConfigured?: boolean;
 }
 
 /** Error envelope shape: `{ error, code }`. */
