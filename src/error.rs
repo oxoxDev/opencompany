@@ -107,6 +107,10 @@ pub enum OpenCompanyError {
     #[error("company not found: {0}")]
     CompanyNotFound(String),
 
+    /// An addressed resource other than a company does not exist.
+    #[error("not found: {0}")]
+    NotFound(String),
+
     /// No MCP install exists in the addressed company's registry store.
     #[cfg(feature = "mcp")]
     #[error("MCP server not found: {0}")]
@@ -226,6 +230,7 @@ impl OpenCompanyError {
             Self::StoreIo { .. } => "store_io".to_string(),
             Self::Serde(_) => "serialization_error".to_string(),
             Self::CompanyNotFound(_) => "company_not_found".to_string(),
+            Self::NotFound(_) => "not_found".to_string(),
             #[cfg(feature = "mcp")]
             Self::McpServerNotFound(_) => "mcp_server_not_found".to_string(),
             Self::ToolNotGranted(_) => "tool_not_granted".to_string(),

@@ -325,7 +325,7 @@ async fn steer_task(
                     "task {task_id} is not in flight"
                 ))))
             } else {
-                Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
+                Err(ApiError(OpenCompanyError::NotFound(format!(
                     "task {task_id}"
                 ))))
             }
