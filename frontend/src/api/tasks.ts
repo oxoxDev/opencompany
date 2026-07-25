@@ -62,3 +62,55 @@ export function deleteTask(
 ): Promise<void> {
   return client.del<void>(`${client.scopeFor(company)}/tasks/${encodeURIComponent(id)}`);
 }
+
+/** A steer verb the operator can apply to an in-flight run (issue #111). */
+export type SteerAction = "pause" | "cancel" | "redirect";
+
+/**
+ * One in-flight run the operator can steer (issue #111): a dispatched board
+ * task (`kind: "task"`) or a sub-agent delegation (`kind: "delegation"`).
+ * `key` is the steer identifier — for a board task it equals the task id.
+ * `pendingAction` is non-null while a steer of that verb is already in flight
+ * for this run, so the console can badge + disable its row.
+ */
+export interface InflightRun {
+  taskId: string | null;
+  key: string;
+  kind: "task" | "delegation";
+  title: string;
+  agentId: string;
+  startedAt: number;
+  pendingAction: string | null;
+}
+
+/** The steer body. `redirect` requires `instruction`; `cancel` requires `confirm`. */
+export interface SteerInput {
+  action: SteerAction;
+  instruction?: string;
+  confirm?: boolean;
+}
+
+/** The runs currently in flight for a company, steerable from company chat. */
+export function listInflight(
+  client: OpenCompanyClient,
+  company: string | null,
+): Promise<InflightRun[]> {
+  return client.get<InflightRun[]>(`${client.scopeFor(company)}/tasks/inflight`);
+}
+
+/**
+ * Steer an in-flight run by its `key`: pause it, cancel it (requires
+ * `confirm: true`), or redirect it with a fresh `instruction`. The host answers
+ * 202 with no body; callers should refetch {@link listInflight} afterwards.
+ */
+export function steerTask(
+  client: OpenCompanyClient,
+  company: string | null,
+  key: string,
+  body: SteerInput,
+): Promise<void> {
+  return client.post<void>(
+    `${client.scopeFor(company)}/tasks/${encodeURIComponent(key)}/steer`,
+    body,
+  );
+}

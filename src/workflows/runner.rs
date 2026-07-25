@@ -154,6 +154,7 @@ description = "Runs Acme."
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
             plan: None,
             media: None,
+            steer: crate::company::steer::InflightRegistry::default(),
         }
     }
 

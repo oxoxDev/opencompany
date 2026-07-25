@@ -105,6 +105,15 @@ pub struct CompanyRuntime {
     /// so the default build simply leaves it `None` and the run route reports
     /// "not wired".
     pub(crate) workflow_runner: Option<Arc<dyn crate::ports::WorkflowRunner>>,
+    /// Issue #111: the registry of in-flight, steerable runs. The operator steer
+    /// routes (`GET …/tasks/inflight`, `POST …/tasks/{key}/steer`) read and write
+    /// it; the harness brain registers a dispatched task / desk delegation here
+    /// before running it. Always present (the type is openhuman-free) — the
+    /// default build simply never registers anything, so the strip is empty and
+    /// every steer is `not in flight`. On the harness path the
+    /// [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) wires in the same handle
+    /// the harness deps hold via [`set_steer`](Self::set_steer).
+    pub(crate) steer: crate::company::steer::InflightRegistry,
     /// Held for the duration of a cycle so cycles never interleave per company.
     pub(crate) serial: TokioMutex<()>,
     /// WS4: the embedded openhuman harness pool, when wired via
@@ -162,6 +171,7 @@ impl CompanyRuntime {
             filer,
             source_dir: None,
             workflow_runner: None,
+            steer: crate::company::steer::InflightRegistry::new(),
             serial: TokioMutex::new(()),
             #[cfg(feature = "openhuman")]
             harness: None,
@@ -220,6 +230,20 @@ impl CompanyRuntime {
     #[cfg(feature = "mcp")]
     pub fn mcp(&self) -> Option<&Arc<crate::harness::mcp::McpRuntime>> {
         self.mcp.as_ref()
+    }
+
+    /// Issue #111: replaces this runtime's in-flight steer registry with a shared
+    /// handle (wired by the [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) to
+    /// the one the harness deps hold, so the operator routes and the brain see the
+    /// same runs).
+    pub fn set_steer(&mut self, steer: crate::company::steer::InflightRegistry) {
+        self.steer = steer;
+    }
+
+    /// This company's in-flight steer registry — the operator control plane for
+    /// pausing / cancelling / redirecting live runs.
+    pub fn steer(&self) -> &crate::company::steer::InflightRegistry {
+        &self.steer
     }
 
     /// This company's id.
