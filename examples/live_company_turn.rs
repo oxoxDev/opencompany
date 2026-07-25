@@ -112,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: opencompany::harness::toolbelt::CapabilityFilter::AllowAll,
+        plan: None,
     };
 
     let pool = HarnessPool::new();

@@ -37,6 +37,7 @@
 
 pub mod brain;
 pub mod build;
+pub mod capability_budget;
 pub mod cost;
 pub mod mcp;
 pub mod mcp_probe;
@@ -171,8 +172,18 @@ pub struct HarnessDeps {
     pub web_allowed_domains: Vec<String>,
     /// The capability-tier filter applied to each agent's assembled tool vector
     /// (Cell A seam). [`AllowAll`](crate::harness::toolbelt::CapabilityFilter::AllowAll)
-    /// (the default) is identity; a future tier cell swaps this construction.
+    /// (the default) is identity. When [`Self::plan`] is set,
+    /// [`HarnessPool::ensure`] overwrites this per turn with the tenant's
+    /// resolved filter; when the plan is `None` this stays the no-plan
+    /// fallback/test override.
     pub capabilities: toolbelt::CapabilityFilter,
+    /// The tenant's capability tier plan (issue #108). `None` (the default)
+    /// leaves gating **off** — byte-identical to Cell A, [`Self::capabilities`]
+    /// is used verbatim. When set, [`HarnessPool::ensure`] resolves a per-tenant,
+    /// per-period, fail-closed [`CapabilityFilter`](toolbelt::CapabilityFilter)
+    /// from the [`UsageMeter`] before each turn and installs it on the roster it
+    /// builds. Resolved from the manifest `[plan]` section by the runtime builder.
+    pub plan: Option<capability_budget::CapabilityPlan>,
 }
 
 /// One live openhuman agent, keyed by its manifest id.
@@ -349,6 +360,16 @@ pub struct HarnessPool {
     /// whenever an operator- or orchestrator-added teammate is added/removed,
     /// mirroring the MCP-freshness fingerprint above.
     overlay_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// Fingerprint of the resolved [`CapabilityFilter`](toolbelt::CapabilityFilter)
+    /// the cached roster was built from, keyed by company (issue #108). Drives
+    /// capability-budget freshness: [`ensure`](Self::ensure) re-resolves the
+    /// tenant's filter from the [`UsageMeter`] on every call and rebuilds the
+    /// roster whenever the denied-namespace set changes — so a tier that crosses
+    /// its token budget switches off on the company's **next** turn. With no
+    /// plan ([`HarnessDeps::plan`] `None`) the filter is the static
+    /// [`HarnessDeps::capabilities`], whose fingerprint never moves — no rebuild,
+    /// byte-identical to Cell A.
+    capability_fingerprints: RwLock<HashMap<CompanyId, u64>>,
 }
 
 impl Default for HarnessPool {
@@ -364,6 +385,7 @@ impl HarnessPool {
             agents: RwLock::new(HashMap::new()),
             mcp_fingerprints: RwLock::new(HashMap::new()),
             overlay_fingerprints: RwLock::new(HashMap::new()),
+            capability_fingerprints: RwLock::new(HashMap::new()),
         }
     }
 
@@ -394,13 +416,22 @@ impl HarnessPool {
         let overlay_agents = self.resolve_effective_overlay(company, deps).await;
         let overlay_fp = overlay_fingerprint(&overlay_agents);
 
+        // Re-resolve + fingerprint the tenant's capability filter (issue #108):
+        // a per-tenant, per-period, fail-closed budget read from the meter. With
+        // no plan this is the static `deps.capabilities`, whose fingerprint is
+        // stable — so a no-plan company never rebuilds on this axis.
+        let capability_filter = self.resolve_capability_filter(company, deps).await;
+        let capability_fp = capability_budget::filter_fingerprint(&capability_filter);
+
         {
             let agents = self.agents.read().await;
             let mcp_fingerprints = self.mcp_fingerprints.read().await;
             let overlay_fingerprints = self.overlay_fingerprints.read().await;
+            let capability_fingerprints = self.capability_fingerprints.read().await;
             if agents.contains_key(&company.id)
                 && mcp_fingerprints.get(&company.id) == Some(&mcp_fp)
                 && overlay_fingerprints.get(&company.id) == Some(&overlay_fp)
+                && capability_fingerprints.get(&company.id) == Some(&capability_fp)
             {
                 return Ok(());
             }
@@ -418,6 +449,11 @@ impl HarnessPool {
         // shares every Arc / queue handle — only `mcp_servers` is overridden.
         let mut fresh_deps = deps.clone();
         fresh_deps.mcp_servers = effective_mcp;
+        // Install the freshly-resolved capability filter on the deps the roster
+        // is built from, the same pattern as `mcp_servers` — so a tenant that
+        // crossed a tier budget gets a roster whose exec tools are actually
+        // trimmed. With no plan this is just `deps.capabilities` unchanged.
+        fresh_deps.capabilities = capability_filter;
         // Same treatment for the overlay-agent set: `company` may be a stale
         // boot-time snapshot (e.g. `HarnessBrain::record`), so the roster is
         // built from the live-resolved overlay set, not `company.overlay_agents`.
@@ -435,7 +471,37 @@ impl HarnessPool {
             .write()
             .await
             .insert(company.id.clone(), overlay_fp);
+        self.capability_fingerprints
+            .write()
+            .await
+            .insert(company.id.clone(), capability_fp);
         Ok(())
+    }
+
+    /// Re-resolves the company's capability filter (issue #108): with a plan
+    /// wired ([`HarnessDeps::plan`]), a per-tenant, per-period, fail-closed
+    /// budget read from the [`UsageMeter`] via
+    /// [`capability_budget::resolve_filter`]; without one, the static
+    /// [`HarnessDeps::capabilities`] verbatim (gating off). Never a boot
+    /// snapshot — resolved on every `ensure` so a tier switches off the turn
+    /// after its budget is crossed.
+    async fn resolve_capability_filter(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+    ) -> toolbelt::CapabilityFilter {
+        match &deps.plan {
+            Some(plan) => {
+                capability_budget::resolve_filter(
+                    plan,
+                    deps.meter.as_deref(),
+                    &company.id,
+                    crate::ports::now_millis(),
+                )
+                .await
+            }
+            None => deps.capabilities.clone(),
+        }
     }
 
     /// Re-resolves the company's effective MCP server set: from the secret store
@@ -495,6 +561,17 @@ impl HarnessPool {
     #[cfg(test)]
     pub async fn overlay_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
         self.overlay_fingerprints.read().await.get(company).copied()
+    }
+
+    /// The current capability-filter fingerprint for a company (test-only), so a
+    /// budget-freshness test can assert a rebuild happened (issue #108).
+    #[cfg(test)]
+    pub async fn capability_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
+        self.capability_fingerprints
+            .read()
+            .await
+            .get(company)
+            .copied()
     }
 
     /// Routes a message to one agent and returns its reply, recording the turn's
@@ -970,6 +1047,7 @@ description = "Builds the product."
                 secrets: None,
                 web_allowed_domains: Vec::new(),
                 capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+                plan: None,
             },
             store,
             meter,
@@ -1022,6 +1100,7 @@ description = "Builds the product."
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            plan: None,
         };
 
         let roster = build_roster(&record(), &deps, &[]).expect("roster builds with skills");
@@ -1297,6 +1376,7 @@ description = "Builds the product."
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            plan: None,
         };
         let roster = build_roster(&record(), &deps, &[]).expect("roster");
         // Keep the tempdir alive for the agent's workspace by leaking it into the
@@ -1417,6 +1497,7 @@ description = "Builds the product."
             secrets: Some(secrets.clone()),
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            plan: None,
         };
         let pool = HarnessPool::new();
         let rec = record();
@@ -1524,6 +1605,7 @@ description = "Builds the product."
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            plan: None,
         };
         let pool = HarnessPool::new();
 
@@ -1577,5 +1659,190 @@ description = "Builds the product."
         // A third ensure with no further change is a no-op (fingerprint stable).
         pool.ensure(&rec, &deps).await.expect("third ensure");
         assert_eq!(pool.overlay_fingerprint_of(&rec.id).await, Some(after));
+    }
+
+    // --- Capability-budget freshness (issue #108) ---------------------------
+
+    /// A manifest that grants every tool namespace, so the roster actually builds
+    /// the exec tools the capability filter then trims. (The default `manifest()`
+    /// grants nothing, so no exec tools would be present to gate.)
+    fn granting_manifest() -> CompanyManifest {
+        toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[policy]
+mode = "full"
+
+[tools]
+allow = ["shell", "code", "web", "files"]
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+description = "Sets direction."
+"#,
+        )
+        .expect("valid manifest")
+    }
+
+    fn granting_record() -> CompanyRecord {
+        CompanyRecord {
+            id: CompanyId::new("acme"),
+            manifest: granting_manifest(),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+        }
+    }
+
+    /// The `ceo` roster agent's live tool names (test introspection via the
+    /// public `Agent::tools()` accessor).
+    async fn ceo_tool_names(pool: &HarnessPool, id: &CompanyId) -> Vec<String> {
+        let guard = pool.agents.read().await;
+        let roster = guard.get(id).expect("roster present");
+        let ceo = roster
+            .iter()
+            .find(|a| a.agent_id == "ceo")
+            .expect("ceo present");
+        let agent = ceo.agent.lock().await;
+        agent.tools().iter().map(|t| t.name().to_string()).collect()
+    }
+
+    /// End-to-end capability gating: a plan budgeting `shell` at 100 tokens grants
+    /// the shell tools while spend is under budget; once a recorded turn pushes
+    /// period spend past the threshold, the very next `ensure` rebuilds the roster
+    /// with the shell namespace dropped — while intrinsic tools (memory) and the
+    /// ungated `files` namespace survive. Mirrors the MCP-freshness test shape.
+    #[tokio::test]
+    async fn ensure_gates_shell_tools_once_the_token_budget_is_crossed() {
+        let dir = tempfile::tempdir().unwrap();
+        let meter = Arc::new(RecordingMeter::default());
+        let plan = crate::harness::capability_budget::CapabilityPlan {
+            period: crate::harness::capability_budget::BudgetPeriod::Daily,
+            budgets: std::collections::BTreeMap::from([("shell".to_string(), 100u64)]),
+        };
+        let deps = HarnessDeps {
+            provider: Arc::new(MockProvider::new("mock: ")),
+            provider_slug: "mock".to_string(),
+            context: Arc::new(MockContext::default()),
+            store: Arc::new(RecordingStore::default()),
+            meter: Some(meter.clone()),
+            workspace_root: dir.path().to_path_buf(),
+            model_override: None,
+            tasks: None,
+            skills: None,
+            skills_source_dir: None,
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: DelegationQueue::default(),
+            workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: McpFailureQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            plan: Some(plan),
+        };
+        let pool = HarnessPool::new();
+        let rec = granting_record();
+
+        // First ensure: 0 spend < 100 → shell granted.
+        pool.ensure(&rec, &deps).await.expect("first ensure");
+        let before_fp = pool
+            .capability_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+        let before = ceo_tool_names(&pool, &rec.id).await;
+        assert!(before.contains(&"shell".to_string()), "got {before:?}");
+        assert!(
+            before.contains(&"read_workspace_state".to_string()),
+            "got {before:?}"
+        );
+        assert!(
+            before.contains(&"memory_store".to_string()),
+            "intrinsic memory tool must be present: {before:?}"
+        );
+        assert!(
+            before.contains(&"file_read".to_string()),
+            "ungated files namespace must be present: {before:?}"
+        );
+
+        // Record a turn that burns 150 inference tokens — past the 100 budget.
+        meter
+            .record(
+                &rec.id,
+                &UsageSample {
+                    at_millis: crate::ports::now_millis(),
+                    agent: "ceo".into(),
+                    provider: "managed".into(),
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    cached_input_tokens: 0,
+                    cost_usd: 0.0,
+                    kind: crate::ports::SampleKind::Inference,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Second ensure: 150 >= 100 → shell exhausted → roster rebuilt without it.
+        pool.ensure(&rec, &deps).await.expect("second ensure");
+        let after_fp = pool
+            .capability_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+        assert_ne!(
+            before_fp, after_fp,
+            "crossing the budget must change the capability fingerprint"
+        );
+        assert_eq!(pool.resident_companies().await, 1, "rebuilt in place");
+
+        let after = ceo_tool_names(&pool, &rec.id).await;
+        assert!(
+            !after.contains(&"shell".to_string()),
+            "shell must be gated off once exhausted: {after:?}"
+        );
+        assert!(
+            !after.contains(&"read_workspace_state".to_string()),
+            "the whole shell namespace drops: {after:?}"
+        );
+        assert!(
+            after.contains(&"memory_store".to_string()),
+            "intrinsic memory tool survives gating: {after:?}"
+        );
+        assert!(
+            after.contains(&"file_read".to_string()),
+            "ungated files namespace survives gating: {after:?}"
+        );
+
+        // Third ensure with no new spend → no rebuild (fingerprint stable).
+        pool.ensure(&rec, &deps).await.expect("third ensure");
+        assert_eq!(
+            pool.capability_fingerprint_of(&rec.id).await,
+            Some(after_fp)
+        );
+    }
+
+    /// With no plan wired, the capability fingerprint is stable across ensures —
+    /// gating stays off, byte-identical to Cell A (no rebuild on this axis).
+    #[tokio::test]
+    async fn ensure_without_a_plan_never_gates() {
+        let fx = fixture();
+        let pool = HarnessPool::new();
+        let rec = record();
+        pool.ensure(&rec, &fx.deps).await.expect("first ensure");
+        let fp = pool
+            .capability_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+        pool.ensure(&rec, &fx.deps).await.expect("second ensure");
+        assert_eq!(
+            pool.capability_fingerprint_of(&rec.id).await,
+            Some(fp),
+            "no plan → stable fingerprint → no capability-driven rebuild"
+        );
     }
 }
