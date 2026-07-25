@@ -215,7 +215,7 @@ pub(crate) async fn create_company_workflow(
         .open(&path)
         .map_err(|e| match e.kind() {
             std::io::ErrorKind::AlreadyExists => OpenCompanyError::Conflict(format!(
-                "A workflow named `{}` already exists.",
+                "A workflow with id `{}` already exists. Pick a different id.",
                 file.id
             )),
             _ => OpenCompanyError::StoreIo {
@@ -458,6 +458,10 @@ mod tests {
                     name: "Start".to_string(),
                     summary: None,
                     agent: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
                 },
                 RawNode {
                     id: "worker".to_string(),
@@ -465,6 +469,10 @@ mod tests {
                     name: "Worker".to_string(),
                     summary: None,
                     agent: Some("assistant".to_string()),
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
                 },
                 RawNode {
                     id: "done".to_string(),
@@ -472,6 +480,10 @@ mod tests {
                     name: "Report".to_string(),
                     summary: None,
                     agent: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
                 },
             ],
             edges: vec![
@@ -725,6 +737,10 @@ mod tests {
                 name: format!("N{i}"),
                 summary: None,
                 agent: None,
+                config: None,
+                on_error: None,
+                retry: None,
+                requires_approval: None,
             });
         }
         assert!(draft.nodes.len() > MAX_WORKFLOW_NODES);

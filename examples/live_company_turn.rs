@@ -112,8 +112,10 @@ async fn main() -> anyhow::Result<()> {
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: opencompany::harness::toolbelt::CapabilityFilter::AllowAll,
+        workflow_source_dir: None,
         plan: None,
         media: None,
+        steer: opencompany::company::steer::InflightRegistry::default(),
     };
 
     let pool = HarnessPool::new();

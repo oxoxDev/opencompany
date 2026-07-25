@@ -336,6 +336,9 @@ fn summarize_event(event: &CompanyEvent) -> String {
         CompanyEvent::WorkflowCreated {
             workflow_id, name, ..
         } => format!("workflow created: {name} ({workflow_id})"),
+        CompanyEvent::TaskSteered {
+            task_id, action, ..
+        } => format!("task steered ({action}): {task_id}"),
     }
 }
 
@@ -1010,6 +1013,10 @@ impl From<CreateWorkflowArgs> for RawWorkflow {
                     name: n.name,
                     summary: n.summary,
                     agent: n.agent,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
                 })
                 .collect(),
             edges: args
@@ -1186,8 +1193,13 @@ impl Tool for CreateWorkflowTool {
             }
             Err(err) => {
                 tracing::debug!(company = %self.company, error = %err, "create_workflow: rejected");
+                let detail = match &err {
+                    OpenCompanyError::InvalidRequest(message)
+                    | OpenCompanyError::Conflict(message) => message.clone(),
+                    _ => "the company couldn't save it right now; try again.".to_string(),
+                };
                 Ok(ToolResult::error(format!(
-                    "Couldn't create the workflow: {err}"
+                    "Couldn't create the workflow: {detail}"
                 )))
             }
         }

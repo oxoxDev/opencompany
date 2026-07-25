@@ -47,6 +47,7 @@ pub mod orchestrator;
 pub mod policy;
 pub mod provider;
 pub mod skills;
+pub mod steer;
 pub mod steps;
 pub mod tool_dispatcher;
 pub mod toolbelt;
@@ -66,6 +67,7 @@ use oh::inference::provider::Provider;
 use crate::company::Agent as ManifestAgent;
 use crate::company::Policy;
 use crate::company::mcp::McpServerDecl;
+use crate::company::steer::SteerControl;
 use crate::error::OpenCompanyError;
 use crate::harness::cost::{TurnUsage, record_turn_cost};
 use crate::harness::mcp_probe::McpFailureQueue;
@@ -178,6 +180,15 @@ pub struct HarnessDeps {
     /// resolved filter; when the plan is `None` this stays the no-plan
     /// fallback/test override.
     pub capabilities: toolbelt::CapabilityFilter,
+    /// The company's source directory (`companies/<name>`), from which a
+    /// workflow's `sub_workflow` nodes resolve a child by `workflow_id`
+    /// (`workflows/<id>.toml`). Distinct from
+    /// [`Self::skills_source_dir`](Self::skills_source_dir) so the two seams stay
+    /// independent even though both currently derive from the same `seed_dir`.
+    /// `None` (default/tests, and platform-provisioned tenants with nothing on
+    /// disk) keeps the loud `UnwiredResolver`, so a reached `sub_workflow` node
+    /// fails clearly instead of resolving nothing.
+    pub workflow_source_dir: Option<PathBuf>,
     /// The tenant's capability tier plan (issue #108). `None` (the default)
     /// leaves gating **off** — byte-identical to Cell A, [`Self::capabilities`]
     /// is used verbatim. When set, [`HarnessPool::ensure`] resolves a per-tenant,
@@ -194,6 +205,15 @@ pub struct HarnessDeps {
     /// [`toolbelt::media_tools`]; a grant with no credential wires nothing and
     /// warns.
     pub media: Option<toolbelt::MediaBackend>,
+    /// Issue #111 — the shared registry of in-flight, steerable runs. The
+    /// [`HarnessBrain`] registers a dispatched task / desk delegation here before
+    /// running it (and installs the steer stop-hook over the slot's control), so
+    /// an operator can pause / cancel / redirect it mid-flight. The **same**
+    /// handle is threaded onto the [`CompanyRuntime`](crate::company::runtime::CompanyRuntime)
+    /// so the operator steer routes reach it. A cheap shared handle (like
+    /// [`delegations`](Self::delegations)); the default is an empty registry,
+    /// which simply lists nothing and rejects every steer as `not in flight`.
+    pub steer: crate::company::steer::InflightRegistry,
 }
 
 /// One live openhuman agent, keyed by its manifest id.
@@ -270,6 +290,29 @@ impl CompanyAgent {
     /// per-turn *local* — deliberately not a [`HarnessDeps`] field — so parallel
     /// turns never collide.
     pub async fn run(&self, message: &str) -> crate::Result<(TurnOutcome, Vec<TurnUsage>)> {
+        self.run_with_steer(message, None).await
+    }
+
+    /// Runs one turn with an optional operator **steer** control installed
+    /// (issue #111).
+    ///
+    /// When `steer` is `Some`, a [`SteerStopHook`](crate::harness::steer::SteerStopHook)
+    /// over the shared control is installed around the turn via
+    /// [`with_stop_hooks`](oh::agent::stop_hooks::with_stop_hooks). OpenHuman
+    /// fires stop hooks **between** tool-loop iterations (never mid-tool-call),
+    /// so an operator pause / cancel / redirect halts the turn gracefully at the
+    /// next iteration boundary. The control is `Box::pin`ned at the task-local
+    /// scope boundary to avoid the nested-scope stack-overflow trap.
+    ///
+    /// When a steer is pending after the first attempt yields the transient
+    /// empty-response class, the one-shot retry is **skipped** — a cancel (or
+    /// pause) issued before any text is produced must not silently restart the
+    /// work. With no steer this is byte-identical to the pre-#111 `run`.
+    pub async fn run_with_steer(
+        &self,
+        message: &str,
+        steer: Option<&SteerControl>,
+    ) -> crate::Result<(TurnOutcome, Vec<TurnUsage>)> {
         // Per-turn progress sink + an always-draining collector, so a burst of
         // events never blocks the turn loop on a full channel.
         let (tx, mut rx) = tokio::sync::mpsc::channel::<oh::agent::progress::AgentProgress>(1024);
@@ -283,29 +326,53 @@ impl CompanyAgent {
 
         let mut agent = self.agent.lock().await;
         agent.set_on_progress(Some(tx));
-        let mut usages: Vec<TurnUsage> = Vec::new();
 
-        // Attempt 1, falling through to a single retry only on the transient
-        // empty-response class. Both attempts feed the one progress channel.
-        let first = agent.turn(message).await;
-        usages.push(read_turn_usage(&agent));
-        let reply: crate::Result<String> = match self.classify_turn(first) {
-            AttemptOutcome::Reply(reply) => Ok(reply),
-            AttemptOutcome::Hard(err) => Err(err),
-            AttemptOutcome::Empty => {
-                // Attempt 2 (retry once).
-                let second = agent.turn(message).await;
-                usages.push(read_turn_usage(&agent));
-                match self.classify_turn(second) {
-                    AttemptOutcome::Reply(reply) => Ok(reply),
-                    // Still empty → graceful, scrubbed text (never an `Err`).
-                    AttemptOutcome::Empty => {
-                        Ok(crate::harness::mcp_probe::scrub(GRACEFUL_EMPTY_REPLY, &[]))
-                    }
-                    AttemptOutcome::Hard(err) => Err(err),
-                }
-            }
+        // Install the steer hook only when a control is provided; an empty hook
+        // list is exactly the pre-#111 behaviour.
+        let hooks: Vec<Arc<dyn oh::agent::stop_hooks::StopHook>> = match steer {
+            Some(control) => vec![Arc::new(crate::harness::steer::SteerStopHook::new(
+                control.clone(),
+            ))],
+            None => Vec::new(),
         };
+
+        // `Box::pin` at the task-local scope boundary (the nested-scope
+        // stack-overflow trap). The turn body owns the retry classification and
+        // reports every attempt's usage.
+        let (reply, usages): (crate::Result<String>, Vec<TurnUsage>) =
+            oh::agent::stop_hooks::with_stop_hooks(
+                hooks,
+                Box::pin(async {
+                    let mut usages: Vec<TurnUsage> = Vec::new();
+                    let first = agent.turn(message).await;
+                    usages.push(read_turn_usage(&agent));
+                    let reply: crate::Result<String> = match self.classify_turn(first) {
+                        AttemptOutcome::Reply(reply) => Ok(reply),
+                        AttemptOutcome::Hard(err) => Err(err),
+                        AttemptOutcome::Empty => {
+                            // Retry-guard edge: skip the one-shot retry when an
+                            // operator steer already pends, so a cancel/pause
+                            // before any text can't restart the work.
+                            if steer.map(|c| c.requested()).unwrap_or(false) {
+                                Ok(crate::harness::mcp_probe::scrub(GRACEFUL_EMPTY_REPLY, &[]))
+                            } else {
+                                let second = agent.turn(message).await;
+                                usages.push(read_turn_usage(&agent));
+                                match self.classify_turn(second) {
+                                    AttemptOutcome::Reply(reply) => Ok(reply),
+                                    AttemptOutcome::Empty => Ok(crate::harness::mcp_probe::scrub(
+                                        GRACEFUL_EMPTY_REPLY,
+                                        &[],
+                                    )),
+                                    AttemptOutcome::Hard(err) => Err(err),
+                                }
+                            }
+                        }
+                    };
+                    (reply, usages)
+                }),
+            )
+            .await;
 
         // Detach the sink (drops the only remaining `Sender`, closing the
         // channel), release the agent lock, then drain + fold. A `Hard` error
@@ -596,6 +663,34 @@ impl HarnessPool {
         message: &str,
         deps: &HarnessDeps,
     ) -> crate::Result<TurnOutcome> {
+        self.run_inner(company, agent_id, message, deps, None).await
+    }
+
+    /// Routes a message to one agent with an operator **steer** control installed
+    /// (issue #111), so a dispatched task / desk delegation can be paused,
+    /// cancelled, or redirected mid-flight. Otherwise identical to
+    /// [`run`](Self::run) — same retrieve→inject, cost accounting, and
+    /// memory-writeback. The steer hook fires only between tool-loop iterations.
+    pub async fn run_steered(
+        &self,
+        company: &CompanyId,
+        agent_id: &str,
+        message: &str,
+        deps: &HarnessDeps,
+        control: &SteerControl,
+    ) -> crate::Result<TurnOutcome> {
+        self.run_inner(company, agent_id, message, deps, Some(control))
+            .await
+    }
+
+    async fn run_inner(
+        &self,
+        company: &CompanyId,
+        agent_id: &str,
+        message: &str,
+        deps: &HarnessDeps,
+        steer: Option<&SteerControl>,
+    ) -> crate::Result<TurnOutcome> {
         let agent = {
             let guard = self.agents.read().await;
             let roster = guard
@@ -626,7 +721,7 @@ impl HarnessPool {
         // accessor and returns one entry per attempt (two when the empty-response
         // wrapper retried once). A zero-usage attempt (offline provider) writes
         // nothing, so the inert-metering contract holds.
-        let (outcome, turn_costs) = agent.run(&augmented).await?;
+        let (outcome, turn_costs) = agent.run_with_steer(&augmented, steer).await?;
         // Attribute cost to the provider this turn actually resolved to. With a
         // per-tenant [`TenantProvider`](crate::harness::provider::TenantProvider)
         // a console BYOK switch changes the slug between turns, so read it live
@@ -649,12 +744,17 @@ impl HarnessPool {
         // SECURITY: the reply **text only** — the scrubbed `outcome.steps` never
         // enter the memory store, so a step detail can never be retrieved and
         // re-injected into a later turn.
-        deps.context
-            .put(
-                company,
-                memory_loop::outcome_chunk(agent_id, message, &outcome.reply),
-            )
-            .await?;
+        if !matches!(
+            steer.and_then(SteerControl::pending),
+            Some(SteerAction::Cancel)
+        ) {
+            deps.context
+                .put(
+                    company,
+                    memory_loop::outcome_chunk(agent_id, message, &outcome.reply),
+                )
+                .await?;
+        }
 
         Ok(outcome)
     }
@@ -1057,8 +1157,10 @@ description = "Builds the product."
                 secrets: None,
                 web_allowed_domains: Vec::new(),
                 capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+                workflow_source_dir: None,
                 plan: None,
                 media: None,
+                steer: crate::company::steer::InflightRegistry::default(),
             },
             store,
             meter,
@@ -1111,8 +1213,10 @@ description = "Builds the product."
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
             plan: None,
             media: None,
+            steer: crate::company::steer::InflightRegistry::default(),
         };
 
         let roster = build_roster(&record(), &deps, &[]).expect("roster builds with skills");
@@ -1388,8 +1492,10 @@ description = "Builds the product."
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
             plan: None,
             media: None,
+            steer: crate::company::steer::InflightRegistry::default(),
         };
         let roster = build_roster(&record(), &deps, &[]).expect("roster");
         // Keep the tempdir alive for the agent's workspace by leaking it into the
@@ -1411,6 +1517,36 @@ description = "Builds the product."
         );
         assert_eq!(usages.len(), 2, "both attempts' usage is returned");
     }
+
+    /// Issue #111 retry-guard edge: when a steer already pends and the first
+    /// attempt is the transient empty class, the one-shot retry is SKIPPED — so a
+    /// cancel/pause issued before any text can't silently restart the work. The
+    /// steered-empty turn therefore makes EXACTLY ONE attempt.
+    #[tokio::test]
+    async fn steered_empty_turn_makes_exactly_one_attempt() {
+        use crate::company::steer::SteerAction;
+        // Attempt 1 is empty; a normal `run` would retry and consume the second
+        // script entry. With a steer pending, the retry must not fire.
+        let (agent, _deps) = scripted_agent(vec![Ok(String::new()), Ok("second".into())]);
+        let control = SteerControl::new();
+        control.request(SteerAction::Cancel);
+        let (_outcome, usages) = agent
+            .run_with_steer("hi", Some(&control))
+            .await
+            .expect("runs");
+        assert_eq!(
+            usages.len(),
+            1,
+            "a steered empty turn does NOT retry — exactly one attempt"
+        );
+    }
+
+    // Note: the *installation* of the steer stop-hook can't be observed from the
+    // provider — the tinyagents adapter snapshots the hooks at turn entry and the
+    // provider call may run on a spawned task where the task-local isn't
+    // inherited. The steer mechanism is instead proven end-to-end by the
+    // retry-guard edge above and the `run_task` disposition matrix in
+    // `harness::brain::tests` (cancel / pause / redirect all take effect).
 
     /// Empty twice → a graceful, non-error reply (chat never shows "Couldn't
     /// send" for a transient hiccup), still two attempts.
@@ -1510,8 +1646,10 @@ description = "Builds the product."
             secrets: Some(secrets.clone()),
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
             plan: None,
             media: None,
+            steer: crate::company::steer::InflightRegistry::default(),
         };
         let pool = HarnessPool::new();
         let rec = record();
@@ -1619,8 +1757,10 @@ description = "Builds the product."
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
             plan: None,
             media: None,
+            steer: crate::company::steer::InflightRegistry::default(),
         };
         let pool = HarnessPool::new();
 
@@ -1759,8 +1899,10 @@ description = "Sets direction."
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
             plan: Some(plan),
             media: None,
+            steer: crate::company::steer::InflightRegistry::default(),
         };
         let pool = HarnessPool::new();
         let rec = granting_record();

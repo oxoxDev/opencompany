@@ -8,7 +8,9 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use crate::company::CompanyManifest;
+use crate::company::steer::{InflightEntry, InflightKind};
 use crate::ports::facts::{FactKind, FactRecord};
+use crate::ports::tasks::TaskRecord;
 use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::runtime::RuntimeBuilder;
 use crate::server::router;
@@ -152,6 +154,117 @@ async fn tasks_crud_round_trips_under_both_scopes() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+
+    tokio::fs::remove_dir_all(&home).await.ok();
+}
+
+#[tokio::test]
+async fn steer_task_validates_statuses_and_journals_acceptance() {
+    let home = home();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+    let endpoint = |key: &str| format!("/api/v1/company/tasks/{key}/steer");
+
+    for body in [
+        json!({"action": "unknown"}),
+        json!({"action": "cancel"}),
+        json!({"action": "redirect", "instruction": "   "}),
+    ] {
+        let (status, _) = send(&state, "POST", &endpoint("missing"), Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    runtime
+        .tasks()
+        .upsert(
+            &company,
+            &TaskRecord {
+                id: "idle".into(),
+                title: "Idle".into(),
+                note: None,
+                column: "backlog".into(),
+                priority: "medium".into(),
+                assignee: String::new(),
+                updated_at_millis: 1,
+            },
+        )
+        .await
+        .unwrap();
+    let (status, _) = send(
+        &state,
+        "POST",
+        &endpoint("idle"),
+        Some(json!({"action": "pause"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        &endpoint("missing"),
+        Some(json!({"action": "pause"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let _delegation = runtime.steer().register(
+        &company,
+        InflightEntry {
+            key: "delegation".into(),
+            task_id: None,
+            kind: InflightKind::Delegation,
+            title: "Engineering".into(),
+            agent_id: "ceo".into(),
+            started_at_millis: 1,
+            pending_action: None,
+        },
+    );
+    let (status, _) = send(
+        &state,
+        "POST",
+        &endpoint("delegation"),
+        Some(json!({"action": "pause"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let _task = runtime.steer().register(
+        &company,
+        InflightEntry {
+            key: "active".into(),
+            task_id: Some("active".into()),
+            kind: InflightKind::Task,
+            title: "Active".into(),
+            agent_id: "ceo".into(),
+            started_at_millis: 2,
+            pending_action: None,
+        },
+    );
+    let (status, _) = send(
+        &state,
+        "POST",
+        &endpoint("active"),
+        Some(json!({"action": "redirect", "instruction": "focus on the API"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let events = runtime
+        .events()
+        .read_from(&company, crate::ports::types::EventSeq::new(0), usize::MAX)
+        .await
+        .unwrap();
+    assert!(events.iter().any(|stored| matches!(
+        &stored.event,
+        crate::ports::types::CompanyEvent::TaskSteered {
+            task_id,
+            action,
+            instruction: Some(instruction),
+            ..
+        } if task_id == "active" && action == "redirect" && instruction == "focus on the API"
+    )));
 
     tokio::fs::remove_dir_all(&home).await.ok();
 }

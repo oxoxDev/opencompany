@@ -37,6 +37,7 @@
 //! even on a build that cannot execute them.
 
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::Path as FsPath;
 
 use axum::extract::Path;
@@ -49,7 +50,7 @@ use serde_json::Value;
 use crate::AppState;
 use crate::company::{
     RawEdge, RawNode, RawWorkflow, WorkflowEdgeDef, WorkflowFile, WorkflowNodeDef,
-    create_company_workflow, load_company_workflows,
+    WorkflowRetryDef, load_company_workflows, parse_workflow, render_workflow,
 };
 use crate::error::OpenCompanyError;
 use crate::server::error::ApiError;
@@ -110,7 +111,9 @@ impl From<WorkflowFile> for WorkflowGraph {
 
 /// A single graph node. `kind` is the on-disk string
 /// (`trigger`/`agent`/`tool_call`/`http_request`/`condition`/`output`); `agent`
-/// is only meaningful on `agent` nodes.
+/// is only meaningful on `agent` nodes. The P1 fields (`config` / `onError` /
+/// `retry` / `requiresApproval`) are serialized so `GET …/workflows/{wid}` does
+/// not drop model data (they are omitted entirely when unset).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkflowNode {
@@ -121,6 +124,38 @@ struct WorkflowNode {
     summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    on_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry: Option<WorkflowRetryOut>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requires_approval: Option<bool>,
+}
+
+/// The camelCase retry policy shape the console reads back (`maxAttempts` /
+/// `backoffMs` / `backoff`). Distinct from the snake_case
+/// [`WorkflowRetryDef`] the model/TOML use.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowRetryOut {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_attempts: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backoff_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backoff: Option<String>,
+}
+
+impl From<WorkflowRetryDef> for WorkflowRetryOut {
+    fn from(r: WorkflowRetryDef) -> Self {
+        Self {
+            max_attempts: r.max_attempts,
+            backoff_ms: r.backoff_ms,
+            backoff: r.backoff,
+        }
+    }
 }
 
 impl From<WorkflowNodeDef> for WorkflowNode {
@@ -131,6 +166,10 @@ impl From<WorkflowNodeDef> for WorkflowNode {
             name: n.name,
             summary: n.summary,
             agent: n.agent,
+            config: n.config,
+            on_error: n.on_error,
+            retry: n.retry.map(WorkflowRetryOut::from),
+            requires_approval: n.requires_approval,
         }
     }
 }
@@ -261,6 +300,46 @@ struct CreateNode {
     summary: Option<String>,
     #[serde(default)]
     agent: Option<String>,
+    /// Free-form, kind-specific node config (P2): `switch`/`transform`
+    /// `=expr` bindings, a `sub_workflow` `workflow_id`, a `tool_call` slug/args,
+    /// … . Carried as JSON on the wire and converted to a `toml::Value` on the
+    /// way to disk; a JSON `null` anywhere inside is rejected as a 4xx (TOML has
+    /// no null to represent it).
+    #[serde(default)]
+    config: Option<serde_json::Value>,
+    /// Per-node error policy: `stop` (default) / `continue` / `route`.
+    #[serde(default)]
+    on_error: Option<String>,
+    /// Per-node retry policy the engine honors.
+    #[serde(default)]
+    retry: Option<CreateRetry>,
+    /// When `true`, the node pauses awaiting operator approval before it runs.
+    #[serde(default)]
+    requires_approval: Option<bool>,
+}
+
+/// The camelCase retry policy the create body carries (`maxAttempts` /
+/// `backoffMs` / `backoff`), mapped to the snake_case [`WorkflowRetryDef`] the
+/// model + TOML use — the inverse of the [`WorkflowRetryOut`] read shape.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateRetry {
+    #[serde(default)]
+    max_attempts: Option<u32>,
+    #[serde(default)]
+    backoff_ms: Option<u64>,
+    #[serde(default)]
+    backoff: Option<String>,
+}
+
+impl From<CreateRetry> for WorkflowRetryDef {
+    fn from(r: CreateRetry) -> Self {
+        Self {
+            max_attempts: r.max_attempts,
+            backoff_ms: r.backoff_ms,
+            backoff: r.backoff,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -272,23 +351,40 @@ struct CreateEdge {
     label: Option<String>,
 }
 
-impl From<CreateWorkflowBody> for RawWorkflow {
-    fn from(body: CreateWorkflowBody) -> Self {
-        Self {
+impl TryFrom<CreateWorkflowBody> for RawWorkflow {
+    type Error = ApiError;
+
+    fn try_from(body: CreateWorkflowBody) -> Result<Self, ApiError> {
+        let mut nodes = Vec::with_capacity(body.nodes.len());
+        for n in body.nodes {
+            // JSON config → TOML value. TOML has no `null`, so a `null` anywhere
+            // in the config is a caller error (400), not a 500 on write.
+            let config = match n.config {
+                Some(json) => Some(toml::Value::try_from(json).map_err(|err| {
+                    ApiError(OpenCompanyError::InvalidRequest(format!(
+                        "node `{}` has config that can't be stored ({err}) — TOML has no null; drop null-valued keys.",
+                        n.id
+                    )))
+                })?),
+                None => None,
+            };
+            nodes.push(RawNode {
+                id: n.id,
+                kind: n.kind,
+                name: n.name,
+                summary: n.summary,
+                agent: n.agent,
+                config,
+                on_error: n.on_error,
+                retry: n.retry.map(WorkflowRetryDef::from),
+                requires_approval: n.requires_approval,
+            });
+        }
+        Ok(Self {
             id: body.id,
             name: body.name,
             description: body.description,
-            nodes: body
-                .nodes
-                .into_iter()
-                .map(|n| RawNode {
-                    id: n.id,
-                    kind: n.kind,
-                    name: n.name,
-                    summary: n.summary,
-                    agent: n.agent,
-                })
-                .collect(),
+            nodes,
             edges: body
                 .edges
                 .into_iter()
@@ -298,7 +394,7 @@ impl From<CreateWorkflowBody> for RawWorkflow {
                     label: e.label,
                 })
                 .collect(),
-        }
+        })
     }
 }
 
@@ -306,39 +402,156 @@ impl From<CreateWorkflowBody> for RawWorkflow {
 /// form creator, or any direct API caller, posts the graph shape and it lands
 /// as a new `workflows/<id>.toml` in the company's source directory.
 ///
-/// A thin shim over [`create_company_workflow`] (issue #112), the shared
-/// validated-persist core the orchestrator's `create_workflow` tool also runs —
-/// so both surfaces enforce the same checks (safe id + length/size caps,
-/// exactly one trigger, roster cross-check, case-insensitive name uniqueness,
-/// [`parse_workflow`](crate::company::parse_workflow) revalidation, atomic
-/// write, enable, best-effort audit event) and land the identical artifact.
-///
-/// The only work left at this layer is the two request-shaped concerns: refuse
-/// a deployment with no writable source directory (a hosted tenant with nothing
-/// seeded) before calling the core, and map the core's error variants to HTTP
-/// statuses — [`InvalidRequest`](OpenCompanyError::InvalidRequest) → 400,
-/// [`Conflict`](OpenCompanyError::Conflict) → 409 — via [`ApiError`].
+/// Order of checks, each returning an actionable 4xx before anything is
+/// written: the id must be a safe filename, the deployment must have a source
+/// directory to write into, the id must not already be taken (409), every
+/// `agent` node must name a real roster teammate, and the graph must pass the
+/// same structural validation ([`parse_workflow`]) a hand-authored file would
+/// (at least one trigger, unique node ids, edges that reference real nodes, no
+/// stray `agent` field on a non-agent node).
 async fn create_workflow(
     company: ScopedCompany,
     Json(body): Json<CreateWorkflowBody>,
 ) -> Result<Json<WorkflowGraph>, ApiError> {
-    // A deployment with no source directory (platform-provisioned mode with
-    // nothing seeded on disk yet) has nowhere to write the graph file.
+    if !safe_wid(&body.id) {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            language::WORKFLOW_ID_INVALID.to_string(),
+        )));
+    }
+
     let source_dir = company.runtime.source_dir().ok_or_else(|| {
         ApiError(OpenCompanyError::InvalidRequest(
             language::WORKFLOW_NEEDS_SOURCE_DIR.to_string(),
         ))
     })?;
 
-    let file = create_company_workflow(
-        company.id(),
-        source_dir,
-        company.runtime.store(),
-        Some(company.runtime.events()),
-        body.into(),
-    )
-    .await
-    .map_err(ApiError)?;
+    let workflows_dir = source_dir.join("workflows");
+    let path = workflows_dir.join(format!("{}.toml", body.id));
+
+    std::fs::create_dir_all(&workflows_dir).map_err(|source| {
+        ApiError(OpenCompanyError::StoreIo {
+            path: workflows_dir.clone(),
+            source,
+        })
+    })?;
+
+    // `parse_workflow` only rejects zero triggers (a saved graph may legally
+    // have more, e.g. multiple entry points); the creator is stricter — a
+    // freshly authored graph must name exactly one starting point.
+    let trigger_count = body.nodes.iter().filter(|n| n.kind == "trigger").count();
+    if trigger_count != 1 {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+            "a workflow needs exactly one `trigger` node to say what starts it (found {trigger_count})."
+        ))));
+    }
+
+    // Cross-check every `agent` node against the company's effective roster
+    // (manifest agents + operator overlay teammates) before writing anything.
+    // `parse_workflow` validates the graph's own shape but has no roster to
+    // check names against.
+    let mut record = company
+        .runtime
+        .store()
+        .load(company.id())
+        .await?
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.id().to_string()))?;
+    let roster: HashSet<&str> = record
+        .manifest
+        .agents
+        .iter()
+        .map(|a| a.id.as_str())
+        .chain(record.overlay_agents.iter().map(|a| a.id.as_str()))
+        .collect();
+    for node in &body.nodes {
+        if node.kind != "agent" {
+            continue;
+        }
+        match node.agent.as_deref() {
+            Some(agent_id) if roster.contains(agent_id) => {}
+            Some(agent_id) => {
+                return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                    "node `{}` names teammate `{agent_id}`, which is not on this company's roster.",
+                    node.id
+                ))));
+            }
+            None => {
+                return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                    "node `{}` is an agent node but names no teammate.",
+                    node.id
+                ))));
+            }
+        }
+    }
+
+    // Save `body.id` before `body` is consumed by `Into<RawWorkflow>` below.
+    let body_id = body.id.clone();
+
+    // Render the candidate graph to TOML and reuse `parse_workflow` to
+    // validate its structure end to end — the same rules a hand-authored
+    // `workflows/<id>.toml` must satisfy. Any problem becomes a 400, never the
+    // 500 a malformed on-disk file gets from the read routes.
+    let toml_src = render_workflow(&RawWorkflow::try_from(body)?)?;
+    let file = parse_workflow(&toml_src).map_err(|err| match err {
+        OpenCompanyError::DataInvalid { problems, .. } => {
+            ApiError(OpenCompanyError::InvalidRequest(problems.join(" ")))
+        }
+        OpenCompanyError::DataParse { message, .. } => {
+            ApiError(OpenCompanyError::InvalidRequest(message))
+        }
+        other => ApiError(other),
+    })?;
+
+    // Write the file atomically: `create_new(true)` fails if the path already
+    // exists, closing the TOCTOU gap between a separate `is_file()` check and
+    // `fs::write`. If `write_all` fails, clean up the empty file so the id is
+    // not permanently blocked. Also, save the store record **after** the file
+    // lands so a store failure doesn't orphan a file — if the save fails the
+    // file is cleaned up and the caller can retry.
+    let mut wf_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::AlreadyExists => ApiError(OpenCompanyError::Conflict(format!(
+                "A workflow named `{}` already exists.",
+                body_id
+            ))),
+            _ => ApiError(OpenCompanyError::StoreIo {
+                path: path.clone(),
+                source: e,
+            }),
+        })?;
+    wf_file.write_all(toml_src.as_bytes()).map_err(|source| {
+        let _ = std::fs::remove_file(&path);
+        ApiError(OpenCompanyError::StoreIo {
+            path: path.clone(),
+            source,
+        })
+    })?;
+    drop(wf_file);
+
+    // Record the id as enabled on the operator's live copy of the manifest —
+    // mirrors the team overlay: the version-controlled `company.toml` on disk
+    // is never rewritten (see `crate::server::ops::team`).
+    let save_result = if !record
+        .manifest
+        .workflows
+        .enabled
+        .iter()
+        .any(|e| e == &file.id)
+    {
+        record.manifest.workflows.enabled.push(file.id.clone());
+        company.runtime.store().save(&record).await
+    } else {
+        Ok(())
+    };
+
+    // If the store save failed, remove the file we just wrote so a retry can
+    // succeed without admin intervention.
+    if let Err(e) = save_result {
+        let _ = std::fs::remove_file(&path);
+        return Err(ApiError(e));
+    }
 
     Ok(Json(WorkflowGraph::from(file)))
 }
@@ -567,6 +780,131 @@ mod tests {
         assert!(done.get("agent").is_none());
         assert!(done.get("summary").is_none());
         assert_eq!(done["kind"], "output");
+    }
+
+    #[test]
+    fn json_serializes_p1_node_fields_in_camelcase() {
+        use crate::company::{WorkflowNodeDef, WorkflowNodeKind, WorkflowRetryDef};
+
+        let file = WorkflowFile {
+            id: "wf".into(),
+            name: "WF".into(),
+            description: None,
+            nodes: vec![WorkflowNodeDef {
+                id: "call".into(),
+                kind: WorkflowNodeKind::ToolCall,
+                name: "Call".into(),
+                summary: None,
+                agent: None,
+                config: Some(serde_json::json!({ "slug": "csv_export" })),
+                on_error: Some("continue".into()),
+                retry: Some(WorkflowRetryDef {
+                    max_attempts: Some(3),
+                    backoff_ms: Some(250),
+                    backoff: Some("exponential".into()),
+                }),
+                requires_approval: Some(true),
+            }],
+            edges: Vec::new(),
+        };
+        let json = serde_json::to_value(WorkflowGraph::from(file)).unwrap();
+        let node = &json["nodes"][0];
+        assert_eq!(node["config"]["slug"], "csv_export");
+        assert_eq!(node["onError"], "continue");
+        assert_eq!(node["retry"]["maxAttempts"], 3);
+        assert_eq!(node["retry"]["backoffMs"], 250);
+        assert_eq!(node["retry"]["backoff"], "exponential");
+        assert_eq!(node["requiresApproval"], true);
+    }
+
+    // --- P2: create body maps the new node fields (config/error/retry/approval)
+
+    /// A create body carrying P2 node fields round-trips them through the
+    /// render → parse pipeline the endpoint uses before writing to disk: config
+    /// (with an `=expr` binding), `onError`, `retry` (camelCase → snake), and
+    /// `requiresApproval` all survive.
+    #[test]
+    fn create_body_round_trips_p2_node_fields() {
+        use crate::company::WorkflowNodeKind;
+
+        let body: CreateWorkflowBody = serde_json::from_value(serde_json::json!({
+            "id": "wf",
+            "name": "WF",
+            "nodes": [
+                { "id": "start", "kind": "trigger", "name": "Start" },
+                {
+                    "id": "tf", "kind": "transform", "name": "Transform",
+                    "config": { "set": { "count": "=items | length" } },
+                    "onError": "continue",
+                    "retry": { "maxAttempts": 3, "backoffMs": 250, "backoff": "exponential" },
+                    "requiresApproval": true
+                }
+            ],
+            "edges": [ { "from": "start", "to": "tf" } ]
+        }))
+        .expect("body deserializes");
+
+        let raw = RawWorkflow::try_from(body).expect("converts");
+        let toml_src = render_workflow(&raw).expect("renders");
+        let file = parse_workflow(&toml_src).expect("re-parses");
+
+        let tf = file.nodes.iter().find(|n| n.id == "tf").unwrap();
+        assert_eq!(tf.kind, WorkflowNodeKind::Transform);
+        assert_eq!(tf.on_error.as_deref(), Some("continue"));
+        assert_eq!(tf.requires_approval, Some(true));
+        let retry = tf.retry.as_ref().expect("retry present");
+        assert_eq!(retry.max_attempts, Some(3));
+        assert_eq!(retry.backoff_ms, Some(250));
+        assert_eq!(retry.backoff.as_deref(), Some("exponential"));
+        // The `=expr` binding is preserved verbatim for the engine to evaluate.
+        assert_eq!(
+            tf.config.as_ref().unwrap()["set"]["count"],
+            "=items | length"
+        );
+    }
+
+    /// An old create body (no P2 fields) still produces a bare node — every new
+    /// field unset — so nothing changes for existing callers.
+    #[test]
+    fn create_body_without_new_fields_is_unchanged() {
+        let body: CreateWorkflowBody = serde_json::from_value(serde_json::json!({
+            "id": "wf",
+            "name": "WF",
+            "nodes": [ { "id": "start", "kind": "trigger", "name": "Start" } ],
+            "edges": []
+        }))
+        .unwrap();
+        let raw = RawWorkflow::try_from(body).expect("converts");
+        let node = &raw.nodes[0];
+        assert!(node.config.is_none());
+        assert!(node.on_error.is_none());
+        assert!(node.retry.is_none());
+        assert!(node.requires_approval.is_none());
+    }
+
+    /// A JSON `null` inside node config is a 400 — TOML has no null to store it,
+    /// so it is rejected before anything touches disk.
+    #[test]
+    fn create_body_with_null_config_is_a_bad_request() {
+        use axum::http::StatusCode;
+
+        let body: CreateWorkflowBody = serde_json::from_value(serde_json::json!({
+            "id": "wf",
+            "name": "WF",
+            "nodes": [
+                { "id": "call", "kind": "tool_call", "name": "Call", "config": { "slug": null } }
+            ],
+            "edges": []
+        }))
+        .unwrap();
+        // `RawWorkflow` is not `Debug`, so unwrap the error by hand rather than
+        // via `expect_err`.
+        let err = match RawWorkflow::try_from(body) {
+            Ok(_) => panic!("a null config value must be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(matches!(err.0, OpenCompanyError::InvalidRequest(_)));
     }
 
     #[test]

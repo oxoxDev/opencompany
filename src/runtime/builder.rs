@@ -725,6 +725,12 @@ impl RuntimeBuilder {
         // reuse the same metered pool/deps the brain runs on.
         #[cfg(feature = "openhuman")]
         let mut wf_runner: Option<Arc<dyn WorkflowRunner>> = None;
+        // Issue #111: one in-flight steer registry per company, shared between the
+        // harness deps (which register runs + install the steer hook) and the
+        // runtime (which the operator steer routes reach). Captured from the
+        // harness arm so `CompanyRuntime::set_steer` can be wired downstream.
+        #[cfg(feature = "openhuman")]
+        let mut steer_registry: Option<crate::company::steer::InflightRegistry> = None;
         let brain: Arc<dyn Brain> = match self.brain {
             Some(brain) => brain,
             None => {
@@ -775,6 +781,10 @@ impl RuntimeBuilder {
                         .is_some();
 
                         if configured {
+                            // One shared steer registry; the same handle is wired
+                            // onto the runtime below.
+                            let steer = crate::company::steer::InflightRegistry::new();
+                            steer_registry = Some(steer.clone());
                             // Resolve the company's effective MCP servers to data
                             // (manifest ∪ runtime index, credentials materialized)
                             // before building sync deps. A corrupt index degrades
@@ -849,6 +859,11 @@ impl RuntimeBuilder {
                                     .tools
                                     .web_allowed_domains
                                     .clone(),
+                                // #113 P2: the company source dir so a workflow's
+                                // `sub_workflow` node resolves a child by id from
+                                // `workflows/<id>.toml`. Same origin as the skills
+                                // source dir but a distinct seam.
+                                workflow_source_dir: self.seed_dir.clone(),
                                 // Issue #108: `capabilities` is the no-plan
                                 // fallback (identity). When `[plan]` is set,
                                 // `HarnessPool::ensure` resolves the per-tenant
@@ -866,6 +881,12 @@ impl RuntimeBuilder {
                                 // closed — `build_agent` wires no media tools even
                                 // for a company that grants `media`.
                                 media: self.media_backend.clone(),
+                                // #113 P2: the company source dir so a workflow's
+                                // `sub_workflow` node resolves a child by id from
+                                // `workflows/<id>.toml`. Same origin as the skills
+                                // source dir but a distinct seam.
+                                workflow_source_dir: self.seed_dir.clone(),
+                                steer,
                             };
                             let record = CompanyRecord {
                                 id: id.clone(),
@@ -1032,6 +1053,15 @@ impl RuntimeBuilder {
         #[cfg(feature = "openhuman")]
         if let Some(harness) = self.harness.clone() {
             runtime.set_harness(harness);
+        }
+
+        // Issue #111: attach the same steer registry the harness deps hold, so the
+        // operator steer routes and the in-flight strip reach the runs the brain
+        // registers. Only present on the harness path; the default build leaves
+        // the runtime's registry empty (every steer is `not in flight`).
+        #[cfg(feature = "openhuman")]
+        if let Some(registry) = steer_registry {
+            runtime.set_steer(registry);
         }
 
         // #29: install the workflow runner captured from the harness arm so
