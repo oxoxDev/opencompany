@@ -351,6 +351,30 @@ pub enum CompanyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<Actor>,
     },
+    /// An operator steered an in-flight run — paused, cancelled, or redirected a
+    /// dispatched task (or cancelled a delegation) from chat (issue #111).
+    /// Journaled best-effort **after** the steer is accepted by the in-flight
+    /// registry, so it records an accepted operator control action. Additive: old
+    /// logs never carry it, and its presence doesn't change how any existing
+    /// variant serializes (same `by` / skip-if-none precedent as
+    /// [`WorkflowCreated`](Self::WorkflowCreated)).
+    TaskSteered {
+        /// The steered run's key — the board task id, or a delegation run id.
+        task_id: String,
+        /// The action taken, as a stable wire word: `pause` / `cancel` /
+        /// `redirect`.
+        action: String,
+        /// The operator's redirect instruction (codepoint-capped), present only
+        /// on a `redirect`. Omitted from the wire otherwise, and — being
+        /// operator-authored free text — never projected onto the SSE stream.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instruction: Option<String>,
+        /// Who steered, when known. `None` on a surface that carries no attributed
+        /// actor; kept `Option` so a future attributed steer needs no migration,
+        /// mirroring [`OperatorMessage`](Self::OperatorMessage)'s `by`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
 }
 
 /// A `CompanyEvent` durably appended to the log with its sequence and time.
@@ -1294,6 +1318,36 @@ mod test {
         assert_eq!(
             serde_json::to_string(&event).unwrap(),
             r#"{"kind":"McpCallFailed","server":"browserbase","tool":"browse","status":"tool_call_rejected","message":"server rejected the call"}"#
+        );
+    }
+
+    #[test]
+    fn task_steered_round_trips_and_omits_empty_fields() {
+        // A plain pause: no `instruction`, no `by` — both must be OMITTED from
+        // the wire (skip_serializing_if), so old logs stay byte-stable.
+        let pause = CompanyEvent::TaskSteered {
+            task_id: "t1".into(),
+            action: "pause".into(),
+            instruction: None,
+            by: None,
+        };
+        assert_eq!(round_trip(&pause), pause);
+        assert_eq!(
+            serde_json::to_string(&pause).unwrap(),
+            r#"{"kind":"TaskSteered","task_id":"t1","action":"pause"}"#
+        );
+
+        // A redirect carries its (capped) instruction; still no actor.
+        let redirect = CompanyEvent::TaskSteered {
+            task_id: "t1".into(),
+            action: "redirect".into(),
+            instruction: Some("focus on the API".into()),
+            by: None,
+        };
+        assert_eq!(round_trip(&redirect), redirect);
+        assert_eq!(
+            serde_json::to_string(&redirect).unwrap(),
+            r#"{"kind":"TaskSteered","task_id":"t1","action":"redirect","instruction":"focus on the API"}"#
         );
     }
 
