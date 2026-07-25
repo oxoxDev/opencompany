@@ -86,11 +86,24 @@ impl StoreWorkflowResolver {
     /// closure, the `sub_workflow` chain would loop. Bounded by a visited set and
     /// [`MAX_STATIC_RESOLVE_NODES`]; an unresolvable child is not a cycle (it
     /// fails loudly at its own resolve) so it is skipped here.
-    fn guard_cycle(&self, start_id: &str) -> TfResult<()> {
+    fn guard_cycle(
+        source_dir: PathBuf,
+        root_id: String,
+        start_id: String,
+        start_file: WorkflowFile,
+    ) -> TfResult<()> {
         let mut visited: HashSet<String> = HashSet::new();
         let mut queue: VecDeque<String> = VecDeque::new();
-        queue.push_back(start_id.to_string());
-        let mut budget = 0usize;
+        visited.insert(start_id.clone());
+        let mut budget = 1usize;
+        for referenced in Self::static_refs(&start_file) {
+            if referenced == start_id || referenced == root_id {
+                return Err(EngineError::Capability(format!(
+                    "sub_workflow cycle detected: '{start_id}' references '{referenced}', which loops back into the running chain (root '{root_id}', resolving '{start_id}')"
+                )));
+            }
+            queue.push_back(referenced);
+        }
 
         while let Some(current) = queue.pop_front() {
             if !visited.insert(current.clone()) {
@@ -105,7 +118,7 @@ impl StoreWorkflowResolver {
             // An unresolvable / invalid child is not itself a cycle — it will
             // fail loudly when the engine resolves it. Skip it in the scan.
             let Ok(mut loaded) =
-                load_company_workflows(&self.source_dir, std::slice::from_ref(&current))
+                load_company_workflows(&source_dir, std::slice::from_ref(&current))
             else {
                 continue;
             };
@@ -113,10 +126,10 @@ impl StoreWorkflowResolver {
                 continue;
             };
             for referenced in Self::static_refs(&file) {
-                if referenced == start_id || referenced == self.root_id {
+                if referenced == start_id || referenced == root_id {
                     return Err(EngineError::Capability(format!(
                         "sub_workflow cycle detected: '{current}' references '{referenced}', which loops back into the running chain (root '{}', resolving '{start_id}')",
-                        self.root_id
+                        root_id
                     )));
                 }
                 queue.push_back(referenced);
@@ -152,7 +165,19 @@ impl WorkflowResolver for StoreWorkflowResolver {
 
         // (c) Static cycle guard over the store, before the child is handed back
         // to the engine to compile + run.
-        self.guard_cycle(workflow_id)?;
+        let source_dir = self.source_dir.clone();
+        let root_id = self.root_id.clone();
+        let start_id = workflow_id.to_string();
+        let start_file = file.clone();
+        tokio::task::spawn_blocking(move || {
+            Self::guard_cycle(source_dir, root_id, start_id, start_file)
+        })
+        .await
+        .map_err(|err| {
+            EngineError::Capability(format!(
+                "sub_workflow '{workflow_id}' cycle scan failed: {err}"
+            ))
+        })??;
 
         // (d) Translate to a runnable tinyflows graph.
         Ok(crate::workflows::translate::translate(&file))
