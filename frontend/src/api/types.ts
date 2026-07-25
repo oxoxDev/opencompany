@@ -302,6 +302,16 @@ export interface CapabilityStatusDto {
   spentTokens?: number;
   /** One row per configured tier, namespace-sorted. */
   tiers?: CapabilityTierDto[];
+  /**
+   * Media generation (issue #109): whether the company **explicitly** grants the
+   * real-money `media` namespace (a `*` wildcard does not count). Present
+   * regardless of whether a `[plan]` is configured.
+   */
+  mediaGranted?: boolean;
+  /** Whether the `media` feature is compiled into this build at all. */
+  mediaInBuild?: boolean;
+  /** Whether a managed media credential is configured on this build (env-only). */
+  mediaCredentialConfigured?: boolean;
 }
 
 /** Error envelope shape: `{ error, code }`. */
