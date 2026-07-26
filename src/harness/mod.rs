@@ -50,6 +50,7 @@ pub mod provider;
 pub mod skills;
 pub mod steer;
 pub mod steps;
+pub mod tool_dispatcher;
 pub mod toolbelt;
 
 pub use brain::HarnessBrain;
