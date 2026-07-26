@@ -46,6 +46,7 @@ use oh::agent::progress::AgentProgress;
 use oh::tool_status::ClassifiedFailure;
 
 use crate::ports::types::{TurnStep, TurnStepKind, TurnStepStatus};
+use crate::turn_stream::TurnStreamEvent;
 
 /// Hard cap on the number of steps carried back to the operator. A runaway turn
 /// (a tight tool loop) is truncated to this many, plus one omission note.
@@ -179,6 +180,99 @@ pub fn fold_steps(events: Vec<AgentProgress>) -> Vec<TurnStep> {
     steps
 }
 
+/// Map one live [`AgentProgress`] event to a scrubbed [`TurnStreamEvent`] for
+/// the transient [`turn_stream`](crate::turn_stream) bus, or `None` for events
+/// with no operator-facing live frame (text/thinking/args deltas, iteration and
+/// cost updates, sub-agent lifecycle, turn markers).
+///
+/// This is the live counterpart of [`fold_steps`] and shares its exact
+/// scrubbing helpers ([`label_for`], [`enrich_detail`], [`error_detail`]), so
+/// the live stream carries the identical no-raw-arguments / no-raw-output
+/// projection the final folded timeline does — the two views can never disagree
+/// and neither can leak. `seq` is the caller's monotonic per-turn counter, for
+/// client-side ordering/dedup.
+pub(crate) fn stream_event_from(
+    event: &AgentProgress,
+    seq: u64,
+    thinking_open: &mut bool,
+) -> Option<TurnStreamEvent> {
+    match event {
+        AgentProgress::ToolCallStarted {
+            call_id,
+            tool_name,
+            display_label,
+            ..
+        } => {
+            *thinking_open = false;
+            Some(TurnStreamEvent {
+                kind: "tool_call",
+                seq,
+                agent_id: None,
+                tool_call_id: Some(call_id.clone()),
+                label: Some(label_for(display_label.clone(), tool_name)),
+                detail: None,
+                status: Some("running"),
+                elapsed_ms: None,
+            })
+        }
+        AgentProgress::ToolCallCompleted {
+            call_id,
+            tool_name,
+            success,
+            output,
+            arguments,
+            elapsed_ms,
+            failure,
+            ..
+        } => {
+            *thinking_open = false;
+            let (status, detail) = if *success {
+                ("ok", enrich_detail(tool_name, arguments.as_ref()))
+            } else {
+                ("error", error_detail(failure.as_ref(), output, tool_name))
+            };
+            Some(TurnStreamEvent {
+                kind: "tool_result",
+                seq,
+                agent_id: None,
+                tool_call_id: Some(call_id.clone()),
+                // A label so a completion with no observed start still renders;
+                // the common case pairs by `tool_call_id` and keeps the running
+                // row's richer label.
+                label: Some(humanize(tool_name)),
+                detail,
+                status: Some(status),
+                elapsed_ms: Some(*elapsed_ms),
+            })
+        }
+        // The first thinking delta of a run opens ONE coalesced "Thinking" frame,
+        // exactly as `fold_steps` opens one "Thinking" step; consecutive deltas
+        // fall through to the catch-all and emit nothing, so the live timeline
+        // shows the same thinking rows the final folded one does (they were
+        // otherwise missing live — the count jumped up when the reply landed).
+        AgentProgress::ThinkingDelta { .. } if !*thinking_open => {
+            *thinking_open = true;
+            Some(TurnStreamEvent {
+                kind: "thinking",
+                seq,
+                agent_id: None,
+                tool_call_id: None,
+                label: Some("Thinking".to_string()),
+                detail: None,
+                status: Some("ok"),
+                elapsed_ms: None,
+            })
+        }
+        // Visible assistant text closes a thinking run (the reply is the bubble
+        // body), matching `fold_steps`; it adds no step of its own.
+        AgentProgress::TextDelta { .. } => {
+            *thinking_open = false;
+            None
+        }
+        _ => None,
+    }
+}
+
 /// The label for a tool step: the server-computed `display_label` when it is a
 /// non-blank string, else a humanized form of the tool name. Never derived from
 /// arguments or output.
@@ -225,14 +319,46 @@ fn enrich_detail(tool_name: &str, arguments: Option<&Value>) -> Option<String> {
     }
 }
 
-/// The detail for a failed tool call: the classifier's plain-language cause when
-/// present, else the `sanitize_tool_output` **class** string. Never the raw
-/// remote error text.
+/// OpenCompany's own orchestrator tools (issue #112 et al). Their error text is
+/// **OC-authored, operator-facing copy** — the tool's own `ToolResult::error`
+/// message (e.g. "workflow needs exactly one trigger"), not a remote or
+/// untrusted body — so on failure it is safe *and* useful to surface verbatim
+/// (bounded) instead of collapsing to the generic classifier class. Contrast
+/// `mcp_call_tool`, whose output is a remote server body and therefore stays
+/// scrubbed to a class string. Keep this list in lockstep with
+/// [`orchestrator_tools`](crate::harness::orchestrator::orchestrator_tools).
+const INTRINSIC_TOOLS: &[&str] = &[
+    "query_company",
+    "spawn_task",
+    "delegate_to_desk",
+    "run_workflow",
+    "create_workflow",
+    "add_agent",
+];
+
+/// Bound on the OC-authored failure detail surfaced for an intrinsic tool.
+const ERROR_DETAIL_MAX: usize = 200;
+
+/// The detail for a failed tool call.
+///
+/// For an **intrinsic OpenCompany tool** the tool's own output *is* the
+/// actionable, OC-authored reason, so a bounded copy of it is surfaced first —
+/// this is what turns the useless generic "Something went wrong with this
+/// action." into the real cause the operator needs (issue: workflow-create
+/// error masking). For every other tool the rule is unchanged: the classifier's
+/// plain-language cause when present, else the `sanitize_tool_output` **class**
+/// string — never the raw remote error text.
 fn error_detail(
     failure: Option<&ClassifiedFailure>,
     output: &str,
     tool_name: &str,
 ) -> Option<String> {
+    if INTRINSIC_TOOLS.contains(&tool_name) {
+        let msg = output.trim();
+        if !msg.is_empty() {
+            return Some(truncate(msg, ERROR_DETAIL_MAX));
+        }
+    }
     match failure {
         Some(f) if !f.cause_plain.trim().is_empty() => Some(f.cause_plain.clone()),
         _ => {
@@ -539,5 +665,145 @@ mod tests {
     #[test]
     fn empty_stream_folds_to_no_steps() {
         assert!(fold_steps(Vec::new()).is_empty());
+    }
+
+    /// The workflow-create error-masking fix: an intrinsic OpenCompany tool's
+    /// failure surfaces its OWN OC-authored message — the actionable reason —
+    /// even when the classifier only offers the generic "Unknown" cause. This is
+    /// what turns "Something went wrong with this action." into "…needs exactly
+    /// one trigger" on the operator bubble.
+    #[test]
+    fn intrinsic_tool_failure_surfaces_oc_authored_reason() {
+        let reason = "Couldn't create the workflow: a workflow needs exactly one trigger";
+        let steps = fold_steps(vec![
+            started("c1", "create_workflow", Some("Create Workflow")),
+            completed(
+                "c1",
+                "create_workflow",
+                false,
+                reason,
+                None,
+                // The generic classifier cause an operator would otherwise see.
+                Some(classified(
+                    ToolFailureClass::Unknown,
+                    "Something went wrong",
+                )),
+            ),
+        ]);
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].status, TurnStepStatus::Error);
+        assert_eq!(
+            steps[0].detail.as_deref(),
+            Some(reason),
+            "the intrinsic tool's own message must win over the generic cause"
+        );
+    }
+
+    /// The security invariant the intrinsic-tool branch must NOT weaken: a
+    /// remote (`mcp_call_tool`) failure still scrubs to a class string — its raw
+    /// output (a remote body that can carry a secret) never becomes the detail.
+    #[test]
+    fn remote_tool_failure_stays_scrubbed_to_class() {
+        const SECRET: &str = "sk-live-REMOTE-9x";
+        let steps = fold_steps(vec![
+            started("c1", "mcp_call_tool", Some("Calling a remote tool")),
+            completed(
+                "c1",
+                "mcp_call_tool",
+                false,
+                &format!("401 unauthorized token={SECRET}"),
+                Some(serde_json::json!({ "server": "brave", "tool": "search" })),
+                None,
+            ),
+        ]);
+        let detail = steps[0].detail.clone().unwrap_or_default();
+        assert!(
+            !detail.contains(SECRET),
+            "remote output must never surface as detail: {detail}"
+        );
+    }
+
+    /// `stream_event_from` (the live-bus counterpart of `fold_steps`) maps a
+    /// start to a `running` `tool_call` frame and a completion to an `ok`
+    /// `tool_result` frame paired by `tool_call_id`, carrying the same scrubbed
+    /// label/detail the folded timeline would.
+    #[test]
+    fn stream_event_from_maps_start_and_completion() {
+        let mut thinking_open = false;
+        let start = stream_event_from(
+            &started("c1", "mcp_call_tool", Some("Searching")),
+            0,
+            &mut thinking_open,
+        )
+        .expect("start maps to a frame");
+        assert_eq!(start.kind, "tool_call");
+        assert_eq!(start.status, Some("running"));
+        assert_eq!(start.tool_call_id.as_deref(), Some("c1"));
+        assert_eq!(start.label.as_deref(), Some("Searching"));
+
+        let done = stream_event_from(
+            &completed(
+                "c1",
+                "mcp_call_tool",
+                true,
+                "ok",
+                Some(serde_json::json!({ "server": "brave", "tool": "search" })),
+                None,
+            ),
+            1,
+            &mut thinking_open,
+        )
+        .expect("completion maps to a frame");
+        assert_eq!(done.kind, "tool_result");
+        assert_eq!(done.status, Some("ok"));
+        assert_eq!(done.tool_call_id.as_deref(), Some("c1"));
+        assert_eq!(done.detail.as_deref(), Some("brave · search"));
+        assert_eq!(done.elapsed_ms, Some(42));
+    }
+
+    /// Thinking coalesces live exactly as it folds: the FIRST delta of a run
+    /// emits one `thinking` frame, consecutive deltas emit nothing, and visible
+    /// text closes the run (no frame). This is what keeps the live step count
+    /// tracking the final folded count instead of jumping up when the reply
+    /// lands.
+    #[test]
+    fn stream_event_from_coalesces_thinking_and_ignores_text() {
+        let mut open = false;
+        let first = stream_event_from(&thinking("hmm"), 0, &mut open).expect("first delta → frame");
+        assert_eq!(first.kind, "thinking");
+        assert_eq!(first.label.as_deref(), Some("Thinking"));
+        assert!(open, "run is now open");
+        // A consecutive delta while the run is open adds nothing.
+        assert!(stream_event_from(&thinking("more"), 1, &mut open).is_none());
+        // Visible text closes the run without a frame of its own.
+        assert!(stream_event_from(&text("hello"), 2, &mut open).is_none());
+        assert!(!open, "text closed the run");
+        // A fresh thinking run after that opens a new frame.
+        assert!(stream_event_from(&thinking("again"), 3, &mut open).is_some());
+    }
+
+    /// The live frame is scrubbed exactly like the folded step: a failing remote
+    /// call with a planted secret in its output never serializes that secret.
+    #[test]
+    fn stream_event_from_never_leaks_remote_output() {
+        const SECRET: &str = "sk-live-STREAM-42";
+        let frame = stream_event_from(
+            &completed(
+                "c2",
+                "mcp_call_tool",
+                false,
+                &format!("401 token={SECRET}"),
+                Some(serde_json::json!({ "server": "brave", "tool": "search" })),
+                None,
+            ),
+            0,
+            &mut false,
+        )
+        .expect("frame");
+        let json = serde_json::to_string(&frame).expect("frame serialize");
+        assert!(
+            !json.contains(SECRET),
+            "a planted secret leaked into a live turn-stream frame: {json}"
+        );
     }
 }

@@ -287,7 +287,7 @@ async fn company_events(
     let company = scope.id().clone();
     tracing::debug!(company = %company, "operator SSE stream opening");
     let guard = SseStreamGuard(company.clone());
-    let stream = scope
+    let durable = scope
         .runtime
         .events()
         .subscribe(&company)
@@ -298,6 +298,17 @@ async fn company_events(
                 project_event(&stored).map(|value| Ok(Event::default().data(value.to_string())));
             std::future::ready(event)
         });
+    // Merge the transient live turn-progress bus (tool_call/tool_result frames a
+    // turn emits while it runs — see [`crate::turn_stream`]) onto the same feed.
+    // These are ephemeral and never journaled; the console switches on `type`
+    // just like the durable projections. On a company with no active turn this
+    // stream is simply quiet.
+    let live = crate::turn_stream::subscribe(&company).map(|frame| {
+        Ok::<Event, Infallible>(
+            Event::default().data(serde_json::to_string(&frame).unwrap_or_default()),
+        )
+    });
+    let stream = futures::stream::select(durable, live);
     Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))

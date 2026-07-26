@@ -301,7 +301,7 @@ impl CompanyAgent {
     /// per-turn *local* — deliberately not a [`HarnessDeps`] field — so parallel
     /// turns never collide.
     pub async fn run(&self, message: &str) -> crate::Result<(TurnOutcome, Vec<TurnUsage>)> {
-        self.run_with_steer(message, None).await
+        self.run_with_steer(message, None, None).await
     }
 
     /// Runs one turn with an optional operator **steer** control installed
@@ -323,13 +323,36 @@ impl CompanyAgent {
         &self,
         message: &str,
         steer: Option<&SteerControl>,
+        stream: Option<crate::turn_stream::TurnStreamCtx>,
     ) -> crate::Result<(TurnOutcome, Vec<TurnUsage>)> {
         // Per-turn progress sink + an always-draining collector, so a burst of
         // events never blocks the turn loop on a full channel.
+        //
+        // When `stream` is `Some`, the collector *tees* each event live onto the
+        // transient [`turn_stream`](crate::turn_stream) bus as it arrives —
+        // mirroring OpenHuman's `spawn_progress_bridge` — so the console renders
+        // the tool timeline while the turn is still running. The same events are
+        // still buffered and folded into the durable `TurnStep`s below, so the
+        // live view and the final reply timeline are byte-identical. With `None`
+        // (background turns, non-`openhuman` build) this is exactly the prior
+        // buffer-only behaviour.
         let (tx, mut rx) = tokio::sync::mpsc::channel::<oh::agent::progress::AgentProgress>(1024);
         let collector = tokio::spawn(async move {
             let mut events = Vec::new();
+            let mut seq: u64 = 0;
+            // Mirrors `fold_steps`' thinking-run coalescing so the live timeline
+            // emits the same "Thinking" rows the final folded one does.
+            let mut thinking_open = false;
             while let Some(event) = rx.recv().await {
+                if let Some(ctx) = &stream
+                    && let Some(frame) = steps::stream_event_from(&event, seq, &mut thinking_open)
+                {
+                    crate::turn_stream::publish(
+                        &ctx.company,
+                        frame.with_agent(ctx.agent_id.clone()),
+                    );
+                    seq += 1;
+                }
                 events.push(event);
             }
             events
@@ -789,7 +812,17 @@ impl HarnessPool {
         // accessor and returns one entry per attempt (two when the empty-response
         // wrapper retried once). A zero-usage attempt (offline provider) writes
         // nothing, so the inert-metering contract holds.
-        let (outcome, turn_costs) = agent.run_with_steer(&augmented, steer).await?;
+        // Live tool-call streaming: hand the turn runner the routing context so
+        // it tees each progress event onto the company's transient turn-stream
+        // bus as it happens (the console renders the timeline live). The durable
+        // `TurnStep`s still fold from the same events at turn end.
+        let stream_ctx = crate::turn_stream::TurnStreamCtx {
+            company: company.clone(),
+            agent_id: agent_id.to_string(),
+        };
+        let (outcome, turn_costs) = agent
+            .run_with_steer(&augmented, steer, Some(stream_ctx))
+            .await?;
         // Attribute cost to the provider this turn actually resolved to. With a
         // per-tenant [`TenantProvider`](crate::harness::provider::TenantProvider)
         // a console BYOK switch changes the slug between turns, so read it live
@@ -1601,7 +1634,7 @@ description = "Builds the product."
         let control = SteerControl::new();
         control.request(SteerAction::Cancel);
         let (_outcome, usages) = agent
-            .run_with_steer("hi", Some(&control))
+            .run_with_steer("hi", Some(&control), None)
             .await
             .expect("runs");
         assert_eq!(

@@ -24,7 +24,34 @@ export type CompanyStreamEvent =
     }
   | { type: "approval_resolved"; seq: number; atMillis: number; approvalId: string; verdict: string }
   | { type: "lifecycle_changed"; seq: number; atMillis: number; from: string; to: string }
-  | { type: "payment_received"; seq: number; atMillis: number; amountUsd: number; memo: string };
+  | { type: "payment_received"; seq: number; atMillis: number; amountUsd: number; memo: string }
+  // The transient live turn-progress frames (`src/turn_stream.rs`): a tool call
+  // just started (status `running`) or finished (status `ok`/`error`). These are
+  // ephemeral — never journaled — and drive the in-flight tool timeline the
+  // console renders *while a turn runs*. `label`/`detail` are already scrubbed at
+  // the source (same rules as the folded `TurnStep`s), so no raw args/output.
+  | {
+      type: "tool_call";
+      seq: number;
+      agentId?: string;
+      toolCallId?: string;
+      label?: string;
+      status?: string;
+    }
+  | {
+      type: "tool_result";
+      seq: number;
+      agentId?: string;
+      toolCallId?: string;
+      label?: string;
+      detail?: string;
+      status?: string;
+      elapsedMs?: number;
+    }
+  // A coalesced "Thinking" run between tool calls — streamed so the live
+  // timeline shows the same rows the final folded one does (else the count
+  // jumps up when the reply lands).
+  | { type: "thinking"; seq: number; agentId?: string };
 
 /** An `AgentReply` the hook hands back for injection into a chat transcript. */
 export interface AgentReplyEvent {
@@ -52,6 +79,12 @@ interface Options {
    * — can refetch live off the existing SSE stream instead of only on a poll.
    */
   onTaskEvent?: (event: CompanyStreamEvent) => void;
+  /**
+   * Called for each live turn-progress frame (`tool_call`, `tool_result`) so the
+   * chat can render the tool timeline as the turn runs, then reconcile against
+   * the folded steps on the final reply.
+   */
+  onTurnEvent?: (event: CompanyStreamEvent) => void;
 }
 
 /**
@@ -66,7 +99,7 @@ interface Options {
 export function useEvents(
   client: OpenCompanyClient,
   company: string | null,
-  { pendingApprovals, onAgentReply, onTaskEvent }: Options,
+  { pendingApprovals, onAgentReply, onTaskEvent, onTurnEvent }: Options,
 ): void {
   // Keep the latest callbacks without re-opening the stream when they change.
   const onAgentReplyRef = useRef(onAgentReply);
@@ -77,6 +110,10 @@ export function useEvents(
   useEffect(() => {
     onTaskEventRef.current = onTaskEvent;
   }, [onTaskEvent]);
+  const onTurnEventRef = useRef(onTurnEvent);
+  useEffect(() => {
+    onTurnEventRef.current = onTurnEvent;
+  }, [onTurnEvent]);
 
   // The rising-edge detector for pending approvals. Seeded with the current
   // value so we only toast on an *increase* observed while mounted, never on the
@@ -123,7 +160,7 @@ export function useEvents(
         console.debug("[events] dropping unparseable event", err);
         return;
       }
-      handleEvent(event, onAgentReplyRef.current, onTaskEventRef.current);
+      handleEvent(event, onAgentReplyRef.current, onTaskEventRef.current, onTurnEventRef.current);
     };
 
     source.onerror = () => {
@@ -150,8 +187,16 @@ function handleEvent(
   event: CompanyStreamEvent,
   onAgentReply?: (e: AgentReplyEvent) => void,
   onTaskEvent?: (e: CompanyStreamEvent) => void,
+  onTurnEvent?: (e: CompanyStreamEvent) => void,
 ): void {
   switch (event.type) {
+    // Live turn frames drive the in-flight tool timeline — no toast, they render
+    // inline in the chat.
+    case "tool_call":
+    case "tool_result":
+    case "thinking":
+      onTurnEvent?.(event);
+      break;
     case "mcp_call_failed":
       toast.error(`MCP ${event.server} failed`, {
         description: event.message || `${event.tool} · ${event.status}`,

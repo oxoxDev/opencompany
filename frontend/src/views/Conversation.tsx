@@ -38,13 +38,23 @@ interface Props {
   onReply?: () => void;
   /** Bumped on every task-lifecycle SSE event, so the in-flight strip refetches. */
   taskEventTick?: number;
+  /**
+   * The live in-flight tool timeline per thread, built from the transient
+   * `tool_call`/`tool_result` SSE frames while a turn runs. Rendered under the
+   * typing indicator and cleared by the parent when the final reply lands.
+   */
+  liveStepsByThread?: Record<string, TurnStep[]>;
+  /** Marks a thread's chat POST as in flight (parent suppresses the SSE echo). */
+  onSendStart?: (threadId: string) => void;
+  /** Clears the in-flight mark + live timeline once the POST resolves. */
+  onSendEnd?: (threadId: string) => void;
 }
 
 /** Consecutive messages from one sender within this window group together. */
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
 
 /** WhatsApp-style two-pane chat: a thread list on the left, transcript right. */
-export function Conversation({ client, company, threads, activeId, onSelect, setMessages, onReply, taskEventTick }: Props) {
+export function Conversation({ client, company, threads, activeId, onSelect, setMessages, onReply, taskEventTick, liveStepsByThread, onSendStart, onSendEnd }: Props) {
   const active = threads.find((t) => t.id === activeId) ?? threads[0];
   // On mobile, the list and the chat share the pane — track which is showing.
   const [mobilePane, setMobilePane] = useState<"list" | "chat">("chat");
@@ -68,6 +78,9 @@ export function Conversation({ client, company, threads, activeId, onSelect, set
         setMessages={setMessages}
         onReply={onReply}
         taskEventTick={taskEventTick}
+        liveSteps={liveStepsByThread?.[active.id] ?? []}
+        onSendStart={onSendStart}
+        onSendEnd={onSendEnd}
         onOpenList={() => setMobilePane("list")}
         className={cn("md:flex", mobilePane === "chat" ? "flex" : "hidden")}
       />
@@ -138,6 +151,9 @@ function ChatPane({
   setMessages,
   onReply,
   taskEventTick,
+  liveSteps,
+  onSendStart,
+  onSendEnd,
   onOpenList,
   className,
 }: {
@@ -147,6 +163,9 @@ function ChatPane({
   setMessages: (threadId: string, updater: (m: ChatMessage[]) => ChatMessage[]) => void;
   onReply?: () => void;
   taskEventTick?: number;
+  liveSteps?: TurnStep[];
+  onSendStart?: (threadId: string) => void;
+  onSendEnd?: (threadId: string) => void;
   onOpenList: () => void;
   className?: string;
 }) {
@@ -167,6 +186,7 @@ function ChatPane({
     setDraft("");
     setMessages(thread.id, (m) => [...m, makeMessage("you", text)]);
     setSending(true);
+    onSendStart?.(thread.id);
     try {
       // Address the active desk thread (issue #53). "main" and any id the
       // company doesn't define fall to the orchestrator on the backend.
@@ -183,6 +203,7 @@ function ChatPane({
       setMessages(thread.id, (m) => [...m, makeMessage("system", `Couldn't send — ${msg}`)]);
     } finally {
       setSending(false);
+      onSendEnd?.(thread.id);
     }
   }
 
@@ -228,7 +249,15 @@ function ChatPane({
           {groups.map((g, i) => (
             <MessageGroup key={g.key} group={g} prev={groups[i - 1]} />
           ))}
-          {sending && <TypingIndicator contact={thread.contact} />}
+          {sending && (
+            <>
+              {/* Live tool timeline — the running/done rows stream in over SSE as
+                  the turn works, before the final reply lands (issue: tool calls
+                  weren't visible until the turn finished). */}
+              {liveSteps && liveSteps.length > 0 && <StepTimeline steps={liveSteps} />}
+              <TypingIndicator contact={thread.contact} />
+            </>
+          )}
         </div>
       </div>
 

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
   Brain,
   ChartColumnBig,
@@ -22,7 +22,7 @@ import {
 } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
-import type { CompanyStatus } from "@/api/types";
+import type { CompanyStatus, TurnStep } from "@/api/types";
 import {
   Sidebar,
   SidebarContent,
@@ -47,7 +47,7 @@ import { StatusPill } from "@/components/status-pill";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { DiscordIcon } from "@/components/discord-icon";
 import { useCompany } from "@/hooks/use-company";
-import { type AgentReplyEvent, useEvents } from "@/hooks/use-events";
+import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hooks/use-events";
 import { useHashView } from "@/hooks/use-hash-view";
 import { type ChatMessage, fromHistory, makeMessage } from "@/lib/chat";
 import { DISCORD_INVITE_URL } from "@/lib/links";
@@ -191,6 +191,21 @@ export function AppShell({
   // A monotonic nonce bumped on every task-lifecycle SSE event, so the
   // company-chat in-flight steer strip (issue #111) refetches live.
   const [taskEventTick, setTaskEventTick] = useState(0);
+  // The live tool timeline, per thread, built from the transient `tool_call` /
+  // `tool_result` SSE frames while a turn runs (mirrors OpenHuman's live tool
+  // rows). Cleared when the turn's final reply — carrying the authoritative
+  // folded steps — lands. `toolCallId` is a transient key for the running→done
+  // in-place flip; it is structurally a superset of `TurnStep`, so these render
+  // through the same `StepTimeline` as the final steps.
+  const [liveStepsByThread, setLiveStepsByThread] = useState<
+    Record<string, (TurnStep & { toolCallId?: string })[]>
+  >({});
+  // The thread with a chat POST currently in flight. Live turn frames route to
+  // it (a background/task turn has none, so its frames are ignored in chat), and
+  // the SSE `agent_reply` echo for it is suppressed — the awaited POST reply is
+  // the authoritative, steps-bearing copy (fixes the duplicate-bubble race).
+  const activeTurnThreadRef = useRef<string | null>(null);
+  const pendingPostThreadsRef = useRef<Set<string>>(new Set());
   const feed = useCompany(client, company, initialStatus);
 
   const pending = feed.status.pending_approvals;
@@ -275,6 +290,14 @@ export function AppShell({
   // desks that exist as a thread receive an injection; an unmatched chatId is a
   // no-op rather than polluting the wrong thread.
   const injectAgentReply = useCallback((event: AgentReplyEvent) => {
+    // The operator's own chat turn is delivered synchronously by the awaited
+    // POST (and that copy carries the steps timeline). The backend ALSO journals
+    // an `AgentReply` for it, which arrives over SSE — first, mid-await — so a
+    // blind inject here would double the bubble. Suppress the echo for any
+    // thread with a POST in flight; the POST reply is authoritative. The
+    // recent-tail content check below still guards a late echo that lands just
+    // after the POST resolved.
+    if (pendingPostThreadsRef.current.has(event.chatId)) return;
     setThreads((ts) =>
       ts.map((t) => {
         if (t.id !== event.chatId) return t;
@@ -290,6 +313,76 @@ export function AppShell({
     );
   }, []);
 
+  // Mark/unmark a thread's in-flight POST. `onSendStart` also resets its live
+  // timeline so a fresh turn starts clean; `onSendEnd` clears it because the
+  // final reply now carries the authoritative folded steps.
+  const onSendStart = useCallback((threadId: string) => {
+    pendingPostThreadsRef.current.add(threadId);
+    activeTurnThreadRef.current = threadId;
+    setLiveStepsByThread((prev) => ({ ...prev, [threadId]: [] }));
+  }, []);
+  const onSendEnd = useCallback((threadId: string) => {
+    pendingPostThreadsRef.current.delete(threadId);
+    if (activeTurnThreadRef.current === threadId) activeTurnThreadRef.current = null;
+    setLiveStepsByThread((prev) => {
+      if (!prev[threadId]?.length) return prev;
+      return { ...prev, [threadId]: [] };
+    });
+  }, []);
+
+  // Fold one live turn frame into the in-flight thread's timeline: a `tool_call`
+  // upserts a `running` row keyed by `toolCallId`; a `tool_result` flips that row
+  // to `ok`/`error` in place (FIFO fallback when no id pairs), mirroring
+  // OpenHuman's `toolCallReceived` / `toolResultReceived`.
+  const onTurnEvent = useCallback((event: CompanyStreamEvent) => {
+    const threadId = activeTurnThreadRef.current;
+    if (!threadId) return; // a background/task turn — not part of a chat.
+    setLiveStepsByThread((prev) => {
+      const rows = prev[threadId] ? [...prev[threadId]] : [];
+      if (event.type === "tool_call") {
+        const idx = event.toolCallId
+          ? rows.findIndex((r) => r.toolCallId === event.toolCallId)
+          : -1;
+        const row = {
+          kind: "tool_call" as const,
+          status: "running" as const,
+          label: event.label ?? "Working",
+          toolCallId: event.toolCallId,
+        };
+        if (idx >= 0) rows[idx] = { ...rows[idx], ...row };
+        else rows.push(row);
+      } else if (event.type === "tool_result") {
+        let idx = event.toolCallId
+          ? rows.findIndex((r) => r.toolCallId === event.toolCallId)
+          : -1;
+        if (idx < 0) idx = rows.findIndex((r) => r.status === "running");
+        const status = event.status === "error" ? ("error" as const) : ("ok" as const);
+        if (idx >= 0) {
+          rows[idx] = {
+            ...rows[idx],
+            status,
+            detail: event.detail ?? rows[idx].detail,
+            elapsedMs: event.elapsedMs,
+          };
+        } else {
+          rows.push({
+            kind: "tool_call",
+            status,
+            label: event.label ?? "Working",
+            detail: event.detail,
+            elapsedMs: event.elapsedMs,
+            toolCallId: event.toolCallId,
+          });
+        }
+      } else if (event.type === "thinking") {
+        // The backend already coalesces a thinking run into one frame, so each
+        // arrival is a distinct row (mirrors the folded "Thinking" step).
+        rows.push({ kind: "thinking", status: "ok", label: "Thinking" });
+      }
+      return { ...prev, [threadId]: rows };
+    });
+  }, []);
+
   // The active push half of the attention surface: SSE-driven toasts + chat
   // injection, plus a rising-edge "needs a sign-off" toast off the poll's
   // pending count. Degrades silently to the `useCompany` poll when the host has
@@ -298,6 +391,7 @@ export function AppShell({
     pendingApprovals: pending,
     onAgentReply: injectAgentReply,
     onTaskEvent: useCallback(() => setTaskEventTick((n) => n + 1), []),
+    onTurnEvent,
   });
 
   return (
@@ -391,6 +485,9 @@ export function AppShell({
               setMessages={setThreadMessages}
               onReply={() => void feed.refresh()}
               taskEventTick={taskEventTick}
+              liveStepsByThread={liveStepsByThread}
+              onSendStart={onSendStart}
+              onSendEnd={onSendEnd}
             />
           )}
           {view === "inbox" && <InboxView company={company} />}
