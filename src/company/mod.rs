@@ -22,6 +22,7 @@ mod skill_file;
 // from the operator chat. Always compiled + openhuman-free so the operator
 // control plane can steer in any build and no agent tool can ever reach it.
 pub mod steer;
+pub mod task_intent;
 pub mod telegram;
 mod types;
 #[cfg(feature = "openhuman")]
