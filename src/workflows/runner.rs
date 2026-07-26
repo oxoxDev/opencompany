@@ -163,6 +163,8 @@ description = "Runs Acme."
             workflow_source_dir: None,
             plan: None,
             media: None,
+            composio: None,
+            steer: crate::company::steer::InflightRegistry::default(),
         }
     }
 

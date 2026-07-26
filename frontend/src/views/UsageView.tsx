@@ -215,6 +215,9 @@ export function UsageView({ client, company }: Props) {
             {/* Media generation (issue #109): opt-in, managed-credential-gated —
                 its own status row, separate from the token-budget bars. */}
             {capsLoaded && caps ? <MediaStatusRow caps={caps} /> : null}
+            {/* Per-tenant Composio (issue #110): opt-in, per-tenant-token-gated —
+                its own status row like media. */}
+            {capsLoaded && caps ? <ComposioStatusRow caps={caps} /> : null}
           </CardContent>
         </Card>
       </div>
@@ -229,6 +232,7 @@ const NAMESPACE_LABELS: Record<string, string> = {
   web: "Web & HTTP",
   subagent: "Sub-agents",
   media: "Media generation",
+  composio: "Composio (Gmail/Slack/GitHub)",
 };
 
 // Badge variant subset the media status row uses.
@@ -264,6 +268,38 @@ function mediaStatus(caps: CapabilityStatusDto): { label: string; variant: Badge
   if (!caps.mediaGranted) return { label: "Not granted", variant: "secondary" };
   if (!caps.mediaCredentialConfigured)
     return { label: "Awaiting credential", variant: "destructive" };
+  return { label: "Active", variant: "default" };
+}
+
+/**
+ * The Composio capability (issue #110) is opt-in per tool grant and gated on a
+ * per-tenant OAuth token, so it gets its own status row like media. Four states:
+ * not compiled into this build, not granted, granted-but-awaiting-token, and
+ * active. Set the token from Connections.
+ */
+function ComposioStatusRow({ caps }: { caps: CapabilityStatusDto }) {
+  const { label, variant } = composioStatus(caps);
+  return (
+    <div className="flex items-center justify-between gap-3 border-t pt-4 text-sm">
+      <div className="space-y-0.5">
+        <span className="font-medium">Composio integrations</span>
+        <p className="text-xs text-muted-foreground">
+          Gmail, Slack &amp; GitHub via Composio — opt-in, runs on the company&apos;s own OAuth
+          token, and every send/authorize is approved before it runs. Set the token in Connections.
+        </p>
+      </div>
+      <Badge variant={variant} className="shrink-0">
+        {label}
+      </Badge>
+    </div>
+  );
+}
+
+function composioStatus(caps: CapabilityStatusDto): { label: string; variant: BadgeVariant } {
+  if (caps.composioInBuild === false) return { label: "Not in this build", variant: "outline" };
+  if (!caps.composioGranted) return { label: "Not granted", variant: "secondary" };
+  if (!caps.composioTokenConfigured)
+    return { label: "Awaiting token", variant: "destructive" };
   return { label: "Active", variant: "default" };
 }
 

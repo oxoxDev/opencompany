@@ -115,6 +115,7 @@ async fn main() -> anyhow::Result<()> {
         workflow_source_dir: None,
         plan: None,
         media: None,
+        composio: None,
         steer: opencompany::company::steer::InflightRegistry::default(),
     };
 

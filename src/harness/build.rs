@@ -238,6 +238,34 @@ pub fn build_agent(
         }
     }
 
+    // Per-tenant Composio (issue #110) — Gmail / Slack / GitHub over the
+    // company's OAuth token. Two hard gates before any tool is wired:
+    //
+    //  1. an **EXPLICIT** `composio` grant (`grants_composio_explicit`) — like
+    //     `media`, the catch-all `*` does NOT grant it, so a broadly-permissioned
+    //     company never accidentally hands its agents a live account-reaching
+    //     surface; it must opt in by name.
+    //  2. a resolved per-tenant token on the deps (`deps.composio`), read from the
+    //     company secret store by `HarnessPool::ensure` — never an env/platform
+    //     key. The backend derives the Composio entity from THIS token, so it is
+    //     the entire tenant-isolation lever.
+    //
+    // Granted-but-tokenless wires nothing and warns (fail-closed). The
+    // `authorize` / `execute` tools additionally park for operator approval via
+    // the `ApprovalPolicy`. Gated on the `composio` feature; the default/
+    // `openhuman` build never compiles this.
+    #[cfg(feature = "composio")]
+    if crate::company::grants_composio_explicit(grants) {
+        match &deps.composio {
+            Some(config) => tools.extend(crate::harness::composio::composio_tools(config)),
+            None => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `composio` but no per-tenant Composio token is configured; composio tools NOT wired (fail-closed)"
+            ),
+        }
+    }
+
     // Persona over openhuman's own identity: `omit_identity = true` drops the
     // "you are OpenHuman" preamble so the agent speaks as its company role.
     let mut persona = persona_prompt(company_name, manifest_agent);

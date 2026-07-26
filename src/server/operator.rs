@@ -1034,6 +1034,7 @@ mod test {
             workflow_source_dir: None,
             plan: None,
             media: None,
+            composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record);

@@ -17,6 +17,7 @@
 
 pub mod capabilities;
 pub mod channels;
+pub mod composio;
 pub mod domain;
 pub mod inbox;
 pub mod inference;
@@ -138,6 +139,7 @@ pub fn router() -> Router<AppState> {
     let router = Router::new()
         .merge(capabilities::router())
         .merge(channels::router())
+        .merge(composio::router())
         .merge(domain::router())
         .merge(smtp::router())
         .merge(inbox::router())
