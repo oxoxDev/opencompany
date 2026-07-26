@@ -514,6 +514,31 @@ async fn run_chat(
     } else {
         None
     };
+    // Deterministic task card: an actionable operator request ("build the
+    // landing page", "can you set up the newsletter") opens a `backlog` card so
+    // "do X" always leaves a visible work item on the dashboard — independent of
+    // whether the orchestrator model also calls `spawn_task` (it may open
+    // sub-tasks on top). Pure questions, greetings, and acknowledgements don't
+    // fire, so the board fills with work, not small talk. Best-effort: a card
+    // write failure must never sink the chat reply.
+    if let Some(title) = crate::company::task_intent::detect_task_intent(&message.text) {
+        // Keep the full message as the note only when the title was shortened
+        // from it, so a one-line ask doesn't duplicate itself.
+        let note =
+            (title.trim_end_matches('…') != message.text.trim()).then(|| message.text.clone());
+        let record = crate::ports::tasks::TaskRecord {
+            id: crate::ports::generate_id(),
+            title,
+            note,
+            column: "backlog".to_string(),
+            priority: "medium".to_string(),
+            assignee: String::new(),
+            updated_at_millis: crate::ports::now_millis(),
+        };
+        if let Err(err) = runtime.upsert_task(&record).await {
+            tracing::warn!(error = %err, "failed to open task card for chat request");
+        }
+    }
     let report = runtime
         .run_cycle(vec![CompanyEvent::OperatorMessage {
             text: message.text,
@@ -974,6 +999,53 @@ mod test {
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["responses"][0]["text"], "You said: hi");
         assert_eq!(value["responses"][0]["channel"], "operator");
+        tokio::fs::remove_dir_all(&home).await.ok();
+    }
+
+    /// An actionable operator chat opens exactly one `backlog` task card on the
+    /// dashboard (deterministic, independent of the brain's own `spawn_task`),
+    /// and a greeting opens none. Runs on the default echo brain, so it proves
+    /// the handler-level wiring, not model behaviour.
+    #[tokio::test]
+    async fn actionable_chat_opens_a_backlog_task_card() {
+        let home = home();
+        let state = state_with_company(&home, "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        let chat = |text: &str| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/company/chat")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"text":{}}}"#,
+                    serde_json::json!(text)
+                )))
+                .unwrap()
+        };
+
+        // Actionable → one backlog card, titled from the ask.
+        let r = app
+            .clone()
+            .oneshot(chat("build the landing page"))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(tasks.len(), 1, "an actionable ask opens one card");
+        assert_eq!(tasks[0].column, "backlog");
+        assert_eq!(tasks[0].priority, "medium");
+        assert_eq!(tasks[0].title, "Build the landing page");
+
+        // Greeting → no new card.
+        let r = app.oneshot(chat("thanks!")).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(tasks.len(), 1, "a greeting must not open a card");
+
         tokio::fs::remove_dir_all(&home).await.ok();
     }
 
