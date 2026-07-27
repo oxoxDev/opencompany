@@ -337,6 +337,43 @@ pub fn load_company_workflows(dir: &Path, enabled: &[String]) -> Result<Vec<Work
     Ok(out)
 }
 
+/// Scans a company's `workflows/` directory and loads every `*.toml` graph it
+/// finds, in stable id order.
+///
+/// The single on-disk enumeration both the REST `list_workflows` route and the
+/// orchestrator's `query_company` surface read, so the console picker and the
+/// agent can never disagree about which workflows a company has saved. `None`
+/// (platform-provisioned mode) or a missing `workflows/` directory yields an
+/// empty vec. A malformed `workflows/<id>.toml` skips only itself (logged) so
+/// one bad file never hides the rest.
+pub fn list_source_workflows(source_dir: Option<&Path>) -> Vec<WorkflowFile> {
+    let Some(source_dir) = source_dir else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(source_dir.join("workflows")) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
+        .filter_map(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_string)
+        })
+        .collect();
+    ids.sort();
+    let mut files = Vec::with_capacity(ids.len());
+    for id in &ids {
+        match load_company_workflows(source_dir, std::slice::from_ref(id)) {
+            Ok(loaded) => files.extend(loaded),
+            Err(err) => tracing::warn!(workflow = %id, error = %err, "skipping malformed workflow"),
+        }
+    }
+    files
+}
+
 /// Collects every validation problem in prosumer language. Empty means valid.
 fn validate(raw: &RawWorkflow) -> Vec<String> {
     let mut problems = Vec::new();

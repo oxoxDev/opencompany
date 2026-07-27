@@ -50,7 +50,8 @@ use serde_json::Value;
 use crate::AppState;
 use crate::company::{
     RawEdge, RawNode, RawWorkflow, WorkflowEdgeDef, WorkflowFile, WorkflowNodeDef,
-    WorkflowRetryDef, load_company_workflows, parse_workflow, render_workflow,
+    WorkflowRetryDef, list_source_workflows, load_company_workflows, parse_workflow,
+    render_workflow,
 };
 use crate::error::OpenCompanyError;
 use crate::server::error::ApiError;
@@ -207,7 +208,7 @@ impl From<WorkflowEdgeDef> for WorkflowEdge {
 /// console renders "no workflows yet" rather than a failure.
 async fn list_workflows(company: ScopedCompany) -> Result<Json<Vec<WorkflowSummary>>, ApiError> {
     let source_dir = company.runtime.source_dir();
-    let files = load_source_workflows(source_dir)?;
+    let files = list_source_workflows(source_dir);
     let mut seen: HashSet<String> = files.iter().map(|f| f.id.clone()).collect();
     let mut summaries: Vec<WorkflowSummary> =
         files.into_iter().map(WorkflowSummary::from).collect();
@@ -556,39 +557,6 @@ async fn create_workflow(
     Ok(Json(WorkflowGraph::from(file)))
 }
 
-/// Loads every saved workflow under `source_dir/workflows/`, or an empty list
-/// when there is no source directory or no `workflows/` directory.
-fn load_source_workflows(source_dir: Option<&FsPath>) -> Result<Vec<WorkflowFile>, ApiError> {
-    let Some(source_dir) = source_dir else {
-        return Ok(Vec::new());
-    };
-    let Ok(entries) = std::fs::read_dir(source_dir.join("workflows")) else {
-        return Ok(Vec::new());
-    };
-    let mut ids: Vec<String> = entries
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
-        .filter_map(|path| {
-            path.file_stem()
-                .and_then(|stem| stem.to_str())
-                .map(str::to_string)
-        })
-        .collect();
-    // Stable, deterministic order for the picker.
-    ids.sort();
-    // Load each id on its own so one malformed `workflows/*.toml` skips only
-    // itself instead of 500-ing the whole picker.
-    let mut files = Vec::with_capacity(ids.len());
-    for id in &ids {
-        match load_company_workflows(source_dir, std::slice::from_ref(id)) {
-            Ok(loaded) => files.extend(loaded),
-            Err(err) => tracing::warn!(workflow = %id, error = %err, "skipping malformed workflow"),
-        }
-    }
-    Ok(files)
-}
-
 /// Whether `wid` is a single safe on-disk filename stem — no path separators,
 /// no `..`, not empty — so it can't escape the `workflows/` directory.
 fn safe_wid(wid: &str) -> bool {
@@ -708,7 +676,7 @@ mod tests {
     #[test]
     fn list_returns_a_summary_per_saved_workflow() {
         let dir = seed_demo();
-        let files = load_source_workflows(Some(dir.path())).expect("lists");
+        let files = list_source_workflows(Some(dir.path()));
         let summaries: Vec<WorkflowSummary> =
             files.into_iter().map(WorkflowSummary::from).collect();
         assert_eq!(summaries.len(), 1);
@@ -751,13 +719,13 @@ mod tests {
 
     #[test]
     fn no_source_dir_lists_empty() {
-        assert!(load_source_workflows(None).unwrap().is_empty());
+        assert!(list_source_workflows(None).is_empty());
     }
 
     #[test]
     fn no_workflows_dir_lists_empty() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(load_source_workflows(Some(dir.path())).unwrap().is_empty());
+        assert!(list_source_workflows(Some(dir.path())).is_empty());
     }
 
     #[test]
@@ -929,7 +897,7 @@ mod tests {
             "id = \"broken\"\nname = \n[[node]] oops",
         )
         .unwrap();
-        let files = load_source_workflows(Some(dir.path())).expect("lists despite a bad file");
+        let files = list_source_workflows(Some(dir.path()));
         let ids: Vec<_> = files.iter().map(|f| f.id.as_str()).collect();
         assert_eq!(ids, vec!["demo"]);
     }
