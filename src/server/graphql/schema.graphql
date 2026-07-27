@@ -164,6 +164,12 @@ type Company {
 	SMTP status — host/port/username only, never the password.
 	"""
 	smtp: SmtpStatus!
+	"""
+	The source-template provenance recorded at launch: the stable template
+	id (directory slug) and, when known, its version. Null for a company
+	provisioned from a raw manifest body rather than a template.
+	"""
+	provenance: TemplateProvenance
 }
 
 """
@@ -693,6 +699,25 @@ type TeamMember {
 	Whether this teammate has an enabled inbox.
 	"""
 	inboxEnabled: Boolean!
+}
+
+"""
+The source-template provenance of a company: where its manifest was seeded
+from. Mirrors [`TemplateProvenance`](crate::ports::types::TemplateProvenance).
+"""
+type TemplateProvenance {
+	"""
+	The template's stable identifier — the source directory slug.
+	"""
+	sourceId: String!
+	"""
+	The template's version, when the source exposes one.
+	"""
+	version: String
+	"""
+	The source directory path the company was launched from, when recorded.
+	"""
+	path: String
 }
 
 """
