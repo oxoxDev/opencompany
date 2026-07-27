@@ -423,9 +423,8 @@ export function AppShell({
               <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
               <SidebarMenu>
                 {group.items.map((item) => (
-                  <SidebarMenuItem key={item.view}>
+                  <SidebarMenuItem key={item.view} data-tour={`nav-${item.view}`}>
                     <SidebarMenuButton
-                      data-tour={`nav-${item.view}`}
                       isActive={view === item.view}
                       tooltip={item.label}
                       onClick={() => setView(item.view)}
@@ -578,7 +577,7 @@ export function AppShell({
         onOpenChange={setFeedbackOpen}
       />
 
-      <TourController company={company} view={view} setView={setView} />
+      <TourController company={company} setView={setView} />
     </SidebarProvider>
   );
 }
