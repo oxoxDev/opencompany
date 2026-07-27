@@ -373,7 +373,7 @@ impl Tool for QueryCompanyTool {
                 roster.push((agent.id.clone(), agent.role.clone()));
             }
             for overlay in &record.overlay_agents {
-                roster.push((overlay.id.clone(), overlay.role.clone()));
+                roster.push((overlay.name.clone(), overlay.role.clone()));
             }
         }
         md.push_str("\n## Team\n");
@@ -1478,8 +1478,8 @@ name = "Morning"
         assert!(out.contains("Daily Standup"), "workflow missing: {out}");
         assert!(out.contains("daily-standup"), "workflow id missing: {out}");
         assert!(
-            out.contains("fact-fetcher"),
-            "overlay teammate missing: {out}"
+            out.contains("Fact Fetcher"),
+            "overlay teammate name missing: {out}"
         );
     }
 
