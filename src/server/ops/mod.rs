@@ -18,6 +18,7 @@
 pub mod capabilities;
 pub mod channels;
 pub mod composio;
+pub mod connections_read;
 pub mod domain;
 pub mod inbox;
 pub mod inference;
@@ -138,6 +139,7 @@ impl std::fmt::Debug for ConnectionsRuntime {
 pub fn router() -> Router<AppState> {
     let router = Router::new()
         .merge(capabilities::router())
+        .merge(connections_read::router())
         .merge(channels::router())
         .merge(composio::router())
         .merge(domain::router())
