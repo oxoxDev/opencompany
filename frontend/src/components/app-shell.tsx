@@ -49,6 +49,8 @@ import { DiscordIcon } from "@/components/discord-icon";
 import { useCompany } from "@/hooks/use-company";
 import { type AgentReplyEvent, useEvents } from "@/hooks/use-events";
 import { useHashView } from "@/hooks/use-hash-view";
+import { toast } from "sonner";
+
 import { type ChatMessage, fromHistory, makeMessage } from "@/lib/chat";
 import { DISCORD_INVITE_URL } from "@/lib/links";
 import { defaultThreads, threadsFromDesks } from "@/lib/threads";
@@ -194,6 +196,27 @@ export function AppShell({
   const feed = useCompany(client, company, initialStatus);
 
   const pending = feed.status.pending_approvals;
+
+  // OAuth connect bounce-back: the host's callback redirects the browser to
+  // `…/connections?connected={provider}` after storing the token. Land the
+  // operator on the Connections view, confirm with a toast, then strip the
+  // param so a refresh doesn't re-fire it. Runs once; StrictMode's double
+  // invoke is harmless because the first run clears the param the second reads.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const connected = params.get("connected");
+    if (!connected) return;
+    params.delete("connected");
+    const query = params.toString();
+    window.history.replaceState(
+      {},
+      "",
+      window.location.pathname + (query ? `?${query}` : "") + window.location.hash,
+    );
+    setView("connections");
+    toast.success(`Connected ${connected}.`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Build the chat threads from the company's real desks (issue #53); keep the
   // static defaults when the host doesn't expose `/desks` (404) or defines none.
