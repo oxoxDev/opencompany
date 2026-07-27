@@ -357,11 +357,16 @@ function NodeDetailPanel({
           </DetailField>
         )}
 
-        {!node.summary && !node.agent && !hasConfig && !node.onError && !node.retry && (
-          <p className="text-xs text-muted-foreground">
-            This node has no extra details beyond its kind and name.
-          </p>
-        )}
+        {!node.summary &&
+          !node.agent &&
+          !hasConfig &&
+          !node.onError &&
+          !node.retry &&
+          !node.requiresApproval && (
+            <p className="text-xs text-muted-foreground">
+              This node has no extra details beyond its kind and name.
+            </p>
+          )}
       </div>
     </div>
   );
