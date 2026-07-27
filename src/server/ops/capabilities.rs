@@ -245,6 +245,7 @@ mod tests {
                 lifecycle: "running".to_string(),
                 overlay_agents: Vec::new(),
                 overlay_desk_members: Vec::new(),
+                template_provenance: None,
             })
             .await
             .unwrap();

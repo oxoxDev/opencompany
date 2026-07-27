@@ -542,6 +542,7 @@ description = "Runs Acme."
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            template_provenance: None,
         }
     }
 
@@ -679,6 +680,7 @@ description = "Builds it."
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            template_provenance: None,
         }
     }
 
@@ -884,6 +886,7 @@ members = ["engineer"]
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            template_provenance: None,
         }
     }
 
@@ -992,6 +995,7 @@ name = "Design"
                 desk_id: "design".to_string(),
                 agent_id: "engineer".to_string(),
             }],
+            template_provenance: None,
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
         assert_eq!(brain.desk_lead("design"), Some("engineer".to_string()));

@@ -986,6 +986,7 @@ mod test {
                 lifecycle: lifecycle.to_string(),
                 overlay_agents: Vec::new(),
                 overlay_desk_members: Vec::new(),
+                template_provenance: None,
             })
             .await
             .unwrap();
@@ -1103,6 +1104,7 @@ mod test {
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            template_provenance: None,
         };
         FsCompanyStore::new(home.to_path_buf())
             .save(&record)
@@ -1204,6 +1206,7 @@ mod test {
                 lifecycle: "running".to_string(),
                 overlay_agents: Vec::new(),
                 overlay_desk_members: Vec::new(),
+                template_provenance: None,
             })
             .await
             .unwrap();

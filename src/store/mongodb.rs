@@ -297,6 +297,7 @@ impl CompanyStore for MongoStore {
             lifecycle: get_str(&company, "lifecycle")?,
             overlay_agents: overlay.agents,
             overlay_desk_members: overlay.desk_members,
+            template_provenance: overlay.provenance,
         }))
     }
 
@@ -1679,6 +1680,7 @@ mod test {
                 lifecycle: "running".into(),
                 overlay_agents: Vec::new(),
                 overlay_desk_members: Vec::new(),
+                template_provenance: None,
             };
             // Same template name under two tenants: distinct namespaced ids, no
             // `companies` unique-index conflict.

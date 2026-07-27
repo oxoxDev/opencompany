@@ -136,6 +136,11 @@ struct Meta {
     /// The operator desk-membership overlay (agents added to desks at runtime).
     #[serde(default)]
     overlay_desk_members: Vec<crate::ports::types::OverlayDeskMember>,
+    /// The source-template provenance stamped at launch. `None` for companies
+    /// provisioned from a raw manifest and for legacy meta files written before
+    /// provenance existed (the `#[serde(default)]` keeps those loading).
+    #[serde(default)]
+    template_provenance: Option<crate::ports::types::TemplateProvenance>,
 }
 
 // ---------------------------------------------------------------------------
@@ -178,16 +183,18 @@ impl CompanyStore for FsCompanyStore {
             .map_err(|e| OpenCompanyError::Store(format!("invalid company.toml: {e}")))?;
 
         let meta_src = read_optional(&bundle.meta_json()).await?;
-        let (lifecycle, overlay_agents, overlay_desk_members) = if meta_src.trim().is_empty() {
-            ("running".to_string(), Vec::new(), Vec::new())
-        } else {
-            let meta: Meta = serde_json::from_str(&meta_src)?;
-            (
-                meta.lifecycle,
-                meta.overlay_agents,
-                meta.overlay_desk_members,
-            )
-        };
+        let (lifecycle, overlay_agents, overlay_desk_members, template_provenance) =
+            if meta_src.trim().is_empty() {
+                ("running".to_string(), Vec::new(), Vec::new(), None)
+            } else {
+                let meta: Meta = serde_json::from_str(&meta_src)?;
+                (
+                    meta.lifecycle,
+                    meta.overlay_agents,
+                    meta.overlay_desk_members,
+                    meta.template_provenance,
+                )
+            };
 
         let ledger = read_jsonl::<LedgerEntry>(&bundle.ledger_jsonl()).await?;
 
@@ -198,6 +205,7 @@ impl CompanyStore for FsCompanyStore {
             lifecycle,
             overlay_agents,
             overlay_desk_members,
+            template_provenance,
         }))
     }
 
@@ -213,6 +221,7 @@ impl CompanyStore for FsCompanyStore {
             lifecycle: record.lifecycle.clone(),
             overlay_agents: record.overlay_agents.clone(),
             overlay_desk_members: record.overlay_desk_members.clone(),
+            template_provenance: record.template_provenance.clone(),
         };
         write_atomic(&bundle.meta_json(), &serde_json::to_string(&meta)?).await?;
         Ok(())
@@ -878,6 +887,7 @@ mod test {
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            template_provenance: None,
         };
         store.save(&record).await.unwrap();
 
@@ -913,6 +923,7 @@ mod test {
                 lifecycle: "running".to_string(),
                 overlay_agents: Vec::new(),
                 overlay_desk_members: Vec::new(),
+                template_provenance: None,
             })
             .await
             .unwrap();

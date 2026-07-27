@@ -29,6 +29,7 @@ use crate::ports::store::CompanyStore;
 use crate::ports::tasks::{TaskRecord, TaskStore};
 use crate::ports::types::{
     CompanyEvent, CompanyId, CompanyRecord, CompressedTrace, ContextChunk, EventSeq, LedgerEntry,
+    TemplateProvenance,
 };
 use crate::ports::usage::{SampleKind, UsageMeter, UsageSample};
 use crate::ports::users::{InviteRecord, UserRecord, UserRole, UserStatus, UserStore};
@@ -51,7 +52,19 @@ fn sample_manifest() -> crate::company::CompanyManifest {
     toml::from_str(toml_src).expect("parse sample manifest")
 }
 
-/// Builds an empty running record for `id`.
+/// The source-template provenance the fixture seeds every record with, so the
+/// export/round-trip suite proves each backend (fs, sqlite, mongodb) persists
+/// and rehydrates it (issue #85).
+fn sample_provenance() -> TemplateProvenance {
+    TemplateProvenance {
+        source_id: "conformance_template".to_string(),
+        version: Some("1.2.3".to_string()),
+        path: Some("companies/conformance_template".to_string()),
+    }
+}
+
+/// Builds an empty running record for `id`, stamped with the sample template
+/// provenance so store round-trips assert it survives persistence.
 fn record(id: &CompanyId) -> CompanyRecord {
     CompanyRecord {
         id: id.clone(),
@@ -60,6 +73,7 @@ fn record(id: &CompanyId) -> CompanyRecord {
         lifecycle: "running".to_string(),
         overlay_agents: Vec::new(),
         overlay_desk_members: Vec::new(),
+        template_provenance: Some(sample_provenance()),
     }
 }
 
@@ -349,6 +363,14 @@ pub async fn assert_export_totality(
     assert_eq!(loaded.manifest.company.name, "Conformance Co");
     assert_eq!(loaded.lifecycle, "running");
     assert_eq!(loaded.ledger, ledger);
+    // Issue #85: the source-template provenance persists through the port and
+    // rehydrates intact — asserted here for every backend the suite runs against
+    // (fs, sqlite, mongodb), which is the cross-backend durability guarantee.
+    assert_eq!(
+        loaded.template_provenance,
+        Some(sample_provenance()),
+        "template provenance did not round-trip through the store"
+    );
 
     // Full event log round-trips with seqs and payloads intact.
     let read = events

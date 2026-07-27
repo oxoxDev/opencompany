@@ -36,7 +36,7 @@ use crate::openhuman::{OpenHumanChannelAdapter, OpenHumanToolProvider};
 use crate::policy::ManifestApprovalGate;
 #[cfg(feature = "openhuman")]
 use crate::ports::WorkflowRunner;
-use crate::ports::types::{CompanyId, CompanyRecord, SecretValue};
+use crate::ports::types::{CompanyId, CompanyRecord, SecretValue, TemplateProvenance};
 use crate::ports::{
     AgentEconomy, Brain, ChannelAdapter, CompanyStore, ContextStore, EventLog, FactStore,
     InboxStore, LoginCodeStore, MemoryStore, SecretStore, SessionStore, SkillStateStore, TaskStore,
@@ -172,6 +172,12 @@ pub struct RuntimeBuilder {
     sessions: Option<Arc<dyn SessionStore>>,
     login_codes: Option<Arc<dyn LoginCodeStore>>,
     seed_dir: Option<PathBuf>,
+    /// Issue #85: the source-template provenance to stamp on this company's
+    /// record at *first* launch. Set by the launch path when the manifest was
+    /// seeded from a template directory; left `None` for a raw-manifest
+    /// provision. On a rebuild the record's own provenance is carried forward,
+    /// so this only applies when no record exists yet.
+    template_provenance: Option<TemplateProvenance>,
     feedback: Option<Arc<FeedbackStore>>,
     github: Option<Arc<dyn GitHubClient>>,
     tinyhumans_feedback: Option<Arc<dyn TinyHumansClient>>,
@@ -235,6 +241,7 @@ impl RuntimeBuilder {
             sessions: None,
             login_codes: None,
             seed_dir: None,
+            template_provenance: None,
             feedback: None,
             github: None,
             tinyhumans_feedback: None,
@@ -405,6 +412,16 @@ impl RuntimeBuilder {
     /// tree is seeded from on first build. Without it, no seeding runs.
     pub fn with_seed_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.seed_dir = Some(dir.into());
+        self
+    }
+
+    /// Records the source-template provenance to stamp on this company's record
+    /// at first launch (issue #85). The launch path sets this when the manifest
+    /// was seeded from a template directory; a raw-manifest provision leaves it
+    /// unset so no provenance is fabricated. On a rebuild the persisted record's
+    /// provenance is carried forward and this value is ignored.
+    pub fn with_template_provenance(mut self, provenance: TemplateProvenance) -> Self {
+        self.template_provenance = Some(provenance);
         self
     }
 
@@ -919,6 +936,7 @@ impl RuntimeBuilder {
                                 lifecycle: "running".to_string(),
                                 overlay_agents: Vec::new(),
                                 overlay_desk_members: Vec::new(),
+                                template_provenance: self.template_provenance.clone(),
                             };
                             // Workflow agent nodes execute on the same pool as the
                             // brain — clone before both moves into `HarnessBrain`.
@@ -991,6 +1009,14 @@ impl RuntimeBuilder {
             .as_ref()
             .map(|r| r.overlay_desk_members.clone())
             .unwrap_or_default();
+        // Issue #85: carry an existing record's source-template provenance
+        // forward across the rebuild (a rebuild never re-stamps it); on the very
+        // first launch, stamp from the value the launch path recorded (a slug for
+        // a template directory, `None` for a raw-manifest provision).
+        let template_provenance = existing
+            .as_ref()
+            .and_then(|r| r.template_provenance.clone())
+            .or_else(|| self.template_provenance.clone());
         let ledger = existing.map(|r| r.ledger).unwrap_or_default();
         store
             .save(&CompanyRecord {
@@ -1000,6 +1026,7 @@ impl RuntimeBuilder {
                 lifecycle,
                 overlay_agents,
                 overlay_desk_members,
+                template_provenance,
             })
             .await?;
 
@@ -1531,6 +1558,58 @@ mod test {
         assert!(!tree.iter().any(|n| n.name == "voice.md"));
         // Sanity: the record store still loads.
         assert!(runtime.store().load(&id).await.unwrap().is_some());
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Issue #85: the launch path's template provenance is stamped onto the
+    /// record at first build, survives a rebuild that supplies no provenance
+    /// (carried forward), and a company built with no provenance records `None`.
+    #[tokio::test]
+    async fn template_provenance_stamped_at_launch_and_carried_forward() {
+        let home = std::env::temp_dir().join(format!("oc-prov-{}", crate::ports::generate_id()));
+        let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
+        let id = CompanyId::new("acme");
+        let provenance = TemplateProvenance {
+            source_id: "agentic_law_firm".to_string(),
+            version: None,
+            path: Some("companies/agentic_law_firm".to_string()),
+        };
+
+        // First launch from a template: provenance is stamped onto the record.
+        let runtime = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .with_template_provenance(provenance.clone())
+            .build()
+            .await
+            .unwrap();
+        let stamped = runtime.store().load(&id).await.unwrap().unwrap();
+        assert_eq!(stamped.template_provenance.as_ref(), Some(&provenance));
+        drop(runtime);
+
+        // Rebuild without re-supplying provenance: the record carries it forward.
+        let runtime = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let carried = runtime.store().load(&id).await.unwrap().unwrap();
+        assert_eq!(
+            carried.template_provenance,
+            Some(provenance),
+            "provenance was dropped on rebuild"
+        );
+        drop(runtime);
+
+        // A company built with no provenance (raw-manifest provision) records None.
+        let other = CompanyId::new("raw");
+        let runtime = RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(other.clone())
+            .build()
+            .await
+            .unwrap();
+        let raw = runtime.store().load(&other).await.unwrap().unwrap();
+        assert!(raw.template_provenance.is_none());
 
         std::fs::remove_dir_all(&home).ok();
     }
