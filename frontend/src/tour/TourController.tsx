@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import type { Step, TourData } from "react-joyride";
 
 import type { View } from "@/components/app-shell";
@@ -12,102 +12,69 @@ import { RESTART_EVENT, tourForced, tourSeen, writeTourState } from "./state";
 // erase and don't pull the module eagerly.
 const Joyride = lazy(() => import("react-joyride").then((m) => ({ default: m.Joyride })));
 
-// react-joyride status/action values as string literals, so we don't statically
-// import the runtime `STATUS`/`ACTIONS` enums (which would defeat the lazy load).
+// react-joyride status values as string literals, so we don't statically import
+// the runtime `STATUS` enum (which would defeat the lazy load).
 const STATUS_FINISHED = "finished";
 const STATUS_SKIPPED = "skipped";
-const ACTION_PREV = "prev";
-const ACTION_SKIP = "skip";
-const ACTION_CLOSE = "close";
 
 const STEPS: Step[] = TOUR.map((s) => ({
   target: s.target,
   title: s.title,
   content: s.body,
   placement: s.placement,
-  disableBeacon: true,
+  // v3 renamed `disableBeacon` → `skipBeacon`; open straight to the tooltip.
+  skipBeacon: true,
+  // Let react-joyride wait for the target to mount after we switch views — this
+  // covers both the route swap and lazy Suspense chunks (Workflows, Usage, …),
+  // so we don't need to hand-roll the wait.
+  targetWaitTimeout: 6000,
+  // A walkthrough shouldn't trap keyboard focus inside the tooltip.
+  disableFocusTrap: true,
 }));
 
 /**
- * Owns the onboarding lifecycle: the one-time welcome dialog, then a controlled
- * react-joyride spotlight that navigates the console view-by-view. Mounted once
- * inside `AppShell` (a sibling of the feedback dialog) so it overlays every view
- * and can drive `setView` itself.
+ * Owns the onboarding lifecycle: the one-time welcome dialog, then the
+ * react-joyride spotlight. Mounted once inside `AppShell` (a sibling of the
+ * feedback dialog) so it overlays every view and can drive `setView` itself.
  *
- * The crux is cross-view stepping against a hash router with lazy views: on each
- * Back/Next we pause the tour (`active=false`), switch the pane, wait for the
- * next target to actually mount, then resume at the new index — so the spotlight
- * never anchors on a stale or not-yet-mounted node.
+ * We let react-joyride own the stepping. Its `before` hook fires right before
+ * each step renders — we use it to switch the console to that step's view, and
+ * joyride then waits (`targetWaitTimeout`) for the target to mount before
+ * spotlighting. That delegates the cross-view + lazy-Suspense timing to
+ * joyride's tested machinery instead of a hand-rolled controlled `stepIndex`.
  */
 export function TourController({
   company,
-  view,
   setView,
 }: {
   company: string | null;
-  view: View;
   setView: (view: View) => void;
 }) {
   const [welcomeOpen, setWelcomeOpen] = useState(false);
-  const [session, setSession] = useState(false); // whole tour lifetime (mounts Joyride)
-  const [active, setActive] = useState(false); // run prop (paused during nav)
-  const [stepIndex, setStepIndex] = useState(0);
-  // True only while we're navigating+waiting between steps, so the
-  // external-navigation guard doesn't fire on our own view switch.
-  const transitioning = useRef(false);
+  const [session, setSession] = useState(false); // mounts Joyride for the run
+  const [run, setRun] = useState(false); // joyride active
 
   // Offer the tour once per company on first arrival (or every load under the
-  // dev-force flag). Runs when the console mounts / the company changes.
+  // dev-force flag).
   useEffect(() => {
     if (tourForced() || !tourSeen(company)) setWelcomeOpen(true);
     else setWelcomeOpen(false);
   }, [company]);
 
+  const start = useCallback(() => {
+    setWelcomeOpen(false);
+    setSession(true);
+    setRun(true);
+  }, []);
+
   const finish = useCallback(
     (skipped: boolean) => {
-      transitioning.current = false;
-      setActive(false);
+      setRun(false);
       setSession(false);
-      setStepIndex(0);
       writeTourState(company, skipped ? { skipped: true } : { completed: true });
     },
     [company],
   );
-
-  // Land on a given step: pause, switch view if needed, wait for the target to
-  // mount, then resume there. A target that never mounts ends the tour cleanly.
-  const goTo = useCallback(
-    async (nextIndex: number) => {
-      const stop = TOUR[nextIndex];
-      if (!stop) {
-        finish(false);
-        return;
-      }
-      transitioning.current = true;
-      setActive(false);
-      setView(stop.view);
-      const ok = await waitForTarget(stop.target);
-      transitioning.current = false;
-      if (!ok) {
-        finish(false);
-        return;
-      }
-      setStepIndex(nextIndex);
-      setActive(true);
-    },
-    [setView, finish],
-  );
-
-  const start = useCallback(async () => {
-    setSession(true);
-    setStepIndex(0);
-    await goTo(0);
-  }, [goTo]);
-
-  const handleStart = useCallback(() => {
-    setWelcomeOpen(false);
-    void start();
-  }, [start]);
 
   const handleSkip = useCallback(() => {
     setWelcomeOpen(false);
@@ -117,35 +84,34 @@ export function TourController({
   // "Replay product tour" from Settings clears the flag and dispatches
   // RESTART_EVENT; jump straight into the tour (no welcome dialog).
   useEffect(() => {
-    const onRestart = () => {
-      setWelcomeOpen(false);
-      void start();
-    };
-    window.addEventListener(RESTART_EVENT, onRestart);
-    return () => window.removeEventListener(RESTART_EVENT, onRestart);
+    window.addEventListener(RESTART_EVENT, start);
+    return () => window.removeEventListener(RESTART_EVENT, start);
   }, [start]);
 
-  // If the operator navigates away mid-tour (sidebar click, browser back), the
-  // spotlight would point at the wrong pane — end the tour quietly instead.
-  useEffect(() => {
-    if (!active || transitioning.current) return;
-    if (view !== TOUR[stepIndex]?.view) finish(true);
-  }, [view, active, stepIndex, finish]);
-
-  // react-joyride v3 fires this `after` hook once per completed step, carrying
-  // the action the operator took. We control `stepIndex`, so we translate that
-  // into a navigate-then-wait `goTo` (or end the tour on skip/close/finish).
-  const handleAfter = useCallback(
-    (data: TourData) => {
-      const { status, action, index } = data;
-      const skipped = action === ACTION_SKIP || status === STATUS_SKIPPED;
-      if (skipped || action === ACTION_CLOSE || status === STATUS_FINISHED) {
-        finish(skipped);
-        return;
-      }
-      void goTo(action === ACTION_PREV ? index - 1 : index + 1);
+  // Before each step renders, switch the console to that step's view AND wait
+  // for its target to actually be in the DOM before letting joyride proceed.
+  // joyride awaits this hook, so a content anchor on a just-navigated view
+  // (e.g. the chat composer on Conversation) is spotlighted only once mounted —
+  // otherwise joyride checks too early, finds nothing, and skips the step.
+  // `setView` is idempotent (no-op when already there), so this is safe on Back.
+  const before = useCallback(
+    async (data: TourData) => {
+      const stop = TOUR[data.index];
+      if (!stop) return;
+      setView(stop.view);
+      await waitForTarget(stop.target);
     },
-    [finish, goTo],
+    [setView],
+  );
+
+  // End the tour (recording completed vs skipped) when joyride reports it done.
+  const after = useCallback(
+    (data: TourData) => {
+      if (data.status === STATUS_FINISHED || data.status === STATUS_SKIPPED) {
+        finish(data.status === STATUS_SKIPPED);
+      }
+    },
+    [finish],
   );
 
   return (
@@ -153,15 +119,14 @@ export function TourController({
       <WelcomeDialog
         open={welcomeOpen}
         onOpenChange={setWelcomeOpen}
-        onStart={handleStart}
+        onStart={start}
         onSkip={handleSkip}
       />
       {session && (
         <Suspense fallback={null}>
           <Joyride
             steps={STEPS}
-            run={active}
-            stepIndex={stepIndex}
+            run={run}
             continuous
             tooltipComponent={TourTooltip}
             options={{
@@ -169,7 +134,8 @@ export function TourController({
               overlayColor: "rgba(0,0,0,0.45)",
               spotlightPadding: 6,
               arrowSize: 0,
-              after: handleAfter,
+              before,
+              after,
             }}
           />
         </Suspense>
