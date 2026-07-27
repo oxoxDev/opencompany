@@ -161,11 +161,13 @@ mod tests {
             &home,
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
              [[connection]]\nprovider = \"github\"\n\
-             [[connection]]\nprovider = \"slack\"\n",
+             [[connection]]\nprovider = \"slack\"\n\
+             [[connection]]\nprovider = \"gmail\"\n",
         )
         .await;
 
         // Store a GitHub token blob (github connected, with an account label);
+        // a Gmail token blob with NO account label (connected, account omitted);
         // slack stays untouched (not connected).
         let id = CompanyId::new("acme");
         let runtime = state.registry().get(&id).unwrap();
@@ -184,11 +186,25 @@ mod tests {
             )
             .await
             .unwrap();
+        runtime
+            .secrets()
+            .set(
+                &id,
+                "oauth/gmail",
+                SecretValue(
+                    serde_json::json!({
+                        "token": { "access_token": "ya29_secret_should_never_leak" }
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap();
 
         let (status, body) = get_connections(&state).await;
         assert_eq!(status, StatusCode::OK);
         let list = body.as_array().expect("array body");
-        assert_eq!(list.len(), 2, "one row per manifest connection: {body}");
+        assert_eq!(list.len(), 3, "one row per manifest connection: {body}");
 
         let github = list
             .iter()
@@ -207,9 +223,26 @@ mod tests {
             "no account when not connected: {slack}"
         );
 
+        // A connected provider whose stored blob carries no `account` label is
+        // still `connected: true`, and the `account` field is omitted entirely
+        // (never serialized as null) — the `skip_serializing_if` path.
+        let gmail = list
+            .iter()
+            .find(|c| c["provider"] == "gmail")
+            .expect("gmail row");
+        assert_eq!(gmail["connected"], true);
+        assert!(
+            gmail.get("account").is_none(),
+            "no account when the stored blob carries no label: {gmail}"
+        );
+
         // SECURITY: no token material may appear anywhere in the response.
         assert!(
             !body.to_string().contains("gho_secret_should_never_leak"),
+            "token material leaked into the connections response: {body}"
+        );
+        assert!(
+            !body.to_string().contains("ya29_secret_should_never_leak"),
             "token material leaked into the connections response: {body}"
         );
         assert!(
