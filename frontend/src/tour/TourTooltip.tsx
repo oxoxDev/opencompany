@@ -2,11 +2,14 @@ import type { ReactNode } from "react";
 import type { TooltipRenderProps } from "react-joyride";
 
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 
 /**
  * The tour's spotlight card — a design-system-native replacement for
- * react-joyride's default tooltip: title, a step counter, the body copy, a
- * progress bar, and Skip / Back / Next controls (Base UI buttons).
+ * react-joyride's default tooltip. Everything is driven by theme tokens
+ * (`popover`, `primary`, `muted`, `border`), so it reads correctly in both
+ * light and dark. Shows a step chip, the copy, a segmented progress rail, and
+ * Skip / Back / Next controls.
  */
 export function TourTooltip({
   index,
@@ -18,33 +21,39 @@ export function TourTooltip({
   tooltipProps,
   isLastStep,
 }: TooltipRenderProps) {
-  const pct = Math.round(((index + 1) / size) * 100);
   return (
     <div
       {...tooltipProps}
-      className="w-80 max-w-[calc(100vw-2rem)] rounded-xl bg-popover p-4 text-popover-foreground shadow-lg ring-1 ring-foreground/10"
+      className="w-[340px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-2xl border border-border bg-popover text-popover-foreground shadow-xl ring-1 ring-black/5 dark:ring-white/10"
     >
-      <div className="flex items-center justify-between gap-2">
-        <span className="font-heading text-sm font-semibold">{step.title as ReactNode}</span>
-        <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
-          {index + 1} / {size}
+      <div className="px-4 pt-4">
+        <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium tracking-wide text-primary tabular-nums">
+          Step {index + 1} of {size}
         </span>
+        <h3 className="mt-2.5 font-heading text-[15px] leading-tight font-semibold">
+          {step.title as ReactNode}
+        </h3>
+        <p className="mt-1.5 text-[13px] leading-relaxed text-muted-foreground">
+          {step.content as ReactNode}
+        </p>
       </div>
 
-      <p className="mt-2 text-sm leading-snug text-muted-foreground">
-        {step.content as ReactNode}
-      </p>
-
-      <div className="mt-3 h-1 w-full overflow-hidden rounded-full bg-muted">
-        <div
-          className="h-full rounded-full bg-primary transition-all"
-          style={{ width: `${pct}%` }}
-        />
+      {/* Segmented progress rail — one bar per step, filled up to the current. */}
+      <div className="flex gap-1 px-4 pt-3.5">
+        {Array.from({ length: size }).map((_, i) => (
+          <span
+            key={i}
+            className={cn(
+              "h-1 flex-1 rounded-full transition-colors",
+              i <= index ? "bg-primary" : "bg-muted",
+            )}
+          />
+        ))}
       </div>
 
-      <div className="mt-3 flex items-center justify-between">
-        <Button variant="ghost" size="sm" {...skipProps}>
-          Skip
+      <div className="flex items-center justify-between gap-2 p-4 pt-3.5">
+        <Button variant="ghost" size="sm" className="text-muted-foreground" {...skipProps}>
+          Skip tour
         </Button>
         <div className="flex items-center gap-2">
           {index > 0 && (
@@ -53,7 +62,7 @@ export function TourTooltip({
             </Button>
           )}
           <Button size="sm" {...primaryProps}>
-            {isLastStep ? "Finish" : "Next"}
+            {isLastStep ? "Done" : "Next"}
           </Button>
         </div>
       </div>
