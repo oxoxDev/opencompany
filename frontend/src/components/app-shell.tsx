@@ -450,7 +450,7 @@ export function AppShell({
                 </div>
               }
             >
-              <FinancesView />
+              <FinancesView client={client} company={company} />
             </Suspense>
           )}
           {view === "connections" && <ConnectionsView client={client} company={company} />}

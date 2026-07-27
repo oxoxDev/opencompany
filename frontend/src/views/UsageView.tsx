@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Area,
   AreaChart,
@@ -12,7 +12,7 @@ import {
 import { Coins, CreditCard, Gauge, Plug, Zap } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
-import type { CapabilityStatusDto } from "@/api/types";
+import type { CapabilityStatusDto, UsageDto } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -36,7 +36,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { buildUsage, compact, usd } from "@/lib/usage-sample";
+import { compact, usd } from "@/lib/usage-sample";
 import { cn } from "@/lib/utils";
 
 const RANGES: Record<string, number> = { "7d": 7, "30d": 30, "90d": 90 };
@@ -49,18 +49,41 @@ const chartConfig = {
   calls: { label: "Calls", theme: { light: "#1baf7a", dark: "#199e70" } },
 } satisfies ChartConfig;
 
-// A stable "today" so the seeded series don't shift between renders.
-const TODAY_MS = Date.now();
-
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
 }
 
+// The empty usage read — shown before the first fetch resolves and as the
+// fallback when a host doesn't expose the surface yet (404). Real-or-zero: an
+// empty series renders flat rather than inventing numbers.
+const EMPTY_USAGE: UsageDto = {
+  series: [],
+  byAgent: [],
+  byProvider: [],
+  totals: { inputTokens: 0, outputTokens: 0, tokens: 0, costUsd: 0, oauthCalls: 0, connections: 0 },
+};
+
 /** In-depth usage: token burn over time, by agent, and OAuth calls by provider. */
 export function UsageView({ client, company }: Props) {
   const [range, setRange] = useState("30d");
-  const data = useMemo(() => buildUsage(RANGES[range], TODAY_MS), [range]);
+  const [data, setData] = useState<UsageDto>(EMPTY_USAGE);
+  useEffect(() => {
+    let alive = true;
+    client
+      .usage(range, company)
+      .then((usage) => {
+        if (alive) setData(usage);
+      })
+      // Hosts without the surface (older builds) 404 — show the empty state
+      // rather than fabricating a series.
+      .catch(() => {
+        if (alive) setData(EMPTY_USAGE);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [client, company, range]);
   const { totals } = data;
 
   // Capability budgets (issue #108) — the one live-wired card on this view.
