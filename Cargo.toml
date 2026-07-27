@@ -188,7 +188,14 @@ bs58 = { version = "0.5", default-features = false, features = ["std"], optional
 rand_core = { version = "0.6", default-features = false, features = ["getrandom"], optional = true }
 
 [features]
-default = []
+# `oauth` ships in the standard build: the connection write routes
+# (authorize-url + server-side token exchange) are a first-class console
+# surface, so a company can connect GitHub end-to-end without a custom feature
+# build. It only pulls in `reqwest`, which several already-shipped features
+# (`github`, `telegram`, `medulla`, …) also depend on, so the default build
+# gains no new heavy native dependency. The read-only status route
+# (`ops::connections_read`) is un-gated and available regardless.
+default = ["oauth"]
 tiny = ["tinyagents"]
 # WS4: embed `vendor/openhuman` (`openhuman_core`) directly as the tenant agent
 # harness via `AgentBuilder`. `src/harness/` compiles only under this feature;
