@@ -63,7 +63,8 @@ use openhuman_core::openhuman as oh;
 use tokio::sync::{Mutex, RwLock};
 
 use oh::agent::Agent;
-use oh::inference::provider::Provider;
+
+use crate::harness::provider::HarnessModel;
 
 use crate::company::Agent as ManifestAgent;
 use crate::company::Policy;
@@ -84,8 +85,11 @@ use crate::runtime::builder::agent_effective_grants;
 /// Shared dependencies every harness-built agent draws on.
 #[derive(Clone)]
 pub struct HarnessDeps {
-    /// The inference provider shared across a company's agents.
-    pub provider: Arc<dyn Provider>,
+    /// The inference model shared across a company's agents. A [`HarnessModel`]
+    /// is a tinyagents [`ChatModel<()>`](tinyagents::harness::model::ChatModel)
+    /// plus the telemetry slug the cost hook reads live per turn; it upcasts to
+    /// `Arc<dyn ChatModel<()>>` at the openhuman `AgentBuilder::chat_model` seam.
+    pub provider: Arc<dyn HarnessModel>,
     /// Stable provider slug attributed to usage samples (e.g. `managed`).
     pub provider_slug: String,
     /// Context store backing every agent's [`OcMemory`](memory::OcMemory).
@@ -1175,6 +1179,7 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use async_trait::async_trait;
+    use tinyagents::harness::model::{ChatModel, ModelRequest, ModelResponse};
 
     use crate::company::CompanyManifest;
     use crate::harness::provider::MockProvider;
@@ -1626,10 +1631,11 @@ description = "Builds the product."
 
     // --- Empty-response turn wrapper ----------------------------------------
 
-    /// A provider that plays back a scripted sequence of outcomes, one per
-    /// `chat_with_system` call, so the empty-response retry wrapper can be driven
-    /// deterministically. `Ok("")` is the transient empty class; `Err(_)` is a
-    /// hard error.
+    /// A model that plays back a scripted sequence of outcomes, one per
+    /// [`invoke`](ChatModel::invoke) call, so the empty-response retry wrapper can
+    /// be driven deterministically. `Ok("")` is the transient empty class (the
+    /// harness turn raises the empty-response error on a blank assistant reply);
+    /// `Err(_)` is a hard error.
     struct ScriptedProvider {
         script: StdMutex<std::collections::VecDeque<Result<String, String>>>,
         calls: std::sync::atomic::AtomicUsize,
@@ -1645,23 +1651,24 @@ description = "Builds the product."
     }
 
     #[async_trait]
-    impl oh::inference::provider::Provider for ScriptedProvider {
-        fn telemetry_provider_id(&self) -> String {
-            "scripted".to_string()
-        }
-        async fn chat_with_system(
+    impl ChatModel<()> for ScriptedProvider {
+        async fn invoke(
             &self,
-            _system: Option<&str>,
-            _message: &str,
-            _model: &str,
-            _temperature: f64,
-        ) -> anyhow::Result<String> {
+            _state: &(),
+            _request: ModelRequest,
+        ) -> tinyagents::Result<ModelResponse> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match self.script.lock().unwrap().pop_front() {
-                Some(Ok(reply)) => Ok(reply),
-                Some(Err(err)) => Err(anyhow::anyhow!("{err}")),
-                None => Ok("exhausted".to_string()),
+                Some(Ok(reply)) => Ok(ModelResponse::assistant(reply)),
+                Some(Err(err)) => Err(tinyagents::TinyAgentsError::Model(err)),
+                None => Ok(ModelResponse::assistant("exhausted")),
             }
+        }
+    }
+
+    impl HarnessModel for ScriptedProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "scripted".to_string()
         }
     }
 
