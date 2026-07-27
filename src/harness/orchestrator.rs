@@ -50,7 +50,7 @@ use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
 
 use crate::company::{
     Agent as ManifestAgent, RawEdge, RawNode, RawWorkflow, WorkflowFile, create_company_workflow,
-    load_company_workflows,
+    list_source_workflows, load_company_workflows,
 };
 use crate::error::OpenCompanyError;
 use crate::ports::events::EventLog;
@@ -116,7 +116,10 @@ pub fn orchestrator_brief() -> String {
     " You are also this company's orchestrator: the single point of contact for the operator. \
 Answer from whole-company context, and when a request belongs to a specialist desk or should be \
 tracked as work, delegate instead of guessing. Use `query_company` to ground answers in the \
-company's durable facts and recent activity, `delegate_to_desk` to hand a turn to a desk's lead \
+company's durable facts, recent activity, saved workflows, and team roster — it is the source of \
+truth for what workflows exist and who is on the team, so consult it before answering \"what \
+workflows/teammates do we have?\" rather than guessing or naming a skill \
+— `delegate_to_desk` to hand a turn to a desk's lead \
 member, `spawn_task` to open a tracked task card, `run_workflow` to execute one of the \
 company's saved workflows by id (for example to advance or finish a task that is waiting on a \
 workflow run) — you can run workflows yourself; never claim the run_workflow tool is unavailable — \
@@ -208,20 +211,32 @@ pub struct QueryCompanyTool {
     company: CompanyId,
     facts: Option<Arc<dyn FactStore>>,
     events: Option<Arc<dyn EventLog>>,
+    /// The company's source directory, so the tool can enumerate saved
+    /// `workflows/*.toml` graphs — the same on-disk list the REST picker reads.
+    /// `None` in platform-provisioned mode (nothing on disk to scan).
+    workflow_source_dir: Option<PathBuf>,
+    /// The company store, so the tool can read the persisted roster (manifest
+    /// agents + operator-added overlay teammates) and the manifest's enabled
+    /// workflow ids. `None` on builds with no store wired.
+    store: Option<Arc<dyn CompanyStore>>,
 }
 
 impl QueryCompanyTool {
-    /// Builds the tool over the company's read ports. Either handle may be
-    /// `None`; the tool reports whatever surface is wired.
+    /// Builds the tool over the company's read ports. Any handle may be `None`;
+    /// the tool reports whatever surface is wired.
     pub fn new(
         company: CompanyId,
         facts: Option<Arc<dyn FactStore>>,
         events: Option<Arc<dyn EventLog>>,
+        workflow_source_dir: Option<PathBuf>,
+        store: Option<Arc<dyn CompanyStore>>,
     ) -> Self {
         Self {
             company,
             facts,
             events,
+            workflow_source_dir,
+            store,
         }
     }
 }
@@ -233,7 +248,7 @@ impl Tool for QueryCompanyTool {
     }
 
     fn description(&self) -> &str {
-        "Read the company's durable facts and recent activity to ground an answer in whole-company context. Optionally pass a `query` to filter facts by a case-insensitive substring."
+        "Read the company's durable facts, recent activity, saved workflows, and team roster to ground an answer in whole-company context — use this to answer \"what workflows do we have?\" or \"who is on the team?\" instead of guessing. Optionally pass a `query` to filter facts by a case-insensitive substring."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -306,10 +321,76 @@ impl Tool for QueryCompanyTool {
             md.push('\n');
         }
 
+        // Load the persisted record once: it carries both the roster and the
+        // manifest's enabled workflow ids (the seed workflows that have no file
+        // under `workflows/`). `None`/error → those sections read empty rather
+        // than failing the whole surface.
+        let record = match &self.store {
+            Some(store) => store.load(&self.company).await.ok().flatten(),
+            None => None,
+        };
+
+        // Saved workflows: the on-disk `workflows/*.toml` graphs (what
+        // `create_workflow` writes and the REST picker lists), unioned with the
+        // manifest's enabled ids so seed workflows show too. This is the section
+        // that makes "what workflows do we have?" answerable — before it, the
+        // orchestrator had no way to enumerate saved workflows and would fall
+        // back to its skills catalog.
+        let mut workflows: Vec<(String, String)> =
+            list_source_workflows(self.workflow_source_dir.as_deref())
+                .into_iter()
+                .map(|f| (f.id, f.name))
+                .collect();
+        let mut seen: std::collections::HashSet<String> =
+            workflows.iter().map(|(id, _)| id.clone()).collect();
+        if let Some(record) = &record {
+            for id in &record.manifest.workflows.enabled {
+                if seen.insert(id.clone()) {
+                    workflows.push((id.clone(), id.clone()));
+                }
+            }
+        }
+        workflows.sort_by(|a, b| a.0.cmp(&b.0));
+        md.push_str("\n## Saved workflows\n");
+        if workflows.is_empty() {
+            md.push_str("_No saved workflows. Author one with `create_workflow`._\n");
+        } else {
+            for (id, name) in &workflows {
+                md.push_str(&format!(
+                    "- **{}** (`{}`) — run with `run_workflow`\n",
+                    name.trim(),
+                    id
+                ));
+            }
+        }
+
+        // Team roster: manifest agents plus operator-added overlay teammates
+        // (the ones `add_agent` persists), so a freshly added teammate is
+        // visible on the next query instead of looking unpersisted.
+        let mut roster: Vec<(String, String)> = Vec::new();
+        if let Some(record) = &record {
+            for agent in &record.manifest.agents {
+                roster.push((agent.id.clone(), agent.role.clone()));
+            }
+            for overlay in &record.overlay_agents {
+                roster.push((overlay.id.clone(), overlay.role.clone()));
+            }
+        }
+        md.push_str("\n## Team\n");
+        if roster.is_empty() {
+            md.push_str("_Roster unavailable._\n");
+        } else {
+            for (id, role) in &roster {
+                md.push_str(&format!("- **{}** — {}\n", id, role.trim()));
+            }
+        }
+
         Ok(ToolResult::success_with_markdown(
             json!({
                 "facts": facts.len(),
                 "recent_events": recent.len(),
+                "workflows": workflows.len(),
+                "team": roster.len(),
             }),
             md,
         ))
@@ -652,6 +733,8 @@ pub fn orchestrator_tools(
         company.clone(),
         facts,
         events.clone(),
+        workflow_source_dir.clone(),
+        Some(store.clone()),
     ))];
     tools.extend(delegation_tools(queue));
     tools.push(Box::new(RunWorkflowTool::new(
@@ -1337,12 +1420,67 @@ mod tests {
 
     #[tokio::test]
     async fn query_company_tool_reports_no_data_when_unwired() {
-        let tool = QueryCompanyTool::new(CompanyId::new("acme"), None, None);
+        let tool = QueryCompanyTool::new(CompanyId::new("acme"), None, None, None, None);
         let result = tool.execute(json!({})).await.expect("execute");
         // The insight surface lives in the markdown; `output()` is the summary.
         let out = result.output_for_llm(true);
         assert!(out.contains("No durable facts recorded"), "{out}");
         assert!(out.contains("No recent activity"), "{out}");
+        assert!(out.contains("No saved workflows"), "{out}");
+    }
+
+    /// Regression: a saved workflow (on disk) and an operator-added overlay
+    /// teammate both show up in `query_company`. Before this the orchestrator
+    /// had no way to enumerate either, so a freshly created workflow / added
+    /// teammate looked unpersisted when the operator asked about it.
+    #[tokio::test]
+    async fn query_company_tool_lists_saved_workflows_and_roster() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("workflows")).unwrap();
+        std::fs::write(
+            dir.path().join("workflows").join("daily-standup.toml"),
+            r#"
+id = "daily-standup"
+name = "Daily Standup"
+description = "Morning summary."
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Morning"
+"#,
+        )
+        .unwrap();
+
+        // A record whose overlay adds a teammate — the `add_agent`
+        // persistence shape.
+        let mut record = seeded_record(&CompanyId::new("acme"));
+        record.overlay_agents.push(OverlayAgent {
+            id: "fact-fetcher".to_string(),
+            name: "Fact Fetcher".to_string(),
+            role: "Researcher".to_string(),
+            description: None,
+        });
+        let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record));
+
+        let tool = QueryCompanyTool::new(
+            CompanyId::new("acme"),
+            None,
+            None,
+            Some(dir.path().to_path_buf()),
+            Some(store),
+        );
+        let out = tool
+            .execute(json!({}))
+            .await
+            .expect("execute")
+            .output_for_llm(true);
+
+        assert!(out.contains("Daily Standup"), "workflow missing: {out}");
+        assert!(out.contains("daily-standup"), "workflow id missing: {out}");
+        assert!(
+            out.contains("fact-fetcher"),
+            "overlay teammate missing: {out}"
+        );
     }
 
     // --- add_agent (issue #71) ----------------------------------------------
