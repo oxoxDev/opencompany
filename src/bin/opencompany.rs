@@ -182,6 +182,19 @@ async fn register_company(
     // The company's on-disk source directory (`companies/<name>`) seeds the
     // workspace tree on first boot and lets read resolvers find its committed
     // skills/workflows content.
+    let source_dir = company_source_dir(dir);
+    // Issue #85: this company was seeded from a template directory, so record
+    // that directory's slug as the durable source-template provenance. The
+    // builder stamps it only on first launch and carries it forward on rebuilds;
+    // a raw-manifest `POST /api/v1/companies` provision has no template dir and
+    // records no provenance.
+    let provenance = source_dir.file_name().and_then(|s| s.to_str()).map(|slug| {
+        opencompany::ports::types::TemplateProvenance {
+            source_id: slug.to_string(),
+            version: None,
+            path: Some(source_dir.display().to_string()),
+        }
+    });
     let mut builder = attach_tinyhumans_feedback(
         attach_harness(attach_openhuman(RuntimeBuilder::new(
             home.to_path_buf(),
@@ -189,9 +202,12 @@ async fn register_company(
         ))),
         state.config(),
     )
-    .with_seed_dir(company_source_dir(dir))
+    .with_seed_dir(source_dir.clone())
     .with_tinyplace_api_url(state.config().tinyplace_api_url.clone())
     .with_host_base_url(state.config().host_base_url());
+    if let Some(provenance) = provenance {
+        builder = builder.with_template_provenance(provenance);
+    }
     // Shared-single-DB mode: namespace the derived id with this tenant so the
     // same boot template (`OPENCOMPANY_COMPANY`) does not collide across tenants
     // in one logical database. A no-op when `tenant_namespace` is unset.
