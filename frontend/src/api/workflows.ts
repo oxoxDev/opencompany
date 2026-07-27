@@ -25,6 +25,18 @@ export interface WorkflowNode {
   summary?: string;
   /** The roster agent id — only present on `agent` nodes. */
   agent?: string;
+  /** Kind-specific configuration (a slug, URL, case labels, schema, …). */
+  config?: unknown;
+  /** How the engine handles an error on this node, when set. */
+  onError?: string;
+  /** The node's retry policy, when set. */
+  retry?: {
+    maxAttempts?: number;
+    backoffMs?: number;
+    backoff?: string;
+  };
+  /** Whether the node pauses for a human approval before proceeding. */
+  requiresApproval?: boolean;
 }
 
 /** A directed edge between two node ids, with an optional branch label. */

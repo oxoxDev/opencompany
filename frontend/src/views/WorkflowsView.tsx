@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import {
   Background,
   BackgroundVariant,
@@ -20,6 +20,7 @@ import {
   listWorkflows,
   runWorkflow,
   type WorkflowGraph,
+  type WorkflowNode as WorkflowNodeModel,
   type WorkflowRunResult,
   type WorkflowSummary,
 } from "@/api/workflows";
@@ -69,6 +70,7 @@ export function WorkflowsView({
   const [result, setResult] = useState<WorkflowRunResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   // Load the workflow list once, and auto-select the first entry.
   useEffect(() => {
@@ -106,6 +108,7 @@ export function WorkflowsView({
     let live = true;
     setLoadingGraph(true);
     setResult(null);
+    setSelectedNodeId(null);
     (async () => {
       try {
         const g = await getWorkflow(client, company, selectedId);
@@ -155,6 +158,18 @@ export function WorkflowsView({
   const { nodes, edges } = useMemo(() => (graph ? layout(graph) : { nodes: [], edges: [] }), [graph]);
 
   const selected = workflows.find((w) => w.id === selectedId) ?? null;
+
+  // The full node model (kind/name/summary/agent/config) for the clicked node,
+  // looked up from the loaded graph so the inspector shows fields the laid-out
+  // canvas node data doesn't carry (agent, config, …).
+  const selectedNode = useMemo(
+    () => graph?.nodes.find((n) => n.id === selectedNodeId) ?? null,
+    [graph, selectedNodeId],
+  );
+
+  const onNodeClick = useCallback((_: unknown, node: Node) => {
+    setSelectedNodeId(node.id);
+  }, []);
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
@@ -222,22 +237,29 @@ export function WorkflowsView({
             </Button>
           </div>
         ) : (
-          <ReactFlow
-            nodes={nodes}
-            edges={edges}
-            nodeTypes={NODE_TYPES}
-            colorMode={resolvedTheme === "dark" ? "dark" : "light"}
-            fitView
-            fitViewOptions={{ padding: 0.2 }}
-            nodesDraggable={false}
-            nodesConnectable={false}
-            elementsSelectable
-            proOptions={{ hideAttribution: true }}
-          >
-            <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
-            <Controls showInteractive={false} />
-            <MiniMap pannable zoomable className="!hidden sm:!block" />
-          </ReactFlow>
+          <>
+            <ReactFlow
+              nodes={nodes}
+              edges={edges}
+              nodeTypes={NODE_TYPES}
+              colorMode={resolvedTheme === "dark" ? "dark" : "light"}
+              fitView
+              fitViewOptions={{ padding: 0.2 }}
+              nodesDraggable={false}
+              nodesConnectable={false}
+              elementsSelectable
+              onNodeClick={onNodeClick}
+              onPaneClick={() => setSelectedNodeId(null)}
+              proOptions={{ hideAttribution: true }}
+            >
+              <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
+              <Controls showInteractive={false} />
+              <MiniMap pannable zoomable className="!hidden sm:!block" />
+            </ReactFlow>
+            {selectedNode && (
+              <NodeDetailPanel node={selectedNode} onClose={() => setSelectedNodeId(null)} />
+            )}
+          </>
         )}
       </div>
 
@@ -252,6 +274,105 @@ export function WorkflowsView({
         onOpenChange={setCreateOpen}
         onCreated={handleCreated}
       />
+    </div>
+  );
+}
+
+/** A read-only inspector for a single graph node, overlaid on the canvas when
+ * the operator clicks a node. Surfaces the fields already on the wire from
+ * `GET …/workflows/{wid}`: kind, name, summary, the assigned agent (agent
+ * nodes), and any kind-specific config / error-handling policy. */
+function NodeDetailPanel({
+  node,
+  onClose,
+}: {
+  node: WorkflowNodeModel;
+  onClose: () => void;
+}) {
+  const meta = nodeKindMeta(node.kind);
+  const hasConfig =
+    node.config !== undefined && node.config !== null &&
+    !(typeof node.config === "object" && Object.keys(node.config as object).length === 0);
+
+  return (
+    <div className="absolute right-3 top-3 bottom-3 z-10 flex w-72 flex-col overflow-hidden rounded-xl border bg-card/95 shadow-lg backdrop-blur sm:w-80">
+      <div className="flex items-start justify-between gap-2 border-b px-3 py-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="text-base leading-none" aria-hidden>
+            {meta.emoji}
+          </span>
+          <div className="min-w-0">
+            <div className="truncate text-sm font-semibold">{node.name}</div>
+            <div className="truncate text-[11px] text-muted-foreground">{node.id}</div>
+          </div>
+        </div>
+        <Button variant="ghost" size="sm" className="-mr-1 h-7 px-2" onClick={onClose}>
+          Close
+        </Button>
+      </div>
+
+      <div className="min-h-0 flex-1 space-y-3 overflow-auto px-3 py-3 text-sm">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Badge variant="outline" className="font-normal">
+            {node.kind}
+          </Badge>
+          {node.requiresApproval && (
+            <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 font-normal">
+              requires approval
+            </Badge>
+          )}
+        </div>
+
+        {node.summary && (
+          <DetailField label="Summary">
+            <p className="text-sm leading-snug">{node.summary}</p>
+          </DetailField>
+        )}
+
+        {node.agent && (
+          <DetailField label="Assigned agent">
+            <p className="font-mono text-xs">{node.agent}</p>
+          </DetailField>
+        )}
+
+        {hasConfig && (
+          <DetailField label="Config">
+            <pre className="overflow-auto rounded-lg border bg-muted/40 p-2 font-mono text-[11px] leading-snug">
+              {JSON.stringify(node.config, null, 2)}
+            </pre>
+          </DetailField>
+        )}
+
+        {node.onError && (
+          <DetailField label="On error">
+            <p className="font-mono text-xs">{node.onError}</p>
+          </DetailField>
+        )}
+
+        {node.retry && (
+          <DetailField label="Retry">
+            <pre className="overflow-auto rounded-lg border bg-muted/40 p-2 font-mono text-[11px] leading-snug">
+              {JSON.stringify(node.retry, null, 2)}
+            </pre>
+          </DetailField>
+        )}
+
+        {!node.summary && !node.agent && !hasConfig && !node.onError && !node.retry && (
+          <p className="text-xs text-muted-foreground">
+            This node has no extra details beyond its kind and name.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** A labelled block inside the node inspector. */
+function DetailField({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="space-y-1">
+      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</p>
+      {children}
     </div>
   );
 }
