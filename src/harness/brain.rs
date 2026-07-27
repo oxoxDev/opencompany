@@ -542,6 +542,7 @@ description = "Runs Acme."
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
         }
     }
 
@@ -679,6 +680,7 @@ description = "Builds it."
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
         }
     }
 
@@ -884,6 +886,7 @@ members = ["engineer"]
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
         }
     }
 
@@ -992,10 +995,65 @@ name = "Design"
                 desk_id: "design".to_string(),
                 agent_id: "engineer".to_string(),
             }],
+            overlay_desk_order: Vec::new(),
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
         assert_eq!(brain.desk_lead("design"), Some("engineer".to_string()));
         assert_eq!(brain.responder_for(Some("design")), "engineer");
+    }
+
+    /// The operator's desk hierarchy drives the desk lead: a desk with manifest
+    /// members `[eng1, eng2]` plus an overlay `cto`, ordered `[cto, eng1, eng2]`,
+    /// resolves its lead to `cto` — `desk_lead` reads `effective_desk_members`,
+    /// so the reorder flows through with no change to the resolver (issue #131).
+    #[test]
+    fn desk_order_drives_the_desk_lead() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[policy]
+mode = "full"
+
+[[agent]]
+id = "eng1"
+role = "Engineer One"
+
+[[agent]]
+id = "eng2"
+role = "Engineer Two"
+
+[[group_chat]]
+id = "eng"
+name = "Engineering"
+members = ["eng1", "eng2"]
+"#,
+        )
+        .expect("valid manifest");
+        let record = CompanyRecord {
+            id: CompanyId::new("acme"),
+            manifest,
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: vec![crate::ports::types::OverlayAgent {
+                id: "cto".to_string(),
+                name: "Cto".to_string(),
+                role: "CTO".to_string(),
+                description: None,
+            }],
+            overlay_desk_members: vec![crate::ports::types::OverlayDeskMember {
+                desk_id: "eng".to_string(),
+                agent_id: "cto".to_string(),
+            }],
+            overlay_desk_order: vec![crate::ports::types::OverlayDeskOrder {
+                desk_id: "eng".to_string(),
+                ordered: vec!["cto".to_string(), "eng1".to_string(), "eng2".to_string()],
+            }],
+        };
+        let (brain, _tasks) = brain_over(dir.path(), record);
+        assert_eq!(brain.desk_lead("eng"), Some("cto".to_string()));
     }
 
     /// A `spawn_task` delegation opens a backlog card and surfaces no bubble.

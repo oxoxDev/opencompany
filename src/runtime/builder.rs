@@ -919,6 +919,7 @@ impl RuntimeBuilder {
                                 lifecycle: "running".to_string(),
                                 overlay_agents: Vec::new(),
                                 overlay_desk_members: Vec::new(),
+                                overlay_desk_order: Vec::new(),
                             };
                             // Workflow agent nodes execute on the same pool as the
                             // brain — clone before both moves into `HarnessBrain`.
@@ -991,6 +992,10 @@ impl RuntimeBuilder {
             .as_ref()
             .map(|r| r.overlay_desk_members.clone())
             .unwrap_or_default();
+        let overlay_desk_order = existing
+            .as_ref()
+            .map(|r| r.overlay_desk_order.clone())
+            .unwrap_or_default();
         let ledger = existing.map(|r| r.ledger).unwrap_or_default();
         store
             .save(&CompanyRecord {
@@ -1000,6 +1005,7 @@ impl RuntimeBuilder {
                 lifecycle,
                 overlay_agents,
                 overlay_desk_members,
+                overlay_desk_order,
             })
             .await?;
 

@@ -51,7 +51,8 @@ fn sample_manifest() -> crate::company::CompanyManifest {
     toml::from_str(toml_src).expect("parse sample manifest")
 }
 
-/// Builds an empty running record for `id`.
+/// Builds a running record for `id` carrying a non-empty desk-order overlay, so
+/// the store round-trip covers the operator desk-hierarchy field (issue #131).
 fn record(id: &CompanyId) -> CompanyRecord {
     CompanyRecord {
         id: id.clone(),
@@ -60,6 +61,10 @@ fn record(id: &CompanyId) -> CompanyRecord {
         lifecycle: "running".to_string(),
         overlay_agents: Vec::new(),
         overlay_desk_members: Vec::new(),
+        overlay_desk_order: vec![crate::ports::types::OverlayDeskOrder {
+            desk_id: "studio".to_string(),
+            ordered: vec!["ceo".to_string(), "eng".to_string()],
+        }],
     }
 }
 
@@ -142,6 +147,15 @@ pub async fn assert_isolation_by_company(
     // `alpha` still sees its own data.
     let loaded = store.load(&alpha).await.unwrap().expect("alpha record");
     assert_eq!(loaded.ledger.len(), 1);
+    // The operator desk-order overlay survives the store round-trip (issue #131).
+    assert_eq!(
+        loaded.overlay_desk_order,
+        vec![crate::ports::types::OverlayDeskOrder {
+            desk_id: "studio".to_string(),
+            ordered: vec!["ceo".to_string(), "eng".to_string()],
+        }],
+        "overlay_desk_order did not survive save/load"
+    );
     assert_eq!(
         events
             .read_from(&alpha, EventSeq::new(0), usize::MAX)
