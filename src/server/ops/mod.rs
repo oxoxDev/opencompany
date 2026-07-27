@@ -31,6 +31,7 @@ pub mod skills;
 pub mod smtp;
 pub mod tasks;
 pub mod team;
+pub mod usage;
 pub mod workflows;
 pub mod workspace;
 
@@ -141,6 +142,7 @@ pub fn router() -> Router<AppState> {
         .merge(channels::router())
         .merge(composio::router())
         .merge(domain::router())
+        .merge(usage::router())
         .merge(smtp::router())
         .merge(inbox::router())
         .merge(tasks::router())
