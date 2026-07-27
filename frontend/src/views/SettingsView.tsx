@@ -59,6 +59,18 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
             <InfoRow label="Company">
               <span className="font-mono text-xs">{status.id}</span>
             </InfoRow>
+            {status.template_provenance ? (
+              <InfoRow label="Template">
+                <span className="text-sm">
+                  <span className="font-mono text-xs">
+                    {status.template_provenance.source_id}
+                  </span>
+                  {status.template_provenance.version
+                    ? ` (${status.template_provenance.version})`
+                    : ""}
+                </span>
+              </InfoRow>
+            ) : null}
             <InfoRow label="Mode">
               <span className="text-sm">
                 {client.isSingleCompany ? "Single-company" : "Multi-company (platform)"}

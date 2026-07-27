@@ -2,6 +2,20 @@
 // Kept in sync with src/runtime/types.rs, src/server/operator.rs, and
 // src/feedback/{types,service}.rs.
 
+/**
+ * Where a company's manifest was seeded from — the source template's stable
+ * identity, recorded once at launch. Mirrors `TemplateProvenance` in
+ * `src/ports/types.rs`. Absent for a company provisioned from a raw manifest.
+ */
+export interface TemplateProvenance {
+  /** The template's stable id — the source directory slug. */
+  source_id: string;
+  /** The template's version, when the source exposes one. */
+  version?: string | null;
+  /** The source directory the company was launched from, when recorded. */
+  path?: string | null;
+}
+
 /** `GET /api/v1/companies` and `GET /api/v1/companies/{id}`. */
 export interface CompanyStatus {
   id: string;
@@ -9,6 +23,11 @@ export interface CompanyStatus {
   /** e.g. "running", "paused", "suspended", "archived". */
   lifecycle: string;
   pending_approvals: number;
+  /**
+   * The source-template provenance recorded at launch (issue #85). Absent for
+   * a company provisioned from a raw manifest rather than a template.
+   */
+  template_provenance?: TemplateProvenance | null;
 }
 
 /** What kind of processing step this is (drives the timeline icon). */
