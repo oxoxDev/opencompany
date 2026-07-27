@@ -324,6 +324,89 @@ export interface CapabilityStatusDto {
   composioTokenConfigured?: boolean;
 }
 
+/** One day's token totals in the usage series (`GET .../usage`). */
+export interface UsagePointDto {
+  /** ISO day, `YYYY-MM-DD`. */
+  date: string;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+/** Tokens attributed to one teammate (desk) over the window. */
+export interface AgentTokensDto {
+  name: string;
+  tokens: number;
+}
+
+/** OAuth-connected calls counted for one provider over the window. */
+export interface ProviderCallsDto {
+  provider: string;
+  calls: number;
+}
+
+/** Rolled-up usage totals for the window. */
+export interface UsageTotalsDto {
+  inputTokens: number;
+  outputTokens: number;
+  tokens: number;
+  costUsd: number;
+  oauthCalls: number;
+  connections: number;
+}
+
+/**
+ * `GET .../usage?range=` — the company's usage read. A REST twin of the
+ * `Company.usage(range)` GraphQL surface. Token/cost figures populate on a
+ * harness build; the offline build reports a zero-filled series (that is the
+ * real value, not a stub). `byProvider` / `oauthCalls` stay empty/zero until the
+ * OAuth-call emit lands (Phase 2).
+ */
+export interface UsageDto {
+  /** Zero-filled daily token series over the range, oldest first. */
+  series: UsagePointDto[];
+  /** Tokens per teammate (desk), highest first. */
+  byAgent: AgentTokensDto[];
+  /** OAuth calls per provider, highest first (empty until Phase 2 emit). */
+  byProvider: ProviderCallsDto[];
+  totals: UsageTotalsDto;
+}
+
+/** Spend rolled up by prosumer category (`GET .../finances`). */
+export interface CategorySpendDto {
+  category: string;
+  amount: number;
+}
+
+/** One monetary ledger movement in the finance journal. */
+export interface TransactionDto {
+  id: string;
+  /** ISO day, `YYYY-MM-DD`. */
+  date: string;
+  description: string;
+  category: string;
+  /** Absolute USD magnitude; sign is carried by `direction`. */
+  amountUsd: number;
+  direction: "in" | "out";
+}
+
+/**
+ * `GET .../finances` — the company's finance read. A REST twin of the
+ * `Company.finances` GraphQL surface: the ledger + manifest `[budget]` folded
+ * into balance, budget vs spend, revenue, spend by category, and the journal.
+ * The ledger fills on a harness build; the offline build reports zeroes.
+ * `balanceUsd` is the bookkeeping net until the wallet balance is surfaced
+ * (Phase 2).
+ */
+export interface FinancesDto {
+  balanceUsd: number;
+  budgetUsd: number;
+  spentUsd: number;
+  revenueUsd: number;
+  netUsd: number;
+  byCategory: CategorySpendDto[];
+  transactions: TransactionDto[];
+}
+
 /** Error envelope shape: `{ error, code }`. */
 export interface ApiErrorBody {
   error: string;

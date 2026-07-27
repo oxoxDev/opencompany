@@ -28,7 +28,9 @@ import {
   type FeedbackInput,
   type FeedbackResponse,
   type FeedbackSummary,
+  type FinancesDto,
   type TeamMemberDto,
+  type UsageDto,
   type Verdict,
 } from "./types";
 
@@ -151,6 +153,26 @@ export class OpenCompanyClient {
    */
   capabilityStatus(company?: string | null): Promise<CapabilityStatusDto> {
     return this.request<CapabilityStatusDto>("GET", `${this.scope(company)}/capabilities`);
+  }
+
+  /**
+   * The company's usage read (Usage view): daily token series, tokens by desk,
+   * OAuth calls by provider, and window totals over a `7d` / `30d` / `90d`
+   * range. Token figures are real-or-zero — the offline build reports a
+   * zero-filled series until the harness cost hook meters spend.
+   */
+  usage(range?: string | null, company?: string | null): Promise<UsageDto> {
+    const qs = range ? `?range=${encodeURIComponent(range)}` : "";
+    return this.request<UsageDto>("GET", `${this.scope(company)}/usage${qs}`);
+  }
+
+  /**
+   * The company's finance read (Finances view): balance, budget vs spend,
+   * revenue, spend by category, and the transaction journal. Figures are
+   * real-or-zero — the offline build reports zeroes until the ledger fills.
+   */
+  finances(company?: string | null): Promise<FinancesDto> {
+    return this.request<FinancesDto>("GET", `${this.scope(company)}/finances`);
   }
 
   /**
