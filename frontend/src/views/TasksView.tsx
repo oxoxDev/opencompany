@@ -163,7 +163,7 @@ export function TasksView({
         </div>
       )}
 
-      <div className="flex flex-1 gap-4 overflow-x-auto p-4">
+      <div className="flex flex-1 gap-4 overflow-x-auto py-4 pl-4">
         {TASK_COLUMNS.map((col) => {
           const items = tasks.filter((t) => t.column === col.id);
           return (
@@ -227,6 +227,9 @@ export function TasksView({
             </div>
           );
         })}
+        {/* Trailing gutter: flex scroll containers drop their padding-inline-end,
+            so this spacer keeps ~16px of breathing room past the last column. */}
+        <div aria-hidden className="w-4 shrink-0" />
       </div>
 
       <TaskDetailDialog
