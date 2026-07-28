@@ -242,14 +242,12 @@ impl HarnessBrain {
     /// agent or a team-overlay teammate, so an overlay-added lead is reachable on
     /// a desk the manifest left empty.
     fn desk_lead(&self, desk: &str) -> Option<String> {
-        let chat = self
-            .record
-            .manifest
-            .group_chats
-            .iter()
-            .find(|c| c.id == desk || c.name.eq_ignore_ascii_case(desk))?;
+        // Resolve the desk key (id or case-insensitive name) against both the
+        // manifest desks and the operator-created overlay desks, so a
+        // runtime-created desk routes exactly like a blueprint one.
+        let desk_id = self.record.resolve_desk_id(desk)?;
         self.record
-            .effective_desk_members(&chat.id)
+            .effective_desk_members(&desk_id)
             .into_iter()
             .find(|m| self.record.is_roster_agent(m))
     }
@@ -491,7 +489,10 @@ impl Brain for HarnessBrain {
 mod tests {
     use super::*;
 
-    use crate::harness::provider::MockProvider;
+    use tinyagents::harness::message::Message;
+    use tinyagents::harness::model::{ChatModel, ModelRequest, ModelResponse};
+
+    use crate::harness::provider::{HarnessModel, MockProvider};
     use crate::ports::brain::CycleHost;
     use crate::ports::types::{
         CompanyId, ContextOp, ContextOpResult, Effect, EffectDisposition, ToolCall, ToolResult,
@@ -543,6 +544,7 @@ description = "Runs Acme."
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
         }
     }
 
@@ -681,6 +683,7 @@ description = "Builds it."
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
         }
     }
 
@@ -887,6 +890,7 @@ members = ["engineer"]
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
         }
     }
 
@@ -996,6 +1000,7 @@ name = "Design"
                 agent_id: "engineer".to_string(),
             }],
             overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
         assert_eq!(brain.desk_lead("design"), Some("engineer".to_string()));
@@ -1051,6 +1056,7 @@ members = ["eng1", "eng2"]
                 desk_id: "eng".to_string(),
                 ordered: vec!["cto".to_string(), "eng1".to_string(), "eng2".to_string()],
             }],
+            overlay_desks: Vec::new(),
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
         assert_eq!(brain.desk_lead("eng"), Some("cto".to_string()));
@@ -1209,14 +1215,13 @@ members = ["eng1", "eng2"]
     // --- Steer disposition (issue #111) -------------------------------------
 
     use crate::company::steer::InflightRegistry;
-    use openhuman_core::openhuman as oh;
     use std::collections::VecDeque;
     use std::sync::Mutex as StdMutex;
 
-    /// A provider that steers its OWN in-flight run on selected turns (via the
+    /// A model that steers its OWN in-flight run on selected turns (via the
     /// shared registry), so the disposition matrix can be driven deterministically
-    /// over an offline turn. It pops one queued action per `chat_with_system`
-    /// call and applies it against `key`, then echoes the message.
+    /// over an offline turn. It pops one queued action per [`invoke`](ChatModel::invoke)
+    /// call and applies it against `key`, then echoes the last user message.
     struct SteeringProvider {
         steer: InflightRegistry,
         company: CompanyId,
@@ -1226,17 +1231,12 @@ members = ["eng1", "eng2"]
     }
 
     #[async_trait]
-    impl oh::inference::provider::Provider for SteeringProvider {
-        fn telemetry_provider_id(&self) -> String {
-            "steering".to_string()
-        }
-        async fn chat_with_system(
+    impl ChatModel<()> for SteeringProvider {
+        async fn invoke(
             &self,
-            _system: Option<&str>,
-            message: &str,
-            _model: &str,
-            _temperature: f64,
-        ) -> anyhow::Result<String> {
+            _state: &(),
+            request: ModelRequest,
+        ) -> tinyagents::Result<ModelResponse> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Some(action) = self.actions.lock().unwrap().pop_front() {
                 let key = if self.key.is_empty() {
@@ -1251,7 +1251,20 @@ members = ["eng1", "eng2"]
                 };
                 let _ = self.steer.steer(&self.company, &key, action);
             }
-            Ok(format!("did: {message}"))
+            let message = request
+                .messages
+                .iter()
+                .rev()
+                .find(|m| matches!(m, Message::User(_)))
+                .map(|m| m.text())
+                .unwrap_or_default();
+            Ok(ModelResponse::assistant(format!("did: {message}")))
+        }
+    }
+
+    impl HarnessModel for SteeringProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "steering".to_string()
         }
     }
 

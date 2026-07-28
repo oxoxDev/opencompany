@@ -65,6 +65,7 @@ fn record(id: &CompanyId) -> CompanyRecord {
             desk_id: "studio".to_string(),
             ordered: vec!["ceo".to_string(), "eng".to_string()],
         }],
+        overlay_desks: Vec::new(),
     }
 }
 

@@ -300,6 +300,7 @@ impl CompanyStore for SqliteStore {
             overlay_agents: overlay.agents,
             overlay_desk_members: overlay.desk_members,
             overlay_desk_order: overlay.desk_order,
+            overlay_desks: overlay.desks,
         }))
     }
 

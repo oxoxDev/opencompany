@@ -44,6 +44,7 @@ async fn state_with(home: &std::path::Path, companies: &[&str]) -> AppState {
                 overlay_agents: Vec::new(),
                 overlay_desk_members: Vec::new(),
                 overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
             })
             .await
             .unwrap();
