@@ -30,12 +30,15 @@
 //! (openhuman's own `merge_openhuman_usage_meta` helper is `pub(crate)`, hence
 //! the local re-expression in [`inject_usage_meta`].)
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 
 use async_trait::async_trait;
 
-use tinyagents::harness::message::Message;
-use tinyagents::harness::model::{ChatModel, ModelRequest, ModelResponse};
+use tinyagents::harness::message::{AssistantMessage, ContentBlock, Message};
+use tinyagents::harness::model::{
+    ChatModel, Modalities, ModelProfile, ModelRequest, ModelResponse, ToolChoice,
+};
+use tinyagents::harness::tool::{ToolCall, ToolSchema};
 use tinyagents::harness::usage::Usage;
 use tinyagents::{Result as TaResult, TinyAgentsError};
 
@@ -152,22 +155,131 @@ pub fn media_backend_from_env(env: &dyn EnvSource) -> Option<super::toolbelt::Me
 }
 
 /// Flatten a tinyagents request's messages into the OpenAI-compatible wire
-/// `[{role, content}]` array. Text-only: each message's role is mapped by
-/// variant and its concatenated text taken verbatim.
+/// `[{role, content, …}]` array.
+///
+/// This preserves the two fields native tool calling round-trips on (dropping
+/// either strands a multi-turn tool loop): an assistant turn's `tool_calls`
+/// (`{id, type:"function", function:{name, arguments}}`, `arguments` a JSON
+/// **string** per the OpenAI contract) and a tool-result turn's `tool_call_id`.
+/// A tool-call-only assistant turn carries `content: null` (OpenAI's shape).
+/// Mirrors tinyagents' own `openai::convert::translate_message`.
 fn wire_messages(messages: &[Message]) -> Vec<serde_json::Value> {
-    messages
+    messages.iter().map(wire_message).collect()
+}
+
+/// Translate one message into its OpenAI wire object. Split out so the
+/// assistant/tool arms stay readable.
+fn wire_message(message: &Message) -> serde_json::Value {
+    match message {
+        Message::System(_) => serde_json::json!({ "role": "system", "content": message.text() }),
+        Message::User(_) => serde_json::json!({ "role": "user", "content": message.text() }),
+        Message::Assistant(assistant) => {
+            let text = message.text();
+            let mut obj = serde_json::Map::new();
+            obj.insert("role".to_string(), serde_json::json!("assistant"));
+            // OpenAI accepts (and expects) a null content on a tool-call-only turn.
+            if text.is_empty() && !assistant.tool_calls.is_empty() {
+                obj.insert("content".to_string(), serde_json::Value::Null);
+            } else {
+                obj.insert("content".to_string(), serde_json::json!(text));
+            }
+            if !assistant.tool_calls.is_empty() {
+                obj.insert(
+                    "tool_calls".to_string(),
+                    serde_json::Value::Array(
+                        assistant.tool_calls.iter().map(wire_tool_call).collect(),
+                    ),
+                );
+            }
+            serde_json::Value::Object(obj)
+        }
+        Message::Tool(tool) => serde_json::json!({
+            "role": "tool",
+            "tool_call_id": tool.tool_call_id,
+            "content": message.text(),
+        }),
+    }
+}
+
+/// Render one assistant [`ToolCall`] as an OpenAI `tool_calls[]` entry. OpenAI
+/// requires `function.arguments` to be a JSON **string**, not an object.
+fn wire_tool_call(call: &ToolCall) -> serde_json::Value {
+    serde_json::json!({
+        "id": call.id,
+        "type": "function",
+        "function": {
+            "name": call.name,
+            "arguments": serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".to_string()),
+        },
+    })
+}
+
+/// Render the exposed [`ToolSchema`] set into the OpenAI `tools[]` array.
+/// Returns an empty vec when no tools are exposed, so the caller can omit the
+/// `tools`/`tool_choice` keys entirely (a bare chat turn stays byte-identical).
+fn wire_tools(tools: &[ToolSchema]) -> Vec<serde_json::Value> {
+    tools
         .iter()
-        .map(|m| {
-            let role = match m {
-                Message::System(_) => "system",
-                Message::User(_) => "user",
-                Message::Assistant(_) => "assistant",
-                Message::Tool(_) => "tool",
-            };
-            serde_json::json!({ "role": role, "content": m.text() })
+        .map(|schema| {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": schema.name,
+                    "description": schema.description,
+                    "parameters": schema.parameters,
+                },
+            })
         })
         .collect()
 }
+
+/// Translate a tinyagents [`ToolChoice`] into the OpenAI `tool_choice` wire
+/// value. Mirrors tinyagents' `openai::convert::translate_tool_choice`.
+fn wire_tool_choice(choice: &ToolChoice) -> serde_json::Value {
+    match choice {
+        ToolChoice::Auto => serde_json::json!("auto"),
+        ToolChoice::None => serde_json::json!("none"),
+        ToolChoice::Required => serde_json::json!("required"),
+        ToolChoice::Tool(name) => serde_json::json!({
+            "type": "function",
+            "function": { "name": name },
+        }),
+    }
+}
+
+/// Attach `tools` + `tool_choice` to a chat-completion `body` when any tools are
+/// exposed. `tool_choice` is only meaningful alongside a non-empty `tools`
+/// array, so both are omitted together when the turn exposes no tools.
+fn attach_tools(
+    body: &mut serde_json::Value,
+    tools: Vec<serde_json::Value>,
+    tool_choice: &ToolChoice,
+) {
+    if tools.is_empty() {
+        return;
+    }
+    body["tool_choice"] = wire_tool_choice(tool_choice);
+    body["tools"] = serde_json::Value::Array(tools);
+}
+
+/// The capability profile the hosted / tenant managed inference surface
+/// advertises. `tool_calling: true` is the load-bearing bit: openhuman's turn
+/// loop derives `native_tools` from the injected model's profile
+/// (`ProfileOverrideModel` → `native_tools = profile.tool_calling`), so without
+/// this the harness falls back to prompt-guided XML tool calls and a model that
+/// narrates prose instead of emitting the exact `<tool_call>` tag never runs a
+/// tool. Mirrors the shape openhuman's own `OpenHumanBackendModel` uses against
+/// the identical `/openai/v1` backend.
+static MANAGED_PROFILE: LazyLock<ModelProfile> = LazyLock::new(|| ModelProfile {
+    provider: Some("managed".to_string()),
+    modalities: Modalities {
+        image_in: true,
+        ..Modalities::default()
+    },
+    tool_calling: true,
+    parallel_tool_calls: true,
+    ..ModelProfile::default()
+});
 
 /// Extract token usage from an OpenAI-compatible chat-completion payload as a
 /// tinyagents [`Usage`], or `None` when the payload carries no `usage` block.
@@ -240,23 +352,81 @@ fn inject_usage_meta(
     }
 }
 
+/// Parse the OpenAI `choices[0].message.tool_calls[]` array into tinyagents
+/// [`ToolCall`]s. `function.arguments` arrives as a JSON **string**, which is
+/// parsed back into a value; an unparseable blob is preserved verbatim and the
+/// call is flagged [`ToolCall::invalid`] (mirroring tinyagents' tolerance of
+/// small-model defects) rather than dropped, so the loop can feed the error
+/// back to the model instead of stalling on a never-resolving call. A missing
+/// or empty `id` is back-filled with a stable `tool-{index}` slot id so the
+/// tool result can still correlate.
+fn parse_tool_calls(payload: &serde_json::Value) -> Vec<ToolCall> {
+    let Some(raw_calls) = payload
+        .pointer("/choices/0/message/tool_calls")
+        .and_then(|v| v.as_array())
+    else {
+        return Vec::new();
+    };
+    raw_calls
+        .iter()
+        .enumerate()
+        .filter_map(|(index, call)| {
+            let name = call.pointer("/function/name").and_then(|v| v.as_str())?;
+            let id = call
+                .get("id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("tool-{index}"));
+            let raw_args = call
+                .pointer("/function/arguments")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let (arguments, invalid) = match serde_json::from_str::<serde_json::Value>(raw_args) {
+                Ok(value) => (value, None),
+                // Empty arguments are the no-arg case, not a defect.
+                Err(_) if raw_args.trim().is_empty() => (serde_json::json!({}), None),
+                Err(e) => (
+                    serde_json::Value::String(raw_args.to_string()),
+                    Some(format!("unparseable tool-call arguments: {e}")),
+                ),
+            };
+            Some(ToolCall {
+                id,
+                name: name.to_string(),
+                arguments,
+                invalid,
+            })
+        })
+        .collect()
+}
+
 /// Parse an OpenAI-compatible chat-completion payload into a tinyagents
-/// [`ModelResponse`], preserving token usage AND the managed billing envelope.
+/// [`ModelResponse`], preserving token usage, native tool calls, AND the managed
+/// billing envelope.
 ///
 /// The full wire payload is kept on [`ModelResponse::raw`] (parity with the
 /// crate `OpenAiModel`), and when the managed backend reports a charge the
 /// `openhuman_usage_meta` key is injected so the host cost layer sees the USD
-/// amount. Errors when the response carries no assistant text.
+/// amount. `content` is **optional**: a tool-call-only turn carries `content:
+/// null`. Errors only when the response carries neither text nor a tool call.
 fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResponse> {
     let content = payload
         .pointer("/choices/0/message/content")
         .and_then(|c| c.as_str())
-        .ok_or_else(|| {
-            TinyAgentsError::Model(
-                "inference response missing choices[0].message.content".to_string(),
-            )
-        })?
+        .unwrap_or("")
         .to_string();
+    let tool_calls = parse_tool_calls(&payload);
+    if content.is_empty() && tool_calls.is_empty() {
+        return Err(TinyAgentsError::Model(
+            "inference response carried neither choices[0].message.content nor tool_calls"
+                .to_string(),
+        ));
+    }
+    let finish_reason = payload
+        .pointer("/choices/0/finish_reason")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
 
     let usage = parse_usage(&payload);
     // USD is only present on the managed envelope; the raw `/openai/v1`
@@ -270,7 +440,28 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
 
-    let mut response = ModelResponse::assistant(content);
+    // Build the assistant message directly so a tool-call-only turn carries no
+    // spurious empty text block alongside its `tool_calls`.
+    let mut blocks = Vec::new();
+    if !content.is_empty() {
+        blocks.push(ContentBlock::Text(content));
+    }
+    let message = AssistantMessage {
+        id: None,
+        content: blocks,
+        tool_calls,
+        usage,
+    };
+    let mut response = ModelResponse {
+        message,
+        usage,
+        finish_reason,
+        raw: None,
+        resolved_model: None,
+        continue_turn: None,
+    };
+    // `with_usage` mirrors usage onto both slots; call it only when present so
+    // the billing-free path leaves `usage: None` intact.
     if let Some(u) = usage {
         response = response.with_usage(u);
     }
@@ -391,6 +582,12 @@ impl HostedProvider {
 
 #[async_trait]
 impl ChatModel<()> for HostedProvider {
+    /// Advertise native tool calling so openhuman's turn loop drives structured
+    /// `tools`/`tool_calls` instead of prompt-guided XML. See [`MANAGED_PROFILE`].
+    fn profile(&self) -> Option<&ModelProfile> {
+        Some(&MANAGED_PROFILE)
+    }
+
     /// Structured multi-turn chat — the path [`Agent::turn`] actually calls. The
     /// full history reaches the backend so multi-turn context survives, and the
     /// response's token/cost usage is parsed back out (the WS5 metering signal).
@@ -409,6 +606,9 @@ impl ChatModel<()> for HostedProvider {
         if let Some(cap) = request.max_tokens {
             body["max_tokens"] = serde_json::json!(cap);
         }
+        // Native tool calling: expose the turn's tools so the model emits
+        // structured `tool_calls` instead of hand-written `<tool_call>` XML.
+        attach_tools(&mut body, wire_tools(&request.tools), &request.tool_choice);
 
         let url = format!(
             "{}/chat/completions",
@@ -472,12 +672,17 @@ pub struct RequestPlan {
 /// * OpenRouter gets its mandatory `HTTP-Referer` / `X-Title` attribution
 ///   headers; other providers get none.
 /// * An empty resolved key omits the bearer (the Ollama / keyless case).
+/// * `tools` (already in OpenAI wire shape via [`wire_tools`]) and `tool_choice`
+///   are attached only when the turn exposes tools, so a bare chat turn stays
+///   byte-identical to the pre-tool-calling body.
 pub fn request_plan(
     decl: &InferenceDecl,
     abstract_model: &str,
     messages: Vec<serde_json::Value>,
     temperature: f64,
     max_tokens: Option<u32>,
+    tools: Vec<serde_json::Value>,
+    tool_choice: &ToolChoice,
 ) -> RequestPlan {
     let model = decl
         .models
@@ -507,6 +712,7 @@ pub fn request_plan(
     if let Some(cap) = max_tokens {
         body["max_tokens"] = serde_json::json!(cap);
     }
+    attach_tools(&mut body, tools, tool_choice);
     RequestPlan {
         url,
         model,
@@ -613,6 +819,15 @@ impl TenantProvider {
 
 #[async_trait]
 impl ChatModel<()> for TenantProvider {
+    /// Advertise native tool calling so the harness drives structured
+    /// `tools`/`tool_calls`. Most OpenAI-compatible BYOK endpoints (OpenAI,
+    /// OpenRouter, DeepSeek, recent Ollama) honour the `tools` param; the
+    /// backend ignores an unused array, so this is safe to advertise uniformly.
+    /// See [`MANAGED_PROFILE`].
+    fn profile(&self) -> Option<&ModelProfile> {
+        Some(&MANAGED_PROFILE)
+    }
+
     /// Structured multi-turn chat — the path [`Agent::turn`] calls. Re-resolves
     /// the effective config, then mirrors [`HostedProvider`]: full history
     /// reaches the backend and token/cost usage is parsed back out.
@@ -626,7 +841,15 @@ impl ChatModel<()> for TenantProvider {
         let messages = wire_messages(&request.messages);
         let model = request.model.as_deref().unwrap_or(DEFAULT_HOSTED_MODEL);
         let temperature = request.temperature.unwrap_or(0.0);
-        let plan = request_plan(&decl, model, messages, temperature, request.max_tokens);
+        let plan = request_plan(
+            &decl,
+            model,
+            messages,
+            temperature,
+            request.max_tokens,
+            wire_tools(&request.tools),
+            &request.tool_choice,
+        );
         let payload = send_plan(&self.client, &plan)
             .await
             .map_err(|e| TinyAgentsError::Model(e.to_string()))?;
@@ -646,7 +869,17 @@ impl HarnessModel for TenantProvider {
 pub async fn probe(decl: &InferenceDecl) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     let messages = vec![serde_json::json!({ "role": "user", "content": "ping" })];
-    let plan = request_plan(decl, DEFAULT_HOSTED_MODEL, messages, 0.0, Some(16));
+    // The connectivity probe exposes no tools — it only checks the endpoint
+    // answers a bare chat turn.
+    let plan = request_plan(
+        decl,
+        DEFAULT_HOSTED_MODEL,
+        messages,
+        0.0,
+        Some(16),
+        Vec::new(),
+        &ToolChoice::Auto,
+    );
     let payload = send_plan(&client, &plan).await?;
     payload
         .pointer("/choices/0/message/content")
@@ -835,15 +1068,148 @@ mod tests {
     }
 
     #[test]
-    fn missing_content_is_an_error_and_no_usage_is_none() {
-        let no_content = serde_json::json!({ "choices": [{ "message": {} }] });
-        assert!(model_response_from_payload(no_content).is_err());
+    fn empty_message_is_an_error_and_no_usage_is_none() {
+        // Neither content nor tool_calls → genuinely empty, still an error.
+        let empty = serde_json::json!({ "choices": [{ "message": {} }] });
+        assert!(model_response_from_payload(empty).is_err());
 
         let no_usage = serde_json::json!({
             "choices": [{ "message": { "content": "hi" } }]
         });
         let resp = model_response_from_payload(no_usage).expect("parses");
         assert!(resp.usage.is_none());
+    }
+
+    /// A tool-call-only turn carries `content: null` and a `tool_calls` array.
+    /// It must parse into a response whose message has no text block but the
+    /// tool call intact (id, name, arguments parsed from the JSON string), so the
+    /// harness's native tool loop can dispatch it. This is the core of bug #1:
+    /// previously the null content hard-errored and the tool call was dropped.
+    #[test]
+    fn parses_tool_call_only_response_with_null_content() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_abc",
+                        "type": "function",
+                        "function": {
+                            "name": "check_inventory",
+                            "arguments": "{\"sku\":\"A-1\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+        let resp = model_response_from_payload(payload).expect("parses tool-call-only turn");
+        assert_eq!(resp.text(), "", "no visible text on a tool-call-only turn");
+        let calls = resp.tool_calls();
+        assert_eq!(calls.len(), 1, "the tool call survives parsing");
+        assert_eq!(calls[0].id, "call_abc");
+        assert_eq!(calls[0].name, "check_inventory");
+        assert_eq!(calls[0].arguments, serde_json::json!({ "sku": "A-1" }));
+        assert!(calls[0].invalid.is_none());
+        assert_eq!(resp.finish_reason.as_deref(), Some("tool_calls"));
+    }
+
+    /// A missing/empty tool-call `id` is back-filled with a stable `tool-{index}`
+    /// slot id so the tool result can still correlate, and unparseable arguments
+    /// are preserved + flagged `invalid` rather than dropping the call.
+    #[test]
+    fn tool_call_id_backfill_and_invalid_arguments_are_tolerated() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "function": { "name": "do_thing", "arguments": "{not json" }
+                    }]
+                }
+            }]
+        });
+        let resp = model_response_from_payload(payload).expect("parses");
+        let calls = resp.tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "tool-0", "missing id back-fills to slot id");
+        assert!(
+            calls[0].invalid.is_some(),
+            "unparseable arguments flag the call instead of dropping it"
+        );
+        assert_eq!(
+            calls[0].arguments,
+            serde_json::Value::String("{not json".to_string()),
+            "raw arguments preserved for model retry"
+        );
+    }
+
+    /// Exposed tools serialize into the OpenAI `tools[]`/`tool_choice` wire
+    /// shape, and a multi-turn tool history (assistant `tool_calls` + a `tool`
+    /// result) round-trips through the outbound message mapping. Together these
+    /// are the outbound half of native tool calling.
+    #[test]
+    fn tools_and_tool_history_serialize_to_openai_wire() {
+        use tinyagents::harness::message::Message;
+
+        let tools = wire_tools(&[ToolSchema {
+            name: "check_inventory".to_string(),
+            description: "look up stock".to_string(),
+            parameters: serde_json::json!({ "type": "object" }),
+            format: tinyagents::harness::tool::ToolFormat::default(),
+        }]);
+        let mut body = serde_json::json!({ "model": "chat-v1" });
+        attach_tools(&mut body, tools, &ToolChoice::Required);
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["function"]["name"], "check_inventory");
+        assert_eq!(body["tool_choice"], "required");
+
+        // An assistant tool-call turn → null content + wire tool_calls; the tool
+        // result → a `tool` role message carrying its `tool_call_id`.
+        let assistant = Message::Assistant(AssistantMessage {
+            id: None,
+            content: Vec::new(),
+            tool_calls: vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "check_inventory".to_string(),
+                arguments: serde_json::json!({ "sku": "A-1" }),
+                invalid: None,
+            }],
+            usage: None,
+        });
+        let tool_result = Message::tool("call_1", "3 in stock");
+        let wire = wire_messages(&[assistant, tool_result]);
+        assert_eq!(wire[0]["role"], "assistant");
+        assert!(
+            wire[0]["content"].is_null(),
+            "tool-call-only turn has null content"
+        );
+        assert_eq!(wire[0]["tool_calls"][0]["id"], "call_1");
+        // OpenAI requires arguments as a JSON string, not an object.
+        assert_eq!(
+            wire[0]["tool_calls"][0]["function"]["arguments"],
+            "{\"sku\":\"A-1\"}"
+        );
+        assert_eq!(wire[1]["role"], "tool");
+        assert_eq!(wire[1]["tool_call_id"], "call_1");
+        assert_eq!(wire[1]["content"], "3 in stock");
+    }
+
+    /// The hosted provider must advertise native tool calling, since openhuman's
+    /// turn loop derives `native_tools` from `profile().tool_calling` — without it
+    /// the harness silently falls back to prompt-guided XML (bug #1's mechanism).
+    #[test]
+    fn hosted_provider_advertises_native_tool_calling() {
+        let provider = HostedProvider::new(HostedProviderConfig {
+            base_url: "https://example.test/v1".to_string(),
+            api_key: String::new(),
+            extra_headers: Vec::new(),
+        });
+        let profile = provider.profile().expect("hosted profile is advertised");
+        assert!(
+            profile.tool_calling,
+            "native tool calling must be advertised"
+        );
     }
 
     // ---- TenantProvider (issue #56 — BYOK) --------------------------------
@@ -900,10 +1266,27 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let plan = request_plan(&decl, "chat-v1", Vec::new(), 0.2, None);
+        let plan = request_plan(
+            &decl,
+            "chat-v1",
+            Vec::new(),
+            0.2,
+            None,
+            Vec::new(),
+            &ToolChoice::Auto,
+        );
         assert_eq!(
             plan.model, "deepseek/deepseek-chat",
             "tier maps through table"
+        );
+        // A toolless turn omits both `tools` and `tool_choice` entirely.
+        assert!(
+            plan.body.get("tools").is_none(),
+            "no tools key when toolless"
+        );
+        assert!(
+            plan.body.get("tool_choice").is_none(),
+            "no tool_choice without tools"
         );
         assert_eq!(plan.bearer.as_deref(), Some("or-key"));
         assert!(plan.url.ends_with("/chat/completions"), "{}", plan.url);
@@ -917,7 +1300,15 @@ mod tests {
         );
 
         // An unmapped tier passes through unchanged.
-        let passthrough = request_plan(&decl, "reasoning-v1", Vec::new(), 0.2, None);
+        let passthrough = request_plan(
+            &decl,
+            "reasoning-v1",
+            Vec::new(),
+            0.2,
+            None,
+            Vec::new(),
+            &ToolChoice::Auto,
+        );
         assert_eq!(passthrough.model, "reasoning-v1");
     }
 
@@ -931,7 +1322,15 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let plan = request_plan(&decl, "chat-v1", Vec::new(), 0.0, None);
+        let plan = request_plan(
+            &decl,
+            "chat-v1",
+            Vec::new(),
+            0.0,
+            None,
+            Vec::new(),
+            &ToolChoice::Auto,
+        );
         assert!(plan.bearer.is_none(), "keyless Ollama sends no bearer");
         assert!(plan.headers.is_empty(), "no OpenRouter headers for Ollama");
     }
