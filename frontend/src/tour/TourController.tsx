@@ -57,6 +57,11 @@ export function TourController({
   // Offer the tour once per company on first arrival (or every load under the
   // dev-force flag).
   useEffect(() => {
+    // A company switch must tear down the prior company's in-flight tour first,
+    // otherwise `finish` would record its completion/skip under the NEW
+    // company's key (cross-company contamination).
+    setRun(false);
+    setSession(false);
     if (tourForced() || !tourSeen(company)) setWelcomeOpen(true);
     else setWelcomeOpen(false);
   }, [company]);
