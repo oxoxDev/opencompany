@@ -236,7 +236,11 @@ function DeskCard({
                     size="icon"
                     className="size-6 text-muted-foreground hover:text-foreground"
                     aria-label={`Move ${displayName(id)} up`}
-                    disabled={isBusy || i === 0}
+                    // Global busy lock: block any reorder (this row, another row,
+                    // or another desk) while a mutation is in flight, so a second
+                    // PUT can't be computed from a stale pre-refetch order. The
+                    // direction boundary (`i === 0`) stays per-row.
+                    disabled={busy !== null || i === 0}
                     onClick={() => onReorder(i, "up")}
                   >
                     <ChevronUp className="size-3.5" />
@@ -246,7 +250,9 @@ function DeskCard({
                     size="icon"
                     className="size-6 text-muted-foreground hover:text-foreground"
                     aria-label={`Move ${displayName(id)} down`}
-                    disabled={isBusy || i === desk.members.length - 1}
+                    // Global busy lock (see the up arrow): no cross-row/cross-desk
+                    // reorder fires until the in-flight one settles and refetches.
+                    disabled={busy !== null || i === desk.members.length - 1}
                     onClick={() => onReorder(i, "down")}
                   >
                     <ChevronDown className="size-3.5" />
