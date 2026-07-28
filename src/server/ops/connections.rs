@@ -497,10 +497,14 @@ mod test {
         assert_eq!(company, "acme");
         assert_eq!(provider, "slack");
 
-        // A tampered signature fails.
+        // A tampered signature fails. Flip the last char to a guaranteed-different
+        // one so the mutation is never a no-op (a blind `push('0')` leaves the
+        // string unchanged — and the assertion flaky — whenever it already ends
+        // in '0').
         let mut tampered = state.clone();
-        tampered.pop();
-        tampered.push('0');
+        let last = tampered.pop().expect("encoded state is non-empty");
+        tampered.push(if last == '0' { '1' } else { '0' });
+        assert_ne!(tampered, state, "tamper must actually change the state");
         assert!(decode_state(&tampered).is_none());
     }
 
