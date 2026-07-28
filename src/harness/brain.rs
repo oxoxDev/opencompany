@@ -540,6 +540,7 @@ description = "Runs Acme."
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            overlay_desks: Vec::new(),
         }
     }
 
@@ -677,6 +678,7 @@ description = "Builds it."
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            overlay_desks: Vec::new(),
         }
     }
 
@@ -882,6 +884,7 @@ members = ["engineer"]
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            overlay_desks: Vec::new(),
         }
     }
 
