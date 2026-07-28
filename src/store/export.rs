@@ -31,8 +31,8 @@ use crate::ports::events::EventLog;
 use crate::ports::memory::MemoryStore;
 use crate::ports::store::CompanyStore;
 use crate::ports::types::{
-    CompanyId, CompanyRecord, CompressedTrace, ContextChunk, EventSeq, LedgerEntry,
-    OverlayDeskOrder, StoredEvent,
+    CompanyId, CompanyRecord, CompressedTrace, ContextChunk, EventSeq, LedgerEntry, OverlayAgent,
+    OverlayDesk, OverlayDeskMember, OverlayDeskOrder, StoredEvent,
 };
 
 /// Canonical bundle file and directory names, matching the fs
@@ -85,12 +85,29 @@ fn io_err(path: &Path, source: std::io::Error) -> OpenCompanyError {
 struct BundleMeta {
     lifecycle: String,
     id: String,
+    /// The operator team overlay — teammates the operator added that the
+    /// version-controlled manifest does not know about. Preserved across the
+    /// bundle round-trip so an export→import keeps the operator-added roster.
+    /// `#[serde(default)]` loads bundles written before this field existed as an
+    /// empty overlay.
+    #[serde(default)]
+    overlay_agents: Vec<OverlayAgent>,
+    /// The operator desk-membership overlay. Preserved so operator-added desk
+    /// memberships survive an export→import. `#[serde(default)]` for back-compat
+    /// with older bundles.
+    #[serde(default)]
+    overlay_desk_members: Vec<OverlayDeskMember>,
     /// The operator per-desk member-ordering overlay. Preserved across the bundle
     /// round-trip so an export→import keeps the operator-defined desk hierarchy
     /// (and therefore the routing lead). `#[serde(default)]` loads bundles written
     /// before this field existed as an empty order.
     #[serde(default)]
     overlay_desk_order: Vec<OverlayDeskOrder>,
+    /// The operator-created desk overlay. Preserved so operator-created desks
+    /// survive an export→import. `#[serde(default)]` for back-compat with older
+    /// bundles.
+    #[serde(default)]
+    overlay_desks: Vec<OverlayDesk>,
 }
 
 /// One exported context chunk: its content address, label, and body.
@@ -118,9 +135,18 @@ struct BundleContents {
     events: Vec<StoredEvent>,
     traces: Vec<CompressedTrace>,
     context: Vec<ExportedChunk>,
+    /// The operator team overlay (operator-added teammates), carried through the
+    /// bundle so export→import preserves the operator roster.
+    overlay_agents: Vec<OverlayAgent>,
+    /// The operator desk-membership overlay, carried through the bundle so
+    /// export→import preserves operator-added desk memberships.
+    overlay_desk_members: Vec<OverlayDeskMember>,
     /// The operator per-desk member-ordering overlay, carried through the bundle
     /// so export→import preserves the desk hierarchy (and routing lead).
     overlay_desk_order: Vec<OverlayDeskOrder>,
+    /// The operator-created desk overlay, carried through the bundle so
+    /// export→import preserves operator-created desks.
+    overlay_desks: Vec<OverlayDesk>,
 }
 
 impl BundleContents {
@@ -159,7 +185,10 @@ impl BundleContents {
             events,
             traces,
             context: chunks,
+            overlay_agents: record.overlay_agents,
+            overlay_desk_members: record.overlay_desk_members,
             overlay_desk_order: record.overlay_desk_order,
+            overlay_desks: record.overlay_desks,
         })
     }
 
@@ -182,10 +211,10 @@ impl BundleContents {
                 manifest: self.manifest.clone(),
                 ledger: Vec::new(),
                 lifecycle: self.lifecycle.clone(),
-                overlay_agents: Vec::new(),
-                overlay_desk_members: Vec::new(),
+                overlay_agents: self.overlay_agents.clone(),
+                overlay_desk_members: self.overlay_desk_members.clone(),
                 overlay_desk_order: self.overlay_desk_order.clone(),
-                overlay_desks: Vec::new(),
+                overlay_desks: self.overlay_desks.clone(),
             })
             .await?;
         for entry in &self.ledger {
@@ -222,7 +251,10 @@ impl BundleContents {
         let meta = BundleMeta {
             lifecycle: self.lifecycle.clone(),
             id: self.id.as_ref().to_string(),
+            overlay_agents: self.overlay_agents.clone(),
+            overlay_desk_members: self.overlay_desk_members.clone(),
             overlay_desk_order: self.overlay_desk_order.clone(),
+            overlay_desks: self.overlay_desks.clone(),
         };
         write_file(
             &dest.join(META_JSON),
@@ -299,7 +331,10 @@ impl BundleContents {
             events,
             traces,
             context,
+            overlay_agents: meta.overlay_agents,
+            overlay_desk_members: meta.overlay_desk_members,
             overlay_desk_order: meta.overlay_desk_order,
+            overlay_desks: meta.overlay_desks,
         })
     }
 }
@@ -787,11 +822,15 @@ mod test {
         }
     }
 
-    /// A non-empty operator desk-order overlay survives export→import, so the
-    /// operator-defined desk hierarchy — and therefore the routing lead — is not
-    /// silently reset to the blueprint order by a bundle round-trip.
+    /// EVERY operator overlay — the team (`overlay_agents`), desk memberships
+    /// (`overlay_desk_members`), the desk-order hierarchy (`overlay_desk_order`),
+    /// and operator-created desks (`overlay_desks`) — survives an export→import.
+    /// A prior version threaded only `overlay_desk_order` through the bundle, so a
+    /// round-trip silently ERASED operator-added teammates, desk memberships, and
+    /// operator-created desks (data loss). This asserts all four come back intact
+    /// and that the desk hierarchy still drives the routing lead.
     #[tokio::test]
-    async fn desk_order_survives_roundtrip() {
+    async fn operator_overlays_including_desk_order_survive_roundtrip() {
         let home1 = tmp_root("order-src");
         let home2 = tmp_root("order-dst");
         let dest = tmp_root("order-bundle");
@@ -825,6 +864,25 @@ mod test {
             desk_id: "eng".into(),
             ordered: vec!["cto".into(), "ceo".into()],
         }];
+        // An operator-added teammate, not in the manifest.
+        let agents = vec![OverlayAgent {
+            id: "designer".into(),
+            name: "Dana Designer".into(),
+            role: "Design".into(),
+            description: Some("Owns the brand".into()),
+        }];
+        // That teammate added to the `eng` desk through the membership overlay.
+        let desk_members = vec![OverlayDeskMember {
+            desk_id: "eng".into(),
+            agent_id: "designer".into(),
+        }];
+        // An operator-created desk the manifest never declared.
+        let desks = vec![OverlayDesk {
+            id: "growth".into(),
+            name: "Growth".into(),
+            description: Some("Marketing pod".into()),
+            members: vec!["ceo".into()],
+        }];
 
         let (s1, e1, m1, c1) = fs_ports(&home1);
         s1.save(&CompanyRecord {
@@ -832,10 +890,10 @@ mod test {
             manifest: manifest.clone(),
             ledger: Vec::new(),
             lifecycle: "running".into(),
-            overlay_agents: Vec::new(),
-            overlay_desk_members: Vec::new(),
+            overlay_agents: agents.clone(),
+            overlay_desk_members: desk_members.clone(),
             overlay_desk_order: order.clone(),
-            overlay_desks: Vec::new(),
+            overlay_desks: desks.clone(),
         })
         .await
         .unwrap();
@@ -850,13 +908,42 @@ mod test {
         let (s2, e2, m2, c2) = fs_ports(&home2);
         import_bundle(&dest, s2.clone(), e2, m2, c2).await.unwrap();
 
-        // The order overlay came across intact — not reset to an empty list.
+        // Every overlay came across intact — not reset to an empty list.
         let dst_record = s2.load(&id).await.unwrap().unwrap();
+        assert!(
+            !dst_record.overlay_agents.is_empty(),
+            "team overlay erased by the bundle round-trip"
+        );
+        assert_eq!(
+            dst_record.overlay_agents, agents,
+            "team overlay altered by the bundle round-trip"
+        );
+        assert!(
+            !dst_record.overlay_desk_members.is_empty(),
+            "desk-membership overlay erased by the bundle round-trip"
+        );
+        assert_eq!(
+            dst_record.overlay_desk_members, desk_members,
+            "desk-membership overlay altered by the bundle round-trip"
+        );
+        assert!(
+            !dst_record.overlay_desk_order.is_empty(),
+            "desk-order overlay erased by the bundle round-trip"
+        );
         assert_eq!(
             dst_record.overlay_desk_order, order,
-            "desk order overlay dropped by the bundle round-trip"
+            "desk order overlay altered by the bundle round-trip"
         );
-        // And it still drives routing: `cto` remains the lead after import.
+        assert!(
+            !dst_record.overlay_desks.is_empty(),
+            "operator-created desks erased by the bundle round-trip"
+        );
+        assert_eq!(
+            dst_record.overlay_desks, desks,
+            "operator-created desks altered by the bundle round-trip"
+        );
+        // And the hierarchy still drives routing: `cto` remains the lead after
+        // import.
         assert_eq!(
             dst_record.effective_desk_members("eng")[0],
             "cto",
