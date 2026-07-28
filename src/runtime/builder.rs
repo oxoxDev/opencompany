@@ -1738,4 +1738,138 @@ mod test {
         assert_eq!(mock.count("register_name"), 1, "boot claimed the handle");
         assert_eq!(mock.count("put_agent"), 1, "boot published the card");
     }
+
+    /// Spawns an in-process OpenAI-compatible stub that answers every
+    /// chat-completion with `marker`, so a harness turn can run without a real
+    /// inference backend. Mirrors the provider-test helper of the same name.
+    #[cfg(feature = "openhuman")]
+    async fn spawn_stub(marker: &'static str) -> String {
+        use axum::routing::post;
+        use axum::{Json, Router};
+
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || async move {
+                Json(serde_json::json!({
+                    "choices": [{ "message": { "role": "assistant", "content": marker } }],
+                    "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// Builder-level regression for the `overlay_desk_order` seeding path (#133).
+    /// The harness test `desk_order_change_updates_routing_after_rebuild` exercises
+    /// `brain_over(record)` directly; this one drives the real
+    /// [`RuntimeBuilder::build`] wiring end-to-end: a persisted record carries a
+    /// NON-EMPTY `overlay_desk_order` that promotes `eng2` over the blueprint lead
+    /// `eng1`, and after `build()` a desk-addressed cycle must run on `eng2` — the
+    /// reordered lead — proving the builder seeds the operator order into the brain
+    /// rather than an empty default. The harness records each turn under a
+    /// `task-outcome/{agent_id}` context chunk, which is the observable seam.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn build_seeds_desk_order_into_brain_routing() {
+        use crate::harness::HarnessPool;
+        use crate::ports::types::{CompanyEvent, OverlayDeskOrder};
+        use crate::store::{FsCompanyStore, FsContextStore};
+
+        let home =
+            std::env::temp_dir().join(format!("oc-seed-order-{}", crate::ports::generate_id()));
+        let id = CompanyId::new("order-co");
+
+        // A desk `eng` whose blueprint lead is `eng1` (declared first).
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Order Co"
+
+            [policy]
+            mode = "full"
+
+            [[agent]]
+            id = "eng1"
+            role = "Engineer One"
+
+            [[agent]]
+            id = "eng2"
+            role = "Engineer Two"
+
+            [[group_chat]]
+            id = "eng"
+            name = "Engineering"
+            members = ["eng1", "eng2"]
+            "#,
+        );
+
+        // Persist a record whose operator order promotes `eng2` above `eng1`.
+        let store = FsCompanyStore::new(home.clone());
+        store
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: vec![OverlayDeskOrder {
+                    desk_id: "eng".to_string(),
+                    ordered: vec!["eng2".to_string(), "eng1".to_string()],
+                }],
+                overlay_desks: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        // Build the runtime with an embedded harness pool + a stub inference
+        // backend, so `build()` constructs the seeded `HarnessBrain`.
+        let stub = spawn_stub("desk lead reply").await;
+        let runtime = RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .with_harness(Arc::new(HarnessPool::new()))
+            .with_harness_inference(
+                HostedProviderConfig {
+                    base_url: stub,
+                    api_key: "k".to_string(),
+                    extra_headers: Vec::new(),
+                },
+                None,
+            )
+            .build()
+            .await
+            .unwrap();
+
+        // A message addressed to the `eng` desk must be answered by the reordered
+        // lead `eng2`, not the blueprint lead `eng1`.
+        runtime
+            .run_cycle(vec![CompanyEvent::OperatorMessage {
+                text: "who leads?".to_string(),
+                by: None,
+                chat: Some("eng".to_string()),
+            }])
+            .await
+            .expect("cycle");
+
+        // The harness writes the turn under `task-outcome/{responder}`; the
+        // responder must be the reordered lead.
+        let context: Arc<dyn ContextStore> = Arc::new(FsContextStore::new(home.clone()));
+        let outcomes = context.list(&id, "task-outcome/").await.unwrap();
+        let labels: Vec<&str> = outcomes.iter().map(|m| m.label.as_str()).collect();
+        assert!(
+            labels.contains(&"task-outcome/eng2"),
+            "desk turn did not route to the reordered lead eng2; saw {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"task-outcome/eng1"),
+            "desk turn routed to the blueprint lead eng1 — the builder dropped the operator desk order; saw {labels:?}"
+        );
+
+        tokio::fs::remove_dir_all(&home).await.ok();
+    }
 }
