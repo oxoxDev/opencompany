@@ -297,6 +297,7 @@ impl CompanyStore for MongoStore {
             lifecycle: get_str(&company, "lifecycle")?,
             overlay_agents: overlay.agents,
             overlay_desk_members: overlay.desk_members,
+            overlay_desks: overlay.desks,
         }))
     }
 

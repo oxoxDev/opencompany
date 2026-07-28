@@ -242,14 +242,12 @@ impl HarnessBrain {
     /// agent or a team-overlay teammate, so an overlay-added lead is reachable on
     /// a desk the manifest left empty.
     fn desk_lead(&self, desk: &str) -> Option<String> {
-        let chat = self
-            .record
-            .manifest
-            .group_chats
-            .iter()
-            .find(|c| c.id == desk || c.name.eq_ignore_ascii_case(desk))?;
+        // Resolve the desk key (id or case-insensitive name) against both the
+        // manifest desks and the operator-created overlay desks, so a
+        // runtime-created desk routes exactly like a blueprint one.
+        let desk_id = self.record.resolve_desk_id(desk)?;
         self.record
-            .effective_desk_members(&chat.id)
+            .effective_desk_members(&desk_id)
             .into_iter()
             .find(|m| self.record.is_roster_agent(m))
     }
@@ -992,6 +990,7 @@ name = "Design"
                 desk_id: "design".to_string(),
                 agent_id: "engineer".to_string(),
             }],
+            overlay_desks: Vec::new(),
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
         assert_eq!(brain.desk_lead("design"), Some("engineer".to_string()));
