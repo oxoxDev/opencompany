@@ -32,6 +32,7 @@ use crate::ports::memory::MemoryStore;
 use crate::ports::store::CompanyStore;
 use crate::ports::types::{
     CompanyId, CompanyRecord, CompressedTrace, ContextChunk, EventSeq, LedgerEntry, StoredEvent,
+    TemplateProvenance,
 };
 
 /// Canonical bundle file and directory names, matching the fs
@@ -78,12 +79,19 @@ fn io_err(path: &Path, source: std::io::Error) -> OpenCompanyError {
 
 /// Bundle metadata persisted alongside the manifest. Carries the company id so an
 /// import can restore the original id even when it diverges from the manifest
-/// slug. The fs [`CompanyStore`] reads only `lifecycle`; the extra field is
-/// ignored there (serde skips unknown fields).
+/// slug, plus the source-template provenance so a template-launched company keeps
+/// its provenance across an export/import round-trip. The fs [`CompanyStore`]
+/// reads only `lifecycle`; the extra fields are ignored there (serde skips
+/// unknown fields).
 #[derive(Serialize, Deserialize)]
 struct BundleMeta {
     lifecycle: String,
     id: String,
+    /// The source-template provenance, when the exported company carried one.
+    /// `#[serde(default)]` keeps older bundles written before provenance existed
+    /// importing cleanly (they decode to `None` — no migration).
+    #[serde(default)]
+    template_provenance: Option<TemplateProvenance>,
 }
 
 /// One exported context chunk: its content address, label, and body.
@@ -107,6 +115,7 @@ struct BundleContents {
     id: CompanyId,
     manifest: CompanyManifest,
     lifecycle: String,
+    template_provenance: Option<TemplateProvenance>,
     ledger: Vec<LedgerEntry>,
     events: Vec<StoredEvent>,
     traces: Vec<CompressedTrace>,
@@ -145,6 +154,7 @@ impl BundleContents {
             id: id.clone(),
             manifest: record.manifest,
             lifecycle: record.lifecycle,
+            template_provenance: record.template_provenance,
             ledger: record.ledger,
             events,
             traces,
@@ -173,7 +183,7 @@ impl BundleContents {
                 lifecycle: self.lifecycle.clone(),
                 overlay_agents: Vec::new(),
                 overlay_desk_members: Vec::new(),
-                template_provenance: None,
+                template_provenance: self.template_provenance.clone(),
             })
             .await?;
         for entry in &self.ledger {
@@ -210,6 +220,7 @@ impl BundleContents {
         let meta = BundleMeta {
             lifecycle: self.lifecycle.clone(),
             id: self.id.as_ref().to_string(),
+            template_provenance: self.template_provenance.clone(),
         };
         write_file(
             &dest.join(META_JSON),
@@ -282,6 +293,7 @@ impl BundleContents {
             id: CompanyId::new(meta.id),
             manifest,
             lifecycle: meta.lifecycle,
+            template_provenance: meta.template_provenance,
             ledger,
             events,
             traces,
@@ -766,6 +778,58 @@ mod test {
             events[0].event,
             CompanyEvent::LifecycleChanged { .. }
         ));
+
+        for dir in [home1, home2, dest] {
+            tokio::fs::remove_dir_all(&dir).await.ok();
+        }
+    }
+
+    /// Issue #85: a template-launched company's `template_provenance` survives an
+    /// export → import round-trip intact (source_id, version, and path all carry
+    /// through the bundle's `meta.json`), so exporting then importing never
+    /// silently strips a company's origin template.
+    #[tokio::test]
+    async fn template_provenance_survives_roundtrip() {
+        let home1 = tmp_root("prov-src");
+        let home2 = tmp_root("prov-dst");
+        let dest = tmp_root("prov-bundle");
+        let id = CompanyId::new("prov-co");
+
+        let provenance = TemplateProvenance {
+            source_id: "agentic_law_firm".into(),
+            version: None,
+            path: Some("agentic_law_firm".into()),
+        };
+
+        // Register a company carrying template provenance in the source home.
+        let (s1, e1, m1, c1) = fs_ports(&home1);
+        s1.save(&CompanyRecord {
+            id: id.clone(),
+            manifest: manifest(),
+            ledger: Vec::new(),
+            lifecycle: "running".into(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            template_provenance: Some(provenance.clone()),
+        })
+        .await
+        .unwrap();
+
+        // Export → import into a fresh home.
+        export_bundle(&id, &dest, s1, e1, m1, c1, ExportOpts::default())
+            .await
+            .unwrap();
+        let (s2, e2, m2, c2) = fs_ports(&home2);
+        let imported = import_bundle(&dest, s2.clone(), e2, m2, c2).await.unwrap();
+        assert_eq!(imported, id, "id preserved through the bundle");
+
+        // The imported record carries the identical provenance — all three fields.
+        let rec = s2.load(&id).await.unwrap().expect("imported record");
+        assert_eq!(
+            rec.template_provenance,
+            Some(provenance),
+            "template provenance lost across the bundle round-trip"
+        );
 
         for dir in [home1, home2, dest] {
             tokio::fs::remove_dir_all(&dir).await.ok();
