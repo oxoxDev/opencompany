@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Crown, Plus, Users, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Crown, Plus, Trash2, Users, X } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { DeskDto, TeamMemberDto } from "@/api/types";
@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+import { DeskCreateDialog } from "@/views/DeskCreateDialog";
 
 interface Props {
   client: OpenCompanyClient;
@@ -33,6 +34,7 @@ export function DesksView({ client, company }: Props) {
   const [roster, setRoster] = useState<TeamMemberDto[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
 
   const boot = useCallback(async () => {
     try {
@@ -76,11 +78,18 @@ export function DesksView({ client, company }: Props) {
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
-        <div className="space-y-1">
-          <h2 className="text-2xl font-semibold tracking-tight">Desks</h2>
-          <p className="text-sm text-muted-foreground">
-            The desks your company works from. Add or remove teammates to change who staffs each one.
-          </p>
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-1">
+            <h2 className="text-2xl font-semibold tracking-tight">Desks</h2>
+            <p className="text-sm text-muted-foreground">
+              The desks your company works from. Add or remove teammates to change who staffs each
+              one.
+            </p>
+          </div>
+          <Button size="sm" variant="outline" className="shrink-0" onClick={() => setCreateOpen(true)}>
+            <Plus className="mr-1.5 size-4" />
+            New desk
+          </Button>
         </div>
 
         {error && (
@@ -96,9 +105,13 @@ export function DesksView({ client, company }: Props) {
             ))}
           </div>
         ) : load === "empty" ? (
-          <div className="flex min-h-40 flex-col items-center justify-center gap-2 rounded-xl border border-dashed text-sm text-muted-foreground">
+          <div className="flex min-h-40 flex-col items-center justify-center gap-3 rounded-xl border border-dashed text-sm text-muted-foreground">
             <Users className="size-5" />
             This company has no desks yet.
+            <Button size="sm" variant="outline" onClick={() => setCreateOpen(true)}>
+              <Plus className="mr-1.5 size-4" />
+              Create your first desk
+            </Button>
           </div>
         ) : (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -119,11 +132,31 @@ export function DesksView({ client, company }: Props) {
                     client.removeDeskMember(desk.id, agentId, company),
                   )
                 }
+                onReorder={(fromIndex, direction) => {
+                  const next = [...desk.members];
+                  const swapWith = direction === "up" ? fromIndex - 1 : fromIndex + 1;
+                  if (swapWith < 0 || swapWith >= next.length) return;
+                  [next[fromIndex], next[swapWith]] = [next[swapWith], next[fromIndex]];
+                  void mutate(`${desk.id}:${next[swapWith]}`, () =>
+                    client.setDeskOrder(desk.id, next, company),
+                  );
+                }}
+                onDelete={() =>
+                  mutate(`delete:${desk.id}`, () => client.deleteDesk(desk.id, company))
+                }
               />
             ))}
           </div>
         )}
       </div>
+
+      <DeskCreateDialog
+        client={client}
+        company={company}
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        onCreated={() => void boot()}
+      />
     </div>
   );
 }
@@ -135,6 +168,8 @@ function DeskCard({
   displayName,
   onAdd,
   onRemove,
+  onReorder,
+  onDelete,
 }: {
   desk: DeskDto;
   roster: TeamMemberDto[];
@@ -142,18 +177,37 @@ function DeskCard({
   displayName: (id: string) => string;
   onAdd: (agentId: string) => void;
   onRemove: (agentId: string) => void;
+  onReorder: (fromIndex: number, direction: "up" | "down") => void;
+  onDelete: () => void;
 }) {
   const overlay = new Set(desk.overlayMembers ?? []);
   // Roster teammates not already on this desk are the ones we can add.
   const available = roster.filter((r) => !desk.members.includes(r.id));
+  const deleting = busy === `delete:${desk.id}`;
 
   return (
     <Card>
       <CardContent className="flex h-full flex-col gap-3 py-4">
-        <div className="min-w-0">
-          <p className="truncate font-medium">{desk.name}</p>
-          {desk.description && (
-            <p className="line-clamp-2 text-xs text-muted-foreground">{desk.description}</p>
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <p className="truncate font-medium">{desk.name}</p>
+            {desk.description && (
+              <p className="line-clamp-2 text-xs text-muted-foreground">{desk.description}</p>
+            )}
+          </div>
+          {/* Only operator-created desks can be deleted at runtime — a blueprint
+              desk is part of the company definition. */}
+          {desk.overlayCreated && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-6 shrink-0 text-muted-foreground hover:text-destructive"
+              aria-label={`Delete ${desk.name}`}
+              disabled={busy !== null}
+              onClick={onDelete}
+            >
+              <Trash2 className={cn("size-3.5", deleting && "opacity-50")} />
+            </Button>
           )}
         </div>
 
@@ -176,7 +230,34 @@ function DeskCard({
                   {i === 0 && <Crown className="size-3.5 shrink-0 text-amber-500" aria-label="Desk lead" />}
                   <span className="truncate">{displayName(id)}</span>
                 </span>
-                {isOverlay ? (
+                <span className="flex shrink-0 items-center gap-0.5">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-6 text-muted-foreground hover:text-foreground"
+                    aria-label={`Move ${displayName(id)} up`}
+                    // Global busy lock: block any reorder (this row, another row,
+                    // or another desk) while a mutation is in flight, so a second
+                    // PUT can't be computed from a stale pre-refetch order. The
+                    // direction boundary (`i === 0`) stays per-row.
+                    disabled={busy !== null || i === 0}
+                    onClick={() => onReorder(i, "up")}
+                  >
+                    <ChevronUp className="size-3.5" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-6 text-muted-foreground hover:text-foreground"
+                    aria-label={`Move ${displayName(id)} down`}
+                    // Global busy lock (see the up arrow): no cross-row/cross-desk
+                    // reorder fires until the in-flight one settles and refetches.
+                    disabled={busy !== null || i === desk.members.length - 1}
+                    onClick={() => onReorder(i, "down")}
+                  >
+                    <ChevronDown className="size-3.5" />
+                  </Button>
+                  {isOverlay ? (
                   <Button
                     variant="ghost"
                     size="icon"
@@ -188,10 +269,11 @@ function DeskCard({
                     <X className="size-3.5" />
                   </Button>
                 ) : (
-                  <Badge variant="secondary" className="shrink-0 text-[10px]">
-                    Blueprint
-                  </Badge>
-                )}
+                    <Badge variant="secondary" className="shrink-0 text-[10px]">
+                      Blueprint
+                    </Badge>
+                  )}
+                </span>
               </li>
             );
           })}

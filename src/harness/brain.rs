@@ -242,14 +242,12 @@ impl HarnessBrain {
     /// agent or a team-overlay teammate, so an overlay-added lead is reachable on
     /// a desk the manifest left empty.
     fn desk_lead(&self, desk: &str) -> Option<String> {
-        let chat = self
-            .record
-            .manifest
-            .group_chats
-            .iter()
-            .find(|c| c.id == desk || c.name.eq_ignore_ascii_case(desk))?;
+        // Resolve the desk key (id or case-insensitive name) against both the
+        // manifest desks and the operator-created overlay desks, so a
+        // runtime-created desk routes exactly like a blueprint one.
+        let desk_id = self.record.resolve_desk_id(desk)?;
         self.record
-            .effective_desk_members(&chat.id)
+            .effective_desk_members(&desk_id)
             .into_iter()
             .find(|m| self.record.is_roster_agent(m))
     }
@@ -491,7 +489,10 @@ impl Brain for HarnessBrain {
 mod tests {
     use super::*;
 
-    use crate::harness::provider::MockProvider;
+    use tinyagents::harness::message::Message;
+    use tinyagents::harness::model::{ChatModel, ModelRequest, ModelResponse};
+
+    use crate::harness::provider::{HarnessModel, MockProvider};
     use crate::ports::brain::CycleHost;
     use crate::ports::types::{
         CompanyId, ContextOp, ContextOpResult, Effect, EffectDisposition, ToolCall, ToolResult,
@@ -542,6 +543,8 @@ description = "Runs Acme."
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
             template_provenance: None,
         }
     }
@@ -680,6 +683,8 @@ description = "Builds it."
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
             template_provenance: None,
         }
     }
@@ -886,6 +891,8 @@ members = ["engineer"]
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
             template_provenance: None,
         }
     }
@@ -995,11 +1002,151 @@ name = "Design"
                 desk_id: "design".to_string(),
                 agent_id: "engineer".to_string(),
             }],
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
             template_provenance: None,
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
         assert_eq!(brain.desk_lead("design"), Some("engineer".to_string()));
         assert_eq!(brain.responder_for(Some("design")), "engineer");
+    }
+
+    /// The operator's desk hierarchy drives the desk lead: a desk with manifest
+    /// members `[eng1, eng2]` plus an overlay `cto`, ordered `[cto, eng1, eng2]`,
+    /// resolves its lead to `cto` — `desk_lead` reads `effective_desk_members`,
+    /// so the reorder flows through with no change to the resolver (issue #131).
+    #[test]
+    fn desk_order_drives_the_desk_lead() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[policy]
+mode = "full"
+
+[[agent]]
+id = "eng1"
+role = "Engineer One"
+
+[[agent]]
+id = "eng2"
+role = "Engineer Two"
+
+[[group_chat]]
+id = "eng"
+name = "Engineering"
+members = ["eng1", "eng2"]
+"#,
+        )
+        .expect("valid manifest");
+        let record = CompanyRecord {
+            id: CompanyId::new("acme"),
+            manifest,
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: vec![crate::ports::types::OverlayAgent {
+                id: "cto".to_string(),
+                name: "Cto".to_string(),
+                role: "CTO".to_string(),
+                description: None,
+            }],
+            overlay_desk_members: vec![crate::ports::types::OverlayDeskMember {
+                desk_id: "eng".to_string(),
+                agent_id: "cto".to_string(),
+            }],
+            overlay_desk_order: vec![crate::ports::types::OverlayDeskOrder {
+                desk_id: "eng".to_string(),
+                ordered: vec!["cto".to_string(), "eng1".to_string(), "eng2".to_string()],
+            }],
+            overlay_desks: Vec::new(),
+            template_provenance: None,
+        };
+        let (brain, _tasks) = brain_over(dir.path(), record);
+        assert_eq!(brain.desk_lead("eng"), Some("cto".to_string()));
+    }
+
+    /// Regression for the builder seeding path (#133): a desk-order change written
+    /// to the store must take effect on routing once the brain is rebuilt from the
+    /// persisted record. The builder used to construct the brain with an empty
+    /// `overlay_desk_order`, so desk chats kept routing to the pre-reorder lead.
+    /// Here we persist a record, build a brain from the loaded record (blueprint
+    /// lead), then write a new order and rebuild the brain from the reloaded record
+    /// — the lead must update, not stay stale.
+    #[tokio::test]
+    async fn desk_order_change_updates_routing_after_rebuild() {
+        use crate::ports::store::CompanyStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsCompanyStore::new(dir.path());
+        let manifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[policy]
+mode = "full"
+
+[[agent]]
+id = "eng1"
+role = "Engineer One"
+
+[[agent]]
+id = "eng2"
+role = "Engineer Two"
+
+[[group_chat]]
+id = "eng"
+name = "Engineering"
+members = ["eng1", "eng2"]
+"#,
+        )
+        .expect("valid manifest");
+        let id = CompanyId::new("acme");
+        store
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest,
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                template_provenance: None,
+            })
+            .await
+            .unwrap();
+
+        // Brain built from the persisted record before any reorder: blueprint lead.
+        let loaded = store.load(&id).await.unwrap().unwrap();
+        let (brain, _tasks) = brain_over(dir.path(), loaded);
+        assert_eq!(
+            brain.desk_lead("eng"),
+            Some("eng1".to_string()),
+            "blueprint lead before reorder"
+        );
+
+        // Operator reorders the desk (as `set_desk_order` does), promoting eng2.
+        let mut record = store.load(&id).await.unwrap().unwrap();
+        record
+            .overlay_desk_order
+            .push(crate::ports::types::OverlayDeskOrder {
+                desk_id: "eng".to_string(),
+                ordered: vec!["eng2".to_string(), "eng1".to_string()],
+            });
+        store.save(&record).await.unwrap();
+
+        // Rebuild the brain from the reloaded record: routing follows the reorder,
+        // no stale lead.
+        let reloaded = store.load(&id).await.unwrap().unwrap();
+        let (rebuilt, _tasks2) = brain_over(dir.path(), reloaded);
+        assert_eq!(
+            rebuilt.desk_lead("eng"),
+            Some("eng2".to_string()),
+            "reorder did not take effect on routing after rebuild"
+        );
     }
 
     /// A `spawn_task` delegation opens a backlog card and surfaces no bubble.
@@ -1155,14 +1302,13 @@ name = "Design"
     // --- Steer disposition (issue #111) -------------------------------------
 
     use crate::company::steer::InflightRegistry;
-    use openhuman_core::openhuman as oh;
     use std::collections::VecDeque;
     use std::sync::Mutex as StdMutex;
 
-    /// A provider that steers its OWN in-flight run on selected turns (via the
+    /// A model that steers its OWN in-flight run on selected turns (via the
     /// shared registry), so the disposition matrix can be driven deterministically
-    /// over an offline turn. It pops one queued action per `chat_with_system`
-    /// call and applies it against `key`, then echoes the message.
+    /// over an offline turn. It pops one queued action per [`invoke`](ChatModel::invoke)
+    /// call and applies it against `key`, then echoes the last user message.
     struct SteeringProvider {
         steer: InflightRegistry,
         company: CompanyId,
@@ -1172,17 +1318,12 @@ name = "Design"
     }
 
     #[async_trait]
-    impl oh::inference::provider::Provider for SteeringProvider {
-        fn telemetry_provider_id(&self) -> String {
-            "steering".to_string()
-        }
-        async fn chat_with_system(
+    impl ChatModel<()> for SteeringProvider {
+        async fn invoke(
             &self,
-            _system: Option<&str>,
-            message: &str,
-            _model: &str,
-            _temperature: f64,
-        ) -> anyhow::Result<String> {
+            _state: &(),
+            request: ModelRequest,
+        ) -> tinyagents::Result<ModelResponse> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Some(action) = self.actions.lock().unwrap().pop_front() {
                 let key = if self.key.is_empty() {
@@ -1197,7 +1338,20 @@ name = "Design"
                 };
                 let _ = self.steer.steer(&self.company, &key, action);
             }
-            Ok(format!("did: {message}"))
+            let message = request
+                .messages
+                .iter()
+                .rev()
+                .find(|m| matches!(m, Message::User(_)))
+                .map(|m| m.text())
+                .unwrap_or_default();
+            Ok(ModelResponse::assistant(format!("did: {message}")))
+        }
+    }
+
+    impl HarnessModel for SteeringProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "steering".to_string()
         }
     }
 
