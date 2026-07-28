@@ -1831,6 +1831,7 @@ mod test {
                 overlay_agents: Vec::new(),
                 overlay_desk_members: Vec::new(),
                 overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
             })
             .await
             .unwrap();
