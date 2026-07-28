@@ -182,6 +182,25 @@ async fn register_company(
     // The company's on-disk source directory (`companies/<name>`) seeds the
     // workspace tree on first boot and lets read resolvers find its committed
     // skills/workflows content.
+    let source_dir = company_source_dir(dir);
+    // Issue #85: this company was seeded from a template directory, so record
+    // that directory's slug as the durable source-template provenance. The
+    // builder stamps it only on first launch and carries it forward on rebuilds;
+    // a raw-manifest `POST /api/v1/companies` provision has no template dir and
+    // records no provenance.
+    let provenance = source_dir.file_name().and_then(|s| s.to_str()).map(|slug| {
+        opencompany::ports::types::TemplateProvenance {
+            source_id: slug.to_string(),
+            version: None,
+            // Record only the template directory's basename, never the raw
+            // absolute host path: `path` is exposed verbatim on the GraphQL and
+            // REST provenance surfaces, and the absolute source dir would leak
+            // the host filesystem layout + username. `slug` is already the final
+            // path component (the `file_name()` guard above makes this `None`
+            // when there is no basename, e.g. `serve --company .`).
+            path: Some(slug.to_string()),
+        }
+    });
     let mut builder = attach_tinyhumans_feedback(
         attach_harness(attach_openhuman(RuntimeBuilder::new(
             home.to_path_buf(),
@@ -189,9 +208,12 @@ async fn register_company(
         ))),
         state.config(),
     )
-    .with_seed_dir(company_source_dir(dir))
+    .with_seed_dir(source_dir.clone())
     .with_tinyplace_api_url(state.config().tinyplace_api_url.clone())
     .with_host_base_url(state.config().host_base_url());
+    if let Some(provenance) = provenance {
+        builder = builder.with_template_provenance(provenance);
+    }
     // Shared-single-DB mode: namespace the derived id with this tenant so the
     // same boot template (`OPENCOMPANY_COMPANY`) does not collide across tenants
     // in one logical database. A no-op when `tenant_namespace` is unset.
@@ -897,6 +919,73 @@ mod test {
         assert!(
             !runtime.workspace().is_empty(runtime.id()).await.unwrap(),
             "workspace still seeds when --company is a manifest file"
+        );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Issue #85: launching from a template *directory* derives the provenance
+    /// from that directory's basename — `source_id` and `path` both the slug,
+    /// `version` faithfully `None` (the serve path exposes no template version).
+    /// Distinct from the builder-injection test in `runtime::builder`: this
+    /// exercises the serve-path derivation in `register_company` itself. Per
+    /// 8b40fa7 the stamped `path` is the basename, never the absolute host path.
+    #[tokio::test]
+    async fn register_company_stamps_provenance_from_directory() {
+        let home = std::env::temp_dir().join(format!("oc-prov-dir-{}", std::process::id()));
+        let state = AppState::new(AppConfig::default());
+        let dir = std::path::Path::new("companies/agentic_law_firm");
+
+        register_company(&state, &home, dir, false).await.unwrap();
+
+        let runtime = state.registry().sole().expect("sole company");
+        let record = runtime
+            .store()
+            .load(runtime.id())
+            .await
+            .unwrap()
+            .expect("persisted record");
+        let provenance = record
+            .template_provenance
+            .expect("a directory launch stamps template provenance");
+        assert_eq!(provenance.source_id, "agentic_law_firm");
+        assert_eq!(provenance.version, None, "serve path records no version");
+        assert_eq!(
+            provenance.path.as_deref(),
+            Some("agentic_law_firm"),
+            "path is the template basename, not the absolute host path"
+        );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Issue #85: launching from a `company.toml` *file* path normalizes to its
+    /// parent company directory before deriving provenance, so the stamped
+    /// provenance matches the directory launch exactly (basename `source_id` +
+    /// `path`, `None` version). Guards the file-path input shape of the
+    /// serve-path derivation.
+    #[tokio::test]
+    async fn register_company_stamps_provenance_from_manifest_file() {
+        let home = std::env::temp_dir().join(format!("oc-prov-file-{}", std::process::id()));
+        let state = AppState::new(AppConfig::default());
+        let file = std::path::Path::new("companies/agentic_law_firm/company.toml");
+
+        register_company(&state, &home, file, false).await.unwrap();
+
+        let runtime = state.registry().sole().expect("sole company");
+        let record = runtime
+            .store()
+            .load(runtime.id())
+            .await
+            .unwrap()
+            .expect("persisted record");
+        let provenance = record
+            .template_provenance
+            .expect("a manifest-file launch stamps provenance from the parent dir");
+        assert_eq!(provenance.source_id, "agentic_law_firm");
+        assert_eq!(provenance.version, None);
+        assert_eq!(
+            provenance.path.as_deref(),
+            Some("agentic_law_firm"),
+            "path is the template basename, not the absolute host path"
         );
         std::fs::remove_dir_all(&home).ok();
     }

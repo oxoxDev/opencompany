@@ -181,6 +181,33 @@ impl CompanyGql {
     async fn smtp(&self) -> async_graphql::Result<SmtpStatusGql> {
         connections::resolve_smtp(&self.runtime).await
     }
+
+    /// The source-template provenance recorded at launch: the stable template
+    /// id (directory slug) and, when known, its version. Null for a company
+    /// provisioned from a raw manifest body rather than a template.
+    async fn provenance(&self) -> async_graphql::Result<Option<TemplateProvenanceGql>> {
+        let Some(record) = self.runtime.store().load(&self.id).await? else {
+            return Ok(None);
+        };
+        Ok(record.template_provenance.map(|p| TemplateProvenanceGql {
+            source_id: p.source_id,
+            version: p.version,
+            path: p.path,
+        }))
+    }
+}
+
+/// The source-template provenance of a company: where its manifest was seeded
+/// from. Mirrors [`TemplateProvenance`](crate::ports::types::TemplateProvenance).
+#[derive(SimpleObject)]
+#[graphql(name = "TemplateProvenance")]
+pub struct TemplateProvenanceGql {
+    /// The template's stable identifier — the source directory slug.
+    pub source_id: String,
+    /// The template's version, when the source exposes one.
+    pub version: Option<String>,
+    /// The source directory path the company was launched from, when recorded.
+    pub path: Option<String>,
 }
 
 impl CompanyGql {

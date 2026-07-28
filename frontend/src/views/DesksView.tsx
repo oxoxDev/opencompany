@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Crown, Plus, Trash2, Users, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Crown, Plus, Trash2, Users, X } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { DeskDto, TeamMemberDto } from "@/api/types";
@@ -132,6 +132,15 @@ export function DesksView({ client, company }: Props) {
                     client.removeDeskMember(desk.id, agentId, company),
                   )
                 }
+                onReorder={(fromIndex, direction) => {
+                  const next = [...desk.members];
+                  const swapWith = direction === "up" ? fromIndex - 1 : fromIndex + 1;
+                  if (swapWith < 0 || swapWith >= next.length) return;
+                  [next[fromIndex], next[swapWith]] = [next[swapWith], next[fromIndex]];
+                  void mutate(`${desk.id}:${next[swapWith]}`, () =>
+                    client.setDeskOrder(desk.id, next, company),
+                  );
+                }}
                 onDelete={() =>
                   mutate(`delete:${desk.id}`, () => client.deleteDesk(desk.id, company))
                 }
@@ -159,6 +168,7 @@ function DeskCard({
   displayName,
   onAdd,
   onRemove,
+  onReorder,
   onDelete,
 }: {
   desk: DeskDto;
@@ -167,6 +177,7 @@ function DeskCard({
   displayName: (id: string) => string;
   onAdd: (agentId: string) => void;
   onRemove: (agentId: string) => void;
+  onReorder: (fromIndex: number, direction: "up" | "down") => void;
   onDelete: () => void;
 }) {
   const overlay = new Set(desk.overlayMembers ?? []);
@@ -219,7 +230,34 @@ function DeskCard({
                   {i === 0 && <Crown className="size-3.5 shrink-0 text-amber-500" aria-label="Desk lead" />}
                   <span className="truncate">{displayName(id)}</span>
                 </span>
-                {isOverlay ? (
+                <span className="flex shrink-0 items-center gap-0.5">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-6 text-muted-foreground hover:text-foreground"
+                    aria-label={`Move ${displayName(id)} up`}
+                    // Global busy lock: block any reorder (this row, another row,
+                    // or another desk) while a mutation is in flight, so a second
+                    // PUT can't be computed from a stale pre-refetch order. The
+                    // direction boundary (`i === 0`) stays per-row.
+                    disabled={busy !== null || i === 0}
+                    onClick={() => onReorder(i, "up")}
+                  >
+                    <ChevronUp className="size-3.5" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-6 text-muted-foreground hover:text-foreground"
+                    aria-label={`Move ${displayName(id)} down`}
+                    // Global busy lock (see the up arrow): no cross-row/cross-desk
+                    // reorder fires until the in-flight one settles and refetches.
+                    disabled={busy !== null || i === desk.members.length - 1}
+                    onClick={() => onReorder(i, "down")}
+                  >
+                    <ChevronDown className="size-3.5" />
+                  </Button>
+                  {isOverlay ? (
                   <Button
                     variant="ghost"
                     size="icon"
@@ -231,10 +269,11 @@ function DeskCard({
                     <X className="size-3.5" />
                   </Button>
                 ) : (
-                  <Badge variant="secondary" className="shrink-0 text-[10px]">
-                    Blueprint
-                  </Badge>
-                )}
+                    <Badge variant="secondary" className="shrink-0 text-[10px]">
+                      Blueprint
+                    </Badge>
+                  )}
+                </span>
               </li>
             );
           })}

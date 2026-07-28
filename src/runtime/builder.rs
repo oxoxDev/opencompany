@@ -36,7 +36,7 @@ use crate::openhuman::{OpenHumanChannelAdapter, OpenHumanToolProvider};
 use crate::policy::ManifestApprovalGate;
 #[cfg(feature = "openhuman")]
 use crate::ports::WorkflowRunner;
-use crate::ports::types::{CompanyId, CompanyRecord, SecretValue};
+use crate::ports::types::{CompanyId, CompanyRecord, SecretValue, TemplateProvenance};
 use crate::ports::{
     AgentEconomy, Brain, ChannelAdapter, CompanyStore, ContextStore, EventLog, FactStore,
     InboxStore, LoginCodeStore, MemoryStore, SecretStore, SessionStore, SkillStateStore, TaskStore,
@@ -172,6 +172,12 @@ pub struct RuntimeBuilder {
     sessions: Option<Arc<dyn SessionStore>>,
     login_codes: Option<Arc<dyn LoginCodeStore>>,
     seed_dir: Option<PathBuf>,
+    /// Issue #85: the source-template provenance to stamp on this company's
+    /// record at *first* launch. Set by the launch path when the manifest was
+    /// seeded from a template directory; left `None` for a raw-manifest
+    /// provision. On a rebuild the record's own provenance is carried forward,
+    /// so this only applies when no record exists yet.
+    template_provenance: Option<TemplateProvenance>,
     feedback: Option<Arc<FeedbackStore>>,
     github: Option<Arc<dyn GitHubClient>>,
     tinyhumans_feedback: Option<Arc<dyn TinyHumansClient>>,
@@ -235,6 +241,7 @@ impl RuntimeBuilder {
             sessions: None,
             login_codes: None,
             seed_dir: None,
+            template_provenance: None,
             feedback: None,
             github: None,
             tinyhumans_feedback: None,
@@ -405,6 +412,16 @@ impl RuntimeBuilder {
     /// tree is seeded from on first build. Without it, no seeding runs.
     pub fn with_seed_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.seed_dir = Some(dir.into());
+        self
+    }
+
+    /// Records the source-template provenance to stamp on this company's record
+    /// at first launch (issue #85). The launch path sets this when the manifest
+    /// was seeded from a template directory; a raw-manifest provision leaves it
+    /// unset so no provenance is fabricated. On a rebuild the persisted record's
+    /// provenance is carried forward and this value is ignored.
+    pub fn with_template_provenance(mut self, provenance: TemplateProvenance) -> Self {
+        self.template_provenance = Some(provenance);
         self
     }
 
@@ -731,6 +748,47 @@ impl RuntimeBuilder {
         // harness arm so `CompanyRuntime::set_steer` can be wired downstream.
         #[cfg(feature = "openhuman")]
         let mut steer_registry: Option<crate::company::steer::InflightRegistry> = None;
+
+        // Load the persisted record BEFORE constructing the brain so the brain's
+        // in-memory record carries the operator overlays (team, desk memberships,
+        // desk order/hierarchy, operator-created desks) rather than empty lists.
+        // The brain's `desk_lead` resolver reads `overlay_desk_order`, so seeding
+        // it from the persisted record is what makes a `/desks/{id}/order` reorder
+        // take effect on routing after the runtime is rebuilt — otherwise desk
+        // chats keep routing to the pre-reorder lead. `save` only writes
+        // company.toml + meta.json; the append-only ledger file is left untouched,
+        // so an existing ledger survives a rebuild.
+        let existing = store.load(&id).await?;
+        let lifecycle = existing
+            .as_ref()
+            .map(|r| r.lifecycle.clone())
+            .unwrap_or_else(|| "running".to_string());
+        let overlay_agents = existing
+            .as_ref()
+            .map(|r| r.overlay_agents.clone())
+            .unwrap_or_default();
+        let overlay_desk_members = existing
+            .as_ref()
+            .map(|r| r.overlay_desk_members.clone())
+            .unwrap_or_default();
+        let overlay_desk_order = existing
+            .as_ref()
+            .map(|r| r.overlay_desk_order.clone())
+            .unwrap_or_default();
+        let overlay_desks = existing
+            .as_ref()
+            .map(|r| r.overlay_desks.clone())
+            .unwrap_or_default();
+        // Issue #85: carry an existing record's source-template provenance
+        // forward across the rebuild (a rebuild never re-stamps it); on the very
+        // first launch, stamp from the value the launch path recorded (a slug for
+        // a template directory, `None` for a raw-manifest provision).
+        let template_provenance = existing
+            .as_ref()
+            .and_then(|r| r.template_provenance.clone())
+            .or_else(|| self.template_provenance.clone());
+        let ledger = existing.map(|r| r.ledger).unwrap_or_default();
+
         let brain: Arc<dyn Brain> = match self.brain {
             Some(brain) => brain,
             None => {
@@ -916,10 +974,16 @@ impl RuntimeBuilder {
                                 id: id.clone(),
                                 manifest: self.manifest.clone(),
                                 ledger: Vec::new(),
-                                lifecycle: "running".to_string(),
-                                overlay_agents: Vec::new(),
-                                overlay_desk_members: Vec::new(),
-                                overlay_desks: Vec::new(),
+                                lifecycle: lifecycle.clone(),
+                                // Seed the brain from the persisted overlays so
+                                // desk routing (`desk_lead` → `effective_desk_members`
+                                // → `overlay_desk_order`) reflects the operator's
+                                // current hierarchy, not the blueprint default.
+                                overlay_agents: overlay_agents.clone(),
+                                overlay_desk_members: overlay_desk_members.clone(),
+                                overlay_desk_order: overlay_desk_order.clone(),
+                                overlay_desks: overlay_desks.clone(),
+                                template_provenance: template_provenance.clone(),
                             };
                             // Workflow agent nodes execute on the same pool as the
                             // brain — clone before both moves into `HarnessBrain`.
@@ -974,30 +1038,11 @@ impl RuntimeBuilder {
         };
 
         // Materialize the manifest so status/roster loads have a record to read.
-        // `save` only writes company.toml + meta.json; the append-only ledger
-        // file is left untouched, so an existing ledger survives a rebuild.
-        let existing = store.load(&id).await?;
-        let lifecycle = existing
-            .as_ref()
-            .map(|r| r.lifecycle.clone())
-            .unwrap_or_else(|| "running".to_string());
-        // Preserve the operator team + desk overlays across rebuilds — a rebuild
-        // never rewrites the version-controlled manifest, and it must not drop
-        // operator-added teammates, desk memberships, or operator-created desks
-        // either.
-        let overlay_agents = existing
-            .as_ref()
-            .map(|r| r.overlay_agents.clone())
-            .unwrap_or_default();
-        let overlay_desk_members = existing
-            .as_ref()
-            .map(|r| r.overlay_desk_members.clone())
-            .unwrap_or_default();
-        let overlay_desks = existing
-            .as_ref()
-            .map(|r| r.overlay_desks.clone())
-            .unwrap_or_default();
-        let ledger = existing.map(|r| r.ledger).unwrap_or_default();
+        // The persisted overlays + provenance + ledger + lifecycle were read above
+        // (before the brain was constructed, so the brain could be seeded from
+        // them); a rebuild never rewrites the version-controlled manifest, and must
+        // not drop the operator-added teammates, desk memberships, desk order,
+        // operator-created desks, or the source-template provenance either.
         store
             .save(&CompanyRecord {
                 id: id.clone(),
@@ -1006,7 +1051,9 @@ impl RuntimeBuilder {
                 lifecycle,
                 overlay_agents,
                 overlay_desk_members,
+                overlay_desk_order,
                 overlay_desks,
+                template_provenance,
             })
             .await?;
 
@@ -1542,6 +1589,58 @@ mod test {
         std::fs::remove_dir_all(&home).ok();
     }
 
+    /// Issue #85: the launch path's template provenance is stamped onto the
+    /// record at first build, survives a rebuild that supplies no provenance
+    /// (carried forward), and a company built with no provenance records `None`.
+    #[tokio::test]
+    async fn template_provenance_stamped_at_launch_and_carried_forward() {
+        let home = std::env::temp_dir().join(format!("oc-prov-{}", crate::ports::generate_id()));
+        let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
+        let id = CompanyId::new("acme");
+        let provenance = TemplateProvenance {
+            source_id: "agentic_law_firm".to_string(),
+            version: None,
+            path: Some("companies/agentic_law_firm".to_string()),
+        };
+
+        // First launch from a template: provenance is stamped onto the record.
+        let runtime = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .with_template_provenance(provenance.clone())
+            .build()
+            .await
+            .unwrap();
+        let stamped = runtime.store().load(&id).await.unwrap().unwrap();
+        assert_eq!(stamped.template_provenance.as_ref(), Some(&provenance));
+        drop(runtime);
+
+        // Rebuild without re-supplying provenance: the record carries it forward.
+        let runtime = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let carried = runtime.store().load(&id).await.unwrap().unwrap();
+        assert_eq!(
+            carried.template_provenance,
+            Some(provenance),
+            "provenance was dropped on rebuild"
+        );
+        drop(runtime);
+
+        // A company built with no provenance (raw-manifest provision) records None.
+        let other = CompanyId::new("raw");
+        let runtime = RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(other.clone())
+            .build()
+            .await
+            .unwrap();
+        let raw = runtime.store().load(&other).await.unwrap().unwrap();
+        assert!(raw.template_provenance.is_none());
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
     fn parse(toml_src: &str) -> CompanyManifest {
         toml::from_str(toml_src).expect("valid manifest")
     }
@@ -1717,5 +1816,140 @@ mod test {
         assert!(runtime.has_economy());
         assert_eq!(mock.count("register_name"), 1, "boot claimed the handle");
         assert_eq!(mock.count("put_agent"), 1, "boot published the card");
+    }
+
+    /// Spawns an in-process OpenAI-compatible stub that answers every
+    /// chat-completion with `marker`, so a harness turn can run without a real
+    /// inference backend. Mirrors the provider-test helper of the same name.
+    #[cfg(feature = "openhuman")]
+    async fn spawn_stub(marker: &'static str) -> String {
+        use axum::routing::post;
+        use axum::{Json, Router};
+
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || async move {
+                Json(serde_json::json!({
+                    "choices": [{ "message": { "role": "assistant", "content": marker } }],
+                    "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// Builder-level regression for the `overlay_desk_order` seeding path (#133).
+    /// The harness test `desk_order_change_updates_routing_after_rebuild` exercises
+    /// `brain_over(record)` directly; this one drives the real
+    /// [`RuntimeBuilder::build`] wiring end-to-end: a persisted record carries a
+    /// NON-EMPTY `overlay_desk_order` that promotes `eng2` over the blueprint lead
+    /// `eng1`, and after `build()` a desk-addressed cycle must run on `eng2` — the
+    /// reordered lead — proving the builder seeds the operator order into the brain
+    /// rather than an empty default. The harness records each turn under a
+    /// `task-outcome/{agent_id}` context chunk, which is the observable seam.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn build_seeds_desk_order_into_brain_routing() {
+        use crate::harness::HarnessPool;
+        use crate::ports::types::{CompanyEvent, OverlayDeskOrder};
+        use crate::store::{FsCompanyStore, FsContextStore};
+
+        let home =
+            std::env::temp_dir().join(format!("oc-seed-order-{}", crate::ports::generate_id()));
+        let id = CompanyId::new("order-co");
+
+        // A desk `eng` whose blueprint lead is `eng1` (declared first).
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Order Co"
+
+            [policy]
+            mode = "full"
+
+            [[agent]]
+            id = "eng1"
+            role = "Engineer One"
+
+            [[agent]]
+            id = "eng2"
+            role = "Engineer Two"
+
+            [[group_chat]]
+            id = "eng"
+            name = "Engineering"
+            members = ["eng1", "eng2"]
+            "#,
+        );
+
+        // Persist a record whose operator order promotes `eng2` above `eng1`.
+        let store = FsCompanyStore::new(home.clone());
+        store
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: vec![OverlayDeskOrder {
+                    desk_id: "eng".to_string(),
+                    ordered: vec!["eng2".to_string(), "eng1".to_string()],
+                }],
+                overlay_desks: Vec::new(),
+                template_provenance: None,
+            })
+            .await
+            .unwrap();
+
+        // Build the runtime with an embedded harness pool + a stub inference
+        // backend, so `build()` constructs the seeded `HarnessBrain`.
+        let stub = spawn_stub("desk lead reply").await;
+        let runtime = RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .with_harness(Arc::new(HarnessPool::new()))
+            .with_harness_inference(
+                HostedProviderConfig {
+                    base_url: stub,
+                    api_key: "k".to_string(),
+                    extra_headers: Vec::new(),
+                },
+                None,
+            )
+            .build()
+            .await
+            .unwrap();
+
+        // A message addressed to the `eng` desk must be answered by the reordered
+        // lead `eng2`, not the blueprint lead `eng1`.
+        runtime
+            .run_cycle(vec![CompanyEvent::OperatorMessage {
+                text: "who leads?".to_string(),
+                by: None,
+                chat: Some("eng".to_string()),
+            }])
+            .await
+            .expect("cycle");
+
+        // The harness writes the turn under `task-outcome/{responder}`; the
+        // responder must be the reordered lead.
+        let context: Arc<dyn ContextStore> = Arc::new(FsContextStore::new(home.clone()));
+        let outcomes = context.list(&id, "task-outcome/").await.unwrap();
+        let labels: Vec<&str> = outcomes.iter().map(|m| m.label.as_str()).collect();
+        assert!(
+            labels.contains(&"task-outcome/eng2"),
+            "desk turn did not route to the reordered lead eng2; saw {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"task-outcome/eng1"),
+            "desk turn routed to the blueprint lead eng1 — the builder dropped the operator desk order; saw {labels:?}"
+        );
+
+        tokio::fs::remove_dir_all(&home).await.ok();
     }
 }

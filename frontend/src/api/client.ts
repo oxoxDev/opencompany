@@ -223,6 +223,25 @@ export class OpenCompanyClient {
   }
 
   /**
+   * Set the operator's explicit member order (the desk hierarchy) for a desk
+   * (issue #131). `orderedMemberIds` is the full member list in the intended
+   * order — the first is the desk lead. Every id must be a current member; an
+   * empty list resets the desk to its blueprint order. The version-controlled
+   * manifest is never rewritten — the order lives in the overlay.
+   */
+  setDeskOrder(
+    deskId: string,
+    orderedMemberIds: string[],
+    company?: string | null,
+  ): Promise<void> {
+    return this.request<void>(
+      "PUT",
+      `${this.scope(company)}/desks/${encodeURIComponent(deskId)}/order`,
+      { ordered_member_ids: orderedMemberIds },
+    );
+  }
+
+  /**
    * Create a desk through the operator overlay. `name` is required; the id is
    * derived from it when omitted. Members are optional and must be roster
    * teammates; the first is the desk's lead. The manifest is never rewritten and

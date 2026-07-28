@@ -873,6 +873,50 @@ pub struct OverlayDeskMember {
     pub agent_id: String,
 }
 
+/// Where a company's manifest was seeded from — the source template's stable
+/// identity, recorded once at launch and carried across rebuilds.
+///
+/// A company launched from a template directory (`serve --company
+/// companies/<slug>`) records the directory slug as its stable `source_id`; a
+/// company provisioned from a raw manifest body (`POST /api/v1/companies`)
+/// carries no provenance (`CompanyRecord::template_provenance` stays `None`) —
+/// provenance is never fabricated for a manifest that did not come from a
+/// template. The blueprint (`company.toml`) is never rewritten: provenance
+/// lives only on the record/overlay.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemplateProvenance {
+    /// The template's stable identifier — the source directory slug (or a
+    /// canonical id where one exists). Stable across rebuilds and restarts.
+    pub source_id: String,
+    /// The template's version, when the source exposes one. `None` when the
+    /// template is unversioned.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// The source directory path the company was launched from, when recorded.
+    /// Optional and informational; `source_id` is the durable stable key.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// An operator-set explicit ordering (hierarchy) for one desk's effective
+/// members. Persisted as an overlay on the [`CompanyRecord`]; the version-
+/// controlled manifest is never rewritten. Applied inside
+/// [`CompanyRecord::effective_desk_members`] as a whole-set permutation: ids in
+/// `ordered` come first in the given order (so an overlay-added member can be
+/// promoted above manifest members — a whole-set reorder, which a per-member
+/// `rank` could not express), and any effective member not listed keeps today's
+/// relative order after them. Stale ids in `ordered` that are no longer members
+/// are simply ignored. An empty `ordered` (or an absent entry) reproduces the
+/// blueprint order exactly.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverlayDeskOrder {
+    /// The desk (group-chat) id this ordering targets.
+    pub desk_id: String,
+    /// The operator-set member id order. Listed ids sort first in this order;
+    /// unlisted effective members keep their default relative order after.
+    pub ordered: Vec<String>,
+}
+
 /// An operator-created desk (group chat) that the version-controlled manifest
 /// does not declare. Persisted as an overlay on the [`CompanyRecord`] and merged
 /// with the manifest's `[[group_chat]]` desks at read/resolve time; the
@@ -911,19 +955,29 @@ pub struct OverlayBlob {
     /// The operator desk-membership overlay.
     #[serde(default)]
     pub desk_members: Vec<OverlayDeskMember>,
+    /// The operator per-desk member-ordering overlay.
+    #[serde(default)]
+    pub desk_order: Vec<OverlayDeskOrder>,
     /// The operator-created desk overlay. Absent on rows written before desk
     /// creation existed, so `#[serde(default)]` loads them as empty.
     #[serde(default)]
     pub desks: Vec<OverlayDesk>,
+    /// The source-template provenance recorded at launch. `None` for companies
+    /// provisioned from a raw manifest and for legacy rows written before
+    /// provenance existed (the `#[serde(default)]` keeps those rows loading).
+    #[serde(default)]
+    pub provenance: Option<TemplateProvenance>,
 }
 
 impl OverlayBlob {
-    /// Builds a blob from a record's overlay collections.
+    /// Builds a blob from a record's overlay collections and provenance.
     pub fn from_record(record: &CompanyRecord) -> Self {
         Self {
             agents: record.overlay_agents.clone(),
             desk_members: record.overlay_desk_members.clone(),
+            desk_order: record.overlay_desk_order.clone(),
             desks: record.overlay_desks.clone(),
+            provenance: record.template_provenance.clone(),
         }
     }
 
@@ -942,7 +996,9 @@ impl OverlayBlob {
                 .map(|agents| Self {
                     agents,
                     desk_members: Vec::new(),
+                    desk_order: Vec::new(),
                     desks: Vec::new(),
+                    provenance: None,
                 })
                 .map_err(|_| original),
         }
@@ -968,23 +1024,41 @@ pub struct CompanyRecord {
     /// overlay). Merged into a desk's effective membership at read time.
     #[serde(default)]
     pub overlay_desk_members: Vec<OverlayDeskMember>,
+    /// Operator-set per-desk member orderings (the desk-hierarchy overlay).
+    /// Applied as a whole-set permutation inside [`Self::effective_desk_members`];
+    /// empty = the blueprint order. The manifest is never rewritten.
+    #[serde(default)]
+    pub overlay_desk_order: Vec<OverlayDeskOrder>,
     /// Operator-created desks not present in the manifest (the desk-creation
     /// overlay). Merged with the manifest's `[[group_chat]]` desks at read time.
     #[serde(default)]
     pub overlay_desks: Vec<OverlayDesk>,
+    /// Where this company's manifest was seeded from — the source template's
+    /// stable identity, stamped once at launch and carried across rebuilds.
+    /// `None` for companies provisioned from a raw manifest body. The
+    /// `#[serde(default)]` keeps records written before provenance existed
+    /// loading without a migration.
+    #[serde(default)]
+    pub template_provenance: Option<TemplateProvenance>,
 }
 
 impl CompanyRecord {
     /// The effective member ids of a desk: the desk's declared members first
     /// (from the manifest `[[group_chat]]` or, for an operator-created desk, the
     /// [`OverlayDesk`]), then any operator-overlay member additions for that
-    /// desk, in order and deduplicated on id.
+    /// desk, in order and deduplicated on id — then re-ordered by this desk's
+    /// operator-set [`OverlayDeskOrder`] if one exists.
     ///
     /// This is the single source of truth for "who is on a desk", shared by the
     /// REST `list_desks` handler and the harness `desk_lead` resolver so the two
-    /// cannot drift. Ordering rule: declared order is preserved, overlay members
-    /// are appended in insertion order — so the first declared member stays the
-    /// lead, and an overlay lead only applies to a desk declared with no members.
+    /// cannot drift. Base ordering: declared order is preserved (manifest or
+    /// [`OverlayDesk`]), overlay members are appended in insertion order. Then,
+    /// if the operator has set an explicit order for this desk, it is applied as
+    /// a whole-set permutation — listed ids come first in the operator's order
+    /// (so an overlay member can be promoted to the lead slot), and any effective
+    /// member the order does not mention keeps its base relative position after
+    /// them. With no order override the base order is returned unchanged, so the
+    /// first declared member stays the lead by default.
     pub fn effective_desk_members(&self, desk_id: &str) -> Vec<String> {
         let mut members: Vec<String> = self
             .manifest
@@ -1003,6 +1077,32 @@ impl CompanyRecord {
             if add.desk_id == desk_id && !members.contains(&add.agent_id) {
                 members.push(add.agent_id.clone());
             }
+        }
+        // Apply the operator-set ordering as a whole-set permutation. Listed ids
+        // sort first in the operator's order; unlisted members keep their base
+        // relative order after (stable sort). Stale ids no longer members are
+        // absent from `members`, so they simply have no effect.
+        if let Some(order) = self
+            .overlay_desk_order
+            .iter()
+            .find(|o| o.desk_id == desk_id && !o.ordered.is_empty())
+        {
+            let mut ranked: Vec<(usize, usize, String)> = members
+                .into_iter()
+                .enumerate()
+                .map(|(base_index, id)| {
+                    // Listed ids rank by their position in the operator order;
+                    // unlisted ids rank after all listed ids, keyed on their base
+                    // index so their relative order is preserved by the sort.
+                    let key = match order.ordered.iter().position(|listed| *listed == id) {
+                        Some(pos) => pos,
+                        None => order.ordered.len() + base_index,
+                    };
+                    (key, base_index, id)
+                })
+                .collect();
+            ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+            members = ranked.into_iter().map(|(_, _, id)| id).collect();
         }
         members
     }
@@ -1561,8 +1661,22 @@ mod test {
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: overlay,
+            overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            template_provenance: None,
         }
+    }
+
+    /// Like [`desk_record`] but with an explicit per-desk order overlay, for the
+    /// desk-hierarchy tests.
+    fn desk_record_ordered(
+        toml_src: &str,
+        overlay: Vec<OverlayDeskMember>,
+        order: Vec<OverlayDeskOrder>,
+    ) -> CompanyRecord {
+        let mut record = desk_record(toml_src, overlay);
+        record.overlay_desk_order = order;
+        record
     }
 
     /// The effective membership is the manifest members first, then overlay
@@ -1604,6 +1718,128 @@ mod test {
         );
     }
 
+    /// A three-member manifest desk whose order override permutes the members.
+    const HIERARCHY_MANIFEST: &str = "[company]\nname = \"Acme\"\n\
+         [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+         [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n\
+         [[agent]]\nid = \"des\"\nrole = \"Designer\"\n\
+         [[group_chat]]\nid = \"studio\"\nname = \"Studio\"\nmembers = [\"ceo\", \"eng\", \"des\"]\n";
+
+    fn order(desk: &str, ids: &[&str]) -> Vec<OverlayDeskOrder> {
+        vec![OverlayDeskOrder {
+            desk_id: desk.into(),
+            ordered: ids.iter().map(|s| s.to_string()).collect(),
+        }]
+    }
+
+    /// A full permutation reorders the manifest members exactly as given.
+    #[test]
+    fn desk_order_reorders_manifest_members() {
+        let record = desk_record_ordered(
+            HIERARCHY_MANIFEST,
+            Vec::new(),
+            order("studio", &["des", "ceo", "eng"]),
+        );
+        assert_eq!(
+            record.effective_desk_members("studio"),
+            vec!["des".to_string(), "ceo".to_string(), "eng".to_string()]
+        );
+    }
+
+    /// The override can promote an overlay-added member above manifest members —
+    /// the whole-set permutation a per-member rank could not express.
+    #[test]
+    fn desk_order_promotes_overlay_member_to_lead() {
+        let record = desk_record_ordered(
+            HIERARCHY_MANIFEST,
+            vec![OverlayDeskMember {
+                desk_id: "studio".into(),
+                agent_id: "cto".into(),
+            }],
+            order("studio", &["cto", "ceo", "eng", "des"]),
+        );
+        let members = record.effective_desk_members("studio");
+        assert_eq!(members[0], "cto");
+        assert_eq!(
+            members,
+            vec![
+                "cto".to_string(),
+                "ceo".to_string(),
+                "eng".to_string(),
+                "des".to_string()
+            ]
+        );
+    }
+
+    /// An absent or empty override reproduces the base order byte-for-byte.
+    #[test]
+    fn desk_order_absent_or_empty_keeps_base_order() {
+        let base = desk_record(HIERARCHY_MANIFEST, Vec::new());
+        let base_members = base.effective_desk_members("studio");
+        assert_eq!(base_members, vec!["ceo", "eng", "des"]);
+
+        // An explicit empty override for the desk is a no-op too.
+        let empty = desk_record_ordered(HIERARCHY_MANIFEST, Vec::new(), order("studio", &[]));
+        assert_eq!(empty.effective_desk_members("studio"), base_members);
+    }
+
+    /// Ids in the override that are no longer desk members are ignored.
+    #[test]
+    fn desk_order_ignores_stale_ids() {
+        let record = desk_record_ordered(
+            HIERARCHY_MANIFEST,
+            Vec::new(),
+            order("studio", &["ghost", "des", "ceo", "eng"]),
+        );
+        // `ghost` is not a member, so it contributes nothing; the rest apply.
+        assert_eq!(
+            record.effective_desk_members("studio"),
+            vec!["des".to_string(), "ceo".to_string(), "eng".to_string()]
+        );
+    }
+
+    /// A subset override lists its ids first, then the unlisted members keep
+    /// their base relative order after.
+    #[test]
+    fn desk_order_subset_is_listed_first_then_default() {
+        let record = desk_record_ordered(HIERARCHY_MANIFEST, Vec::new(), order("studio", &["des"]));
+        // `des` promoted first; `ceo`, `eng` keep their base order behind it.
+        assert_eq!(
+            record.effective_desk_members("studio"),
+            vec!["des".to_string(), "ceo".to_string(), "eng".to_string()]
+        );
+    }
+
+    /// The persisted overlay blob round-trips the desk-order collection.
+    #[test]
+    fn overlay_blob_round_trips_desk_order() {
+        let record = desk_record_ordered(
+            HIERARCHY_MANIFEST,
+            Vec::new(),
+            order("studio", &["des", "ceo", "eng"]),
+        );
+        let blob = OverlayBlob::from_record(&record);
+        let json = serde_json::to_string(&blob).expect("serialize blob");
+        let parsed = OverlayBlob::parse(&json).expect("parse blob");
+        assert_eq!(parsed.desk_order, record.overlay_desk_order);
+    }
+
+    /// An object-form blob written before `desk_order` existed still parses, and
+    /// the legacy bare-array form still parses — both with an empty order.
+    #[test]
+    fn overlay_blob_parses_without_desk_order_key() {
+        // Object form missing the `desk_order` key (pre-#131 rows).
+        let object = r#"{"agents":[{"id":"a","name":"A","role":"r"}],"desk_members":[{"desk_id":"d","agent_id":"a"}]}"#;
+        let blob = OverlayBlob::parse(object).expect("object without desk_order");
+        assert_eq!(blob.desk_members.len(), 1);
+        assert!(blob.desk_order.is_empty());
+
+        // Legacy bare `Vec<OverlayAgent>` form.
+        let legacy = r#"[{"id":"a","name":"A","role":"r"}]"#;
+        let blob = OverlayBlob::parse(legacy).expect("legacy array");
+        assert!(blob.desk_order.is_empty());
+    }
+
     /// `is_roster_agent` accepts both manifest agents and overlay teammates, and
     /// rejects an unknown id — the validation the desk-add route relies on.
     #[test]
@@ -1630,17 +1866,22 @@ mod test {
         let blob = OverlayBlob::parse(object).expect("object");
         assert_eq!(blob.agents.len(), 1);
         assert_eq!(blob.desk_members.len(), 1);
+        // Issue #85: an object written before provenance existed omits the key;
+        // `#[serde(default)]` loads it as `None` (zero-migration back-compat).
+        assert!(blob.provenance.is_none());
 
         // Legacy: overlay_json used to hold a bare Vec<OverlayAgent>.
         let legacy = r#"[{"id":"a","name":"A","role":"r"}]"#;
         let blob = OverlayBlob::parse(legacy).expect("legacy array");
         assert_eq!(blob.agents.len(), 1);
         assert!(blob.desk_members.is_empty());
+        assert!(blob.provenance.is_none());
 
         // The empty-array default persisted by fresh schema.
         let blob = OverlayBlob::parse("[]").expect("empty array");
         assert!(blob.agents.is_empty());
         assert!(blob.desk_members.is_empty());
+        assert!(blob.provenance.is_none());
         assert!(blob.desks.is_empty());
 
         // A pre-desk-creation object row (no `desks` key) loads with an empty
@@ -1648,6 +1889,22 @@ mod test {
         let pre_desks = r#"{"agents":[],"desk_members":[]}"#;
         let blob = OverlayBlob::parse(pre_desks).expect("pre-desks object");
         assert!(blob.desks.is_empty());
+    }
+
+    /// Issue #85: a record's template provenance round-trips through the
+    /// `OverlayBlob` the sqlite/mongodb stores persist, and a blob carrying
+    /// provenance re-parses with it intact.
+    #[test]
+    fn overlay_blob_carries_template_provenance() {
+        let mut record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
+        record.template_provenance = Some(TemplateProvenance {
+            source_id: "agentic_law_firm".to_string(),
+            version: Some("2.0.0".to_string()),
+            path: Some("companies/agentic_law_firm".to_string()),
+        });
+        let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
+        let blob = OverlayBlob::parse(&json).expect("reparse");
+        assert_eq!(blob.provenance, record.template_provenance);
     }
 
     /// An operator-created overlay desk resolves through the same

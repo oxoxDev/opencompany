@@ -34,7 +34,9 @@ pub(crate) async fn state_with_company(home: &std::path::Path) -> AppState {
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            template_provenance: None,
         })
         .await
         .unwrap();
@@ -173,7 +175,9 @@ async fn state_with_rich_company(home: &std::path::Path) -> AppState {
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            template_provenance: None,
         })
         .await
         .unwrap();
@@ -567,7 +571,9 @@ async fn skills_and_workflows_resolve_from_source_dir() {
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            template_provenance: None,
         })
         .await
         .unwrap();
