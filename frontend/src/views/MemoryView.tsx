@@ -17,6 +17,7 @@ import {
   type MemoryStats,
 } from "@/api/memory";
 import type { OpenCompanyClient } from "@/api/client";
+import { Markdown } from "@/components/markdown";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -308,7 +309,14 @@ function MemoryCard({ entry, onDelete }: { entry: MemoryEntry; onDelete: () => v
             {badge.label}
           </Badge>
         </div>
-        {entry.body && <p className="text-sm text-muted-foreground">{entry.body}</p>}
+        {entry.body && (
+          // Render markdown so **bold**/lists in memory bodies format instead
+          // of showing raw markup. Force muted-foreground on every descendant so
+          // prose's own palette doesn't override the card's muted body styling.
+          <Markdown className="text-muted-foreground [&_*]:text-muted-foreground [&>:first-child]:mt-0 [&>:last-child]:mb-0">
+            {entry.body}
+          </Markdown>
+        )}
         <div className="flex items-center justify-between pt-1">
           <span className="text-xs text-muted-foreground">via {entry.source}</span>
           {/* Delete is only offered on operator facts; agent memory and task

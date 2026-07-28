@@ -20,6 +20,7 @@ import { toast } from "sonner";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError, type TurnStep, type TurnStepKind } from "@/api/types";
 import { listInflight, steerTask, type InflightRun, type SteerAction } from "@/api/tasks";
+import { Markdown } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -573,7 +574,6 @@ function Bubble({ message, mine, last }: { message: ChatMessage; mine: boolean; 
         last && (mine ? "rounded-br-md" : "rounded-bl-md"),
       )}
     >
-      <span className="whitespace-pre-wrap break-words align-bottom">{message.text}</span>
       <span
         className={cn(
           "float-right ml-2 translate-y-1 select-none text-[10px]",
@@ -582,6 +582,16 @@ function Bubble({ message, mine, last }: { message: ChatMessage; mine: boolean; 
       >
         {formatTime(message.at)}
       </span>
+      {mine ? (
+        // User-typed bubbles stay plain text so literal asterisks/underscores a
+        // person types aren't reinterpreted as markdown.
+        <span className="whitespace-pre-wrap break-words align-bottom">{message.text}</span>
+      ) : (
+        // Company/agent replies render markdown so **bold**, lists, and links
+        // show formatted instead of leaking raw markup. Trim the first/last
+        // block margins so a reply stays flush inside the tight bubble padding.
+        <Markdown className="[&>:first-child]:mt-0 [&>:last-child]:mb-0">{message.text}</Markdown>
+      )}
     </div>
   );
 }
