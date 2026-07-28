@@ -276,8 +276,11 @@ async fn set_desk_order(
         .load(scope.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
-    // The desk must be one of the company's blueprint group chats.
-    if !record.manifest.group_chats.iter().any(|c| c.id == desk_id) {
+    // The desk must exist — either a manifest blueprint group chat or an
+    // operator-created overlay desk (#140). `desk_exists` covers both (the same
+    // check `effective_desk_members` uses), so an operator-created desk can be
+    // reordered / have its lead changed too, not just manifest desks.
+    if !record.desk_exists(&desk_id) {
         return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
             "desk {desk_id}"
         ))));
@@ -1907,6 +1910,57 @@ mod test {
         let desks = get_desks(&app, &cookie).await;
         assert_eq!(desks[0]["members"][0], "ceo");
         assert_eq!(desks[0]["members"][1], "eng");
+        tokio::fs::remove_dir_all(&home).await.ok();
+    }
+
+    /// An operator-created (overlay) desk can be reordered too — the set-order
+    /// handler validates existence with `desk_exists`, which covers overlay desks,
+    /// not just manifest group chats. A manifest-only check used to 404 here (#133).
+    #[tokio::test]
+    async fn set_desk_order_reorders_an_overlay_created_desk() {
+        let home = home();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // Create an overlay desk with two members (lead is `ceo` by declaration).
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/desks")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"name":"Growth desk","members":["ceo","eng"]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        // Reordering the overlay desk succeeds (not 404) and promotes `eng`.
+        let status = put_desk_order(
+            &app,
+            &cookie,
+            "growth_desk",
+            r#"{"ordered_member_ids":["eng","ceo"]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // The new hierarchy surfaces in the list for the overlay desk.
+        let desks = get_desks(&app, &cookie).await;
+        let growth = desks
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == "growth_desk")
+            .expect("overlay desk present");
+        assert_eq!(growth["members"][0], "eng");
+        assert_eq!(growth["members"][1], "ceo");
         tokio::fs::remove_dir_all(&home).await.ok();
     }
 
