@@ -370,13 +370,34 @@ pub fn build_agent(
     // always kept.
     let tools = toolbelt::filter_by_capabilities(tools, &deps.capabilities);
 
+    // Tool-calling transport follows the provider's advertised capability. A
+    // provider that advertises native tool calling (`profile().tool_calling`,
+    // e.g. the managed hosted/tenant surface) gets openhuman's
+    // [`NativeToolDispatcher`], so the harness sends structured `tools` and reads
+    // `message.tool_calls` back — the reliable multi-step path. A provider that
+    // does not (the offline `MockProvider`, a keyless local model with no profile)
+    // keeps the prompt-guided [`AttrTolerantXmlDispatcher`] fallback. Without this
+    // every turn is pinned to prompt-XML and a model that narrates prose instead
+    // of the exact `<tool_call>` tag silently runs no tools (bug #1).
+    use oh::agent::dispatcher::{NativeToolDispatcher, ToolDispatcher};
+    let native_tools = deps
+        .provider
+        .profile()
+        .map(|profile| profile.tool_calling)
+        .unwrap_or(false);
+    let tool_dispatcher: Box<dyn ToolDispatcher> = if native_tools {
+        Box::new(NativeToolDispatcher)
+    } else {
+        Box::new(AttrTolerantXmlDispatcher::default())
+    };
+
     AgentBuilder::default()
         // `HarnessModel` upcasts to the tinyagents `ChatModel<()>` the builder's
         // native injection seam takes (the old `Provider` adapter is gone).
         .chat_model(deps.provider.clone() as Arc<dyn tinyagents::harness::model::ChatModel<()>>)
         .memory(memory)
         .tools(tools)
-        .tool_dispatcher(Box::new(AttrTolerantXmlDispatcher::default()))
+        .tool_dispatcher(tool_dispatcher)
         .tool_policy(Arc::new(policy))
         .prompt_builder(prompt_builder)
         .model_name(model)
