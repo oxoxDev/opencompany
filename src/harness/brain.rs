@@ -1062,6 +1062,87 @@ members = ["eng1", "eng2"]
         assert_eq!(brain.desk_lead("eng"), Some("cto".to_string()));
     }
 
+    /// Regression for the builder seeding path (#133): a desk-order change written
+    /// to the store must take effect on routing once the brain is rebuilt from the
+    /// persisted record. The builder used to construct the brain with an empty
+    /// `overlay_desk_order`, so desk chats kept routing to the pre-reorder lead.
+    /// Here we persist a record, build a brain from the loaded record (blueprint
+    /// lead), then write a new order and rebuild the brain from the reloaded record
+    /// — the lead must update, not stay stale.
+    #[tokio::test]
+    async fn desk_order_change_updates_routing_after_rebuild() {
+        use crate::ports::store::CompanyStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsCompanyStore::new(dir.path());
+        let manifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[policy]
+mode = "full"
+
+[[agent]]
+id = "eng1"
+role = "Engineer One"
+
+[[agent]]
+id = "eng2"
+role = "Engineer Two"
+
+[[group_chat]]
+id = "eng"
+name = "Engineering"
+members = ["eng1", "eng2"]
+"#,
+        )
+        .expect("valid manifest");
+        let id = CompanyId::new("acme");
+        store
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest,
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        // Brain built from the persisted record before any reorder: blueprint lead.
+        let loaded = store.load(&id).await.unwrap().unwrap();
+        let (brain, _tasks) = brain_over(dir.path(), loaded);
+        assert_eq!(
+            brain.desk_lead("eng"),
+            Some("eng1".to_string()),
+            "blueprint lead before reorder"
+        );
+
+        // Operator reorders the desk (as `set_desk_order` does), promoting eng2.
+        let mut record = store.load(&id).await.unwrap().unwrap();
+        record
+            .overlay_desk_order
+            .push(crate::ports::types::OverlayDeskOrder {
+                desk_id: "eng".to_string(),
+                ordered: vec!["eng2".to_string(), "eng1".to_string()],
+            });
+        store.save(&record).await.unwrap();
+
+        // Rebuild the brain from the reloaded record: routing follows the reorder,
+        // no stale lead.
+        let reloaded = store.load(&id).await.unwrap().unwrap();
+        let (rebuilt, _tasks2) = brain_over(dir.path(), reloaded);
+        assert_eq!(
+            rebuilt.desk_lead("eng"),
+            Some("eng2".to_string()),
+            "reorder did not take effect on routing after rebuild"
+        );
+    }
+
     /// A `spawn_task` delegation opens a backlog card and surfaces no bubble.
     #[tokio::test]
     async fn spawn_task_delegation_opens_a_backlog_card() {

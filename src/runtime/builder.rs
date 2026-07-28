@@ -731,6 +731,39 @@ impl RuntimeBuilder {
         // harness arm so `CompanyRuntime::set_steer` can be wired downstream.
         #[cfg(feature = "openhuman")]
         let mut steer_registry: Option<crate::company::steer::InflightRegistry> = None;
+
+        // Load the persisted record BEFORE constructing the brain so the brain's
+        // in-memory record carries the operator overlays (team, desk memberships,
+        // desk order/hierarchy, operator-created desks) rather than empty lists.
+        // The brain's `desk_lead` resolver reads `overlay_desk_order`, so seeding
+        // it from the persisted record is what makes a `/desks/{id}/order` reorder
+        // take effect on routing after the runtime is rebuilt — otherwise desk
+        // chats keep routing to the pre-reorder lead. `save` only writes
+        // company.toml + meta.json; the append-only ledger file is left untouched,
+        // so an existing ledger survives a rebuild.
+        let existing = store.load(&id).await?;
+        let lifecycle = existing
+            .as_ref()
+            .map(|r| r.lifecycle.clone())
+            .unwrap_or_else(|| "running".to_string());
+        let overlay_agents = existing
+            .as_ref()
+            .map(|r| r.overlay_agents.clone())
+            .unwrap_or_default();
+        let overlay_desk_members = existing
+            .as_ref()
+            .map(|r| r.overlay_desk_members.clone())
+            .unwrap_or_default();
+        let overlay_desk_order = existing
+            .as_ref()
+            .map(|r| r.overlay_desk_order.clone())
+            .unwrap_or_default();
+        let overlay_desks = existing
+            .as_ref()
+            .map(|r| r.overlay_desks.clone())
+            .unwrap_or_default();
+        let ledger = existing.map(|r| r.ledger).unwrap_or_default();
+
         let brain: Arc<dyn Brain> = match self.brain {
             Some(brain) => brain,
             None => {
@@ -916,11 +949,15 @@ impl RuntimeBuilder {
                                 id: id.clone(),
                                 manifest: self.manifest.clone(),
                                 ledger: Vec::new(),
-                                lifecycle: "running".to_string(),
-                                overlay_agents: Vec::new(),
-                                overlay_desk_members: Vec::new(),
-                                overlay_desk_order: Vec::new(),
-                                overlay_desks: Vec::new(),
+                                lifecycle: lifecycle.clone(),
+                                // Seed the brain from the persisted overlays so
+                                // desk routing (`desk_lead` → `effective_desk_members`
+                                // → `overlay_desk_order`) reflects the operator's
+                                // current hierarchy, not the blueprint default.
+                                overlay_agents: overlay_agents.clone(),
+                                overlay_desk_members: overlay_desk_members.clone(),
+                                overlay_desk_order: overlay_desk_order.clone(),
+                                overlay_desks: overlay_desks.clone(),
                             };
                             // Workflow agent nodes execute on the same pool as the
                             // brain — clone before both moves into `HarnessBrain`.
@@ -975,34 +1012,11 @@ impl RuntimeBuilder {
         };
 
         // Materialize the manifest so status/roster loads have a record to read.
-        // `save` only writes company.toml + meta.json; the append-only ledger
-        // file is left untouched, so an existing ledger survives a rebuild.
-        let existing = store.load(&id).await?;
-        let lifecycle = existing
-            .as_ref()
-            .map(|r| r.lifecycle.clone())
-            .unwrap_or_else(|| "running".to_string());
-        // Preserve the operator team + desk overlays across rebuilds — a rebuild
-        // never rewrites the version-controlled manifest, and it must not drop
-        // operator-added teammates, desk memberships, or operator-created desks
-        // either.
-        let overlay_agents = existing
-            .as_ref()
-            .map(|r| r.overlay_agents.clone())
-            .unwrap_or_default();
-        let overlay_desk_members = existing
-            .as_ref()
-            .map(|r| r.overlay_desk_members.clone())
-            .unwrap_or_default();
-        let overlay_desk_order = existing
-            .as_ref()
-            .map(|r| r.overlay_desk_order.clone())
-            .unwrap_or_default();
-        let overlay_desks = existing
-            .as_ref()
-            .map(|r| r.overlay_desks.clone())
-            .unwrap_or_default();
-        let ledger = existing.map(|r| r.ledger).unwrap_or_default();
+        // The persisted overlays + ledger + lifecycle were read above (before the
+        // brain was constructed, so the brain could be seeded from them); a rebuild
+        // never rewrites the version-controlled manifest, and must not drop the
+        // operator-added teammates, desk memberships, desk order, or operator-
+        // created desks either.
         store
             .save(&CompanyRecord {
                 id: id.clone(),
