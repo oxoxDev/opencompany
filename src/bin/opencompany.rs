@@ -192,7 +192,13 @@ async fn register_company(
         opencompany::ports::types::TemplateProvenance {
             source_id: slug.to_string(),
             version: None,
-            path: Some(source_dir.display().to_string()),
+            // Record only the template directory's basename, never the raw
+            // absolute host path: `path` is exposed verbatim on the GraphQL and
+            // REST provenance surfaces, and the absolute source dir would leak
+            // the host filesystem layout + username. `slug` is already the final
+            // path component (the `file_name()` guard above makes this `None`
+            // when there is no basename, e.g. `serve --company .`).
+            path: Some(slug.to_string()),
         }
     });
     let mut builder = attach_tinyhumans_feedback(
