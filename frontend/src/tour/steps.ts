@@ -55,7 +55,7 @@ export const TOUR: TourStop[] = [
     target: '[data-tour="nav-desks"]',
     placement: "right",
     title: "Desks",
-    body: "Teammates group into desks by function — Engineering, Support, and so on. Work routed to a desk goes to its lead.",
+    body: "Teammates group into desks by function — Engineering, Support, and so on. Work routed to a desk goes to its lead. Spin up your own with New desk anytime.",
   },
   {
     view: "workflows",
