@@ -407,7 +407,21 @@ async fn best_effort_revoke(runtime: &CompanyRuntime, provider: &str) {
     let Some(url) = revoke_url(provider, &config) else {
         return;
     };
-    let client = reqwest::Client::new();
+    // Bound the best-effort revoke: a provider that accepts the connection but
+    // hangs (or a slow `_REVOKE_URL` override) must not block the disconnect
+    // handler indefinitely. A builder failure skips the remote revoke entirely
+    // — the caller blanks the local secret unconditionally, so this stays
+    // best-effort without blocking or panicking.
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::warn!(provider, "oauth revoke client build failed: {err}");
+            return;
+        }
+    };
     let request = match provider {
         // GitHub revokes a grant with an authenticated DELETE carrying the token
         // in the JSON body and the app credentials as Basic auth.
