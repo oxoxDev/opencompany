@@ -31,7 +31,8 @@ use crate::ports::events::EventLog;
 use crate::ports::memory::MemoryStore;
 use crate::ports::store::CompanyStore;
 use crate::ports::types::{
-    CompanyId, CompanyRecord, CompressedTrace, ContextChunk, EventSeq, LedgerEntry, StoredEvent,
+    CompanyId, CompanyRecord, CompressedTrace, ContextChunk, EventSeq, LedgerEntry,
+    OverlayDeskOrder, StoredEvent,
 };
 
 /// Canonical bundle file and directory names, matching the fs
@@ -84,6 +85,12 @@ fn io_err(path: &Path, source: std::io::Error) -> OpenCompanyError {
 struct BundleMeta {
     lifecycle: String,
     id: String,
+    /// The operator per-desk member-ordering overlay. Preserved across the bundle
+    /// round-trip so an export→import keeps the operator-defined desk hierarchy
+    /// (and therefore the routing lead). `#[serde(default)]` loads bundles written
+    /// before this field existed as an empty order.
+    #[serde(default)]
+    overlay_desk_order: Vec<OverlayDeskOrder>,
 }
 
 /// One exported context chunk: its content address, label, and body.
@@ -111,6 +118,9 @@ struct BundleContents {
     events: Vec<StoredEvent>,
     traces: Vec<CompressedTrace>,
     context: Vec<ExportedChunk>,
+    /// The operator per-desk member-ordering overlay, carried through the bundle
+    /// so export→import preserves the desk hierarchy (and routing lead).
+    overlay_desk_order: Vec<OverlayDeskOrder>,
 }
 
 impl BundleContents {
@@ -149,6 +159,7 @@ impl BundleContents {
             events,
             traces,
             context: chunks,
+            overlay_desk_order: record.overlay_desk_order,
         })
     }
 
@@ -173,7 +184,7 @@ impl BundleContents {
                 lifecycle: self.lifecycle.clone(),
                 overlay_agents: Vec::new(),
                 overlay_desk_members: Vec::new(),
-                overlay_desk_order: Vec::new(),
+                overlay_desk_order: self.overlay_desk_order.clone(),
                 overlay_desks: Vec::new(),
             })
             .await?;
@@ -211,6 +222,7 @@ impl BundleContents {
         let meta = BundleMeta {
             lifecycle: self.lifecycle.clone(),
             id: self.id.as_ref().to_string(),
+            overlay_desk_order: self.overlay_desk_order.clone(),
         };
         write_file(
             &dest.join(META_JSON),
@@ -287,6 +299,7 @@ impl BundleContents {
             events,
             traces,
             context,
+            overlay_desk_order: meta.overlay_desk_order,
         })
     }
 }
@@ -768,6 +781,87 @@ mod test {
             events[0].event,
             CompanyEvent::LifecycleChanged { .. }
         ));
+
+        for dir in [home1, home2, dest] {
+            tokio::fs::remove_dir_all(&dir).await.ok();
+        }
+    }
+
+    /// A non-empty operator desk-order overlay survives export→import, so the
+    /// operator-defined desk hierarchy — and therefore the routing lead — is not
+    /// silently reset to the blueprint order by a bundle round-trip.
+    #[tokio::test]
+    async fn desk_order_survives_roundtrip() {
+        let home1 = tmp_root("order-src");
+        let home2 = tmp_root("order-dst");
+        let dest = tmp_root("order-bundle");
+        let id = CompanyId::new("order-co");
+
+        // A manifest desk whose blueprint lead is `ceo`.
+        let manifest: CompanyManifest = toml::from_str(
+            r#"
+            [company]
+            name = "Order Co"
+            output = "widgets"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+
+            [[agent]]
+            id = "cto"
+            role = "Tech"
+
+            [[group_chat]]
+            id = "eng"
+            name = "Engineering"
+            members = ["ceo", "cto"]
+        "#,
+        )
+        .expect("parse manifest");
+
+        // Operator reorders the desk so `cto` becomes the lead — a non-empty order.
+        let order = vec![OverlayDeskOrder {
+            desk_id: "eng".into(),
+            ordered: vec!["cto".into(), "ceo".into()],
+        }];
+
+        let (s1, e1, m1, c1) = fs_ports(&home1);
+        s1.save(&CompanyRecord {
+            id: id.clone(),
+            manifest: manifest.clone(),
+            ledger: Vec::new(),
+            lifecycle: "running".into(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: order.clone(),
+            overlay_desks: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+        // Sanity: the override already flips the lead in the source.
+        let src_record = s1.load(&id).await.unwrap().unwrap();
+        assert_eq!(src_record.effective_desk_members("eng")[0], "cto");
+
+        export_bundle(&id, &dest, s1, e1, m1, c1, ExportOpts::default())
+            .await
+            .unwrap();
+        let (s2, e2, m2, c2) = fs_ports(&home2);
+        import_bundle(&dest, s2.clone(), e2, m2, c2).await.unwrap();
+
+        // The order overlay came across intact — not reset to an empty list.
+        let dst_record = s2.load(&id).await.unwrap().unwrap();
+        assert_eq!(
+            dst_record.overlay_desk_order, order,
+            "desk order overlay dropped by the bundle round-trip"
+        );
+        // And it still drives routing: `cto` remains the lead after import.
+        assert_eq!(
+            dst_record.effective_desk_members("eng")[0],
+            "cto",
+            "routing lead reverted to blueprint after import"
+        );
 
         for dir in [home1, home2, dest] {
             tokio::fs::remove_dir_all(&dir).await.ok();
