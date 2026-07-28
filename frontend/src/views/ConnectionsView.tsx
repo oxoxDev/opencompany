@@ -609,8 +609,10 @@ function McpServersSection({
                   </Label>
                   <Input
                     id="mcp-endpoint"
+                    name="mcp-endpoint-url"
                     value={endpoint}
                     placeholder="https://host/mcp"
+                    autoComplete="url"
                     onChange={(e) => setEndpoint(e.target.value)}
                   />
                 </div>
@@ -651,10 +653,11 @@ function McpServersSection({
                   </Label>
                   <Input
                     id="mcp-token"
+                    name="mcp-token-secret"
                     type="password"
                     value={token}
                     placeholder="write-only"
-                    autoComplete="off"
+                    autoComplete="new-password"
                     onChange={(e) => setToken(e.target.value)}
                   />
                 </div>
