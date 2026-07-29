@@ -7,6 +7,11 @@ name = "Agentic Software Company"
 output = "An entire SaaS product"
 human_role = "Product direction"
 
+[tools]
+# Composio integration tools (Gmail/Slack/GitHub). Fail-closed until a
+# per-company Composio bearer is set via the console.
+allow = ["composio"]
+
 [[agent]]
 id = "product_manager"
 role = "Product Manager"

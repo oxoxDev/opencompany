@@ -25,6 +25,11 @@ mode = "full"
 # the company. It is the identity the e2e suite authenticates as.
 admins = ["harness-e2e@tinyhumans.ai"]
 
+[tools]
+# Composio integration tools (Gmail/Slack/GitHub). Fail-closed until a
+# per-company Composio bearer is set via the console.
+allow = ["composio"]
+
 [[agent]]
 id = "ceo"
 role = "Chief Executive"
