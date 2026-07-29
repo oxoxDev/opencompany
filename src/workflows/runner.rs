@@ -1072,4 +1072,250 @@ to = "done"
             run.output
         );
     }
+
+    // --- Issue #155: harness↔engine re-entry depth guard --------------------
+
+    use std::sync::LazyLock;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use tinyagents::harness::message::{AssistantMessage, Message};
+    use tinyagents::harness::model::{ChatModel, ModelProfile, ModelRequest, ModelResponse};
+    use tinyagents::harness::tool::ToolCall;
+
+    use crate::harness::provider::HarnessModel;
+    use crate::ports::types::{CompanySummary, LedgerEntry, OverlayAgent};
+
+    /// A native-tool-calling capability profile (`tool_calling: true`), so the
+    /// harness drives the reliable [`NativeToolDispatcher`] path (issue #145)
+    /// rather than the prompt-guided XML fallback — mirroring the managed
+    /// inference surface the product actually runs.
+    static LOOP_PROFILE: LazyLock<ModelProfile> = LazyLock::new(|| ModelProfile {
+        tool_calling: true,
+        ..ModelProfile::default()
+    });
+
+    /// A self-referential workflow: `trigger → agent(ceo) → output`. Its agent
+    /// node routes back to the orchestrator (`ceo`), which carries the
+    /// `run_workflow` tool over the shared runner handle — so running it can run
+    /// it again, forming the harness↔engine re-entry cycle of issue #155.
+    const LOOP_WF: &str = r#"
+id = "loop"
+name = "Loop"
+
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+
+[[node]]
+id = "call"
+kind = "agent"
+name = "Call orchestrator"
+agent = "ceo"
+
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+
+[[edge]]
+from = "start"
+to = "call"
+
+[[edge]]
+from = "call"
+to = "done"
+"#;
+
+    /// A scripted native-tool-calling model (advertises [`LOOP_PROFILE`] so the
+    /// harness drives structured tool calls, no network) that asks to run the
+    /// `loop` workflow on the first invoke of a turn, then replies plainly once
+    /// the tool has answered. It records whether the re-entry guard's clean error
+    /// ever surfaced back into a conversation.
+    #[derive(Default)]
+    struct LoopModel {
+        invokes: AtomicUsize,
+        saw_depth_error: AtomicBool,
+    }
+
+    #[async_trait]
+    impl ChatModel<()> for LoopModel {
+        fn profile(&self) -> Option<&ModelProfile> {
+            Some(&LOOP_PROFILE)
+        }
+
+        async fn invoke(
+            &self,
+            _state: &(),
+            request: ModelRequest,
+        ) -> tinyagents::Result<ModelResponse> {
+            let n = self.invokes.fetch_add(1, Ordering::SeqCst);
+            // The guard returns a clean `Error` that `RunWorkflowTool` turns into a
+            // tool-error result; seeing it fed back into a later conversation
+            // proves the cycle failed gracefully rather than overflowing.
+            if request
+                .messages
+                .iter()
+                .any(|m| m.text().contains("re-entry depth exceeded"))
+            {
+                self.saw_depth_error.store(true, Ordering::SeqCst);
+            }
+            // Each recursion level runs on a freshly rebuilt agent, so any prior
+            // assistant or tool message means the tool already ran this turn →
+            // stop and reply. The absolute invoke ceiling is a belt-and-suspenders
+            // bound so a heuristic miss can never run away.
+            let is_followup = request
+                .messages
+                .iter()
+                .any(|m| matches!(m, Message::Assistant(_) | Message::Tool(_)));
+            if is_followup || n > 64 {
+                return Ok(ModelResponse::assistant("done"));
+            }
+            // Ask to run the `loop` workflow via a structured (native) tool call.
+            Ok(ModelResponse {
+                message: AssistantMessage {
+                    id: None,
+                    content: Vec::new(),
+                    tool_calls: vec![ToolCall {
+                        id: format!("call-{n}"),
+                        name: "run_workflow".to_string(),
+                        arguments: serde_json::json!({ "id": "loop" }),
+                        invalid: None,
+                    }],
+                    usage: None,
+                },
+                usage: None,
+                finish_reason: Some("tool_calls".to_string()),
+                raw: None,
+                resolved_model: None,
+                continue_turn: None,
+            })
+        }
+    }
+
+    impl HarnessModel for LoopModel {
+        fn telemetry_provider_id(&self) -> String {
+            "loop-test".to_string()
+        }
+    }
+
+    /// A [`CompanyStore`] whose `load` returns a record with a *different* overlay
+    /// teammate on every call, so [`HarnessPool::ensure`] re-fingerprints and
+    /// rebuilds the roster each time the runner consults it. This models the
+    /// production condition under which the re-entry cycle recurses on *fresh*
+    /// orchestrator instances (rather than deadlocking on one agent's re-entrant
+    /// `Mutex`), which is exactly when the depth guard is the operative bound.
+    #[derive(Default)]
+    struct RebuildStore {
+        loads: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl crate::ports::CompanyStore for RebuildStore {
+        async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+            let n = self.loads.fetch_add(1, Ordering::SeqCst);
+            let mut rec = record();
+            rec.overlay_agents = vec![OverlayAgent {
+                id: format!("ghost-{n}"),
+                name: "Ghost".into(),
+                role: "Rebuild trigger".into(),
+                description: None,
+            }];
+            Ok(Some(rec))
+        }
+        async fn save(&self, _record: &CompanyRecord) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+            Ok(Vec::new())
+        }
+        async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Regression for issue #155. An `agent` node that resolves back to the
+    /// orchestrator (which re-runs the same workflow) forms a harness↔engine
+    /// re-entry cycle. Pre-fix it recursed without bound until the Tokio worker
+    /// stack overflowed and aborted the host; post-fix the task-local depth guard
+    /// in [`HarnessPool::run_inner`] refuses past `MAX_AGENT_REENTRY_DEPTH`, the
+    /// workflow run fails gracefully, and the turn returns normally.
+    #[test]
+    fn workflow_agent_reentry_is_bounded_not_a_stack_overflow() {
+        // Drive the async body on a dedicated, generous stack with a
+        // current-thread runtime (the `#[tokio::test]` default flavour). The
+        // *bounded* 8-level re-entry chain — each level a full turn-loop + engine
+        // + tool-dispatch frame — is deep, so libtest's small default stack would
+        // false-overflow even the fixed code. Pre-fix the same chain recurses
+        // WITHOUT bound and exhausts even this 32 MiB; the depth guard is what
+        // stops it. A `spawn`ed thread that `join`s propagates a real overflow as
+        // an abort (test failure), so this still fails loudly on a regression.
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .name("wf155-reentry".into())
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("current-thread runtime builds")
+                    .block_on(reentry_body());
+            })
+            .expect("spawn re-entry thread")
+            .join()
+            .expect("the bounded re-entry cycle must not overflow/abort the host");
+    }
+
+    async fn reentry_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        write_wf(source.path(), "loop", LOOP_WF);
+
+        let model = Arc::new(LoopModel::default());
+        let mut deps = deps(dir.path());
+        deps.provider = model.clone();
+        deps.store = Arc::new(RebuildStore::default());
+        // Doubles as the run_workflow tool's source dir: `build_agent` wires the
+        // orchestrator's run_workflow tool from `skills_source_dir`.
+        deps.skills_source_dir = Some(source.path().to_path_buf());
+
+        let rec = record(); // single `ceo` agent → the orchestrator
+        let pool = Arc::new(HarnessPool::new());
+
+        // Fill the shared handle exactly as the runtime builder does, so the
+        // orchestrator's run_workflow tool reaches a real HarnessWorkflowRunner
+        // over the same pool/deps.
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(HarnessWorkflowRunner::new(
+            pool.clone(),
+            deps.clone(),
+            rec.clone(),
+        ));
+        deps.workflow_runner.set(&runner);
+
+        pool.ensure(&rec, &deps)
+            .await
+            .expect("initial roster builds");
+
+        // One orchestrator turn drives the whole cycle. It MUST return — not hang,
+        // not overflow/abort. The depth cap keeps the recursion shallow and fast.
+        let outcome = pool
+            .run(&rec.id, "ceo", "kick off the loop", &deps, None)
+            .await
+            .expect("the bounded re-entry cycle resolves gracefully");
+
+        // Proof the guard actually fired and its clean error propagated back into
+        // the workflow run as a tool error (graceful failure, not a crash).
+        assert!(
+            model.saw_depth_error.load(Ordering::SeqCst),
+            "the re-entry depth guard must fire and surface a clean error to the turn"
+        );
+        // The top turn still resolves to a normal reply.
+        assert!(
+            !outcome.reply.is_empty(),
+            "the top-level turn should produce a reply, got empty"
+        );
+
+        // The handle holds only a Weak; keep the strong runner alive to here.
+        drop(runner);
+    }
 }
