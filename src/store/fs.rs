@@ -484,12 +484,18 @@ impl MemoryStore for FsMemoryStore {
 // ContextStore
 // ---------------------------------------------------------------------------
 
-/// A context index line pairing an address with its label and length.
+/// A context index line pairing an address with its label, length, and the
+/// epoch-millis it was first stored.
+///
+/// `stored_at_millis` defaults to `0` so index lines written before the field
+/// existed still deserialize — they simply report an unknown store time.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct IndexEntry {
     addr: String,
     label: String,
     len: usize,
+    #[serde(default)]
+    stored_at_millis: u64,
 }
 
 /// Filesystem [`ContextStore`]: content-addressed blobs plus a JSONL index.
@@ -535,6 +541,7 @@ impl ContextStore for FsContextStore {
             addr: addr.clone(),
             label: chunk.label,
             len: chunk.body.len(),
+            stored_at_millis: now_millis(),
         };
         append_line(&index_path, &serde_json::to_string(&entry)?).await?;
         Ok(ChunkAddr::new(addr))
@@ -549,6 +556,7 @@ impl ContextStore for FsContextStore {
                 addr: ChunkAddr::new(e.addr),
                 label: e.label,
                 len: e.len,
+                stored_at_millis: e.stored_at_millis,
             })
             .collect())
     }
@@ -869,6 +877,27 @@ mod test {
         let root = tmp_root();
         conformance::assert_inbox_store(Arc::new(FsInboxStore::new(&root))).await;
         tokio::fs::remove_dir_all(&root).await.ok();
+    }
+
+    #[tokio::test]
+    async fn conformance_context_chunk_stamps() {
+        let root = tmp_root();
+        conformance::assert_context_chunk_stamps(Arc::new(FsContextStore::new(&root))).await;
+        tokio::fs::remove_dir_all(&root).await.ok();
+    }
+
+    /// The fs backend's migration path: index lines written before
+    /// `stored_at_millis` existed carry no such field, and must still
+    /// deserialize — reporting an unknown (`0`) store time rather than failing
+    /// the read and blanking the whole Brain list.
+    #[test]
+    fn legacy_context_index_line_without_a_stamp_still_parses() {
+        let legacy = r#"{"addr":"abc123","label":"agent/ceo","len":24}"#;
+        let entry: IndexEntry = serde_json::from_str(legacy).expect("legacy index line parses");
+        assert_eq!(entry.addr, "abc123");
+        assert_eq!(entry.label, "agent/ceo");
+        assert_eq!(entry.len, 24);
+        assert_eq!(entry.stored_at_millis, 0);
     }
 
     #[tokio::test]

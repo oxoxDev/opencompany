@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS context_chunks (
     label      TEXT NOT NULL,
     body       TEXT NOT NULL,
     len        INTEGER NOT NULL,
+    stored_ms  INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (company_id, addr)
 );
 CREATE TABLE IF NOT EXISTS secrets (
@@ -205,6 +206,39 @@ fn sql_err(e: rusqlite::Error) -> OpenCompanyError {
     OpenCompanyError::Store(format!("sqlite error: {e}"))
 }
 
+/// Adds `column` to `table` when it is absent, so an additive schema change
+/// reaches databases created before the column existed.
+///
+/// [`MIGRATIONS`] is a bundle of `CREATE TABLE IF NOT EXISTS` statements, which
+/// silently skip an already-created table — new columns would therefore never
+/// land on an existing file. `PRAGMA table_info` is the check rather than
+/// swallowing the `ALTER`'s "duplicate column name" error, so a genuine `ALTER`
+/// failure still surfaces.
+fn add_column_if_missing(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+    let present = {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .map_err(sql_err)?;
+        // `table_info` column 1 is the column name.
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .map_err(sql_err)?;
+        let mut found = false;
+        for row in rows {
+            if row.map_err(sql_err)? == column {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+    if present {
+        return Ok(());
+    }
+    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))
+        .map_err(sql_err)
+}
+
 /// Translates a `usize` limit into a SQLite `LIMIT` value. `usize::MAX` (the
 /// "read everything" sentinel used by export/replay) maps to `-1`, SQLite's
 /// unbounded-limit encoding.
@@ -239,6 +273,14 @@ impl SqliteStore {
 
     fn from_conn(conn: Connection) -> Result<Self> {
         conn.execute_batch(MIGRATIONS).map_err(sql_err)?;
+        // `CREATE TABLE IF NOT EXISTS` is a no-op on a database that predates a
+        // column, so additive columns need their own idempotent step.
+        add_column_if_missing(
+            &conn,
+            "context_chunks",
+            "stored_ms",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
         Ok(Self {
             conn: Arc::new(StdMutex::new(conn)),
             senders: Arc::new(StdMutex::new(HashMap::new())),
@@ -553,14 +595,15 @@ impl ContextStore for SqliteStore {
         let addr = content_address(&chunk.body);
         let conn = self.conn();
         conn.execute(
-            "INSERT OR IGNORE INTO context_chunks (company_id, addr, label, body, len) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR IGNORE INTO context_chunks (company_id, addr, label, body, len, stored_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 id.as_ref(),
                 addr,
                 chunk.label,
                 chunk.body,
-                chunk.body.len() as i64
+                chunk.body.len() as i64,
+                now_millis() as i64
             ],
         )
         .map_err(sql_err)?;
@@ -571,7 +614,8 @@ impl ContextStore for SqliteStore {
         let conn = self.conn();
         let mut stmt = conn
             .prepare(
-                "SELECT addr, label, len FROM context_chunks WHERE company_id = ?1 ORDER BY rowid",
+                "SELECT addr, label, len, stored_ms FROM context_chunks \
+                 WHERE company_id = ?1 ORDER BY rowid",
             )
             .map_err(sql_err)?;
         let rows = stmt
@@ -580,17 +624,19 @@ impl ContextStore for SqliteStore {
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
                 ))
             })
             .map_err(sql_err)?;
         let mut out = Vec::new();
         for row in rows {
-            let (addr, label, len) = row.map_err(sql_err)?;
+            let (addr, label, len, stored_ms) = row.map_err(sql_err)?;
             if label.starts_with(prefix) {
                 out.push(ChunkMeta {
                     addr: ChunkAddr::new(addr),
                     label,
                     len: len as usize,
+                    stored_at_millis: stored_ms.max(0) as u64,
                 });
             }
         }
@@ -1786,6 +1832,85 @@ mod test {
     #[tokio::test]
     async fn conformance_fact_store() {
         conformance::assert_fact_store(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_context_chunk_stamps() {
+        conformance::assert_context_chunk_stamps(store()).await;
+    }
+
+    /// The migration path a fresh database never exercises.
+    ///
+    /// [`MIGRATIONS`] is all `CREATE TABLE IF NOT EXISTS`, which is a no-op
+    /// against a database that already has `context_chunks` — so on an existing
+    /// deployment only [`add_column_if_missing`] can add `stored_ms`. Without
+    /// it, every read of the column would fail with "no such column" and the
+    /// whole Brain list/stats surface would 500.
+    #[tokio::test]
+    async fn legacy_context_chunks_table_gains_stored_ms_on_open() {
+        // A database as it looked before the column existed, with a row in it.
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite");
+        conn.execute_batch(
+            "CREATE TABLE context_chunks (
+                 company_id TEXT NOT NULL,
+                 addr       TEXT NOT NULL,
+                 label      TEXT NOT NULL,
+                 body       TEXT NOT NULL,
+                 len        INTEGER NOT NULL,
+                 PRIMARY KEY (company_id, addr)
+             );
+             INSERT INTO context_chunks (company_id, addr, label, body, len)
+             VALUES ('acme', 'legacy-addr', 'agent/ceo', 'remembered before stamps', 24);",
+        )
+        .expect("seed a pre-`stored_ms` database");
+
+        let store = SqliteStore::from_conn(conn).expect("migrations run on a legacy database");
+        let id = CompanyId::new("acme");
+
+        // The legacy row survives the migration and reports an *unknown* store
+        // time — not the epoch, and not a misleading "migrated just now".
+        let metas = store.list(&id, "").await.expect("list after migration");
+        assert_eq!(metas.len(), 1, "the legacy row must not be dropped");
+        assert_eq!(metas[0].label, "agent/ceo");
+        assert_eq!(
+            metas[0].stored_at_millis, 0,
+            "a row written before stamps existed has no store time to report"
+        );
+
+        // A write after the migration is stamped for real.
+        let before = now_millis();
+        store
+            .put(
+                &id,
+                ContextChunk {
+                    label: "agent/ops".to_string(),
+                    body: "remembered after the migration".to_string(),
+                },
+            )
+            .await
+            .expect("put into a migrated database");
+
+        let metas = store.list(&id, "").await.expect("list after put");
+        assert_eq!(metas.len(), 2);
+        let fresh = metas
+            .iter()
+            .find(|m| m.label == "agent/ops")
+            .expect("the new chunk is listed");
+        assert!(
+            fresh.stored_at_millis >= before,
+            "a post-migration write must carry a real stamp, got {}",
+            fresh.stored_at_millis
+        );
+
+        // Reopening an already-migrated database must not try to add the column
+        // a second time — the `ALTER` would fail with "duplicate column name".
+        add_column_if_missing(
+            &store.conn(),
+            "context_chunks",
+            "stored_ms",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        .expect("adding an existing column is a no-op, not an error");
     }
 
     #[tokio::test]
