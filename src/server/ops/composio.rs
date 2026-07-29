@@ -79,15 +79,19 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<ComposioStatusDto,
     let configured = token_configured(runtime.id(), runtime.secrets().as_ref())
         .await
         .map_err(ApiError)?;
-    let env_url = {
+    let (env_url, api_url) = {
         use crate::app::config::EnvSource;
-        crate::app::config::ProcessEnv.get(crate::company::composio::COMPOSIO_BACKEND_URL_ENV)
+        let env = crate::app::config::ProcessEnv;
+        (
+            env.get(crate::company::composio::COMPOSIO_BACKEND_URL_ENV),
+            env.get(crate::company::composio::TINYHUMANS_API_URL_ENV),
+        )
     };
     Ok(ComposioStatusDto {
         in_build: cfg!(feature = "composio"),
         granted,
         token_configured: configured,
-        backend_url: backend_url_or_default(env_url),
+        backend_url: backend_url_or_default(env_url, api_url),
         toolkits,
     })
 }
