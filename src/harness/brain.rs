@@ -231,7 +231,7 @@ impl HarnessBrain {
         Ok(Some(OutboundMessage {
             channel: responder,
             text: task_postback_text(&card),
-            reply_to: Some(origin),
+            reply_to: Some(crate::ports::types::ReplyTo { chat_id: origin }),
             steps: Vec::new(),
         }))
     }
@@ -900,7 +900,10 @@ description = "Builds it."
             .await
             .expect("run")
             .expect("a card with an origin must post back");
-        assert_eq!(posted.reply_to.as_deref(), Some("strategy"));
+        assert_eq!(
+            posted.reply_to.as_ref().map(|r| r.chat_id.as_str()),
+            Some("strategy")
+        );
         assert!(
             !posted.channel.is_empty(),
             "the bubble must be attributed to the responder"
