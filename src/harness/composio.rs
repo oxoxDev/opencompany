@@ -30,7 +30,9 @@ use crate::ports::types::{CompanyId, SecretValue};
 // The credential key + backend routing live in the always-compiled
 // `company::composio` module (so the console read/write plane can manage the
 // token in the default build); re-exported here for the harness call sites.
-pub use crate::company::composio::{COMPOSIO_BACKEND_URL_ENV, TOKEN_KEY, backend_url_or_default};
+pub use crate::company::composio::{
+    COMPOSIO_BACKEND_URL_ENV, TINYHUMANS_API_URL_ENV, TOKEN_KEY, backend_url_or_default,
+};
 
 /// A per-tenant Composio configuration: the backend URL, the tenant's OAuth
 /// bearer token, and the toolkit allowlist.
@@ -80,10 +82,11 @@ impl TenantComposio {
     ///
     /// The token comes **only** from [`TOKEN_KEY`] in the secret store — there is
     /// no environment or platform-key fallback, by design: an absent token must
-    /// mean "no tools", never "borrow someone else's identity". The URL *may*
-    /// come from [`COMPOSIO_BACKEND_URL_ENV`], falling back to
-    /// [`DEFAULT_COMPOSIO_BACKEND_URL`]. `toolkits` is the manifest allowlist,
-    /// threaded through unchanged.
+    /// mean "no tools", never "borrow someone else's identity". The URL resolves
+    /// from [`COMPOSIO_BACKEND_URL_ENV`], then the tenant API base
+    /// [`TINYHUMANS_API_URL_ENV`], then [`DEFAULT_BACKEND_URL`] — see
+    /// [`backend_url_or_default`]. `toolkits` is the manifest allowlist, threaded
+    /// through unchanged.
     ///
     /// A secret-store read error degrades to `None` (fail closed) rather than
     /// bubbling — a transient store hiccup withholds the tools for that turn
@@ -93,6 +96,7 @@ impl TenantComposio {
         secrets: &dyn SecretStore,
         toolkits: Vec<String>,
         backend_url_env: Option<String>,
+        api_url_env: Option<String>,
     ) -> Option<Self> {
         let token = match secrets.get(company, TOKEN_KEY).await {
             Ok(Some(SecretValue(token))) => token,
@@ -103,7 +107,7 @@ impl TenantComposio {
             return None;
         }
         Some(Self {
-            backend_url: backend_url_or_default(backend_url_env),
+            backend_url: backend_url_or_default(backend_url_env, api_url_env),
             auth_token: token,
             toolkits,
         })
@@ -664,7 +668,7 @@ mod tests {
         // SAFETY: single-threaded test; we set then restore the env.
         unsafe { std::env::set_var("TINYHUMANS_API_KEY", "platform-managed-key") };
         assert!(
-            TenantComposio::resolve(&company, &secrets, Vec::new(), None)
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None)
                 .await
                 .is_none(),
             "no stored token must fail closed, ignoring any env platform key"
@@ -676,7 +680,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            TenantComposio::resolve(&company, &secrets, Vec::new(), None)
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None)
                 .await
                 .is_none(),
             "an empty/whitespace token must fail closed"
@@ -691,12 +695,26 @@ mod tests {
             )
             .await
             .unwrap();
-        let resolved = TenantComposio::resolve(&company, &secrets, vec!["gmail".into()], None)
-            .await
-            .expect("a stored token resolves");
+        let resolved =
+            TenantComposio::resolve(&company, &secrets, vec!["gmail".into()], None, None)
+                .await
+                .expect("a stored token resolves");
         assert_eq!(resolved.auth_token, "tenant-token-xyz");
         assert_eq!(resolved.backend_url, "https://api.tinyhumans.ai");
         assert_eq!(resolved.toolkits, vec!["gmail".to_string()]);
+
+        // With no explicit override, the tenant API base is threaded into the
+        // backend URL so a staging tenant's Composio follows staging.
+        let staged = TenantComposio::resolve(
+            &company,
+            &secrets,
+            Vec::new(),
+            None,
+            Some("https://staging-api.tinyhumans.ai".into()),
+        )
+        .await
+        .expect("a stored token resolves");
+        assert_eq!(staged.backend_url, "https://staging-api.tinyhumans.ai");
 
         unsafe { std::env::remove_var("TINYHUMANS_API_KEY") };
         std::fs::remove_dir_all(&dir).ok();

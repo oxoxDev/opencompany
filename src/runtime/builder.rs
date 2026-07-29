@@ -872,24 +872,30 @@ impl RuntimeBuilder {
                             });
                             // Issue #110: resolve the per-tenant Composio config
                             // at boot from the company secret store (token) + the
-                            // manifest toolkit allowlist + the env URL override.
-                            // Only companies that explicitly grant `composio`
-                            // touch the store; the token has no env fallback, so a
-                            // missing token stays `None` (fail closed).
-                            // `HarnessPool::ensure` re-resolves this each turn so a
-                            // console token change takes effect without restart.
+                            // manifest toolkit allowlist + the env URL override,
+                            // falling back to the tenant API base so staging
+                            // Composio follows staging. Only companies that
+                            // explicitly grant `composio` touch the store; the
+                            // token has no env fallback, so a missing token stays
+                            // `None` (fail closed). `HarnessPool::ensure`
+                            // re-resolves this each turn so a console token change
+                            // takes effect without restart.
                             let composio_config = if crate::company::grants_composio_explicit(
                                 &self.manifest.tools.allow,
                             ) {
                                 use crate::app::config::EnvSource;
                                 let toolkits = self.manifest.tools.composio.toolkits.clone();
-                                let url = crate::app::config::ProcessEnv
-                                    .get(crate::harness::composio::COMPOSIO_BACKEND_URL_ENV);
+                                let env = crate::app::config::ProcessEnv;
+                                let url =
+                                    env.get(crate::harness::composio::COMPOSIO_BACKEND_URL_ENV);
+                                let api_url =
+                                    env.get(crate::harness::composio::TINYHUMANS_API_URL_ENV);
                                 crate::harness::composio::TenantComposio::resolve(
                                     &id,
                                     secrets.as_ref(),
                                     toolkits,
                                     url,
+                                    api_url,
                                 )
                                 .await
                             } else {

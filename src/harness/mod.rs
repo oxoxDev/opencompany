@@ -702,9 +702,11 @@ impl HarnessPool {
     /// secret store wired this degrades to the static [`HarnessDeps::composio`].
     ///
     /// The token has no env fallback — an absent/empty secret yields `None` (fail
-    /// closed). The backend URL honors [`composio::COMPOSIO_BACKEND_URL_ENV`],
-    /// read process-globally so a live re-resolution keeps the override even when
-    /// no token was stored at boot.
+    /// closed). The backend URL resolves from
+    /// [`composio::COMPOSIO_BACKEND_URL_ENV`], then the tenant API base
+    /// [`composio::TINYHUMANS_API_URL_ENV`], then the prod default — read
+    /// process-globally so a live re-resolution keeps the override even when no
+    /// token was stored at boot.
     async fn resolve_composio(
         &self,
         company: &CompanyRecord,
@@ -717,9 +719,17 @@ impl HarnessPool {
         match &deps.secrets {
             Some(secrets) => {
                 use crate::app::config::EnvSource;
-                let url = crate::app::config::ProcessEnv.get(composio::COMPOSIO_BACKEND_URL_ENV);
-                composio::TenantComposio::resolve(&company.id, secrets.as_ref(), toolkits, url)
-                    .await
+                let env = crate::app::config::ProcessEnv;
+                let url = env.get(composio::COMPOSIO_BACKEND_URL_ENV);
+                let api_url = env.get(composio::TINYHUMANS_API_URL_ENV);
+                composio::TenantComposio::resolve(
+                    &company.id,
+                    secrets.as_ref(),
+                    toolkits,
+                    url,
+                    api_url,
+                )
+                .await
             }
             None => deps.composio.clone(),
         }

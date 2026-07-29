@@ -19,20 +19,38 @@ use crate::ports::types::{CompanyId, SecretValue};
 /// raw token string.
 pub const TOKEN_KEY: &str = "composio/token";
 
-/// The environment override for the Composio backend URL. Only the **URL** has
-/// an env path — the **token** deliberately does not (fail-closed isolation).
+/// The explicit environment override for the Composio backend URL. Only the
+/// **URL** has an env path — the **token** deliberately does not (fail-closed
+/// isolation). When unset, resolution falls back to the tenant's shared API
+/// base ([`TINYHUMANS_API_URL_ENV`]) so staging Composio follows staging.
 pub const COMPOSIO_BACKEND_URL_ENV: &str = "OPENCOMPANY_COMPOSIO_BACKEND_URL";
 
-/// Default backend base URL for the Composio routes when the environment does
-/// not override it. Mirrors the media backend's default host.
+/// The tenant's shared TinyHumans API base URL (the same backend inference and
+/// the rest of the app already use). Used as the Composio backend fallback when
+/// [`COMPOSIO_BACKEND_URL_ENV`] is unset, so a staging tenant's Composio calls
+/// go to staging instead of the hardcoded prod default.
+pub const TINYHUMANS_API_URL_ENV: &str = "TINYHUMANS_API_URL";
+
+/// Default backend base URL for the Composio routes when neither the explicit
+/// override nor the tenant API base is set. Mirrors the media backend's default
+/// host (prod).
 pub const DEFAULT_BACKEND_URL: &str = "https://api.tinyhumans.ai";
 
-/// The effective backend URL: the trimmed env override when non-empty, else the
-/// default. Credential-free — safe to surface on the console read plane.
-pub fn backend_url_or_default(env_url: Option<String>) -> String {
-    env_url
+/// The effective Composio backend URL, resolved in this order (first non-empty,
+/// trimmed, wins):
+///
+/// 1. `env_override` — [`COMPOSIO_BACKEND_URL_ENV`], the explicit override.
+/// 2. `api_url` — [`TINYHUMANS_API_URL_ENV`], the tenant's shared backend base,
+///    so Composio follows staging/prod with the rest of the app.
+/// 3. [`DEFAULT_BACKEND_URL`] (prod) — last resort.
+///
+/// Credential-free — safe to surface on the console read plane.
+pub fn backend_url_or_default(env_override: Option<String>, api_url: Option<String>) -> String {
+    [env_override, api_url]
+        .into_iter()
+        .flatten()
         .map(|u| u.trim().to_string())
-        .filter(|u| !u.is_empty())
+        .find(|u| !u.is_empty())
         .unwrap_or_else(|| DEFAULT_BACKEND_URL.to_string())
 }
 
@@ -63,15 +81,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn backend_url_prefers_env_then_default() {
-        assert_eq!(backend_url_or_default(None), DEFAULT_BACKEND_URL);
+    fn backend_url_prefers_override_then_api_url_then_default() {
+        // Neither set → prod default.
+        assert_eq!(backend_url_or_default(None, None), DEFAULT_BACKEND_URL);
+
+        // Explicit override wins over everything.
         assert_eq!(
-            backend_url_or_default(Some("  ".into())),
+            backend_url_or_default(
+                Some("https://custom.example".into()),
+                Some("https://staging-api.tinyhumans.ai".into())
+            ),
+            "https://custom.example"
+        );
+
+        // No override → follow the tenant API base (the staging case).
+        assert_eq!(
+            backend_url_or_default(None, Some("https://staging-api.tinyhumans.ai".into())),
+            "https://staging-api.tinyhumans.ai"
+        );
+
+        // Whitespace/empty override falls through to the api_url fallback.
+        assert_eq!(
+            backend_url_or_default(
+                Some("  ".into()),
+                Some("https://staging-api.tinyhumans.ai".into())
+            ),
+            "https://staging-api.tinyhumans.ai"
+        );
+
+        // Whitespace/empty api_url falls through to the prod default.
+        assert_eq!(
+            backend_url_or_default(Some("".into()), Some("   ".into())),
             DEFAULT_BACKEND_URL
         );
+
+        // api_url is trimmed before use.
         assert_eq!(
-            backend_url_or_default(Some("https://custom.example".into())),
-            "https://custom.example"
+            backend_url_or_default(None, Some("  https://staging-api.tinyhumans.ai  ".into())),
+            "https://staging-api.tinyhumans.ai"
         );
     }
 }
