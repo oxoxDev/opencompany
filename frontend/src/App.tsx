@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
+import { toast } from "sonner";
 
 import { verifyCode } from "@/api/auth";
 import { OpenCompanyClient } from "@/api/client";
@@ -10,6 +11,7 @@ import { Login } from "@/views/Login";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { resolveConfig } from "@/config";
+import { captureComposioSignin, COMPOSIO_TOKEN_UPDATED_EVENT } from "@/lib/composio-signin";
 
 type Phase =
   | { kind: "loading" }
@@ -71,11 +73,42 @@ export function App() {
    * skip ahead and query with a session that does not exist yet.
    */
   const redemption = useRef<Promise<unknown> | null>(null);
+  /**
+   * The in-flight Composio sign-in capture, so the returning JWT is consumed
+   * exactly once. The tinyhumans web sign-in lands at `#auth/callback?token=<JWT>`
+   * (a URL *fragment*, distinct from the operator `?token=` in the query string),
+   * and StrictMode double-invokes effects — both runs await this one promise so
+   * the credential is stored, scrubbed, and never replayed.
+   */
+  const composioCapture = useRef<Promise<unknown> | null>(null);
 
   // Now that the code is captured in state, take it out of the URL.
   useEffect(() => {
     if (magicLink) clearMagicLinkFromUrl();
   }, [magicLink]);
+
+  // Capture a returning "Sign in with tinyhumans" (Composio bearer) sign-in. This
+  // runs regardless of the active view because the backend redirects to the
+  // console root, and it scrubs the JWT from the fragment up front so the
+  // credential never lingers in the URL. On success it stores the company's
+  // Composio bearer (via the existing session cookie) and nudges a mounted
+  // ComposioSection to refresh. It is deliberately independent of the operator
+  // session/`?token=` path.
+  useEffect(() => {
+    composioCapture.current ??= captureComposioSignin(client)
+      .then((res) => {
+        if (!res) return;
+        toast.success("Signed in with tinyhumans — Composio is connected for this company.");
+        window.dispatchEvent(new CustomEvent(COMPOSIO_TOKEN_UPDATED_EVENT));
+      })
+      .catch((err) => {
+        toast.error(
+          err instanceof ApiError
+            ? err.message
+            : "Couldn't store the tinyhumans sign-in for Composio. Try again.",
+        );
+      });
+  }, [client]);
 
   // An expired or revoked session anywhere in the console drops to sign-in
   // rather than showing a broken page.
