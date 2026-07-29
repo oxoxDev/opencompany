@@ -13,6 +13,16 @@ pub mod builder;
 pub mod channel;
 pub mod cron;
 pub mod cycle;
+/// Brain-agnostic delegation seam (issue #176): the [`RunTurn`] trait +
+/// [`DelegationRunner`] the harness brain drives. Compiled only under
+/// `openhuman` — it drains the harness delegation queue and yields harness
+/// [`TurnOutcome`]s. See [`delegation`].
+///
+/// [`RunTurn`]: delegation::RunTurn
+/// [`DelegationRunner`]: delegation::DelegationRunner
+/// [`TurnOutcome`]: crate::harness::TurnOutcome
+#[cfg(feature = "openhuman")]
+pub mod delegation;
 pub mod journal;
 pub mod mailbox_poller;
 pub mod registry;
