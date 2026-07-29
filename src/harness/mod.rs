@@ -82,6 +82,30 @@ use crate::ports::{
 };
 use crate::runtime::builder::agent_effective_grants;
 
+tokio::task_local! {
+    /// Re-entry depth across the harness↔workflow-engine boundary (issue #155).
+    ///
+    /// Incremented once per [`HarnessPool::run_inner`] entry — the single choke
+    /// point every agent turn flows through (`run` / `run_background` /
+    /// `run_steered` / `run_steered_background`). A workflow `agent` node
+    /// re-enters the pool via [`run_background`](HarnessPool::run_background);
+    /// when that node resolves to an orchestrator carrying the `run_workflow`
+    /// tool, it can call the engine again and re-enter here, so this counter is
+    /// the only thing that spans the harness→engine→harness cycle. Tinyflows'
+    /// own `MAX_SUB_WORKFLOW_DEPTH` counts `sub_workflow` nodes *within one*
+    /// `engine::run` and resets to 0 on every fresh `run_workflow` tool call, so
+    /// it cannot see the cycle. Reading this outside any scope defaults to 0.
+    static AGENT_REENTRY_DEPTH: usize;
+}
+
+/// The maximum harness↔engine re-entry depth before a turn is refused
+/// (issue #155). Matches tinyflows' `MAX_SUB_WORKFLOW_DEPTH` (8): a
+/// deep-but-legitimate workflow→agent→workflow nesting stays well under it,
+/// while the unbounded self-delegation cycle (an `agent` node that resolves back
+/// to the orchestrator, which runs the same workflow again) is cut before it can
+/// overflow the Tokio worker stack and abort the host.
+const MAX_AGENT_REENTRY_DEPTH: usize = 8;
+
 /// Shared dependencies every harness-built agent draws on.
 #[derive(Clone)]
 pub struct HarnessDeps {
@@ -897,7 +921,63 @@ impl HarnessPool {
         .await
     }
 
+    /// The single choke point every turn passes through, wrapping
+    /// [`run_inner_body`](Self::run_inner_body) with the harness↔engine re-entry
+    /// depth guard (issue #155).
+    ///
+    /// A workflow `agent` node re-enters the pool through
+    /// [`run_background`](Self::run_background); when it resolves back to an
+    /// orchestrator that runs the same workflow, that would recurse without bound
+    /// — each `run_workflow` tool call starts a *fresh* engine, so tinyflows' own
+    /// sub-workflow depth guard resets and never sees the cycle — until the Tokio
+    /// worker stack overflows and the host aborts. The task-local
+    /// [`AGENT_REENTRY_DEPTH`] counter (read as 0 outside any scope) bounds that
+    /// cycle: once it reaches [`MAX_AGENT_REENTRY_DEPTH`] the turn is refused with
+    /// a clean [`OpenCompanyError::Harness`] rather than recursing, which
+    /// [`RunWorkflowTool`](crate::harness::orchestrator::RunWorkflowTool) turns
+    /// into a tool error and
+    /// [`HarnessAgentRunner`](crate::workflows::caps) into an
+    /// `EngineError::Capability` — so the workflow run fails gracefully and the
+    /// host stays up.
+    ///
+    /// [`Box::pin`] at the scope boundary keeps the added future frame off the
+    /// worker stack (the nested-`task_local::scope` overflow trap the turn loop's
+    /// [`with_stop_hooks`](oh::agent::stop_hooks::with_stop_hooks) call already
+    /// boxes around).
     async fn run_inner(
+        &self,
+        company: &CompanyId,
+        agent_id: &str,
+        message: &str,
+        deps: &HarnessDeps,
+        steer: Option<&SteerControl>,
+        live: LiveStream<'_>,
+    ) -> crate::Result<TurnOutcome> {
+        // Default to 0 when no scope is active (a normal top-level turn) — never
+        // an `unwrap` that would panic outside the task-local.
+        let depth = AGENT_REENTRY_DEPTH.try_with(|d| *d).unwrap_or(0);
+        if depth >= MAX_AGENT_REENTRY_DEPTH {
+            tracing::warn!(
+                company = %company,
+                agent = agent_id,
+                depth,
+                max = MAX_AGENT_REENTRY_DEPTH,
+                "agent/workflow re-entry depth exceeded; refusing to recurse"
+            );
+            return Err(OpenCompanyError::Harness(
+                "agent/workflow re-entry depth exceeded".to_string(),
+            ));
+        }
+
+        AGENT_REENTRY_DEPTH
+            .scope(
+                depth + 1,
+                Box::pin(self.run_inner_body(company, agent_id, message, deps, steer, live)),
+            )
+            .await
+    }
+
+    async fn run_inner_body(
         &self,
         company: &CompanyId,
         agent_id: &str,
