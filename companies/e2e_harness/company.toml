@@ -35,19 +35,19 @@ id = "ceo"
 role = "Chief Executive"
 description = "Sets direction, answers about the company, and delegates the work."
 tier = "orchestrator"
-tools = ["mcp:*"]
+tools = ["mcp:*", "composio"]
 
 [[agent]]
 id = "engineer"
 role = "Engineer"
 description = "Explains how things are built and proposes technical plans."
-tools = ["mcp:*"]
+tools = ["mcp:*", "composio"]
 
 [[agent]]
 id = "writer"
 role = "Writer"
 description = "Turns rough notes into short, clear written drafts."
-tools = ["mcp:*"]
+tools = ["mcp:*", "composio"]
 
 [[group_chat]]
 id = "engineering"
