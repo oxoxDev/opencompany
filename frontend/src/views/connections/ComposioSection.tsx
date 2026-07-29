@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, KeyRound, Loader2, LogIn, Plug, Save, Trash2 } from "lucide-react";
+import { Check, KeyRound, Loader2, LogIn, Mail, Plug, Save, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
@@ -11,6 +11,7 @@ import {
   type ComposioStatus,
 } from "@/api/composio";
 import { ApiError } from "@/api/types";
+import { beginComposioSignin, COMPOSIO_TOKEN_UPDATED_EVENT } from "@/lib/composio-signin";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -51,6 +52,10 @@ export function ComposioSection({ client, company }: Props) {
   const [status, setStatus] = useState<ComposioStatus | null>(null);
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState<"save" | "clear" | null>(null);
+  // "Sign in with tinyhumans" (Layer A): the email to send the sign-in link to,
+  // and whether that request is in flight.
+  const [signinEmail, setSigninEmail] = useState("");
+  const [signinBusy, setSigninBusy] = useState(false);
   // toolkit slug -> connected. Absent = unknown / not yet fetched.
   const [connected, setConnected] = useState<Record<string, boolean>>({});
   // toolkit slug currently mid-sign-in (open tab + poll).
@@ -107,6 +112,37 @@ export function ComposioSection({ client, company }: Props) {
     setLoad("loading");
     void refresh();
   }, [refresh]);
+
+  // When a returning "Sign in with tinyhumans" stores the bearer (captured at the
+  // app root, since the backend redirects there), refresh so `tokenConfigured`
+  // flips true and the per-provider list activates without a manual reload.
+  useEffect(() => {
+    const onUpdated = () => void refresh();
+    window.addEventListener(COMPOSIO_TOKEN_UPDATED_EVENT, onUpdated);
+    return () => window.removeEventListener(COMPOSIO_TOKEN_UPDATED_EVENT, onUpdated);
+  }, [refresh]);
+
+  // Kick off tinyhumans web sign-in: the backend emails a link that returns to
+  // this console and hands back a platform JWT, which we then store as the
+  // company's Composio bearer (no paste needed). Live completion needs the
+  // console origin allowlisted on the backend (OAUTH_LOGIN_ALLOWED_DOMAINS).
+  async function signInWithTinyhumans() {
+    if (signinBusy || !status) return;
+    const email = signinEmail.trim();
+    if (!email) return;
+    setSigninBusy(true);
+    try {
+      await beginComposioSignin(status.backendUrl, company, email);
+      setSigninEmail("");
+      toast.success(
+        "Check your email for a tinyhumans sign-in link. Open it in this browser to finish connecting Composio.",
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't start tinyhumans sign-in.");
+    } finally {
+      setSigninBusy(false);
+    }
+  }
 
   async function save() {
     if (!token.trim()) return;
@@ -193,9 +229,9 @@ export function ComposioSection({ client, company }: Props) {
         </h3>
       </div>
       <p className="text-sm text-muted-foreground">
-        Give your agents Gmail, Slack &amp; GitHub via Composio. Sign in per provider below, or paste
-        this company&apos;s Composio OAuth token directly. Either way, the connection takes effect on
-        the next turn, no restart.
+        Give your agents Gmail, Slack &amp; GitHub via Composio. Sign in with tinyhumans to set this
+        company&apos;s Composio identity, then connect each provider — or paste a Composio OAuth token
+        directly as a fallback. Either way, the connection takes effect on the next turn, no restart.
       </p>
 
       {load === "loading" ? (
@@ -225,14 +261,66 @@ export function ComposioSection({ client, company }: Props) {
             </p>
           )}
 
+          {status && (
+            <Card>
+              <CardContent className="space-y-3 py-4">
+                <div className="flex items-center gap-2">
+                  <LogIn className="size-4 text-muted-foreground" />
+                  <p className="text-sm font-medium">Sign in with tinyhumans</p>
+                  {status.tokenConfigured && (
+                    <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+                      <Check className="size-3" /> connected
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  The recommended way. We email you a sign-in link; open it in this browser and your
+                  tinyhumans account becomes this company&apos;s Composio identity — no token to
+                  paste.{" "}
+                  {status.tokenConfigured && "Sign in again to rotate the current identity."}
+                </p>
+                <div className="flex flex-wrap items-end gap-2">
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <Label htmlFor="composio-signin-email" className="text-xs">
+                      tinyhumans email
+                    </Label>
+                    <Input
+                      id="composio-signin-email"
+                      type="email"
+                      autoComplete="email"
+                      placeholder="you@company.com"
+                      value={signinEmail}
+                      disabled={signinBusy}
+                      onChange={(e) => setSigninEmail(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void signInWithTinyhumans();
+                      }}
+                    />
+                  </div>
+                  <Button
+                    disabled={signinBusy || !signinEmail.trim()}
+                    onClick={() => void signInWithTinyhumans()}
+                  >
+                    {signinBusy ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <Mail className="size-4" />
+                    )}
+                    Send sign-in link
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
           {showProviders && status && (
             <Card>
               <CardContent className="space-y-2 py-4">
                 <p className="text-xs font-medium text-muted-foreground">Sign in per provider</p>
                 {!status.tokenConfigured && (
                   <p className="rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
-                    Set the Composio token below first — it is the per-tenant identity the sign-in
-                    flow authorizes against.
+                    Sign in with tinyhumans above (or paste a token below) first — it is the
+                    per-tenant identity the provider sign-in authorizes against.
                   </p>
                 )}
                 <ul className="divide-y divide-border">
