@@ -41,13 +41,23 @@ pub mod sqlite;
 #[cfg(feature = "mongodb")]
 pub mod mongodb;
 
-/// TinyCortex-backed memory and context ports over a mockable client. TinyCortex
-/// is not checked out here, so the compiled backend is an offline in-memory
-/// client; a real HTTP client (inert until the service is reachable through the
-/// OpenHuman seam) is present behind the same feature. Only links under
+/// TinyCortex-backed memory and context ports over a mockable client. The
+/// company-scoped [`CortexClient`](tinycortex::CortexClient) seam plus the
+/// offline [`InMemoryCortex`](tinycortex::InMemoryCortex) test/fallback backend;
+/// the real persistent engine lives in [`tinycortex_engine`]. Only links under
 /// `tinycortex`.
 #[cfg(feature = "tinycortex")]
 pub mod tinycortex;
+
+/// The in-pod, persistent TinyCortex memory engine
+/// ([`EngineCortex`](tinycortex_engine::EngineCortex)): a real engine-backed
+/// [`CortexClient`](tinycortex::CortexClient) over the vendored `tinycortex`
+/// crate, keeping each company's traces, task results, and context chunks in a
+/// durable per-company SQLite workspace. Ships in degraded lexical/recency recall
+/// mode (no embedding compute — that lands in 188c2). Only links under
+/// `tinycortex`.
+#[cfg(feature = "tinycortex")]
+pub mod tinycortex_engine;
 
 /// A backend-agnostic port-conformance suite: async assertions parameterized
 /// over any [`CompanyStore`](crate::ports::CompanyStore) /
@@ -78,9 +88,10 @@ pub use sqlite::SqliteStore;
 pub use mongodb::MongoStore;
 
 #[cfg(feature = "tinycortex")]
-pub use tinycortex::{
-    CortexClient, CortexContextStore, CortexMemoryStore, HttpCortexClient, InMemoryCortex,
-};
+pub use tinycortex::{CortexClient, CortexContextStore, CortexMemoryStore, InMemoryCortex};
+
+#[cfg(feature = "tinycortex")]
+pub use tinycortex_engine::EngineCortex;
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 
