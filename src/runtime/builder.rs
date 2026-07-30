@@ -814,7 +814,10 @@ impl RuntimeBuilder {
                                 .as_ref()
                                 .map(|(config, _)| EnvDefault {
                                     base_url: config.base_url.clone(),
-                                    api_key: config.api_key.clone(),
+                                    // A handle, not a value: the managed
+                                    // credential may be a platform token that
+                                    // rotates in place, so it is read per request.
+                                    credential: config.credential.clone(),
                                 });
                         // An explicit `OPENCOMPANY_INFERENCE_MODEL` flattens the
                         // whole roster to one workload; otherwise each agent keeps
@@ -1932,7 +1935,7 @@ mod test {
             .with_harness_inference(
                 HostedProviderConfig {
                     base_url: stub,
-                    api_key: "k".to_string(),
+                    credential: crate::company::Credential::from_value("k"),
                     extra_headers: Vec::new(),
                 },
                 None,
