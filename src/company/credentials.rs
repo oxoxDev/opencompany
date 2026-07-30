@@ -199,22 +199,55 @@ impl TinyhumansTokenSource {
     /// — the docker runtime mounts nothing, so a leftover variable degrades to the
     /// static tier (with a warning) instead of failing every request.
     pub fn from_env(env: &dyn EnvSource) -> Option<Self> {
-        if let Some(path) = env.get(TOKEN_FILE_ENV).map(|p| p.trim().to_string())
-            && !path.is_empty()
-        {
-            if Path::new(&path).exists() {
-                return Some(Self::projected_file(path));
+        Self::from_parts(
+            env.get(TOKEN_FILE_ENV).as_deref().map(Path::new),
+            env.get(API_KEY_ENV).as_deref(),
+        )
+    }
+
+    /// The precedence rule itself, over already-resolved parts.
+    ///
+    /// [`Self::from_env`] is this function plus an environment read. Callers that
+    /// already hold the resolved values — `RuntimeConfig`, which parsed them at
+    /// load — must route through here rather than re-deriving the rule, because a
+    /// second copy is a second chance to forget the existence check and answer
+    /// `attested` for a path the runtime never mounted.
+    ///
+    /// Both inputs are trimmed; blank is treated as absent.
+    pub fn from_parts(token_file: Option<&Path>, api_key: Option<&str>) -> Option<Self> {
+        if let Some(path) = token_file {
+            let path = Path::new(path.as_os_str().to_str().map(str::trim).unwrap_or_default());
+            if !path.as_os_str().is_empty() {
+                if path.exists() {
+                    return Some(Self::projected_file(path));
+                }
+                tracing::warn!(
+                    token_file = %path.display(),
+                    "{TOKEN_FILE_ENV} names a path that does not exist; falling back to the static credential tier"
+                );
             }
-            tracing::warn!(
-                token_file = %path,
-                "{TOKEN_FILE_ENV} names a path that does not exist; falling back to the static credential tier"
-            );
         }
-        let key = env.get(API_KEY_ENV).map(|k| k.trim().to_string())?;
+        let key = api_key?.trim();
         if key.is_empty() {
             return None;
         }
         Some(Self::static_key(key))
+    }
+
+    /// The tier a set of resolved parts selects, without building a source.
+    ///
+    /// `has_static_credential` stands in for a held secret the caller must not
+    /// hand over (`RuntimeConfig` keeps its key behind a redacting wrapper), so
+    /// the static tier is reported from its presence rather than its value.
+    pub fn source_of_parts(
+        token_file: Option<&Path>,
+        has_static_credential: bool,
+    ) -> CredentialSource {
+        match Self::from_parts(token_file, None) {
+            Some(source) => source.credential_source(),
+            None if has_static_credential => CredentialSource::Static,
+            None => CredentialSource::None,
+        }
     }
 
     /// Which tier this source resolved to.
