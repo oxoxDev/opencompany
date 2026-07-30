@@ -94,7 +94,7 @@ engine layered on top of that base. The base still owns every other port
 | Value | Engine | Feature flag | Notes |
 |---|---|---|---|
 | `store` (default) | The base backend's own memory | — | fs substring recall, or sqlite/mongodb |
-| `tinycortex` | TinyCortex chunk store | `tinycortex` | Ranked token-overlap recall over a compounding store |
+| `tinycortex` | In-pod TinyCortex engine | `tinycortex` | Persistent per-company store; degraded lexical/recency recall |
 
 This is why TinyCortex is not a `StorageKind`: it implements only memory +
 context, so it cannot be a full backend — it overlays. `serve` and platform
@@ -104,9 +104,45 @@ provisioning build the overlay once (`open_memory_overlay`,
 the base keeps the rest. A selected-but-unavailable engine (feature disabled)
 aborts boot, same as the storage backend.
 
-The compiled TinyCortex backend is the offline in-memory client
-(`src/store/tinycortex.rs`); a networked client for true semantic recall is an
-inert seam until the service is reachable through the OpenHuman integration.
+### In-pod engine (`EngineCortex`)
+
+With the `tinycortex` feature and a data directory present, the overlay is
+`EngineCortex` (`src/store/tinycortex_engine.rs`): the OpenHuman `tinycortex`
+engine crate running **inside the pod** with durable local storage. Each company
+gets its own workspace at `<OPENCOMPANY_DATA_DIR>/memory/<company>/`, and the
+engine's canonical per-workspace SQLite database (opened + migrated through the
+crate's own shared connection) holds that company's traces, task results, and
+context chunks. The engine never makes a network call. When no data directory is
+present (tests, no-data-dir callers) the overlay falls back to the offline
+in-memory backend (`InMemoryCortex`), which is also the compiled fallback when a
+company workspace cannot be opened.
+
+**Degraded (lexical/recency) recall — no embedding compute.** This slice builds
+the engine's `MemoryConfig` directly with `embedding.strict = false`, so an inert
+embedder is tolerated and recall degrades to **lexical token-overlap** ranking
+(the same `[0, 1]`-scored, snippet-bearing contract the in-memory backend
+defines) rather than semantic. **Zero** embedding compute is injected. Because
+the crate's retrieval primitives rank only by admission-score/recency in this
+mode (their keyword/graph scorers are defined but not yet wired), and its ingest
+path re-chunks documents under its own ids — which cannot round-trip
+OpenCompany's content-address / label-prefix / peek contract — chunk bodies and
+metadata are persisted through the engine's **KV tier** (on the same per-company
+workspace database) and searched lexically in the adapter. Injecting a real
+embedding provider — and thereby the summary-tree + hybrid-retrieval path — is a
+follow-up slice.
+
+### Durability contract & the `/data`-is-scratch caveat
+
+`EngineCortex` is durable **only to the extent the data directory is durable**.
+On a host with a persistent `OPENCOMPANY_DATA_DIR` (a mounted volume, or the
+default `$HOME/.opencompany`), engine memory survives restarts. But under the
+hosted multi-tenant model with `OPENCOMPANY_STORAGE=mongodb`, the durable base is
+the database and the container's `/data` is treated as **ephemeral scratch** — so
+engine memory written to `<data_dir>/memory` would **not** survive a container
+restart. Selecting `OPENCOMPANY_MEMORY=tinycortex` together with
+`OPENCOMPANY_STORAGE=mongodb` therefore emits a loud boot warning
+(`src/store/select.rs`): mount a durable volume at the data dir, or keep memory
+on the base store (`OPENCOMPANY_MEMORY=store`).
 
 ## MongoDB backend (`src/store/mongodb.rs`)
 
