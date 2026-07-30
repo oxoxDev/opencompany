@@ -331,28 +331,6 @@ mod live {
             .ok_or_else(|| anyhow::anyhow!("missing required `{key}` string argument"))
     }
 
-    /// Build a [`ComposioClient`] over a resolved tenant config.
-    ///
-    /// The Config-free seam: `IntegrationClient::new(backend_url, auth_token)`
-    /// takes the per-tenant credential directly, with no OpenHuman global
-    /// `Config`. The bearer is the ONLY isolation lever — see the module docs.
-    /// Shared by the agent tools ([`composio_tools`]) and the operator-console
-    /// ops handlers ([`authorize_connect_url`], [`list_connection_states`]) so
-    /// both dial the backend the exact same way.
-    fn client_for(config: &TenantComposio) -> ComposioClient {
-        ComposioClient::new(Arc::new(IntegrationClient::new(
-            config.backend_url.clone(),
-            config.auth_token.clone(),
-        )))
-    }
-
-    /// Scrub the tenant bearer out of an upstream error before it can bubble to
-    /// a console handler or a log line — the backend can reflect the presented
-    /// bearer in an error body, and the ops surface must never echo it.
-    fn scrub_err(err: &anyhow::Error, config: &TenantComposio) -> anyhow::Error {
-        anyhow::anyhow!(scrub(&format!("{err}"), &[config.auth_token.clone()]))
-    }
-
     /// Begin an OAuth handoff for `toolkit` and return the Composio-hosted
     /// connect URL the operator opens in a browser. Backs the console's
     /// `POST …/composio/authorize` route (the same building block the
@@ -374,9 +352,10 @@ mod live {
             anyhow::bail!("toolkit `{toolkit}` is not in this company's Composio allowlist");
         }
         tracing::debug!(toolkit = %toolkit, "[composio] ops authorize");
-        match client_for(config).authorize(toolkit, None).await {
+        let (client, secrets) = live_call(config).await?;
+        match client.authorize(toolkit, None).await {
             Ok(resp) => Ok(resp.connect_url),
-            Err(err) => Err(scrub_err(&err, config)),
+            Err(err) => Err(anyhow::anyhow!(scrub(&format!("{err}"), &secrets))),
         }
     }
 
@@ -391,9 +370,10 @@ mod live {
     /// is scrubbed of the tenant bearer before it bubbles.
     pub async fn list_connection_states(config: &TenantComposio) -> Result<Vec<(String, bool)>> {
         tracing::debug!(allowlist = ?config.toolkits, "[composio] ops list_connections");
-        let resp = match client_for(config).list_connections().await {
+        let (client, secrets) = live_call(config).await?;
+        let resp = match client.list_connections().await {
             Ok(resp) => resp,
-            Err(err) => return Err(scrub_err(&err, config)),
+            Err(err) => return Err(anyhow::anyhow!(scrub(&format!("{err}"), &secrets))),
         };
         let mut states: std::collections::BTreeMap<String, bool> =
             std::collections::BTreeMap::new();
@@ -1185,11 +1165,11 @@ mod ops_helper_tests {
     }
 
     fn config(url: &str, toolkits: Vec<String>) -> TenantComposio {
-        TenantComposio {
-            backend_url: url.to_string(),
-            auth_token: "tenant-token".to_string(),
+        TenantComposio::new(
+            url.to_string(),
+            Credential::from_value("tenant-token"),
             toolkits,
-        }
+        )
     }
 
     #[tokio::test]

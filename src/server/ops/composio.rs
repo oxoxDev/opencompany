@@ -233,8 +233,10 @@ async fn connections(company: ScopedCompany) -> Result<Json<Vec<ConnectionDto>>,
 
 /// Resolve the per-tenant Composio config (bearer + backend URL + toolkit
 /// allowlist) the way the harness roster build does, so the console dials the
-/// backend with the exact same tenant identity. A `409 Conflict` when no token
-/// is configured — the operator must set it (paste-token card) before OAuth.
+/// backend with the exact same tenant identity. A `409 Conflict` when no
+/// credential of any tier can be resolved — neither this company's own stored
+/// token nor a platform identity — in which case the operator must paste a token
+/// before OAuth.
 #[cfg(feature = "composio")]
 async fn resolve_tenant(
     runtime: &CompanyRuntime,
@@ -254,11 +256,14 @@ async fn resolve_tenant(
         toolkits,
         backend_env,
         api_env,
+        crate::company::TinyhumansTokenSource::from_env(&env).map(std::sync::Arc::new),
     )
     .await
     .ok_or_else(|| {
         ApiError(crate::error::OpenCompanyError::Conflict(
-            "no Composio token configured for this company — set the token first".to_string(),
+            "no Composio credential is available for this company — this instance has no platform \
+             identity, so paste the company's Composio token first"
+                .to_string(),
         ))
     })
 }
