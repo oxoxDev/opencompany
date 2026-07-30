@@ -51,6 +51,12 @@ struct CapabilityStatusDto {
     /// One row per configured tier, namespace-sorted. Omitted when unconfigured.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tiers: Vec<TierDto>,
+    /// The plan-level **total token ceiling** (issue #188), when one is
+    /// configured. Unlike the per-namespace `tiers` — a *soft* gate that only
+    /// trims exec tools — crossing this is a *hard* stop: the harness refuses to
+    /// dispatch further turns this period. Omitted when no ceiling is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total: Option<TotalDto>,
     /// Media generation (issue #109): whether this company **explicitly** grants
     /// the real-money `media` namespace (a `*` wildcard does NOT count). Sent
     /// regardless of whether a `[plan]` is configured, since media is opt-in per
@@ -91,6 +97,22 @@ struct TierDto {
     exhausted: bool,
 }
 
+/// The plan-level total token ceiling row (issue #188).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TotalDto {
+    /// Total tokens allowed this period before dispatch is refused.
+    budget_tokens: u64,
+    /// Tokens spent this period (the same company-wide figure the tiers compare
+    /// against).
+    spent_tokens: u64,
+    /// `budget - spent`, saturating at zero.
+    remaining_tokens: u64,
+    /// Whether spend has reached the ceiling — the harness refuses to dispatch
+    /// further turns until the period resets.
+    exhausted: bool,
+}
+
 /// The opt-in-capability status flags carried on every response (media +
 /// composio), independent of whether a `[plan]` is configured.
 struct OptInFlags {
@@ -120,6 +142,7 @@ fn unconfigured(flags: OptInFlags) -> CapabilityStatusDto {
         period_start_millis: None,
         spent_tokens: None,
         tiers: Vec::new(),
+        total: None,
         media_granted: flags.media_granted,
         media_in_build: cfg!(feature = "media"),
         media_credential_configured: media_credential_configured(),
@@ -192,6 +215,17 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         })
         .collect();
 
+    // The plan-level total ceiling (issue #188): present only when the manifest
+    // set `[plan].total_tokens`. This is the hard gate the harness enforces by
+    // refusing dispatch — the console renders it alongside the soft per-namespace
+    // tiers.
+    let total = plan.total_status(spent).map(|status| TotalDto {
+        budget_tokens: status.budget,
+        spent_tokens: status.spent,
+        remaining_tokens: status.remaining,
+        exhausted: status.exhausted,
+    });
+
     Ok(CapabilityStatusDto {
         configured: true,
         plan: manifest_plan.name.clone(),
@@ -199,6 +233,7 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         period_start_millis: Some(since),
         spent_tokens: Some(spent),
         tiers,
+        total,
         media_granted: flags.media_granted,
         media_in_build: cfg!(feature = "media"),
         media_credential_configured: media_credential_configured(),
@@ -414,6 +449,56 @@ mod tests {
             assert_eq!(tier["remainingTokens"], 0);
             assert_eq!(tier["exhausted"], true);
         }
+        // No `[plan].total_tokens` → the hard-ceiling row is absent.
+        assert!(
+            dto.get("total").is_none(),
+            "no total ceiling configured: {dto}"
+        );
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The plan-level total token ceiling (issue #188) surfaces its own `total`
+    /// row — budget, spend, remaining, exhausted — alongside the per-namespace
+    /// tiers, and reports `exhausted` once period spend crosses it.
+    #[tokio::test]
+    async fn reports_total_ceiling_row_when_configured() {
+        let home = home();
+        let state = state_with_manifest(
+            &home,
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[plan]\nname = \"starter\"\ntotal_tokens = 300000\n",
+        )
+        .await;
+
+        // Seed 250k inference tokens — under the 300k total ceiling.
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        runtime
+            .usage()
+            .record(
+                &id,
+                &UsageSample {
+                    at_millis: crate::ports::now_millis(),
+                    agent: "ceo".into(),
+                    provider: "managed".into(),
+                    input_tokens: 200_000,
+                    output_tokens: 50_000,
+                    cached_input_tokens: 0,
+                    cost_usd: 0.0,
+                    kind: SampleKind::Inference,
+                },
+            )
+            .await
+            .unwrap();
+
+        let (status, dto) = get_capabilities(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        let total = &dto["total"];
+        assert!(total.is_object(), "total ceiling row present: {dto}");
+        assert_eq!(total["budgetTokens"], 300_000);
+        assert_eq!(total["spentTokens"], 250_000);
+        assert_eq!(total["remainingTokens"], 50_000);
+        assert_eq!(total["exhausted"], false, "250k < 300k is under budget");
 
         std::fs::remove_dir_all(&home).ok();
     }
