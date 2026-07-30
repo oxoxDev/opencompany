@@ -1815,7 +1815,7 @@ mod test {
         .await
         .unwrap();
 
-        let seen = seen.lock().unwrap();
+        let seen = seen.lock().unwrap().clone();
         assert_eq!(seen.len(), 2);
         assert!(
             seen[0].contains("Open work already handed to you")
@@ -1863,7 +1863,7 @@ mod test {
         }])
         .await
         .unwrap();
-        let seen = seen.lock().unwrap();
+        let seen = seen.lock().unwrap().clone();
         assert!(
             !seen[0].contains("Open work already handed to you"),
             "done cards are not surfaced as open work: {:?}",
