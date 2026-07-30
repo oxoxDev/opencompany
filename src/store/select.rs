@@ -10,7 +10,7 @@
 //! Backends behind disabled cargo features fail loudly at open time rather
 //! than silently falling back to the filesystem.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -169,6 +169,11 @@ pub struct StorageSettings {
     /// overlaid on top of `kind`. Defaults to [`MemoryBackend::Store`] (the base
     /// backend's own memory), so unset changes nothing.
     pub memory_backend: MemoryBackend,
+    /// The instance workspace root (`OPENCOMPANY_DATA_DIR`), when known. Threaded
+    /// through so a persistent memory engine can root each company's storage
+    /// under `<data_dir>/memory/`. `None` (the [`Default`]) selects the offline
+    /// in-memory engine — the shape tests and no-data-dir callers get.
+    pub data_dir: Option<PathBuf>,
 }
 
 /// Parses env var `key` into `T`. Absent → `Ok(None)` (the caller applies its
@@ -190,7 +195,7 @@ where
 impl StorageSettings {
     /// Reads the CLI-surface storage env vars (`OPENCOMPANY_STORAGE`,
     /// `OPENCOMPANY_MONGODB_URI`, `OPENCOMPANY_MONGODB_DB`,
-    /// `OPENCOMPANY_TENANT_ID`, `OPENCOMPANY_MEMORY`).
+    /// `OPENCOMPANY_TENANT_ID`, `OPENCOMPANY_MEMORY`, `OPENCOMPANY_DATA_DIR`).
     pub fn from_env() -> Result<Self> {
         let kind: StorageKind = parse_env("OPENCOMPANY_STORAGE")?.unwrap_or_default();
         let memory_backend: MemoryBackend = parse_env("OPENCOMPANY_MEMORY")?.unwrap_or_default();
@@ -201,6 +206,7 @@ impl StorageSettings {
             mongodb_db: non_empty("OPENCOMPANY_MONGODB_DB"),
             tenant_id: non_empty("OPENCOMPANY_TENANT_ID"),
             memory_backend,
+            data_dir: Some(crate::app::config::data_dir_from_env()),
         })
     }
 }
@@ -227,18 +233,41 @@ pub async fn open_storage(
 pub fn open_memory_overlay(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
     match settings.memory_backend {
         MemoryBackend::Store => Ok(None),
-        MemoryBackend::Tinycortex => open_tinycortex(),
+        MemoryBackend::Tinycortex => open_tinycortex(settings),
     }
 }
 
+/// Opens the TinyCortex overlay. With a `data_dir` present it is the persistent,
+/// in-pod [`EngineCortex`](crate::store::tinycortex_engine::EngineCortex) rooted
+/// at `<data_dir>/memory/`; without one (tests, no-data-dir callers) it is the
+/// offline in-memory backend.
 #[cfg(feature = "tinycortex")]
-fn open_tinycortex() -> Result<Option<MemoryOverlay>> {
-    let (memory, context) = crate::store::tinycortex::in_memory();
+fn open_tinycortex(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
+    let (memory, context) = match &settings.data_dir {
+        Some(dir) => {
+            // Durability caveat: the engine persists to `<data_dir>/memory` on the
+            // local container filesystem. Under `OPENCOMPANY_STORAGE=mongodb` the
+            // hosting model treats `/data` as ephemeral scratch (the durable base
+            // is the database), so engine memory would be lost on restart. Warn
+            // loudly rather than silently drop memory. See docs/spec/runtime/storage.md.
+            if settings.kind == StorageKind::Mongodb {
+                tracing::warn!(
+                    data_dir = %dir.display(),
+                    "OPENCOMPANY_MEMORY=tinycortex persists to <data_dir>/memory on the local \
+                     container filesystem, but OPENCOMPANY_STORAGE=mongodb implies /data is \
+                     ephemeral scratch — engine memory will NOT survive a restart. Mount a durable \
+                     volume at the data dir, or keep memory on the base store (OPENCOMPANY_MEMORY=store).",
+                );
+            }
+            crate::store::tinycortex_engine::engine(dir.join("memory"))
+        }
+        None => crate::store::tinycortex::in_memory(),
+    };
     Ok(Some(MemoryOverlay { memory, context }))
 }
 
 #[cfg(not(feature = "tinycortex"))]
-fn open_tinycortex() -> Result<Option<MemoryOverlay>> {
+fn open_tinycortex(_settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
     Err(OpenCompanyError::Config(
         "OPENCOMPANY_MEMORY=tinycortex requires a build with the `tinycortex` feature".into(),
     ))
