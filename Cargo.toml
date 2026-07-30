@@ -164,6 +164,14 @@ rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 # Only links under the `mongodb` feature; the default build stays offline.
 mongodb = { version = "3", optional = true }
 
+# TinyCortex in-pod memory engine (local SQLite kv/vectors/entity + content
+# vault). Only links under the `tinycortex` feature. Resolved to the vendored
+# submodule via the `[patch.crates-io]` entry below — the *same* crate instance
+# `openhuman_core` already links unconditionally — so enabling this on top of an
+# `openhuman` build adds no new compilation. Backs the `EngineCortex`
+# persistent memory + context overlay; never makes a network call.
+tinycortex = { version = "0.1", optional = true }
+
 # Single-file `.tar` packing/unpacking for `opencompany export`/`import`. Pure
 # Rust, no system libs, no network. Only links under the `export` feature; the
 # port-driven bundle core works on an unpacked directory without it.
@@ -283,12 +291,14 @@ sqlite = ["dep:rusqlite"]
 # each tenant its own database on a shared cluster. The fs stores and the
 # port-conformance suite compile without this; only `MongoStore` is gated here.
 mongodb = ["dep:mongodb"]
-# TinyCortex-backed MemoryStore + ContextStore over a mockable CortexClient.
-# TinyCortex itself is not vendored, so this feature adds no dependency: the
-# compiled backend is an offline in-memory client and the real HTTP client is
-# inert until the service is reachable through the OpenHuman seam. The fs stores
-# and the port-conformance suite compile without this.
-tinycortex = []
+# TinyCortex-backed MemoryStore + ContextStore. Pulls the vendored `tinycortex`
+# engine crate (an unconditional dep of `openhuman_core`, so no new build cost
+# under an `openhuman` build) and exposes `EngineCortex`: an in-pod, persistent,
+# per-company memory engine over the crate's local SQLite kv tier. Ships in
+# degraded lexical/recency recall mode — no embedding compute injected yet
+# (that lands in 188c2). The fs stores and the port-conformance suite compile
+# without this; the offline `InMemoryCortex` remains the test/fallback backend.
+tinycortex = ["dep:tinycortex"]
 # Node sidecar brain for self-hosters (bring-your-own-inference). Adds
 # `SidecarBrain`, which speaks the same `/orchestration/v1` wire frames as the
 # hosted brain but against a local sidecar process, with inference routed back
