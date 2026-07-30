@@ -73,22 +73,11 @@ pub trait RunTurn: Send + Sync {
     ) -> Result<TurnOutcome>;
 }
 
-/// The lead member of a desk: the first effective member (manifest ∪ overlay)
-/// that is a real roster teammate. `None` when no desk matches or none of its
-/// members are on the roster.
-///
-/// Resolves the desk key (id or case-insensitive name) against both manifest and
-/// operator-created overlay desks, then reads the same **effective** membership
-/// the REST `list_desks` handler uses
-/// ([`CompanyRecord::effective_desk_members`]), so routing and the console cannot
-/// drift. An overlay-added lead is reachable on a desk the manifest left empty.
-pub(crate) fn desk_lead(record: &CompanyRecord, desk: &str) -> Option<String> {
-    let desk_id = record.resolve_desk_id(desk)?;
-    record
-        .effective_desk_members(&desk_id)
-        .into_iter()
-        .find(|m| record.is_roster_agent(m))
-}
+// `desk_lead` is the brain-agnostic desk-lead resolver — it moved to
+// `runtime::delegation_tools` (issue #176) so the hosted path can resolve a
+// desk lead without the `openhuman` feature. Re-exported here so this module's
+// callers (and its tests) keep using `desk_lead(...)` unchanged.
+pub(crate) use crate::runtime::delegation_tools::desk_lead;
 
 /// The prompt for the CEO-relay hand-back turn: the operator's original message
 /// plus each teammate's reply, framed so the orchestrator relays the answer back

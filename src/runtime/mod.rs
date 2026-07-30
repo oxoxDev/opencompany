@@ -23,6 +23,11 @@ pub mod cycle;
 /// [`TurnOutcome`]: crate::harness::TurnOutcome
 #[cfg(feature = "openhuman")]
 pub mod delegation;
+/// Brain-agnostic delegation-tool primitives (issue #176): the tool names,
+/// argument schemas, hosted [`ToolManifestEntry`](crate::brain::medulla::wire::ToolManifestEntry)
+/// catalog, and desk-lead resolver shared by BOTH the harness and hosted paths.
+/// Compiled in every build (the hosted brain ships in the default build).
+pub mod delegation_tools;
 pub mod journal;
 pub mod mailbox_poller;
 pub mod registry;
