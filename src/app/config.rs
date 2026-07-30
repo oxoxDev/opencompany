@@ -724,14 +724,14 @@ mod test {
     fn projected_token_file_alone_enables_cycles() {
         let env = MapEnv::new([(
             crate::company::credentials::TOKEN_FILE_ENV,
-            "/var/run/secrets/tinyhumans/token",
+            "/var/run/secrets/tinyhumans.ai/token",
         )]);
         let (cfg, prov) = resolve(&env, None, &default_manifest()).unwrap();
 
         assert!(cfg.tinyhumans_credential.is_none(), "no static secret held");
         assert_eq!(
             cfg.tinyhumans_token_file.as_deref(),
-            Some(std::path::Path::new("/var/run/secrets/tinyhumans/token"))
+            Some(std::path::Path::new("/var/run/secrets/tinyhumans.ai/token"))
         );
         assert!(cfg.credential_available());
         assert!(cfg.cycles_available());

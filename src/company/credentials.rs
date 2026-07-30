@@ -12,7 +12,9 @@
 //!    file is re-read whenever the cached copy is past its window, so a rotation
 //!    is picked up without a restart. A permanent cache here would be a latent
 //!    outage: the pod would keep presenting a token the cluster already rotated
-//!    away from.
+//!    away from. The platform mounts it read-only as
+//!    `/var/run/secrets/tinyhumans.ai/token` with a 600-second expiry; the env var
+//!    carries the **path**, never a token value.
 //! 2. **[`Tier::Static`]** — the long-lived [`API_KEY_ENV`] value. This keeps
 //!    `docker compose` development alive and serves the (explicitly
 //!    **unsupported**) self-host case. It is not going away.
@@ -26,6 +28,21 @@
 //! saved file read. An already-expired token is still returned — refusing to
 //! send it would turn a recoverable 401 into a local outage — but likewise never
 //! cached.
+//!
+//! ## Degrading to the static tier
+//!
+//! The projected tier is only selected when the named path actually exists. The
+//! docker runtime injects nothing, so a leftover [`TOKEN_FILE_ENV`] pointing at
+//! a path that was never mounted must fall through to the static tier rather
+//! than failing every request. Once the tier *is* selected, a later read failure
+//! is a hard error: silently swapping to a different identity mid-life is worse
+//! than a loud failure.
+//!
+//! ## Rejected tokens
+//!
+//! Callers invalidate the cache with [`TinyhumansTokenSource::invalidate`] when
+//! the backend rejects a bearer (401), so the very next request re-reads the file
+//! instead of waiting out the window with a token the cluster has moved past.
 //!
 //! ## Redaction
 //!
@@ -176,14 +193,22 @@ impl TinyhumansTokenSource {
     /// precedence **[`TOKEN_FILE_ENV`] > [`API_KEY_ENV`]**, or `None` when
     /// neither is configured (fail closed — the caller keeps its offline brain).
     ///
-    /// The projected file wins deliberately: a pod that has been handed a
-    /// cluster identity must present *that*, even if a stale static key is still
-    /// lying around in its environment.
+    /// The projected file wins deliberately: a pod that has been handed a cluster
+    /// identity must present *that*, even if a stale static key is still lying
+    /// around in its environment. It is chosen only when the named path **exists**
+    /// — the docker runtime mounts nothing, so a leftover variable degrades to the
+    /// static tier (with a warning) instead of failing every request.
     pub fn from_env(env: &dyn EnvSource) -> Option<Self> {
         if let Some(path) = env.get(TOKEN_FILE_ENV).map(|p| p.trim().to_string())
             && !path.is_empty()
         {
-            return Some(Self::projected_file(path));
+            if Path::new(&path).exists() {
+                return Some(Self::projected_file(path));
+            }
+            tracing::warn!(
+                token_file = %path,
+                "{TOKEN_FILE_ENV} names a path that does not exist; falling back to the static credential tier"
+            );
         }
         let key = env.get(API_KEY_ENV).map(|k| k.trim().to_string())?;
         if key.is_empty() {
@@ -246,6 +271,16 @@ impl TinyhumansTokenSource {
         }
     }
 
+    /// Drops any cached read, so the next [`Self::current`] goes back to the
+    /// file. Called when the backend rejects a bearer (401): the cluster may have
+    /// rotated the token early, and waiting out the cache window would keep
+    /// presenting the rejected one. A no-op for the static tier.
+    pub fn invalidate(&self) {
+        if let Tier::ProjectedFile { cache, .. } = &self.tier {
+            *cache.lock().expect("token cache poisoned") = None;
+        }
+    }
+
     /// The credential to present on the next outbound request.
     ///
     /// For the static tier this is the configured value. For the projected-file
@@ -294,6 +329,108 @@ impl TinyhumansTokenSource {
             good_until: now + window,
         });
         Ok(token)
+    }
+}
+
+/// One resolved outbound credential: nothing, a value someone gave us, or a
+/// [`TinyhumansTokenSource`] that must be read per request.
+///
+/// This is the seam that keeps a rotating token from being flattened into a
+/// `String` at build time. Anything holding a credential holds *this*, resolves
+/// it with [`Self::current`] on the request path, and asks
+/// [`Self::configured`]/[`Self::source`] for status — so a rotation never needs a
+/// rebuild and status never needs the value.
+#[derive(Clone, Default)]
+pub enum Credential {
+    /// No credential — omit the bearer entirely (e.g. a keyless local Ollama).
+    #[default]
+    None,
+    /// A value held in memory: a per-company token an operator pasted into the
+    /// secret store, or a BYOK key. A changed value is a changed identity.
+    Value(String),
+    /// A platform token source. Read per request; the value it yields rotates
+    /// while the identity behind it does not.
+    Source(std::sync::Arc<TinyhumansTokenSource>),
+}
+
+impl Credential {
+    /// A credential from a stored value, treating blank as "not configured".
+    pub fn from_value(value: impl Into<String>) -> Self {
+        let value = value.into();
+        if value.trim().is_empty() {
+            Self::None
+        } else {
+            Self::Value(value)
+        }
+    }
+
+    /// A credential over a shared token source.
+    pub fn from_source(source: std::sync::Arc<TinyhumansTokenSource>) -> Self {
+        Self::Source(source)
+    }
+
+    /// Whether a credential can be obtained — the non-secret status the read
+    /// planes surface. Never returns the value.
+    pub fn configured(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    /// Which tier this credential comes from, as the console names it.
+    pub fn source(&self) -> CredentialSource {
+        match self {
+            Self::None => CredentialSource::None,
+            Self::Value(_) => CredentialSource::Static,
+            Self::Source(source) => source.credential_source(),
+        }
+    }
+
+    /// The bearer to present on the next request, or `None` to omit the header.
+    /// A [`Self::Source`] is read here — that is what makes a rotation take
+    /// effect without a rebuild.
+    pub async fn current(&self) -> Result<Option<String>> {
+        let token = match self {
+            Self::None => return Ok(None),
+            Self::Value(value) => value.clone(),
+            Self::Source(source) => source.current().await?,
+        };
+        let token = token.trim().to_string();
+        Ok(if token.is_empty() { None } else { Some(token) })
+    }
+
+    /// Forwards a rejection (401) to the underlying source so the next request
+    /// re-reads it. A no-op for a value we were handed.
+    pub fn invalidate(&self) {
+        if let Self::Source(source) = self {
+            source.invalidate();
+        }
+    }
+
+    /// Folds this credential's *identity* into `hasher` for a roster
+    /// fingerprint — see [`TinyhumansTokenSource::hash_identity`] for why a
+    /// projected source contributes its path rather than its rotating value.
+    pub fn hash_identity<H: std::hash::Hasher>(&self, hasher: &mut H) {
+        use std::hash::Hash;
+        match self {
+            Self::None => 0u8.hash(hasher),
+            Self::Value(value) => {
+                1u8.hash(hasher);
+                value.hash(hasher);
+            }
+            Self::Source(source) => {
+                2u8.hash(hasher);
+                source.hash_identity(hasher);
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => f.write_str("Credential(<unset>)"),
+            Self::Value(_) => f.write_str("Credential(<redacted>)"),
+            Self::Source(source) => write!(f, "Credential({})", source.describe()),
+        }
     }
 }
 
@@ -424,17 +561,34 @@ mod tests {
 
     #[test]
     fn projected_file_beats_static_key() {
+        let path = temp_file("token");
+        std::fs::write(&path, "projected").unwrap();
         let env = MapEnv::new([
-            (TOKEN_FILE_ENV, "/var/run/secrets/tinyhumans/token"),
-            (API_KEY_ENV, "th_static"),
+            (TOKEN_FILE_ENV, path.display().to_string()),
+            (API_KEY_ENV, "th_static".to_string()),
         ]);
         let source = TinyhumansTokenSource::from_env(&env).expect("configured");
         assert_eq!(source.tier(), TokenTier::ProjectedFile);
-        assert_eq!(
-            source.token_file(),
-            Some(Path::new("/var/run/secrets/tinyhumans/token"))
-        );
+        assert_eq!(source.token_file(), Some(path.as_path()));
         assert_eq!(source.credential_source(), CredentialSource::Attested);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// The docker runtime mounts nothing. A leftover `TINYHUMANS_TOKEN_FILE`
+    /// pointing at a path that was never projected must degrade to the static
+    /// tier — not select a tier that can only ever fail.
+    #[test]
+    fn a_token_file_that_does_not_exist_degrades_to_the_static_tier() {
+        let env = MapEnv::new([
+            (TOKEN_FILE_ENV, "/nonexistent/oc/token"),
+            (API_KEY_ENV, "th_static"),
+        ]);
+        let source = TinyhumansTokenSource::from_env(&env).expect("configured");
+        assert_eq!(source.tier(), TokenTier::Static);
+
+        // With nothing to fall back to, there is simply no source.
+        let alone = MapEnv::new([(TOKEN_FILE_ENV, "/nonexistent/oc/token")]);
+        assert!(TinyhumansTokenSource::from_env(&alone).is_none());
     }
 
     #[test]
@@ -524,6 +678,27 @@ mod tests {
         assert_eq!(cache_window(unix(100), Some(unix(100))), None);
         // Unknown expiry → never cache.
         assert_eq!(cache_window(unix(0), None), None);
+    }
+
+    /// A rejected bearer (401) must not wait out the cache window: invalidating
+    /// sends the next call straight back to the file.
+    #[tokio::test]
+    async fn invalidate_forces_a_re_read_inside_the_cache_window() {
+        let path = temp_file("token");
+        std::fs::write(&path, jwt(serde_json::json!({ "exp": 1000 }))).unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        let source = TinyhumansTokenSource::projected_file(&path);
+        assert_eq!(source.current_at(unix(0)).await.unwrap(), first);
+
+        std::fs::write(&path, jwt(serde_json::json!({ "exp": 1001 }))).unwrap();
+        let second = std::fs::read_to_string(&path).unwrap();
+        // Same instant, so the window is wide open — but the cache is gone.
+        source.invalidate();
+        assert_eq!(source.current_at(unix(0)).await.unwrap(), second);
+
+        // Harmless on the static tier.
+        TinyhumansTokenSource::static_key("k").invalidate();
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     /// A token whose expiry cannot be read is re-read on **every** call. Slower,
@@ -665,6 +840,55 @@ mod tests {
         // `-` and `_` are the url-safe substitutions for `+` and `/`.
         assert_eq!(base64url_decode("--__").unwrap(), vec![0xFB, 0xEF, 0xFF]);
         assert!(base64url_decode("a+b/c").is_none());
+    }
+
+    // ---- Credential --------------------------------------------------------
+
+    #[tokio::test]
+    async fn credential_variants_report_status_and_resolve() {
+        use std::sync::Arc;
+
+        let none = Credential::None;
+        assert!(!none.configured());
+        assert_eq!(none.source(), CredentialSource::None);
+        assert_eq!(none.current().await.unwrap(), None);
+
+        // Blank is not configuration.
+        assert!(!Credential::from_value("   ").configured());
+
+        let value = Credential::from_value("pasted-token");
+        assert!(value.configured());
+        assert_eq!(value.source(), CredentialSource::Static);
+        assert_eq!(
+            value.current().await.unwrap().as_deref(),
+            Some("pasted-token")
+        );
+
+        let path = temp_file("token");
+        std::fs::write(&path, "projected-token").unwrap();
+        let source =
+            Credential::from_source(Arc::new(TinyhumansTokenSource::projected_file(&path)));
+        assert!(source.configured());
+        assert_eq!(source.source(), CredentialSource::Attested);
+        assert_eq!(
+            source.current().await.unwrap().as_deref(),
+            Some("projected-token")
+        );
+        // The value it yields follows the file, per call.
+        std::fs::write(&path, "rotated-token").unwrap();
+        assert_eq!(
+            source.current().await.unwrap().as_deref(),
+            Some("rotated-token")
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn credential_debug_never_renders_a_value() {
+        let rendered = format!("{:?}", Credential::from_value("super-secret"));
+        assert!(!rendered.contains("super-secret"), "{rendered}");
+        assert!(rendered.contains("<redacted>"));
+        assert!(format!("{:?}", Credential::None).contains("<unset>"));
     }
 
     /// The tier's DTO spelling is a wire contract the console switches on.

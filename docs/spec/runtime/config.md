@@ -40,15 +40,20 @@ two-tier source (`company::credentials`). Highest precedence first:
 
 | Tier | Env | Who sets it | Shape |
 | --- | --- | --- | --- |
-| projected file | `TINYHUMANS_TOKEN_FILE` | the hosting platform | a short-lived, audience-bound token in a file the platform **rewrites in place** (roughly every 8 minutes) |
+| projected file | `TINYHUMANS_TOKEN_FILE` | the hosting platform | a short-lived, audience-bound token in a file the platform **rewrites in place** (600-second expiry, so roughly every 8 minutes) |
 | static | `TINYHUMANS_API_KEY` | you | a long-lived key held for the life of the process |
 
-A hosted tenant gets the projected file and stores no secret at all. The file is
+A hosted tenant gets the projected file and stores no secret at all: the platform
+mounts it read-only at `/var/run/secrets/tinyhumans.ai/token` and the env var
+carries that **path** — never a token value. The tier is selected only when the
+path exists, so a leftover variable under a runtime that mounts nothing (docker)
+falls through to the static tier instead of failing every request. The file is
 re-read as it rotates: a read is cached for 80% of the token's remaining TTL,
 capped at 60 seconds, and a token whose `exp` cannot be read (or has already
-passed) is not cached at all. Expiry is parsed out of the JWT **without verifying
-the signature** — the runtime needs the date, and the backend is the party that
-verifies the token.
+passed) is not cached at all, and a `401` from the backend drops the cached read
+so the next request goes straight back to the file. Expiry is parsed out of the
+JWT **without verifying the signature** — the runtime needs the date, and the
+backend is the party that verifies the token.
 
 The static tier is what `docker compose` uses, and it is the only credential path
 available if you run this repo standalone. Standalone/self-hosted operation is

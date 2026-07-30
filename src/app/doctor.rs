@@ -237,7 +237,7 @@ mod test {
     fn projected_token_file_reports_the_attested_tier() {
         let env = MapEnv::new([(
             crate::company::credentials::TOKEN_FILE_ENV,
-            "/var/run/secrets/tinyhumans/token",
+            "/var/run/secrets/tinyhumans.ai/token",
         )]);
         let (cfg, prov) = resolve(&env, None, &default_manifest()).unwrap();
         let report = report(&cfg, &prov);
@@ -247,7 +247,7 @@ mod test {
         assert_eq!(value(&report, "tinyhumans_credential"), "missing");
         assert_eq!(
             value(&report, "tinyhumans_token_file"),
-            "/var/run/secrets/tinyhumans/token"
+            "/var/run/secrets/tinyhumans.ai/token"
         );
     }
 
