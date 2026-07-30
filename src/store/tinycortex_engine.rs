@@ -49,7 +49,6 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::Value;
 
 use tinycortex::memory::chunks::shared_connection;
 use tinycortex::memory::config::MemoryConfig;
@@ -132,17 +131,21 @@ impl CompanyEngine {
             .map_err(|e| OpenCompanyError::Store(format!("kv get {key}: {e}")))?
         {
             None => Ok(None),
-            // Values are stored as a JSON string (see `put_json`) so the engine's
-            // write-time safety guard scans one opaque string rather than
-            // restructuring the payload's object keys.
-            Some(Value::String(raw)) => Ok(Some(serde_json::from_str(&raw)?)),
-            Some(other) => Ok(Some(serde_json::from_value(other)?)),
+            Some(value) => Ok(Some(serde_json::from_value(value)?)),
         }
     }
 
     /// JSON-encodes `value` and upserts it at `key`.
     fn put_json<T: Serialize>(&self, key: &str, value: &T) -> Result<()> {
-        let encoded = Value::String(serde_json::to_string(value)?);
+        // Store as a *structured* JSON value, never a stringified blob. The
+        // engine's KV `set_global` runs a write-time safety guard over string
+        // values (a checksum-gated national-ID PII scrubber + secret redaction);
+        // a stringified payload would expose its integer fields — chiefly the
+        // epoch-millis timestamps — to that scrubber, which can rewrite the digits
+        // and corrupt the JSON. Stored as structured JSON, numbers pass through
+        // the guard untouched and only string *content* is scrubbed, so
+        // timestamps round-trip intact.
+        let encoded = serde_json::to_value(value)?;
         self.kv
             .set_global(key, &encoded)
             .map_err(|e| OpenCompanyError::Store(format!("kv set {key}: {e}")))
@@ -156,14 +159,15 @@ impl CompanyEngine {
             .map_err(|e| OpenCompanyError::Store(format!("kv list chunks: {e}")))?;
         let mut out = Vec::new();
         for record in records {
-            let Some(addr) = record.key.strip_prefix(KEY_CHUNK_PREFIX) else {
+            let Some(addr) = record
+                .key
+                .strip_prefix(KEY_CHUNK_PREFIX)
+                .map(str::to_string)
+            else {
                 continue;
             };
-            let chunk: StoredChunk = match &record.value {
-                Value::String(raw) => serde_json::from_str(raw)?,
-                other => serde_json::from_value(other.clone())?,
-            };
-            out.push((addr.to_string(), chunk));
+            let chunk: StoredChunk = serde_json::from_value(record.value)?;
+            out.push((addr, chunk));
         }
         Ok(out)
     }
