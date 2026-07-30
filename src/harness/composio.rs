@@ -931,15 +931,18 @@ mod tests {
         let company = CompanyId::new("acme");
         let source = || Arc::new(TinyhumansTokenSource::static_key("platform-identity"));
 
-        // Nothing stored and no platform identity → fail closed, and an ambient
-        // env key is never consulted.
-        // SAFETY: single-threaded test; we set then restore the env.
-        unsafe { std::env::set_var("TINYHUMANS_API_KEY", "platform-managed-key") };
+        // Nothing stored and no platform identity → fail closed. That an ambient
+        // `TINYHUMANS_API_KEY` cannot be consulted is guaranteed by the signature
+        // — `resolve` takes the source explicitly and has no `EnvSource` — so it
+        // needs no proof by process-env mutation. Setting one here used to leak
+        // into every other test in this binary (`std::env` is process-wide and
+        // nothing restored it), which made an ops-route assertion on
+        // `credentialSource == "none"` flake depending on test order.
         assert!(
             TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, None)
                 .await
                 .is_none(),
-            "no credential at all must fail closed, ignoring any env platform key"
+            "no credential at all must fail closed"
         );
 
         // Nothing stored, but this instance has an identity → it is used.
