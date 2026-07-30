@@ -319,7 +319,7 @@ export function ComposioSection({ client, company }: Props) {
                 )}
                 <div className="space-y-1">
                   <Label htmlFor="composio-token" className="text-xs">
-                    Composio token {byoToken ? "— set, leave blank to keep" : ""}
+                    Composio token {byoToken ? "— set (paste a new value to rotate)" : ""}
                   </Label>
                   <Input
                     id="composio-token"
