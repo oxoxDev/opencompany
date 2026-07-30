@@ -1,0 +1,877 @@
+// The Task Detail screen (v1, #184): the epic's capstone read surface. One
+// `GET …/tasks/{id}` (#185/#190) drives a header, the lineage rail, the event
+// timeline, and a controls bar; a 4s visibility-gated poll keeps it live while
+// the card is open. Cost/₹ is intentionally absent everywhere. Several tabs are
+// honest stubs pending their own issues (see the tab bodies).
+
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import {
+  AlertCircle,
+  ArrowLeft,
+  Ban,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Clock,
+  CornerDownRight,
+  CornerUpLeft,
+  CornerUpRight,
+  Loader2,
+  MessageSquare,
+  Pencil,
+  Play,
+  Send,
+  ShieldCheck,
+  Square,
+  UserCog,
+} from "lucide-react";
+
+import {
+  getTaskDetail,
+  listInflight,
+  patchTask,
+  steerTask,
+  type InflightRun,
+  type SteerAction,
+  type Task,
+  type TaskDetail,
+  type TimelineEntry,
+  type TimelineKind,
+} from "@/api/tasks";
+import { ApiError } from "@/api/types";
+import type { OpenCompanyClient } from "@/api/client";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { cn } from "@/lib/utils";
+import { PRIORITY_STYLES, TASK_COLUMNS } from "@/lib/tasks-sample";
+import { toast } from "sonner";
+import { TaskEditDialog } from "./TaskEditDialog";
+
+/** How often to re-poll the detail while the screen is open (visibility-gated). */
+const POLL_MS = 4000;
+
+function priorityStyle(priority: string): string {
+  return PRIORITY_STYLES[priority as keyof typeof PRIORITY_STYLES] ?? PRIORITY_STYLES.low;
+}
+
+/** The column id → human label ("in_progress" → "In progress"), tolerating unknowns. */
+function columnLabel(column: string): string {
+  return TASK_COLUMNS.find((c) => c.id === column)?.label ?? column;
+}
+
+/**
+ * Sums the task's "worked" spans from its timeline: each `dispatched` opens a
+ * window that its matching `completed` closes. Re-dispatch reopens a fresh
+ * window, so multiple spans accumulate. A `completed` with no open window
+ * (legacy cards journaled before dispatch anchors existed) is skipped rather
+ * than counted from zero. When a window is still open, its running time to
+ * `now` is included and `live` is true — the caller ticks it every second.
+ */
+function workedMillis(timeline: TimelineEntry[], now: number): { millis: number; live: boolean } {
+  let total = 0;
+  let openAt: number | null = null;
+  for (const e of timeline) {
+    if (e.kind === "dispatched") {
+      openAt = e.atMillis;
+    } else if (e.kind === "completed" && openAt !== null) {
+      total += Math.max(0, e.atMillis - openAt);
+      openAt = null;
+    }
+  }
+  const live = openAt !== null;
+  if (openAt !== null) total += Math.max(0, now - openAt);
+  return { millis: total, live };
+}
+
+/** `1h 04m 09s` / `4m 09s` / `9s`. */
+function formatDuration(millis: number): string {
+  const s = Math.floor(millis / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m ${String(sec).padStart(2, "0")}s`;
+  if (m > 0) return `${m}m ${String(sec).padStart(2, "0")}s`;
+  return `${sec}s`;
+}
+
+function timeOf(at: number): string {
+  return new Date(at).toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+export function TaskDetailView({
+  client,
+  company,
+  taskId,
+  onBack,
+  onNavigate,
+  onSaved,
+  onDeleted,
+}: {
+  client: OpenCompanyClient;
+  company: string | null;
+  taskId: string;
+  /** Return to the board. */
+  onBack: () => void;
+  /** Navigate the detail to a neighbouring (lineage) task. */
+  onNavigate: (id: string) => void;
+  /** Hand a saved card back to the board for reconciliation. */
+  onSaved: (t: Task) => void;
+  /** Tell the board a card was deleted. */
+  onDeleted: (id: string) => void;
+}) {
+  const [detail, setDetail] = useState<TaskDetail | null>(null);
+  const [inflight, setInflight] = useState<InflightRun | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [notFound, setNotFound] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+  const mounted = useRef(true);
+
+  const load = useCallback(async () => {
+    try {
+      const [d, runs] = await Promise.all([
+        getTaskDetail(client, company, taskId),
+        listInflight(client, company).catch(() => [] as InflightRun[]),
+      ]);
+      if (!mounted.current) return;
+      setDetail(d);
+      setInflight(runs.find((r) => r.taskId === taskId) ?? null);
+      setNotFound(false);
+      setError(null);
+    } catch (e) {
+      if (!mounted.current) return;
+      if (e instanceof ApiError && e.status === 404) {
+        setNotFound(true);
+        setError(null);
+      } else {
+        setError(e instanceof Error ? e.message : "could not load the task");
+      }
+    } finally {
+      if (mounted.current) setLoading(false);
+    }
+  }, [client, company, taskId]);
+
+  // 4s poll, paused while the tab is hidden and resumed (with an immediate
+  // fetch) when it returns to the foreground. Re-keys on `taskId`, so a lineage
+  // navigation reloads the screen for the new card.
+  useEffect(() => {
+    mounted.current = true;
+    setLoading(true);
+    setDetail(null);
+    void load();
+    let timer: number | undefined;
+    const stop = () => {
+      if (timer !== undefined) {
+        window.clearInterval(timer);
+        timer = undefined;
+      }
+    };
+    const start = () => {
+      if (timer === undefined) timer = window.setInterval(() => void load(), POLL_MS);
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        stop();
+      } else {
+        void load();
+        start();
+      }
+    };
+    if (document.visibilityState !== "hidden") start();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      mounted.current = false;
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [load]);
+
+  const worked = useMemo(
+    () => (detail ? workedMillis(detail.timeline, now) : null),
+    [detail, now],
+  );
+
+  // Only tick the 1s clock while a dispatch window is open (worked is live).
+  useEffect(() => {
+    if (!worked?.live) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== "hidden") setNow(Date.now());
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [worked?.live]);
+
+  if (notFound) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
+        <p className="text-sm font-medium">This task no longer exists.</p>
+        <p className="max-w-sm text-xs text-muted-foreground">
+          It may have been deleted. Head back to the board to pick another card.
+        </p>
+        <Button variant="outline" size="sm" onClick={onBack}>
+          <ArrowLeft className="mr-1.5 size-4" />
+          Back to board
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-1 flex-col overflow-hidden">
+      <div className="flex items-center gap-2 border-b px-4 py-3">
+        <Button variant="ghost" size="sm" className="-ml-2 h-8 px-2" onClick={onBack}>
+          <ArrowLeft className="mr-1.5 size-4" />
+          Board
+        </Button>
+        <span className="text-xs text-muted-foreground">Task detail</span>
+      </div>
+
+      {error && (
+        <div className="px-4 pt-3">
+          <Alert variant="destructive">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        </div>
+      )}
+
+      {loading && !detail ? (
+        <div className="space-y-4 p-4">
+          <Skeleton className="h-24 rounded-xl" />
+          <Skeleton className="h-10 w-64 rounded-lg" />
+          <Skeleton className="h-48 rounded-xl" />
+        </div>
+      ) : detail ? (
+        <ScrollArea className="flex-1">
+          <div className="mx-auto w-full max-w-3xl space-y-5 p-4">
+            <DetailHeader task={detail.task} worked={worked} />
+
+            <ControlBar
+              task={detail.task}
+              inflight={inflight}
+              client={client}
+              company={company}
+              onChanged={load}
+              onSaved={onSaved}
+              onEdit={() => setEditing(true)}
+            />
+
+            <LineageRail lineage={detail.lineage} onNavigate={onNavigate} />
+
+            <Tabs defaultValue="timeline">
+              <TabsList>
+                <TabsTrigger value="timeline">Timeline</TabsTrigger>
+                <TabsTrigger value="approvals">Approvals</TabsTrigger>
+                <TabsTrigger value="artifacts">Artifacts</TabsTrigger>
+                <TabsTrigger value="discussion">Discussion</TabsTrigger>
+              </TabsList>
+
+              <TabsContent value="timeline" className="mt-4">
+                <TimelineList entries={detail.timeline} />
+              </TabsContent>
+
+              <TabsContent value="approvals" className="mt-4">
+                <ApprovalsTab entries={detail.timeline} />
+              </TabsContent>
+
+              <TabsContent value="artifacts" className="mt-4">
+                {/* TODO(#187): render the task's produced artifacts once the
+                    artifacts read plane exists. No fabricated data until then. */}
+                <EmptyState
+                  title="Artifacts land here"
+                  body="Files and outputs a run produces will show once artifacts ship (#187)."
+                />
+              </TabsContent>
+
+              <TabsContent value="discussion" className="mt-4">
+                {/* No backend for per-task discussion yet — honest empty state,
+                    no fake threads. */}
+                <EmptyState
+                  title="No discussion yet"
+                  body="A per-task discussion thread has no backend yet."
+                />
+              </TabsContent>
+            </Tabs>
+          </div>
+        </ScrollArea>
+      ) : null}
+
+      <TaskEditDialog
+        task={editing && detail ? detail.task : null}
+        onClose={() => setEditing(false)}
+        onSaved={(t) => {
+          onSaved(t);
+          setEditing(false);
+          void load();
+        }}
+        onDeleted={(id) => {
+          onDeleted(id);
+          onBack();
+        }}
+        client={client}
+        company={company}
+      />
+    </div>
+  );
+}
+
+function DetailHeader({
+  task,
+  worked,
+}: {
+  task: Task;
+  worked: { millis: number; live: boolean } | null;
+}) {
+  const hasDispatch = worked !== null && (worked.millis > 0 || worked.live);
+  return (
+    <div className="rounded-xl border bg-card p-4">
+      <div className="flex items-start justify-between gap-3">
+        <h2 className="text-lg font-semibold leading-snug">{task.title}</h2>
+        <Badge
+          variant="outline"
+          className={cn("shrink-0 capitalize", priorityStyle(task.priority))}
+        >
+          {task.priority}
+        </Badge>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground">
+        <span className="inline-flex items-center gap-1.5">
+          <span className="font-medium text-foreground">Status</span>
+          <Badge variant="secondary" className="font-normal">
+            {columnLabel(task.column)}
+          </Badge>
+        </span>
+        {task.assignee && (
+          <span className="inline-flex items-center gap-1.5">
+            <span
+              className="flex size-5 items-center justify-center rounded-full bg-muted text-[10px] font-semibold"
+              aria-hidden
+            >
+              {initials(task.assignee)}
+            </span>
+            {task.assignee}
+          </span>
+        )}
+        <span className="inline-flex items-center gap-1.5">
+          <Clock className="size-3.5" />
+          {hasDispatch ? (
+            <>
+              <span className="font-medium text-foreground">
+                Worked {formatDuration(worked!.millis)}
+              </span>
+              {worked!.live && (
+                <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+                  <span className="size-1.5 animate-pulse rounded-full bg-current" aria-hidden />
+                  live
+                </span>
+              )}
+            </>
+          ) : (
+            <span>Not yet dispatched</span>
+          )}
+        </span>
+      </div>
+
+      {task.note && (
+        <p className="mt-3 whitespace-pre-wrap border-t pt-3 text-xs text-muted-foreground">
+          {task.note}
+        </p>
+      )}
+
+      {/* Deferred (#172): the working-vs-waiting split needs the park instant a
+          real park effect records. Until then we show only worked time — never
+          a waiting figure fabricated from timeline gaps. */}
+      <p className="mt-2 text-[11px] text-muted-foreground/70">
+        Waiting time appears when parking lands (#172).
+      </p>
+    </div>
+  );
+}
+
+function ControlBar({
+  task,
+  inflight,
+  client,
+  company,
+  onChanged,
+  onSaved,
+  onEdit,
+}: {
+  task: Task;
+  inflight: InflightRun | null;
+  client: OpenCompanyClient;
+  company: string | null;
+  onChanged: () => Promise<void> | void;
+  onSaved: (t: Task) => void;
+  onEdit: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [redirecting, setRedirecting] = useState(false);
+  const [instruction, setInstruction] = useState("");
+  const [reassigning, setReassigning] = useState(false);
+  const [assignee, setAssignee] = useState(task.assignee);
+
+  const pending = inflight?.pendingAction ?? null;
+  const steerDisabled = busy || pending !== null;
+
+  async function steer(action: SteerAction, opts?: { instruction?: string; confirm?: boolean }) {
+    if (!inflight) return;
+    setBusy(true);
+    try {
+      await steerTask(client, company, inflight.key, { action, ...opts });
+      setRedirecting(false);
+      setInstruction("");
+      await onChanged();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "could not steer the task");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function patchColumn() {
+    setBusy(true);
+    try {
+      const saved = await patchTask(client, company, task.id, { column: "in_progress" });
+      onSaved(saved);
+      await onChanged();
+      toast.success("Dispatched — the assignee is working on it.");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "could not dispatch the task");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveAssignee() {
+    const next = assignee.trim();
+    if (!next || next === task.assignee) {
+      setReassigning(false);
+      return;
+    }
+    setBusy(true);
+    try {
+      const saved = await patchTask(client, company, task.id, { assignee: next });
+      onSaved(saved);
+      await onChanged();
+      setReassigning(false);
+      toast.success("Reassigned.");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "could not reassign the task");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const resumeLabel = task.column === "paused" ? "Resume" : "Retry";
+
+  return (
+    <div className="rounded-xl border bg-card/40 p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        {inflight ? (
+          <>
+            <span className="mr-1 inline-flex items-center gap-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+              <span className="size-1.5 animate-pulse rounded-full bg-current" aria-hidden />
+              In flight
+            </span>
+            {pending !== null ? (
+              <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                {pending}…
+              </span>
+            ) : (
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  disabled={steerDisabled}
+                  onClick={() => void steer("pause")}
+                >
+                  <Square className="mr-1.5 size-3.5" />
+                  Stop
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  disabled={steerDisabled}
+                  aria-pressed={redirecting}
+                  onClick={() => setRedirecting((r) => !r)}
+                >
+                  <CornerUpRight className="mr-1.5 size-3.5" />
+                  Redirect
+                </Button>
+                <ConfirmButton
+                  trigger={
+                    <Button variant="outline" size="sm" className="h-8" disabled={steerDisabled}>
+                      <Ban className="mr-1.5 size-3.5" />
+                      Cancel
+                    </Button>
+                  }
+                  title={`Cancel “${task.title}”?`}
+                  description="This stops the run. It can be retried afterwards from the board or here."
+                  confirmLabel="Cancel run"
+                  destructive
+                  onConfirm={() => void steer("cancel", { confirm: true })}
+                />
+              </>
+            )}
+          </>
+        ) : (
+          <Button variant="outline" size="sm" className="h-8" disabled={busy} onClick={() => void patchColumn()}>
+            <Play className="mr-1.5 size-3.5" />
+            {resumeLabel}
+          </Button>
+        )}
+
+        <div className="ml-auto flex items-center gap-2">
+          {busy && <Loader2 className="size-4 animate-spin text-muted-foreground" />}
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-8"
+            disabled={busy}
+            aria-pressed={reassigning}
+            onClick={() => {
+              setAssignee(task.assignee);
+              setReassigning((r) => !r);
+            }}
+          >
+            <UserCog className="mr-1.5 size-3.5" />
+            Reassign
+          </Button>
+          <Button variant="ghost" size="sm" className="h-8" disabled={busy} onClick={onEdit}>
+            <Pencil className="mr-1.5 size-3.5" />
+            Edit
+          </Button>
+        </div>
+      </div>
+
+      {redirecting && (
+        <div className="mt-2 flex items-center gap-2">
+          <Input
+            autoFocus
+            value={instruction}
+            placeholder="New instruction for the run…"
+            className="h-8"
+            disabled={steerDisabled}
+            onChange={(e) => setInstruction(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && instruction.trim()) void steer("redirect", { instruction: instruction.trim() });
+            }}
+          />
+          <Button
+            size="sm"
+            className="h-8"
+            disabled={steerDisabled || !instruction.trim()}
+            onClick={() => void steer("redirect", { instruction: instruction.trim() })}
+          >
+            <Send className="mr-1.5 size-3.5" />
+            Send
+          </Button>
+        </div>
+      )}
+
+      {reassigning && (
+        <div className="mt-2 flex items-center gap-2">
+          <Input
+            autoFocus
+            value={assignee}
+            placeholder="agent id"
+            className="h-8"
+            disabled={busy}
+            onChange={(e) => setAssignee(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void saveAssignee();
+            }}
+          />
+          <Button size="sm" className="h-8" disabled={busy} onClick={() => void saveAssignee()}>
+            Save
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LineageRail({
+  lineage,
+  onNavigate,
+}: {
+  lineage: TaskDetail["lineage"];
+  onNavigate: (id: string) => void;
+}) {
+  if (!lineage.parent && lineage.children.length === 0) return null;
+  return (
+    <div className="rounded-xl border bg-card/40 p-3">
+      <p className="mb-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+        Lineage
+      </p>
+      <div className="space-y-1.5">
+        {lineage.parent && (
+          <button
+            className="flex w-full items-center gap-2 rounded-lg border bg-card px-2.5 py-1.5 text-left text-xs transition-colors hover:bg-accent"
+            onClick={() => onNavigate(lineage.parent!.id)}
+          >
+            <CornerUpLeft className="size-3.5 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1 truncate">{lineage.parent.title}</span>
+            <Badge variant="secondary" className="shrink-0 font-normal">
+              {columnLabel(lineage.parent.column)}
+            </Badge>
+          </button>
+        )}
+        <div className="px-2.5 py-1 text-[11px] font-medium text-muted-foreground">This task</div>
+        {lineage.children.map((child) => (
+          <button
+            key={child.id}
+            className="flex w-full items-center gap-2 rounded-lg border bg-card px-2.5 py-1.5 pl-5 text-left text-xs transition-colors hover:bg-accent"
+            onClick={() => onNavigate(child.id)}
+          >
+            <CornerDownRight className="size-3.5 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1 truncate">{child.title}</span>
+            <Badge variant="secondary" className="shrink-0 font-normal">
+              {columnLabel(child.column)}
+            </Badge>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** One rendered timeline row — a single entry, or a run of grouped failures. */
+interface TimelineGroup {
+  key: string;
+  kind: TimelineKind;
+  label: string;
+  count: number;
+  entries: TimelineEntry[];
+}
+
+/**
+ * Folds a timeline into rows, coalescing consecutive same-label `tool_failed`
+ * entries into one `×N` row. Every other kind is its own row.
+ */
+function groupTimeline(entries: TimelineEntry[]): TimelineGroup[] {
+  const groups: TimelineGroup[] = [];
+  for (const e of entries) {
+    const last = groups[groups.length - 1];
+    if (e.kind === "tool_failed" && last && last.kind === "tool_failed" && last.label === e.label) {
+      last.count += 1;
+      last.entries.push(e);
+    } else {
+      groups.push({ key: String(e.seq), kind: e.kind, label: e.label, count: 1, entries: [e] });
+    }
+  }
+  return groups;
+}
+
+const KIND_ICON: Record<TimelineKind, ReactElement> = {
+  dispatched: <Play className="size-3.5" />,
+  reply: <MessageSquare className="size-3.5" />,
+  tool_failed: <AlertCircle className="size-3.5" />,
+  approval: <ShieldCheck className="size-3.5" />,
+  completed: <CheckCircle2 className="size-3.5" />,
+};
+
+function kindTone(kind: TimelineKind): string {
+  switch (kind) {
+    case "completed":
+      return "text-emerald-600 dark:text-emerald-400";
+    case "tool_failed":
+      return "text-rose-600 dark:text-rose-400";
+    case "approval":
+      return "text-amber-600 dark:text-amber-400";
+    default:
+      return "text-muted-foreground";
+  }
+}
+
+function TimelineList({ entries }: { entries: TimelineEntry[] }) {
+  const groups = useMemo(() => groupTimeline(entries), [entries]);
+  if (groups.length === 0) {
+    return (
+      <EmptyState
+        title="Nothing has happened yet"
+        body="Dispatch this task from the board to start its timeline."
+      />
+    );
+  }
+  return (
+    <ol className="space-y-1.5">
+      {groups.map((g) => (
+        <TimelineRow key={g.key} group={g} />
+      ))}
+    </ol>
+  );
+}
+
+function TimelineRow({ group }: { group: TimelineGroup }) {
+  const [open, setOpen] = useState(false);
+  const details = group.entries.filter((e) => e.detail);
+  const expandable = details.length > 0 || group.count > 1;
+  const first = group.entries[0];
+
+  return (
+    <li className="rounded-lg border bg-card">
+      <button
+        className={cn(
+          "flex w-full items-center gap-2 px-3 py-2 text-left text-xs",
+          expandable ? "cursor-pointer" : "cursor-default",
+        )}
+        disabled={!expandable}
+        onClick={() => expandable && setOpen((o) => !o)}
+      >
+        <span className={cn("shrink-0", kindTone(group.kind))}>{KIND_ICON[group.kind]}</span>
+        <span className="min-w-0 flex-1 truncate font-medium">{group.label}</span>
+        {group.count > 1 && (
+          <Badge variant="outline" className="shrink-0 font-normal">
+            ×{group.count}
+          </Badge>
+        )}
+        <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+          {timeOf(first.atMillis)}
+        </span>
+        {expandable &&
+          (open ? (
+            <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+          ))}
+      </button>
+      {open && expandable && (
+        <div className="space-y-2 border-t px-3 py-2">
+          {group.count > 1
+            ? group.entries.map((e) => (
+                <div key={e.seq} className="text-[11px]">
+                  <div className="mb-0.5 text-muted-foreground">{timeOf(e.atMillis)}</div>
+                  {e.detail && (
+                    <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-muted-foreground">
+                      {e.detail}
+                    </pre>
+                  )}
+                </div>
+              ))
+            : details.map((e) => (
+                <pre
+                  key={e.seq}
+                  className="whitespace-pre-wrap break-words font-mono text-[11px] text-muted-foreground"
+                >
+                  {e.detail}
+                </pre>
+              ))}
+        </div>
+      )}
+    </li>
+  );
+}
+
+function ApprovalsTab({ entries }: { entries: TimelineEntry[] }) {
+  const approvals = useMemo(() => entries.filter((e) => e.kind === "approval"), [entries]);
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-muted-foreground">
+        Approvals resolved <span className="font-medium text-foreground">during this run</span> —
+        correlated to the dispatch window, not linked per-task. The full approvals ledger arrives
+        with #172.
+      </p>
+      {approvals.length === 0 ? (
+        <EmptyState
+          title="No approvals in this run"
+          body="Sign-offs resolved while this task ran will appear here."
+        />
+      ) : (
+        <ol className="space-y-1.5">
+          {approvals.map((e) => (
+            <li
+              key={e.seq}
+              className="flex items-center gap-2 rounded-lg border bg-card px-3 py-2 text-xs"
+            >
+              <ShieldCheck className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+              <span className="min-w-0 flex-1 truncate font-medium">{e.label}</span>
+              <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+                {timeOf(e.atMillis)}
+              </span>
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+function EmptyState({ title, body }: { title: string; body: string }) {
+  return (
+    <div className="rounded-xl border border-dashed py-10 text-center">
+      <p className="text-sm font-medium">{title}</p>
+      <p className="mx-auto mt-1 max-w-xs text-xs text-muted-foreground">{body}</p>
+    </div>
+  );
+}
+
+/** An AlertDialog-gated button, mirroring the confirm pattern used elsewhere. */
+function ConfirmButton({
+  trigger,
+  title,
+  description,
+  confirmLabel,
+  destructive,
+  onConfirm,
+}: {
+  trigger: ReactElement;
+  title: string;
+  description: string;
+  confirmLabel: string;
+  destructive?: boolean;
+  onConfirm: () => void;
+}) {
+  return (
+    <AlertDialog>
+      <AlertDialogTrigger render={trigger} />
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{title}</AlertDialogTitle>
+          <AlertDialogDescription>{description}</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Keep running</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={onConfirm}
+            className={destructive ? "bg-destructive text-white hover:bg-destructive/90" : undefined}
+          >
+            {confirmLabel}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+function initials(name: string): string {
+  return name
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((p) => p.charAt(0).toUpperCase())
+    .join("");
+}
