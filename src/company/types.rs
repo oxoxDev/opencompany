@@ -558,6 +558,16 @@ pub struct Plan {
     /// tier's map; a gateable namespace absent here is denied.
     #[serde(default)]
     pub token_budgets: BTreeMap<String, u64>,
+    /// Plan-level **total token ceiling** for the period (issue #188). The
+    /// per-namespace `token_budgets` gate only *which exec tools* a turn may use
+    /// (a soft roster trim — an exhausted namespace's tools drop, but the turn
+    /// still runs on intrinsic tools and burns model tokens). This is the hard
+    /// stop: once the company's total period spend reaches this ceiling, the
+    /// harness **refuses to dispatch the turn at all** (no model call) until the
+    /// period resets. `None` (the default) leaves the total gate off — only the
+    /// per-namespace soft gate applies, byte-identical to pre-#188.
+    #[serde(default)]
+    pub total_tokens: Option<u64>,
 }
 
 impl Default for Plan {
@@ -570,16 +580,20 @@ impl Default for Plan {
             name: None,
             period: default_plan_period(),
             token_budgets: BTreeMap::new(),
+            total_tokens: None,
         }
     }
 }
 
 impl Plan {
-    /// Whether this section meaningfully configures a plan — a named tier or an
-    /// explicit budget. An absent `[plan]` deserializes to the default (period
-    /// only), which is *not* set, so gating stays off.
+    /// Whether this section meaningfully configures a plan — a named tier, an
+    /// explicit per-namespace budget, or a total-token ceiling (issue #188). An
+    /// absent `[plan]` deserializes to the default (period only), which is *not*
+    /// set, so gating stays off.
     pub fn is_set(&self) -> bool {
-        self.name.as_deref().is_some_and(|n| !n.trim().is_empty()) || !self.token_budgets.is_empty()
+        self.name.as_deref().is_some_and(|n| !n.trim().is_empty())
+            || !self.token_budgets.is_empty()
+            || self.total_tokens.is_some()
     }
 }
 
@@ -705,6 +719,7 @@ mod test {
             [plan]
             name = "starter"
             period = "monthly"
+            total_tokens = 2000000
 
             [plan.token_budgets]
             web = 500000
@@ -714,16 +729,32 @@ mod test {
         assert_eq!(manifest.plan.name.as_deref(), Some("starter"));
         assert_eq!(manifest.plan.period, "monthly");
         assert_eq!(manifest.plan.token_budgets.get("web"), Some(&500_000));
+        assert_eq!(manifest.plan.total_tokens, Some(2_000_000));
 
         let json = serde_json::to_string(&manifest).expect("serialize");
         let back: CompanyManifest = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.plan.name.as_deref(), Some("starter"));
         assert_eq!(back.plan.period, "monthly");
         assert_eq!(back.plan.token_budgets.get("web"), Some(&500_000));
+        assert_eq!(back.plan.total_tokens, Some(2_000_000));
 
         // An absent `[plan]` defaults to period-only, which is NOT set.
         let bare: CompanyManifest = toml::from_str("[company]\nname = \"Bare\"\n").unwrap();
         assert!(!bare.plan.is_set());
         assert_eq!(bare.plan.period, "daily");
+        assert_eq!(bare.plan.total_tokens, None);
+    }
+
+    /// A `[plan]` carrying **only** a `total_tokens` ceiling (issue #188) — no
+    /// name, no per-namespace budgets — is still a set plan, so the total gate
+    /// engages on its own.
+    #[test]
+    fn plan_total_tokens_only_is_set() {
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[plan]\ntotal_tokens = 1000\n").unwrap();
+        assert!(manifest.plan.is_set(), "a total-only plan must be set");
+        assert_eq!(manifest.plan.total_tokens, Some(1000));
+        assert!(manifest.plan.name.is_none());
+        assert!(manifest.plan.token_budgets.is_empty());
     }
 }
