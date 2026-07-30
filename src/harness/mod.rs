@@ -212,13 +212,13 @@ pub struct HarnessDeps {
     pub media: Option<toolbelt::MediaBackend>,
     /// The per-tenant Composio configuration (issue #110). `None` (the default
     /// at every construction site) fails closed — no Composio tools are wired.
-    /// [`HarnessPool::ensure`] re-resolves it from the [`SecretStore`] under
-    /// [`composio::TOKEN_KEY`](crate::harness::composio::TOKEN_KEY) each turn
-    /// (folded into the roster fingerprint) so a console token set/rotate takes
-    /// effect next turn with no restart. Only wired when a company **explicitly**
-    /// grants `composio` **and** a non-empty token is stored; the token has no
-    /// env fallback, so an absent token means no tools (never a borrowed
-    /// identity).
+    /// [`HarnessPool::ensure`] re-resolves it each turn (folded into the roster
+    /// fingerprint) so a console token set/rotate takes effect next turn with no
+    /// restart. Only wired when a company **explicitly** grants `composio` **and**
+    /// a credential can be obtained: the company's own token under
+    /// [`composio::TOKEN_KEY`](crate::harness::composio::TOKEN_KEY) if it has one,
+    /// else this instance's platform identity. With neither, no tools are wired —
+    /// never a borrowed identity.
     pub composio: Option<composio::TenantComposio>,
     /// Issue #111 — the shared registry of in-flight, steerable runs. The
     /// [`HarnessBrain`] registers a dispatched task / desk delegation here before
@@ -701,12 +701,16 @@ impl HarnessPool {
     /// secret store on this axis; others resolve to `None` (no tools). With no
     /// secret store wired this degrades to the static [`HarnessDeps::composio`].
     ///
-    /// The token has no env fallback — an absent/empty secret yields `None` (fail
-    /// closed). The backend URL resolves from
-    /// [`composio::COMPOSIO_BACKEND_URL_ENV`], then the tenant API base
-    /// [`composio::TINYHUMANS_API_URL_ENV`], then the prod default — read
-    /// process-globally so a live re-resolution keeps the override even when no
-    /// token was stored at boot.
+    /// Resolution prefers the company's own stored token and falls back to this
+    /// instance's platform identity; with neither it yields `None` (fail closed).
+    /// Both the backend URL (from [`composio::COMPOSIO_BACKEND_URL_ENV`], then the
+    /// tenant API base [`composio::TINYHUMANS_API_URL_ENV`], then the prod
+    /// default) and the platform identity are read process-globally here, so a
+    /// live re-resolution keeps them even when nothing was stored at boot.
+    ///
+    /// Re-deriving the token source every turn costs nothing — building it reads
+    /// no file — and the roster that keeps it holds one instance for its whole
+    /// lifetime, so its rotation cache still works.
     async fn resolve_composio(
         &self,
         company: &CompanyRecord,
@@ -728,6 +732,7 @@ impl HarnessPool {
                     toolkits,
                     url,
                     api_url,
+                    crate::company::TinyhumansTokenSource::from_env(&env).map(std::sync::Arc::new),
                 )
                 .await
             }

@@ -874,15 +874,16 @@ impl RuntimeBuilder {
                                 Vec::new()
                             });
                             // Issue #110: resolve the per-tenant Composio config
-                            // at boot from the company secret store (token) + the
-                            // manifest toolkit allowlist + the env URL override,
-                            // falling back to the tenant API base so staging
-                            // Composio follows staging. Only companies that
-                            // explicitly grant `composio` touch the store; the
-                            // token has no env fallback, so a missing token stays
-                            // `None` (fail closed). `HarnessPool::ensure`
-                            // re-resolves this each turn so a console token change
-                            // takes effect without restart.
+                            // at boot from the company secret store (its own
+                            // token, if any) else this instance's platform
+                            // identity, plus the manifest toolkit allowlist and
+                            // the env URL override, falling back to the tenant API
+                            // base so staging Composio follows staging. Only
+                            // companies that explicitly grant `composio` resolve at
+                            // all; with no credential obtainable it stays `None`
+                            // (fail closed). `HarnessPool::ensure` re-resolves this
+                            // each turn so a console token change takes effect
+                            // without restart.
                             let composio_config = if crate::company::grants_composio_explicit(
                                 &self.manifest.tools.allow,
                             ) {
@@ -899,6 +900,11 @@ impl RuntimeBuilder {
                                     toolkits,
                                     url,
                                     api_url,
+                                    // Falls back to this instance's platform
+                                    // identity when the company stored no token
+                                    // of its own.
+                                    crate::company::TinyhumansTokenSource::from_env(&env)
+                                        .map(Arc::new),
                                 )
                                 .await
                             } else {
