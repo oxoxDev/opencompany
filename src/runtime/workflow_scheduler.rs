@@ -192,7 +192,7 @@ impl WorkflowScheduler {
                 // Overlap guard: a previous scheduled run still executing keeps
                 // this fire from stacking a second copy on top of it. Manual
                 // runs go through the run route and are unaffected.
-                if !self.claim(&key) {
+                let Some(claim) = self.claim(&key) else {
                     tracing::info!(
                         %company,
                         workflow = %file.id,
@@ -200,7 +200,7 @@ impl WorkflowScheduler {
                         "workflow scheduler: previous scheduled run still in flight, skipping"
                     );
                     continue;
-                }
+                };
 
                 let input = json!({
                     // `request` is what `run_request_text` reads, so every agent
@@ -212,7 +212,6 @@ impl WorkflowScheduler {
                     "firedAtMs": now,
                 });
 
-                let in_flight = self.in_flight.clone();
                 let runner = runner.clone();
                 let workflow = file;
                 // A FRESH TASK PER FIRE IS CORRECT HERE, and is not a hole in
@@ -230,7 +229,14 @@ impl WorkflowScheduler {
                 // from starving every other company's schedule on the tick
                 // loop.
                 tokio::spawn(async move {
-                    let (company, workflow_id) = key.clone();
+                    // Held for the whole run so the slot is released on EVERY
+                    // exit path, including an unwind. Releasing after the
+                    // `await` instead would leak the claim when the runner
+                    // panics — and a leaked claim is permanent, because nothing
+                    // else ever removes it, so one panic would retire that
+                    // schedule for the life of the process with no log line.
+                    let _claim = claim;
+                    let (company, workflow_id) = key;
                     match runner.run(&company, &workflow, input).await {
                         Ok(run) => tracing::info!(
                             %company,
@@ -245,10 +251,6 @@ impl WorkflowScheduler {
                             "workflow scheduler: scheduled run failed"
                         ),
                     }
-                    in_flight
-                        .lock()
-                        .expect("in-flight set poisoned")
-                        .remove(&key);
                 });
                 fired += 1;
             }
@@ -289,22 +291,25 @@ impl WorkflowScheduler {
         );
     }
 
-    /// Claims `key` for a run, returning `false` when a run already holds it.
-    fn claim(&self, key: &WorkflowKey) -> bool {
-        self.in_flight
-            .lock()
-            .expect("in-flight set poisoned")
-            .insert(key.clone())
+    /// Claims `key` for a run, or `None` when a run already holds it.
+    ///
+    /// The returned [`Claim`] IS the hold: dropping it releases the slot, so a
+    /// caller that takes a claim and then bails out cannot strand it.
+    fn claim(&self, key: &WorkflowKey) -> Option<Claim> {
+        if lock_in_flight(&self.in_flight).insert(key.clone()) {
+            Some(Claim {
+                in_flight: self.in_flight.clone(),
+                key: key.clone(),
+            })
+        } else {
+            None
+        }
     }
 
     /// Whether any scheduled run is currently executing.
     #[cfg(test)]
     fn is_running_any(&self) -> bool {
-        !self
-            .in_flight
-            .lock()
-            .expect("in-flight set poisoned")
-            .is_empty()
+        !lock_in_flight(&self.in_flight).is_empty()
     }
 
     /// Spawns a background task that ticks on every minute boundary until
@@ -323,6 +328,41 @@ impl WorkflowScheduler {
             }
         })
     }
+}
+
+/// An RAII hold on one workflow's in-flight slot, released on drop.
+///
+/// A hold released by a statement after the `await` would survive a panic in
+/// the run: the task unwinds, the statement never executes, and the key stays
+/// in the set forever — permanently retiring that schedule. `Drop` runs while
+/// unwinding, so tying the release to a guard closes that path.
+struct Claim {
+    in_flight: Arc<Mutex<HashSet<WorkflowKey>>>,
+    key: WorkflowKey,
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        lock_in_flight(&self.in_flight).remove(&self.key);
+    }
+}
+
+/// Locks the in-flight set, recovering rather than panicking on a poisoned
+/// mutex.
+///
+/// Two reasons this never unwraps. First, [`Claim::drop`] can run while
+/// unwinding from the very panic that poisoned the lock, and a panic inside a
+/// `Drop` during an unwind aborts the process. Second, the alternative — a
+/// tolerant `if let Ok(..)` — would *skip* the release on a poisoned lock and
+/// reintroduce the leak this guard exists to prevent. Recovering is safe here
+/// because every critical section is a single `insert` / `remove` / `is_empty`
+/// on a `HashSet`, none of which can leave it half-updated.
+fn lock_in_flight(
+    in_flight: &Mutex<HashSet<WorkflowKey>>,
+) -> std::sync::MutexGuard<'_, HashSet<WorkflowKey>> {
+    in_flight
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// The cron a graph's trigger schedules itself on, if any.
@@ -840,6 +880,64 @@ to = "done"
             "the workflow must be schedulable once its run completed"
         );
         wait_for(|| started.lock().unwrap().len() == 2).await;
+
+        cleanup(&home).await;
+    }
+
+    /// A runner that panics must not strand the in-flight claim. Releasing the
+    /// slot after the `await` would leave the key set forever, silently retiring
+    /// that schedule for the life of the process; the RAII [`Claim`] releases it
+    /// on the unwind instead.
+    #[tokio::test]
+    async fn a_panicking_run_releases_its_claim() {
+        struct PanickingRunner {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl WorkflowRunner for PanickingRunner {
+            async fn run(
+                &self,
+                _company: &CompanyId,
+                _workflow: &WorkflowFile,
+                _input: Value,
+            ) -> crate::Result<WorkflowRun> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                panic!("the runner blew up mid-run");
+            }
+        }
+
+        let home = tmp_home();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runner = Arc::new(PanickingRunner {
+            calls: calls.clone(),
+        });
+        let registry = company_with_overlays(
+            &home,
+            "acme",
+            vec![overlay("boom", Some("* * * * *"))],
+            Some(runner),
+            "running",
+        )
+        .await;
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry, clock.clone());
+
+        // Minute 1: fires, and the run panics inside its task.
+        assert_eq!(scheduler.tick().await, 1);
+        wait_for(|| calls.load(Ordering::SeqCst) == 1).await;
+        // The unwind must have released the slot.
+        wait_for(|| !scheduler.is_running_any()).await;
+
+        // Minute 2: the schedule is still alive. Before the RAII guard this
+        // fired 0 forever.
+        clock.set(millis_at(2026, 7, 13, 9, 1));
+        assert_eq!(
+            scheduler.tick().await,
+            1,
+            "a panicking run must not retire the schedule"
+        );
+        wait_for(|| calls.load(Ordering::SeqCst) == 2).await;
 
         cleanup(&home).await;
     }
