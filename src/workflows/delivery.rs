@@ -92,11 +92,6 @@ const MAX_REPORT_CHARS: usize = 16_000;
 /// The marker appended when a report is truncated at [`MAX_REPORT_CHARS`].
 const TRUNCATION_MARKER: &str = "\n\n… (report truncated)";
 
-/// How many inbox messages the established-thread check scans. Mirrors the
-/// agent send path in [`crate::runtime::cycle`] so the two cannot disagree about
-/// what "established" means.
-const ESTABLISHED_SCAN_LIMIT: usize = 500;
-
 /// The ports an output destination needs, bundled so [`HarnessDeps`] grows one
 /// optional field rather than four.
 ///
@@ -475,8 +470,12 @@ async fn record_outbound(
 /// established thread.
 ///
 /// Fails closed (`false`) on a missing sending address or an inbox read error,
-/// which routes the caller to the cold-recipient skip. Byte-for-byte the same
-/// rule as `recipient_is_established` in [`crate::runtime::cycle`].
+/// which routes the caller to the cold-recipient skip.
+///
+/// Delegates the lookup to [`InboxStore::has_inbound_from`] rather than scanning
+/// a page of [`messages`](InboxStore::messages): this is a security gate, and a
+/// gate built on a capped oldest-first page silently stops finding real
+/// correspondents once a company's inbox outgrows the cap (PR #226 review).
 async fn recipient_is_established(
     inbox: &dyn InboxStore,
     company: &CompanyId,
@@ -487,19 +486,10 @@ async fn recipient_is_established(
         return false;
     }
     let key = local_part(company_address);
-    let to = to.trim().to_ascii_lowercase();
-    if to.is_empty() {
-        return false;
-    }
-    match inbox
-        .messages(company, &key, ESTABLISHED_SCAN_LIMIT, 0)
+    inbox
+        .has_inbound_from(company, &key, to)
         .await
-    {
-        Ok(records) => records
-            .iter()
-            .any(|r| !r.outbound && r.from_email.trim().to_ascii_lowercase() == to),
-        Err(_) => false, // fail closed → the cold-recipient skip
-    }
+        .unwrap_or(false) // fail closed → the cold-recipient skip
 }
 
 /// Posts a report to the wired channel adapter with id `channel_id`.
@@ -1061,6 +1051,45 @@ allow = [{allow}]
             h.mail.sent().is_empty(),
             "a cold recipient must not be mailed"
         );
+    }
+
+    /// **Regression (PR #226 review).** A busy company's inbox must not lose an
+    /// established recipient. `InboxStore::messages` returns oldest-first, so a
+    /// capped read takes the OLDEST page — and an inbox that outgrows the cap
+    /// silently stops finding anyone whose mail arrived after it. The failure
+    /// is fail-closed (never a wrong send) but it is still wrong, and it bites
+    /// exactly the longest-lived tenants.
+    ///
+    /// Note the direction: the sender's message must be buried *past* the cap,
+    /// i.e. among the NEWEST mail. A sender whose message is the oldest sits at
+    /// index 0 and was always found, cap or no cap.
+    #[tokio::test]
+    async fn an_established_sender_is_found_past_the_old_scan_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::new(dir.path(), true, true);
+        // 600 older messages from other people fill the first page…
+        for i in 0..600 {
+            h.receive_from(&format!("filler{i}@example.com")).await;
+        }
+        // …so the real correspondent's mail lands well past a 500-message cap.
+        h.receive_from("ada@example.com").await;
+
+        let reports = deliver_outputs(
+            Some(&h.deps),
+            &record(&["*"]),
+            &graph("email", Some("ada@example.com")),
+            &reached_output(),
+        )
+        .await;
+
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(
+            reports[0].status,
+            DeliveryStatus::Sent,
+            "a correspondent buried past the scan cap is still an established \
+             thread: {reports:?}"
+        );
+        assert_eq!(h.mail.sent().len(), 1);
     }
 
     /// The company's OWN prior outbound mail to an address does not make that

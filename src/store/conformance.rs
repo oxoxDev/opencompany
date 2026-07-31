@@ -557,6 +557,70 @@ pub async fn assert_inbox_store(inbox: Arc<dyn InboxStore>) {
             .unwrap()
             .is_empty()
     );
+
+    // --- has_inbound_from: the established-correspondent gate ---------------
+    //
+    // Callers use this as a SECURITY gate (a workflow may only email an address
+    // that has written in first), so the contract is asserted here rather than
+    // left to whichever backend happens to be wired. A backend that overrides
+    // the default with an indexed lookup must still satisfy every case below.
+    let from = |id: &str, mailbox: &str, sender: &str, outbound: bool| EmailRecord {
+        from_email: sender.to_string(),
+        ..email(id, mailbox, outbound, 10)
+    };
+    inbox
+        .append(&alpha, &from("c1", "ops", "ada@example.com", false))
+        .await
+        .unwrap();
+    // `grace` only ever RECEIVED mail from this company — never wrote in.
+    inbox
+        .append(&alpha, &from("c2", "ops", "grace@example.com", true))
+        .await
+        .unwrap();
+
+    assert!(
+        inbox
+            .has_inbound_from(&alpha, "ops", "ada@example.com")
+            .await
+            .unwrap(),
+        "an address that wrote in is an established correspondent"
+    );
+    assert!(
+        !inbox
+            .has_inbound_from(&alpha, "ops", "grace@example.com")
+            .await
+            .unwrap(),
+        "OUTBOUND mail must not establish a correspondent — otherwise one send \
+         would authorize the next"
+    );
+    assert!(
+        !inbox
+            .has_inbound_from(&alpha, "ops", "stranger@example.com")
+            .await
+            .unwrap()
+    );
+    // Case and surrounding whitespace do not change who someone is.
+    assert!(
+        inbox
+            .has_inbound_from(&alpha, "ops", "  Ada@EXAMPLE.com ")
+            .await
+            .unwrap()
+    );
+    // A blank needle matches nobody, rather than matching anybody.
+    assert!(!inbox.has_inbound_from(&alpha, "ops", "   ").await.unwrap());
+    // Wrong mailbox, and wrong company, both miss.
+    assert!(
+        !inbox
+            .has_inbound_from(&alpha, "ceo", "ada@example.com")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !inbox
+            .has_inbound_from(&beta, "ops", "ada@example.com")
+            .await
+            .unwrap()
+    );
 }
 
 /// Asserts the [`TaskStore`] contract: per-company isolation, upsert semantics,
