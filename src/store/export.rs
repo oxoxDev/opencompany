@@ -32,7 +32,8 @@ use crate::ports::memory::MemoryStore;
 use crate::ports::store::CompanyStore;
 use crate::ports::types::{
     CompanyId, CompanyRecord, CompressedTrace, ContextChunk, EventSeq, LedgerEntry, OverlayAgent,
-    OverlayDesk, OverlayDeskMember, OverlayDeskOrder, StoredEvent, TemplateProvenance,
+    OverlayDesk, OverlayDeskMember, OverlayDeskOrder, OverlayWorkflow, StoredEvent,
+    TemplateProvenance,
 };
 
 /// Canonical bundle file and directory names, matching the fs
@@ -110,6 +111,13 @@ struct BundleMeta {
     /// bundles.
     #[serde(default)]
     overlay_desks: Vec<OverlayDesk>,
+    /// The operator workflow-authoring overlay — graph bodies created from the
+    /// console or the orchestrator tool, which live on the record (never in the
+    /// read-only source tree). Preserved so console-created workflows survive an
+    /// export→import instead of being silently dropped. `#[serde(default)]` for
+    /// back-compat with older bundles.
+    #[serde(default)]
+    overlay_workflows: Vec<OverlayWorkflow>,
     /// The source-template provenance, when the exported company carried one.
     /// `#[serde(default)]` keeps older bundles written before provenance existed
     /// importing cleanly (they decode to `None` — no migration).
@@ -155,6 +163,9 @@ struct BundleContents {
     /// The operator-created desk overlay, carried through the bundle so
     /// export→import preserves operator-created desks.
     overlay_desks: Vec<OverlayDesk>,
+    /// The operator workflow-authoring overlay, carried through the bundle so
+    /// export→import preserves console-created workflow graphs.
+    overlay_workflows: Vec<OverlayWorkflow>,
 }
 
 impl BundleContents {
@@ -198,6 +209,7 @@ impl BundleContents {
             overlay_desk_members: record.overlay_desk_members,
             overlay_desk_order: record.overlay_desk_order,
             overlay_desks: record.overlay_desks,
+            overlay_workflows: record.overlay_workflows,
         })
     }
 
@@ -224,6 +236,7 @@ impl BundleContents {
                 overlay_desk_members: self.overlay_desk_members.clone(),
                 overlay_desk_order: self.overlay_desk_order.clone(),
                 overlay_desks: self.overlay_desks.clone(),
+                overlay_workflows: self.overlay_workflows.clone(),
                 template_provenance: self.template_provenance.clone(),
             })
             .await?;
@@ -265,6 +278,7 @@ impl BundleContents {
             overlay_desk_members: self.overlay_desk_members.clone(),
             overlay_desk_order: self.overlay_desk_order.clone(),
             overlay_desks: self.overlay_desks.clone(),
+            overlay_workflows: self.overlay_workflows.clone(),
             template_provenance: self.template_provenance.clone(),
         };
         write_file(
@@ -347,6 +361,7 @@ impl BundleContents {
             overlay_desk_members: meta.overlay_desk_members,
             overlay_desk_order: meta.overlay_desk_order,
             overlay_desks: meta.overlay_desks,
+            overlay_workflows: meta.overlay_workflows,
         })
     }
 }
@@ -793,6 +808,7 @@ mod test {
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -863,6 +879,7 @@ mod test {
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
             template_provenance: Some(provenance.clone()),
         })
         .await
@@ -891,7 +908,8 @@ mod test {
 
     /// EVERY operator overlay — the team (`overlay_agents`), desk memberships
     /// (`overlay_desk_members`), the desk-order hierarchy (`overlay_desk_order`),
-    /// and operator-created desks (`overlay_desks`) — survives an export→import.
+    /// operator-created desks (`overlay_desks`), and runtime-authored workflow
+    /// graphs (`overlay_workflows`) — survives an export→import.
     /// A prior version threaded only `overlay_desk_order` through the bundle, so a
     /// round-trip silently ERASED operator-added teammates, desk memberships, and
     /// operator-created desks (data loss). This asserts all four come back intact
@@ -950,6 +968,15 @@ mod test {
             description: Some("Marketing pod".into()),
             members: vec!["ceo".into()],
         }];
+        // A workflow graph authored at runtime (issue #168). On a hosted tenant
+        // this body is the ONLY copy — a bundle that dropped it would lose the
+        // workflow outright.
+        let workflows = vec![OverlayWorkflow {
+            id: "console_flow".into(),
+            toml: "id = \"console_flow\"\nname = \"Console flow\"\n\
+                   [[node]]\nid = \"start\"\nkind = \"trigger\"\nname = \"Start\"\n"
+                .into(),
+        }];
 
         let (s1, e1, m1, c1) = fs_ports(&home1);
         s1.save(&CompanyRecord {
@@ -961,6 +988,7 @@ mod test {
             overlay_desk_members: desk_members.clone(),
             overlay_desk_order: order.clone(),
             overlay_desks: desks.clone(),
+            overlay_workflows: workflows.clone(),
             template_provenance: None,
         })
         .await
@@ -1009,6 +1037,14 @@ mod test {
         assert_eq!(
             dst_record.overlay_desks, desks,
             "operator-created desks altered by the bundle round-trip"
+        );
+        assert!(
+            !dst_record.overlay_workflows.is_empty(),
+            "runtime-authored workflows erased by the bundle round-trip"
+        );
+        assert_eq!(
+            dst_record.overlay_workflows, workflows,
+            "runtime-authored workflows altered by the bundle round-trip"
         );
         // And the hierarchy still drives routing: `cto` remains the lead after
         // import.
