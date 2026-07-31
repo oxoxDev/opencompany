@@ -144,11 +144,61 @@ hosted multi-tenant model with `OPENCOMPANY_STORAGE=mongodb`, the durable base i
 the database and the container's `/data` is treated as **ephemeral scratch** — so
 engine memory written to `<data_dir>/memory` would **not** survive a container
 restart. Because that failure mode is *silent* memory loss on restart, selecting
-`OPENCOMPANY_MEMORY=tinycortex` together with `OPENCOMPANY_STORAGE=mongodb` is a
-hard **refuse-to-open** error at boot (`src/store/select.rs`), not a warning: the
-overlay never opens a doomed engine. To run the in-pod engine, mount a persistent
-volume at `OPENCOMPANY_DATA_DIR`, use `OPENCOMPANY_STORAGE=fs` or `sqlite` (durable
-`/data`), or keep memory on the base store (`OPENCOMPANY_MEMORY=store`).
+`OPENCOMPANY_MEMORY=tinycortex` together with `OPENCOMPANY_STORAGE=mongodb` is by
+default a hard **refuse-to-open** error at boot (`src/store/select.rs`), not a
+warning: the overlay never opens a doomed engine.
+
+Storage-kind is only a *proxy* for "ephemeral `/data`", though — a mongodb
+deployment that HAS mounted a persistent volume at the data dir is perfectly
+safe to run the in-pod engine on. So the refusal is an explicit **durability
+contract**, not a hard storage-kind rejection. To run the in-pod engine you can:
+
+- mount a persistent volume at `OPENCOMPANY_DATA_DIR` and use
+  `OPENCOMPANY_STORAGE=fs` or `sqlite` (durable `/data`); or
+- keep memory on the base store (`OPENCOMPANY_MEMORY=store`); or
+- under `OPENCOMPANY_STORAGE=mongodb`, if you have mounted a genuinely durable
+  volume at `OPENCOMPANY_DATA_DIR`, set **`OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL=1`**
+  to assert that durability and lift the refusal. Unset (or any non-truthy value)
+  keeps the safe default: refuse. Truthy values are `1`/`true`/`yes`/`on`.
+
+#### Config examples
+
+**(a) Supported persistent config** — durable base + in-pod engine. The data dir
+is a real mounted volume, so engine memory survives restarts and no override is
+needed:
+
+```sh
+OPENCOMPANY_STORAGE=sqlite            # durable /data (single SQLite file)
+OPENCOMPANY_MEMORY=tinycortex         # in-pod engine overlay
+OPENCOMPANY_DATA_DIR=/data            # a persistent volume mount
+# → boots; per-company workspaces persist under /data/memory/<workspace>/
+```
+
+**(b) MongoDB config — the boot-time refusal and how the opt-in changes it.**
+With mongodb as the durable base, `/data` is treated as ephemeral scratch, so the
+engine is refused by default:
+
+```sh
+OPENCOMPANY_STORAGE=mongodb           # durable base is the database; /data is scratch
+OPENCOMPANY_MEMORY=tinycortex
+OPENCOMPANY_DATA_DIR=/data
+OPENCOMPANY_MONGODB_URI=mongodb://…   # (tenant-scoped)
+# → REFUSES to boot: hard OpenCompanyError::Config. The operator-visible result is
+#   a boot abort naming the silent-memory-loss risk and the OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL
+#   opt-in — the engine never opens, so no memory is written to a doomed /data.
+```
+
+If — and only if — the operator has actually mounted a durable volume at
+`/data`, asserting it lifts the refusal:
+
+```sh
+OPENCOMPANY_STORAGE=mongodb
+OPENCOMPANY_MEMORY=tinycortex
+OPENCOMPANY_DATA_DIR=/data            # a genuinely persistent volume
+OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL=1  # operator asserts /data is durable
+OPENCOMPANY_MONGODB_URI=mongodb://…
+# → boots; engine memory persists under /data/memory/<workspace>/ as usual.
+```
 
 ## MongoDB backend (`src/store/mongodb.rs`)
 

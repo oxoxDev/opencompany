@@ -645,6 +645,25 @@ mod test {
     }
 
     #[test]
+    fn from_env_reads_data_dir() {
+        // SAFETY: single-threaded test; restores prior state.
+        let prev = std::env::var("OPENCOMPANY_DATA_DIR").ok();
+
+        // An explicit data dir is threaded straight through into settings.
+        unsafe { std::env::set_var("OPENCOMPANY_DATA_DIR", "/srv/oc-data") };
+        assert_eq!(
+            StorageSettings::from_env().unwrap().data_dir,
+            Some(PathBuf::from("/srv/oc-data")),
+            "OPENCOMPANY_DATA_DIR must be read into StorageSettings::data_dir"
+        );
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("OPENCOMPANY_DATA_DIR", v) },
+            None => unsafe { std::env::remove_var("OPENCOMPANY_DATA_DIR") },
+        }
+    }
+
+    #[test]
     fn from_env_reads_allow_ephemeral_memory() {
         // SAFETY: single-threaded test; restores prior state.
         let prev = std::env::var("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL").ok();
