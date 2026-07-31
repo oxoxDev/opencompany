@@ -81,6 +81,17 @@ pub struct CapabilityPlan {
     /// Gateable namespace → tokens allowed per period. `u64::MAX` is effectively
     /// unlimited.
     pub budgets: BTreeMap<String, u64>,
+    /// Plan-level **total token ceiling** for the period (issue #188), or `None`
+    /// when no ceiling is set.
+    ///
+    /// The `budgets` map is a **soft** gate — it only trims *which* exec tool
+    /// families a turn may reach; an exhausted namespace's tools drop off the
+    /// roster but the turn still runs on intrinsic tools and burns model tokens.
+    /// This is the **hard** gate: once the tenant's total period spend reaches
+    /// this value, dispatch is refused outright (no model call) until the period
+    /// resets. Carried from the manifest `[plan].total_tokens`; the built-in
+    /// named tiers leave it `None` (a manifest overlays it explicitly).
+    pub total_budget: Option<u64>,
 }
 
 impl CapabilityPlan {
@@ -102,6 +113,7 @@ impl CapabilityPlan {
             None => CapabilityPlan {
                 period: BudgetPeriod::Daily,
                 budgets: BTreeMap::new(),
+                total_budget: None,
             },
         };
         // The manifest `period` field is authoritative for the window (defaults
@@ -112,7 +124,33 @@ impl CapabilityPlan {
         for (namespace, tokens) in &plan.token_budgets {
             resolved.budgets.insert(namespace.clone(), *tokens);
         }
+        // The plan-level total ceiling (issue #188) is a manifest-only overlay —
+        // the built-in tiers carry none, so `total_tokens` is authoritative when
+        // present and leaves the hard gate off when absent.
+        resolved.total_budget = plan.total_tokens;
         Some(resolved)
+    }
+
+    /// Whether the tenant's total period `spent` has reached the plan-level token
+    /// ceiling (issue #188). `false` when no ceiling is configured (the hard gate
+    /// is off) or when spend is still under it. The boundary is `>=`, matching the
+    /// per-namespace [`denied_namespaces`](Self::denied_namespaces) exhaustion so
+    /// the total gate trips exactly when a namespace budget equal to it would.
+    pub fn total_exhausted(&self, spent: u64) -> bool {
+        self.total_budget.is_some_and(|cap| spent >= cap)
+    }
+
+    /// The plan-level total-budget status row for the console read surface (issue
+    /// #188), or `None` when no total ceiling is configured. Mirrors
+    /// [`TierBudgetStatus`] but describes the whole-period ceiling, not one
+    /// namespace.
+    pub fn total_status(&self, spent: u64) -> Option<TotalBudgetStatus> {
+        self.total_budget.map(|budget| TotalBudgetStatus {
+            budget,
+            spent,
+            remaining: budget.saturating_sub(spent),
+            exhausted: spent >= budget,
+        })
     }
 
     /// The gateable namespaces this plan denies at `spent` tokens: every gateable
@@ -185,6 +223,9 @@ pub fn plan_named(name: &str) -> Option<CapabilityPlan> {
             .iter()
             .map(|(ns, tokens)| ((*ns).to_string(), *tokens))
             .collect(),
+        // The plan-level total ceiling (issue #188) is opt-in via the manifest
+        // `[plan].total_tokens` overlay only — a named tier never sets it.
+        total_budget: None,
     })
 }
 
@@ -214,6 +255,24 @@ pub struct TierBudgetStatus {
     pub remaining: u64,
     /// Whether spend has reached the threshold (`spent >= budget`) — the tier's
     /// tools are disabled.
+    pub exhausted: bool,
+}
+
+/// The plan-level total-budget status for the console read surface (issue #188).
+///
+/// Unlike [`TierBudgetStatus`] — a per-namespace **soft** gate that only trims a
+/// tool family — `exhausted` here means the tenant has crossed the **hard**
+/// ceiling and the harness will refuse to dispatch further turns this period.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TotalBudgetStatus {
+    /// The total token ceiling for the period.
+    pub budget: u64,
+    /// The tenant's total period spend.
+    pub spent: u64,
+    /// `budget - spent`, saturating at zero.
+    pub remaining: u64,
+    /// Whether spend has reached the ceiling (`spent >= budget`) — dispatch is
+    /// refused until the period resets.
     pub exhausted: bool,
 }
 
@@ -399,6 +458,7 @@ mod tests {
             name: Some("starter".into()),
             period: "daily".into(),
             token_budgets,
+            total_tokens: None,
         })
         .unwrap();
         // Under budget: composio granted, shell/code still granted.
@@ -459,6 +519,7 @@ mod tests {
             name: Some("starter".into()),
             period: "daily".into(),
             token_budgets: BTreeMap::new(),
+            total_tokens: None,
         };
         let resolved = CapabilityPlan::from_manifest(&plan).unwrap();
         assert_eq!(resolved.period, BudgetPeriod::Daily);
@@ -476,6 +537,7 @@ mod tests {
             name: Some("starter".into()),
             period: "monthly".into(),
             token_budgets,
+            total_tokens: None,
         };
         let resolved = CapabilityPlan::from_manifest(&plan).unwrap();
         assert_eq!(resolved.period, BudgetPeriod::Monthly, "period field wins");
@@ -492,9 +554,89 @@ mod tests {
             name: None,
             period: "daily".into(),
             token_budgets,
+            total_tokens: None,
         };
         let resolved = CapabilityPlan::from_manifest(&plan).unwrap();
         assert_eq!(resolved.budgets.len(), 1);
         assert_eq!(resolved.budgets.get("shell"), Some(&500));
+    }
+
+    // --- total budget (issue #188) ------------------------------------------
+
+    #[test]
+    fn total_exhausted_none_budget_is_never_exhausted() {
+        let plan = plan_named("starter").unwrap();
+        assert!(plan.total_budget.is_none(), "named tiers carry no total");
+        assert!(!plan.total_exhausted(0));
+        assert!(!plan.total_exhausted(u64::MAX));
+    }
+
+    #[test]
+    fn total_exhausted_trips_at_the_ge_boundary() {
+        let mut plan = plan_named("free").unwrap();
+        plan.total_budget = Some(1_000);
+        assert!(!plan.total_exhausted(999), "under budget runs");
+        assert!(plan.total_exhausted(1_000), ">= boundary refuses");
+        assert!(plan.total_exhausted(1_001), "over budget refuses");
+    }
+
+    #[test]
+    fn total_exhausted_zero_budget_refuses_from_the_first_token() {
+        let mut plan = plan_named("free").unwrap();
+        plan.total_budget = Some(0);
+        assert!(
+            plan.total_exhausted(0),
+            "a zero ceiling refuses immediately"
+        );
+    }
+
+    #[test]
+    fn total_status_none_when_no_ceiling() {
+        let plan = plan_named("pro").unwrap();
+        assert!(plan.total_status(0).is_none());
+    }
+
+    #[test]
+    fn total_status_reports_budget_spend_remaining_and_exhaustion() {
+        let mut plan = plan_named("free").unwrap();
+        plan.total_budget = Some(1_000);
+        let under = plan.total_status(400).unwrap();
+        assert_eq!(under.budget, 1_000);
+        assert_eq!(under.spent, 400);
+        assert_eq!(under.remaining, 600);
+        assert!(!under.exhausted);
+        // At/over the ceiling: remaining saturates at zero and exhausted flips.
+        let over = plan.total_status(1_500).unwrap();
+        assert_eq!(over.remaining, 0);
+        assert!(over.exhausted);
+    }
+
+    #[test]
+    fn from_manifest_carries_total_tokens_and_named_tier_leaves_it_none() {
+        // A bare total-only plan: no name, no per-namespace budgets.
+        let plan = Plan {
+            name: None,
+            period: "daily".into(),
+            token_budgets: BTreeMap::new(),
+            total_tokens: Some(5_000),
+        };
+        let resolved = CapabilityPlan::from_manifest(&plan).unwrap();
+        assert_eq!(resolved.total_budget, Some(5_000));
+        assert!(resolved.budgets.is_empty(), "no per-namespace gate");
+
+        // A named tier with an explicit total overlay carries the ceiling too.
+        let overlaid = CapabilityPlan::from_manifest(&Plan {
+            name: Some("starter".into()),
+            period: "daily".into(),
+            token_budgets: BTreeMap::new(),
+            total_tokens: Some(9_000),
+        })
+        .unwrap();
+        assert_eq!(overlaid.total_budget, Some(9_000));
+        assert_eq!(overlaid.budgets.get("shell"), Some(&200_000));
+
+        // A named tier with no overlay leaves the total gate off.
+        let plain = plan_named("starter").unwrap();
+        assert!(plain.total_budget.is_none());
     }
 }

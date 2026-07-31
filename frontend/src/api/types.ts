@@ -234,6 +234,11 @@ export interface TeamMemberDto {
   name?: string;
   role: string;
   description?: string;
+  /**
+   * Whether this teammate has an enabled inbox, as the host's `InboxStore` sees
+   * it. Absent on hosts predating the field; the console reads that as `false`.
+   */
+  inboxEnabled?: boolean;
 }
 
 /**
@@ -367,6 +372,23 @@ export interface CapabilityTierDto {
 }
 
 /**
+ * The plan-level total token ceiling (issue #188). Unlike a per-namespace tier
+ * — a *soft* gate that only trims exec tools — crossing this is a *hard* stop:
+ * the harness refuses to dispatch further turns this period. Present only when
+ * the manifest set `[plan].total_tokens`.
+ */
+export interface CapabilityTotalDto {
+  /** Total tokens allowed this period before dispatch is refused. */
+  budgetTokens: number;
+  /** Tokens spent this period. */
+  spentTokens: number;
+  /** `budget - spent`, floored at zero. */
+  remainingTokens: number;
+  /** Whether spend has reached the ceiling — dispatch is paused until reset. */
+  exhausted: boolean;
+}
+
+/**
  * The company's capability-budget status. When no `[plan]` is configured only
  * `configured: false` is present; the other fields accompany a configured plan.
  */
@@ -382,6 +404,12 @@ export interface CapabilityStatusDto {
   spentTokens?: number;
   /** One row per configured tier, namespace-sorted. */
   tiers?: CapabilityTierDto[];
+  /**
+   * The plan-level total token ceiling (issue #188), when configured. Crossing
+   * it is a hard stop — the harness refuses to dispatch further turns this
+   * period, unlike the soft per-namespace `tiers`.
+   */
+  total?: CapabilityTotalDto;
   /**
    * Media generation (issue #109): whether the company **explicitly** grants the
    * real-money `media` namespace (a `*` wildcard does not count). Present

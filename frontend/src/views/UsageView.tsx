@@ -234,13 +234,20 @@ export function UsageView({ client, company }: Props) {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            {/* Plan-level total token ceiling (issue #188): a HARD stop — once
+                spend crosses it the harness refuses to dispatch further turns,
+                unlike the soft per-namespace bars below. Rendered first, and on
+                its own even when no per-namespace tiers are configured. */}
+            {capsLoaded && caps?.configured && caps.total ? (
+              <TotalCeilingRow total={caps.total} />
+            ) : null}
             {capsLoaded && caps?.configured && caps.tiers && caps.tiers.length > 0 ? (
               <div className="space-y-4">
                 {caps.tiers.map((tier) => (
                   <CapabilityRow key={tier.namespace} tier={tier} />
                 ))}
               </div>
-            ) : (
+            ) : capsLoaded && caps?.configured && caps.total ? null : (
               <p className="py-2 text-sm text-muted-foreground">
                 {capsLoaded ? "No token plan configured." : "Loading budgets…"}
               </p>
@@ -339,6 +346,54 @@ function composioStatus(caps: CapabilityStatusDto): { label: string; variant: Ba
 // A budget large enough that we treat it as effectively unlimited (the backend
 // sends u64::MAX for the `unlimited` tier, which arrives as a huge float).
 const UNLIMITED_THRESHOLD = 1e15;
+
+/**
+ * The plan-level total token ceiling (issue #188). Unlike a per-namespace tier
+ * bar — a soft gate that only trims exec tools — crossing this is a hard stop:
+ * the harness refuses to dispatch further turns this period. Rendered with
+ * stronger emphasis (its own labelled bar + a "Dispatch paused" badge when
+ * exhausted) so an operator can tell the hard cap apart from the soft ones.
+ */
+function TotalCeilingRow({ total }: { total: NonNullable<CapabilityStatusDto["total"]> }) {
+  const unlimited = total.budgetTokens >= UNLIMITED_THRESHOLD;
+  const pct = unlimited
+    ? Math.min(100, total.spentTokens > 0 ? 2 : 0)
+    : total.budgetTokens > 0
+      ? Math.min(100, (total.spentTokens / total.budgetTokens) * 100)
+      : 100;
+
+  return (
+    <div className="space-y-1.5 rounded-md border p-3">
+      <div className="flex items-center justify-between gap-2 text-sm">
+        <span className="font-medium">Total token ceiling</span>
+        {total.exhausted ? (
+          <Badge variant="destructive">Dispatch paused</Badge>
+        ) : (
+          <span className="text-xs text-muted-foreground tabular-nums">
+            {compact(total.remainingTokens)} left
+          </span>
+        )}
+      </div>
+      <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+        <div
+          className={cn(
+            "h-full rounded-full transition-all",
+            total.exhausted ? "bg-destructive" : "bg-primary",
+          )}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <div className="flex items-center justify-between text-xs text-muted-foreground tabular-nums">
+        <span>{compact(total.spentTokens)} spent</span>
+        <span>{unlimited ? "Unlimited" : `${compact(total.budgetTokens)} ceiling`}</span>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        A hard cap on total spend this period. When it&apos;s reached, new turns are
+        refused until the period resets — separate from the per-tool budgets below.
+      </p>
+    </div>
+  );
+}
 
 function CapabilityRow({ tier }: { tier: NonNullable<CapabilityStatusDto["tiers"]>[number] }) {
   const label = NAMESPACE_LABELS[tier.namespace] ?? tier.namespace;

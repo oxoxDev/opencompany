@@ -23,26 +23,31 @@ use async_trait::async_trait;
 
 use crate::Result;
 use crate::company::steer::{InflightEntry, InflightKind, SteerAction, cap_redirect};
-use crate::harness::orchestrator::{self, Delegation};
+use crate::harness::lifecycle::{self, TaskRunEnd};
+use crate::harness::orchestrator;
+// `Delegation` is only named by the test-only `run_delegation` wrapper and the
+// delegation tests (via `use super::*`); the cycle path drives the runner's
+// `handle_operator_message` and never spells the type out.
+#[cfg(test)]
+use crate::harness::orchestrator::Delegation;
+use crate::harness::run_turn::HarnessRunTurn;
 use crate::harness::{HarnessDeps, HarnessPool};
+use crate::runtime::delegation::{self, DelegationRunner, RunTurn};
 
 /// The most operator redirects honored within a single task dispatch (issue
 /// #111). A redirect re-runs the turn in-loop with the fresh instruction
 /// appended; past this cap the run is finalized to its terminal column (see
-/// [`success_terminal_column`]) so a redirect storm can't loop forever.
+/// [`lifecycle::success_terminal_column`]) so a redirect storm can't loop
+/// forever.
 const MAX_REDIRECTS_PER_DISPATCH: u32 = 3;
 
-/// The board column a card lands in when the operator is the reviewer.
-const IN_REVIEW: &str = "in_review";
-
-/// The terminal board column — nothing dispatches out of it.
-const DONE: &str = "done";
+use crate::ports::artifacts::{ArtifactAuthor, ArtifactKind, ArtifactRecord};
 use crate::ports::brain::{Brain, CycleHost};
 use crate::ports::types::{
     CompanyEvent, CompanyRecord, CompressedTrace, CycleRequest, CycleResult, OutboundMessage,
     TokenUsage, TurnStep, TurnStepKind, TurnStepStatus,
 };
-use crate::ports::{TaskRecord, generate_id, now_millis};
+use crate::ports::{Cognition, TaskRecord, UsageMetering, generate_id, now_millis};
 
 /// A [`Brain`] that answers with a live openhuman agent turn.
 pub struct HarnessBrain {
@@ -50,32 +55,6 @@ pub struct HarnessBrain {
     deps: HarnessDeps,
     record: CompanyRecord,
     responder: String,
-}
-
-/// The outcome of draining one queued delegation.
-///
-/// A `spawn_task` yields nothing operator-visible (it only opens a board card).
-/// A synchronous `delegate_to_desk` yields a [`DeskReply`] — the teammate's
-/// answer captured so the orchestrator can **relay** it in a follow-up turn
-/// (the CEO-relay hand-back) instead of leaving it as a disconnected sibling
-/// bubble. `bubble` stays for any future delegation that surfaces its own
-/// standalone message directly.
-#[derive(Default)]
-struct DelegationOutcome {
-    /// A chat bubble to surface as-is (unused by the current delegations).
-    bubble: Option<OutboundMessage>,
-    /// A synchronous desk reply to relay through a second orchestrator turn.
-    desk_reply: Option<DeskReply>,
-}
-
-/// A synchronous desk-lead answer captured for the orchestrator to relay: which
-/// member answered, their reply text, and their own turn steps (folded onto the
-/// operator timeline so the teammate's activity stays visible on the single
-/// relayed bubble).
-struct DeskReply {
-    member: String,
-    reply: String,
-    steps: Vec<TurnStep>,
 }
 
 impl HarnessBrain {
@@ -99,15 +78,16 @@ impl HarnessBrain {
         self
     }
 
-    /// Runs one dispatched board task: load the card, route it to its assignee
-    /// (or the default responder) for a single turn, and write the outcome back
-    /// onto the board — moved to its success terminal column on success (see
-    /// [`success_terminal_column`]), back to `backlog` with the error noted on
-    /// failure. A missing task store or a card that has since vanished is a
-    /// silent no-op.
     /// Runs a dispatched card to completion and, when the card remembers the
     /// conversation it was spawned from, returns the reply to post back there
     /// (issue #151 §3.2).
+    ///
+    /// Loads the card, routes it to its assignee (or the default responder) for
+    /// a single turn, and writes the outcome back onto the board — moved to its
+    /// success terminal column on success (see
+    /// [`lifecycle::success_terminal_column`]),
+    /// back to `backlog` with the error noted on failure. A missing task store
+    /// or a card that has since vanished is a silent no-op.
     ///
     /// Before this the answer only ever reached `card.note`: the card runs
     /// asynchronously, long after the turn that spawned it has answered, so the
@@ -151,20 +131,20 @@ impl HarnessBrain {
         let base_instruction = task_instruction(&card);
         let mut instruction = base_instruction.clone();
         let mut redirects: u32 = 0;
+        // Route the background turn through the brain-agnostic `RunTurn` seam
+        // (issue #176), re-attaching `HarnessDeps` behind `HarnessRunTurn`.
+        let run_turn = HarnessRunTurn::new(&self.pool, &self.deps);
 
-        loop {
-            let outcome = self
-                .pool
+        // The loop yields the run's operator-facing result on whichever path
+        // ends it, so the artifact (#187) and the completion event (#185) both
+        // record exactly the text the note does rather than a second, divergent
+        // rendering of the same run.
+        let result_text = loop {
+            let outcome = run_turn
                 // A dispatched task card carries no chat bubble (its steps are
                 // discarded into the note), so its live turn frames must not leak
                 // onto the console timeline — run it un-streamed (#125 review).
-                .run_steered_background(
-                    &self.record.id,
-                    &responder,
-                    &instruction,
-                    &self.deps,
-                    &control,
-                )
+                .run_steered_background(&self.record.id, &responder, &instruction, &control)
                 .await;
             // One-shot read of what (if anything) the operator asked for. `None`
             // is the ordinary, unsteered path.
@@ -173,35 +153,30 @@ impl HarnessBrain {
                     // A dispatched task discards its steps — the note is text-only.
                     match outcome {
                         Ok(outcome) => {
-                            card.note = Some(append_result(
-                                card.note.as_deref(),
-                                &responder,
-                                &outcome.reply,
-                            ));
-                            let terminal = success_terminal_column(&card);
-                            card.column = terminal.to_string();
+                            // `settle` writes the note (attributed to the
+                            // assignee) and the landing column via the #186
+                            // lifecycle seam; the loop still yields the reply so
+                            // the #185/#190 completion events report the same
+                            // text that landed in the note.
+                            let result = outcome.reply;
+                            settle(&mut card, TaskRunEnd::Completed, &responder, &result);
+                            break result;
                         }
                         Err(err) => {
-                            card.note = Some(append_result(
-                                card.note.as_deref(),
-                                &responder,
-                                &format!("dispatch failed: {err}"),
-                            ));
-                            card.column = "backlog".to_string();
+                            let result = format!("dispatch failed: {err}");
+                            settle(&mut card, TaskRunEnd::Failed, &responder, &result);
+                            break result;
                         }
                     }
-                    break;
                 }
                 Some(SteerAction::Cancel) => {
                     // Partial work is DISCARDED — only a cancellation note lands,
-                    // and the card returns to `backlog`.
-                    card.note = Some(append_result(
-                        card.note.as_deref(),
-                        "operator",
-                        "cancelled while in flight",
-                    ));
-                    card.column = "backlog".to_string();
-                    break;
+                    // and the card returns to `backlog`. The note is attributed to
+                    // the operator, not the assignee (the lifecycle seam decides
+                    // that). The loop still yields the text for #185/#190.
+                    let result = "cancelled while in flight".to_string();
+                    settle(&mut card, TaskRunEnd::Cancelled, &responder, &result);
+                    break result;
                 }
                 Some(SteerAction::Pause) => {
                     // Partial work is PRESERVED in the note; the card parks in the
@@ -212,9 +187,8 @@ impl HarnessBrain {
                         Ok(outcome) => format!("[paused] {}", outcome.reply),
                         Err(err) => format!("[paused] dispatch failed: {err}"),
                     };
-                    card.note = Some(append_result(card.note.as_deref(), &responder, &partial));
-                    card.column = "paused".to_string();
-                    break;
+                    settle(&mut card, TaskRunEnd::Paused, &responder, &partial);
+                    break partial;
                 }
                 Some(SteerAction::Redirect { instruction: fresh }) => {
                     redirects += 1;
@@ -231,10 +205,8 @@ impl HarnessBrain {
                             Ok(outcome) => outcome.reply.clone(),
                             Err(err) => format!("dispatch failed: {err}"),
                         };
-                        card.note = Some(append_result(card.note.as_deref(), &responder, &last));
-                        let terminal = success_terminal_column(&card);
-                        card.column = terminal.to_string();
-                        break;
+                        settle(&mut card, TaskRunEnd::RedirectsExhausted, &responder, &last);
+                        break last;
                     }
                     // Re-run from the original brief plus the (codepoint-capped)
                     // operator instruction.
@@ -245,31 +217,211 @@ impl HarnessBrain {
                     continue;
                 }
             }
-        }
+        };
 
         card.updated_at_millis = now_millis();
         tasks.upsert(&self.record.id, &card).await?;
         // `guard` drops here → the run leaves the in-flight strip.
         drop(guard);
 
+        // Issue #187: record the run's output as a versioned artifact so the
+        // Task Detail Artifacts tab has something behind it, and so a later
+        // operator edit can be diffed against what the agent actually wrote.
+        //
+        // Only a card that landed in its **success terminal** produces one:
+        // that is the state meaning "the agent produced something reviewable".
+        // A failure, a cancellation, or a pause writes its line to the note as
+        // before but is NOT an artifact — versioning `dispatch failed: …`
+        // strings would bury the real drafts and make the churn metric
+        // meaningless.
+        //
+        // The success terminal is two columns, not one (#179): a board-created
+        // card parks in `in_review` for its operator reviewer, while a card
+        // carrying an `origin_chat_id` — a delegated handoff nobody is watching
+        // the board for — completes straight to `done`. Both ran a turn and
+        // both produced a deliverable, so testing the column against
+        // `success_terminal_column` keeps the artifact tied to "the run
+        // succeeded" rather than to one particular landing column.
+        //
+        // Recorded before the #185 journal writes below because those move
+        // `result_text` into the completion event; the artifact only borrows it.
+        if card.column == lifecycle::success_terminal_column(&card) {
+            self.record_task_artifact(&card, &responder, &result_text)
+                .await?;
+        }
+
+        // Issue #185: correlate this dispatch's journal trail to its card.
+        //
+        // Ordering matters. Any MCP failures the turn queued are drained FIRST,
+        // tagged with this task, so they land on the task's own timeline. Before
+        // this they were left in the queue for whichever operator turn drained
+        // next — which both mis-attributed them to an unrelated chat bubble and
+        // left the dispatch's timeline silent about the very calls that broke.
+        //
+        // The steps the drain produces are discarded, matching the rest of
+        // `run_task`: a dispatched card has no chat bubble to render them on
+        // (they are journaled as `McpCallFailed` events instead).
+        //
+        // Every write below is **best-effort**: the card was already persisted
+        // above, so propagating a journal failure with `?` would abandon the
+        // terminal anchor *and* the #151 post-back for a dispatch that has in
+        // fact landed — leaving a timeline stuck "still running" for a card the
+        // board already shows in its terminal column, and failing the whole cycle over
+        // a bookkeeping write. Matches the existing journal-after-persist sites
+        // (`chat_and_emit`, `WorkflowCreated`, `TaskSteered`).
+        let mut discarded_steps = Vec::new();
+        if let Err(err) = self
+            .surface_mcp_failures(&mut discarded_steps, Some(&card.id))
+            .await
+        {
+            tracing::warn!(
+                task_id = %card.id,
+                error = %err,
+                "[task] failed to journal dispatch MCP failures; continuing"
+            );
+        }
+
+        if let Some(events) = self.deps.events.as_ref() {
+            // The run's reply, tagged so the per-task timeline can filter it out
+            // of the company-scoped journal.
+            //
+            // `chat_id` is the **card id**, deliberately, not the card's origin
+            // thread. `chat_history::owns` routes a reply into a desk's history
+            // by matching `chat_id` against the desk id/name, so using the
+            // origin here would inject this record into that desk's chat — a
+            // behaviour change well outside a read foundation, and a duplicate
+            // of the live post-back bubble below. A card id matches no desk, so
+            // the record stays exactly what it is: timeline material, reachable
+            // only through `task_id`. An empty string would be worse still — it
+            // folds into the General desk.
+            if let Err(err) = events
+                .append(
+                    &self.record.id,
+                    CompanyEvent::AgentReply {
+                        chat_id: card.id.clone(),
+                        agent_id: responder.clone(),
+                        text: result_text.clone(),
+                        steps: Vec::new(),
+                        task_id: Some(card.id.clone()),
+                    },
+                )
+                .await
+            {
+                tracing::warn!(
+                    task_id = %card.id,
+                    error = %err,
+                    "[task] failed to journal dispatch reply; continuing"
+                );
+            }
+            // The terminal anchor, journaled after the card's landing column is
+            // persisted so it always records a completed run. Attempted even if
+            // the reply above failed — the anchor is what closes a timeline, so
+            // dropping it is strictly worse than dropping the reply.
+            if let Err(err) = events
+                .append(
+                    &self.record.id,
+                    CompanyEvent::DeskTaskCompleted {
+                        task_id: card.id.clone(),
+                        desk: responder.clone(),
+                        output: result_text,
+                        column: card.column.clone(),
+                    },
+                )
+                .await
+            {
+                tracing::warn!(
+                    task_id = %card.id,
+                    error = %err,
+                    "[task] failed to journal task completion; continuing"
+                );
+            }
+        }
+
         // Issue #151 §3.2: answer in the conversation the card was spawned
         // from. Only a card that remembers an origin posts back — one created
         // straight on the board, or written before `origin_chat_id` existed,
         // has no thread to answer in and behaves exactly as before.
         //
-        // The bubble is attributed to the responder (matching a delegated desk
-        // reply) and carries the card's landing column, so the operator reads
-        // one line and knows both what came back and where the card went. Steps
-        // are deliberately empty: a dispatched card discards them into the note.
+        // Issue #186: the **orchestrator** relays the result, not the assignee.
+        //
+        // The bubble used to be attributed to the responder, so a desk member
+        // spoke straight to the operator — which bypasses the orchestrator's
+        // role as the single point of contact that `run_delegation` already
+        // honours. It is now the orchestrator's bubble, and the assignee is
+        // credited inside the text, so the operator still knows who did the
+        // work without a second voice in the thread.
+        //
+        // It still carries the card's landing column, so the operator reads one
+        // line and knows both what came back and where the card went. Steps are
+        // deliberately empty: a dispatched card discards them into the note.
         let Some(origin) = card.origin_chat_id.clone() else {
             return Ok(None);
         };
-        Ok(Some(OutboundMessage {
-            channel: responder,
-            text: task_postback_text(&card),
-            reply_to: Some(crate::ports::types::ReplyTo { chat_id: origin }),
-            steps: Vec::new(),
-        }))
+        Ok(Some(lifecycle::relay_reply(
+            &card,
+            &responder,
+            &self.orchestrator(),
+            origin,
+        )))
+    }
+
+    /// The company orchestrator's agent id — the single voice that answers the
+    /// operator (issue #186).
+    ///
+    /// Resolved from the roster rather than read off [`Self::responder`],
+    /// because `with_responder` can point that at any agent for a test or a
+    /// single-desk company; the relay must still be attributed to the real
+    /// orchestrator. Falls back to `responder` only when the roster has no
+    /// orchestrator to name at all, which is the same empty-roster case
+    /// [`orchestrator::orchestrator_id`] already tolerates.
+    fn orchestrator(&self) -> String {
+        orchestrator::orchestrator_id(&self.record.manifest.agents)
+            .unwrap_or_else(|| self.responder.clone())
+    }
+
+    /// Records a completed dispatch's output as a versioned artifact (#187).
+    ///
+    /// A task that is dispatched, reviewed, and dispatched again is the same
+    /// deliverable evolving — so the second run appends a **version** to the
+    /// existing artifact rather than opening a second one. The artifact to
+    /// extend is the most recently updated one already attached to this card;
+    /// only the first run creates.
+    ///
+    /// A missing artifact store is a silent no-op, exactly like a missing task
+    /// store: the note is still written, so the board behaves as it did before
+    /// this issue.
+    async fn record_task_artifact(
+        &self,
+        card: &TaskRecord,
+        responder: &str,
+        body: &str,
+    ) -> Result<()> {
+        let Some(artifacts) = self.deps.artifacts.as_ref() else {
+            return Ok(());
+        };
+        let existing = artifacts
+            .list(&self.record.id, Some(&card.id))
+            .await?
+            .into_iter()
+            .max_by_key(|a| a.updated_at_millis);
+        let at = now_millis();
+        let record = match existing {
+            Some(mut found) => {
+                found.push_version(body, ArtifactAuthor::Agent, responder, at, None);
+                found
+            }
+            None => ArtifactRecord::new(
+                generate_id(),
+                &card.id,
+                &card.title,
+                ArtifactKind::Text,
+                body,
+                responder,
+                at,
+            ),
+        };
+        artifacts.upsert(&self.record.id, &record).await?;
+        Ok(())
     }
 
     /// Resolves which roster agent runs a task: its `assignee` when that names a
@@ -323,14 +475,10 @@ impl HarnessBrain {
     /// agent or a team-overlay teammate, so an overlay-added lead is reachable on
     /// a desk the manifest left empty.
     fn desk_lead(&self, desk: &str) -> Option<String> {
-        // Resolve the desk key (id or case-insensitive name) against both the
-        // manifest desks and the operator-created overlay desks, so a
-        // runtime-created desk routes exactly like a blueprint one.
-        let desk_id = self.record.resolve_desk_id(desk)?;
-        self.record
-            .effective_desk_members(&desk_id)
-            .into_iter()
-            .find(|m| self.record.is_roster_agent(m))
+        // Desk-lead resolution is brain-agnostic — it reads only `CompanyRecord`
+        // — so it lives on the delegation seam (issue #176); this stays a thin
+        // wrapper for the routing callers on the brain.
+        delegation::desk_lead(&self.record, desk)
     }
 
     /// Drains the MCP failure queue **onto the operator bubble's step timeline**
@@ -344,7 +492,17 @@ impl HarnessBrain {
     /// instead of a separate warning bubble. Every string was already scrubbed at
     /// the source (`OcMcpCallTool`), so `scrubbed_message` is safe to show and to
     /// persist.
-    async fn surface_mcp_failures(&self, steps: &mut Vec<TurnStep>) -> Result<()> {
+    ///
+    /// `task_id` is the dispatched card the failing turn belonged to, when the
+    /// drain runs inside a [`CompanyEvent::TaskDispatched`] cycle (issue #185).
+    /// It is stamped onto each journaled failure so a task's broken tool calls
+    /// can be filtered out of the company-scoped journal onto its own timeline;
+    /// a chat turn passes `None` and journals exactly as before.
+    async fn surface_mcp_failures(
+        &self,
+        steps: &mut Vec<TurnStep>,
+        task_id: Option<&str>,
+    ) -> Result<()> {
         for failure in self.deps.mcp_failures.drain() {
             steps.push(TurnStep {
                 kind: TurnStepKind::Note,
@@ -354,17 +512,33 @@ impl HarnessBrain {
                 elapsed_ms: None,
             });
             if let Some(events) = self.deps.events.as_ref() {
-                events
+                // Best-effort **per failure**. `drain` is a `mem::take`, so the
+                // queue is already empty by the time this loop runs and the
+                // batch exists only in this iterator. Propagating with `?` here
+                // would discard every failure after the first journal error —
+                // permanently, since nothing remains to retry from. A failed
+                // audit write must not cost us the rest of the audit.
+                let server = failure.server.clone();
+                if let Err(err) = events
                     .append(
                         &self.record.id,
                         CompanyEvent::McpCallFailed {
+                            task_id: task_id.map(str::to_string),
                             server: failure.server,
                             tool: failure.tool,
                             status: failure.status,
                             message: failure.scrubbed_message,
                         },
                     )
-                    .await?;
+                    .await
+                {
+                    tracing::warn!(
+                        server = %server,
+                        task_id = task_id.unwrap_or("-"),
+                        error = %err,
+                        "[task] failed to journal an MCP failure; draining the rest"
+                    );
+                }
             }
         }
         Ok(())
@@ -443,102 +617,41 @@ impl HarnessBrain {
     /// lead) or a cancelled run yields nothing to relay. No sub-agent
     /// re-delegation in v1: desk members carry no delegation tools, so their
     /// turns queue nothing.
+    ///
+    /// The orchestration lives on the brain-agnostic seam (issue #176); this is
+    /// a thin wrapper that re-attaches `HarnessDeps` behind a
+    /// [`HarnessRunTurn`] and drives a [`DelegationRunner`]. It exists only to
+    /// keep the delegation tests exercising the same code path the cycle drives
+    /// through [`DelegationRunner::handle_operator_message`], so it is
+    /// test-only — the cycle never calls it directly.
+    #[cfg(test)]
     async fn run_delegation(
         &self,
         delegation: Delegation,
         chat_id: Option<&str>,
-    ) -> Result<DelegationOutcome> {
-        match delegation {
-            Delegation::SpawnTask {
-                title,
-                note,
-                assignee,
-            } => {
-                let Some(tasks) = self.deps.tasks.as_ref() else {
-                    return Ok(DelegationOutcome::default());
-                };
-                let card = TaskRecord {
-                    id: generate_id(),
-                    title,
-                    note,
-                    column: "backlog".to_string(),
-                    priority: "medium".to_string(),
-                    assignee: assignee.unwrap_or_default(),
-                    updated_at_millis: now_millis(),
-                    // Issue #151 §3.2: remember which conversation asked for
-                    // this, so the completion can answer there instead of only
-                    // landing in the note.
-                    origin_chat_id: chat_id.map(str::to_string),
-                };
-                tasks.upsert(&self.record.id, &card).await?;
-                Ok(DelegationOutcome::default())
-            }
-            Delegation::DelegateToDesk { desk, instruction } => {
-                let Some(member) = self.desk_lead(&desk) else {
-                    return Ok(DelegationOutcome::default());
-                };
-                // Register the delegated turn so an operator can CANCEL it
-                // mid-flight (cancel-only in v1 — pause/redirect are rejected at
-                // the route). RAII guard deregisters on every exit path.
-                let guard = self.deps.steer.register(
-                    &self.record.id,
-                    InflightEntry {
-                        key: generate_id(),
-                        task_id: None,
-                        kind: InflightKind::Delegation,
-                        title: desk.clone(),
-                        agent_id: member.clone(),
-                        started_at_millis: now_millis(),
-                        pending_action: None,
-                    },
-                );
-                let control = guard.control().clone();
-                let outcome = self
-                    .pool
-                    .run_steered(
-                        &self.record.id,
-                        &member,
-                        &instruction,
-                        &self.deps,
-                        &control,
-                        chat_id,
-                    )
-                    .await?;
-                // A cancel issued mid-flight discards the delegated reply —
-                // nothing is relayed.
-                if matches!(control.take(), Some(SteerAction::Cancel)) {
-                    return Ok(DelegationOutcome::default());
-                }
-                // Hand the teammate's answer back to the caller to RELAY through
-                // a second orchestrator turn (the CEO-relay hand-back). Their
-                // steps ride along and get folded onto the relayed operator
-                // bubble so the teammate's activity stays visible.
-                Ok(DelegationOutcome {
-                    bubble: None,
-                    desk_reply: Some(DeskReply {
-                        member,
-                        reply: outcome.reply,
-                        steps: outcome.steps,
-                    }),
-                })
-            }
-        }
+    ) -> Result<delegation::DelegationOutcome> {
+        let run_turn = HarnessRunTurn::new(&self.pool, &self.deps);
+        self.delegation_runner(&run_turn)
+            .run_delegation(delegation, chat_id)
+            .await
     }
-}
 
-/// The prompt for the CEO-relay hand-back turn: the operator's original message
-/// plus each teammate's reply, framed so the orchestrator relays the answer back
-/// as its own single, coherent response and does not delegate again.
-fn build_relay_prompt(original: &str, desk_replies: &[(String, String)]) -> String {
-    let mut prompt = format!(
-        "The operator asked:\n{original}\n\nYou delegated this to your team and their reply is \
-below. Relay their answer back to the operator now as your own single, coherent response — \
-summarize it or pass it along. Do not delegate again; just relay what came back."
-    );
-    for (member, reply) in desk_replies {
-        prompt.push_str(&format!("\n\n{member} replied:\n{reply}"));
+    /// Builds a [`DelegationRunner`] over `run_turn`, threading the brain-agnostic
+    /// handles it needs — the record (desk-lead resolution), the task store, the
+    /// steer registry, the company id, and the shared delegation queue the turn
+    /// pushes onto. `HarnessDeps` never crosses the seam; it stays behind
+    /// `run_turn`.
+    fn delegation_runner<'a>(&'a self, run_turn: &'a HarnessRunTurn<'a>) -> DelegationRunner<'a> {
+        DelegationRunner::new(
+            run_turn,
+            &self.record,
+            self.deps.tasks.as_ref(),
+            &self.deps.steer,
+            &self.record.id,
+            &self.deps.delegations,
+            orchestrator::MAX_DELEGATIONS_PER_TURN,
+        )
     }
-    prompt
 }
 
 /// The turn instruction for a dispatched card: its title, plus its note when it
@@ -550,45 +663,25 @@ fn task_instruction(card: &TaskRecord) -> String {
     }
 }
 
-/// Where a dispatched card lands once its run succeeds (issue #171).
+/// Records one run ending on the card: the result block on its note, and the
+/// board column it lands in.
 ///
-/// `in_review` is a naming convention, not a mechanism: nothing consumes it.
-/// `task_enters_in_progress` only edge-fires a dispatch when a card enters
-/// `in_progress`, so an `in_review` card triggers no further cycle and the only
-/// runtime write of `done` is the operator's manual drag on the board.
-///
-/// That is fine for a card an operator made themselves — they are the reviewer,
-/// and the card is sitting in front of them. It strands a card stamped with
-/// `origin_chat_id`: that card came from `spawn_task` during an agent-to-agent
-/// handoff, its result was already posted back into the originating thread, and
-/// no operator is watching the board for it. So a card that remembers an origin
-/// completes to `done`; a board-created card still parks in `in_review`.
-fn success_terminal_column(card: &TaskRecord) -> &'static str {
-    if card.origin_chat_id.is_some() {
-        DONE
-    } else {
-        IN_REVIEW
-    }
-}
-
-/// The post-back line for a finished card (issue #151 §3.2): what the card was,
-/// where it landed, and the reply itself.
-///
-/// Reads the *result* out of the card rather than taking the raw turn reply, so
-/// a cancelled or paused run posts the same thing the board shows instead of
-/// claiming an answer it does not have.
-fn task_postback_text(card: &TaskRecord) -> String {
-    let status = match card.column.as_str() {
-        DONE => "is done",
-        IN_REVIEW => "is ready for review",
-        "paused" => "is paused",
-        "backlog" => "went back to the backlog",
-        other => other,
-    };
-    match card.note.as_deref().filter(|n| !n.trim().is_empty()) {
-        Some(note) => format!("\"{}\" {status}.\n\n{note}", card.title),
-        None => format!("\"{}\" {status}.", card.title),
-    }
+/// Both decisions are the orchestrator's (issue #186), so both are read from
+/// [`crate::harness::lifecycle`] rather than written as literals here. Every
+/// break point in `run_task`'s steer loop goes through this one function, which
+/// is what stops a sixth exit inventing a sixth column string — and gives #171
+/// (the `in_review → done` write, PR #179, now folded into
+/// [`lifecycle::landing_column`]) and #190's `DeskTaskCompleted { column, .. }`
+/// a single decision to consume. #187's artifact guard reads the same seam via
+/// [`lifecycle::success_terminal_column`], so "the run succeeded" stays one
+/// decision rather than a literal column compared in two places.
+fn settle(card: &mut TaskRecord, end: TaskRunEnd, responder: &str, body: &str) {
+    card.note = Some(append_result(
+        card.note.as_deref(),
+        &lifecycle::note_attribution(end, responder),
+        body,
+    ));
+    card.column = lifecycle::landing_column(end, card).to_string();
 }
 
 /// Appends a responder-attributed result block to a card's note, preserving any
@@ -628,90 +721,32 @@ impl Brain for HarnessBrain {
                     // in this cycle rides the same operator thread, so it gets the
                     // same id.
                     let chat_id = chat.as_deref();
-                    // Clear stale delegations + MCP failures so nothing leaks from
-                    // a prior turn, run the turn (metered through `deps`), then
-                    // drain whatever the orchestrator queued (capped; discarded
-                    // past the cap).
-                    self.deps.delegations.clear();
+                    // Clear stale MCP failures so nothing leaks from a prior turn
+                    // (the delegation queue is cleared inside the runner, right
+                    // before the orchestrator turn).
                     self.deps.mcp_failures.clear();
-                    let outcome = self
-                        .pool
-                        .run(&self.record.id, &responder, text, &self.deps, chat_id)
+                    // Drive the brain-agnostic delegation seam (issue #176): the
+                    // orchestrator turn, its queued delegations, and the CEO-relay
+                    // hand-back all run behind the `RunTurn` impl. `HarnessDeps` is
+                    // re-attached behind `HarnessRunTurn`.
+                    let run_turn = HarnessRunTurn::new(&self.pool, &self.deps);
+                    let turn = self
+                        .delegation_runner(&run_turn)
+                        .handle_operator_message(&responder, text, chat_id)
                         .await?;
-                    // The orchestrator's own steps ride on the operator bubble;
-                    // its reply is the operator-facing text UNLESS a synchronous
-                    // desk delegation runs, in which case the relay turn's reply
-                    // replaces it (below).
-                    let mut operator_steps = outcome.steps;
-                    let mut operator_reply = outcome.reply;
-                    // Run whatever the orchestrator queued. A `spawn_task` opens a
-                    // card silently; a `delegate_to_desk` runs the desk lead and
-                    // hands its answer back to RELAY (the CEO-relay hand-back)
-                    // rather than surfacing as a disconnected sibling bubble. Any
-                    // future delegation that surfaces its own bubble lands in
-                    // `delegated`.
-                    let mut delegated = Vec::new();
-                    let mut desk_replies: Vec<(String, String)> = Vec::new();
-                    for delegation in self
-                        .deps
-                        .delegations
-                        .drain(orchestrator::MAX_DELEGATIONS_PER_TURN)
-                    {
-                        let out = self.run_delegation(delegation, chat_id).await?;
-                        if let Some(bubble) = out.bubble {
-                            delegated.push(bubble);
-                        }
-                        if let Some(desk) = out.desk_reply {
-                            // Fold the teammate's activity onto the operator
-                            // timeline, then remember the answer to relay.
-                            operator_steps.extend(desk.steps);
-                            desk_replies.push((desk.member, desk.reply));
-                        }
-                    }
-                    // CEO-relay hand-back: when a synchronous desk delegation
-                    // answered, run exactly ONE more orchestrator turn whose
-                    // prompt is the original message plus the teammate reply,
-                    // and surface THAT as the operator bubble — so the CEO comes
-                    // back with the answer in one coherent conversation. The
-                    // relay turn must not re-delegate: its prompt is relay-only,
-                    // and as a safety net the delegation queue is cleared before
-                    // it and drained-and-discarded after, so anything it tries
-                    // to queue is dropped (bounding cost to one extra turn, no
-                    // re-delegation loop). No delegation → the single first turn
-                    // stays exactly as before.
-                    if !desk_replies.is_empty() {
-                        let relay_prompt = build_relay_prompt(text, &desk_replies);
-                        self.deps.delegations.clear();
-                        let relay = self
-                            .pool
-                            .run(
-                                &self.record.id,
-                                &responder,
-                                &relay_prompt,
-                                &self.deps,
-                                chat_id,
-                            )
-                            .await?;
-                        // Discard anything the relay turn queued — it can only
-                        // relay, never re-delegate.
-                        let _ = self
-                            .deps
-                            .delegations
-                            .drain(orchestrator::MAX_DELEGATIONS_PER_TURN);
-                        operator_reply = relay.reply;
-                        operator_steps.extend(relay.steps);
-                    }
+                    let mut operator_steps = turn.steps;
+                    let operator_reply = turn.reply;
                     // Re-skin any MCP tool-call failures (from the orchestrator
                     // turn, a delegated desk turn, or the relay turn) as error
                     // steps on the operator bubble — one surface, one renderer.
-                    self.surface_mcp_failures(&mut operator_steps).await?;
+                    self.surface_mcp_failures(&mut operator_steps, None).await?;
                     channel_responses.push(OutboundMessage {
                         channel: "operator".to_string(),
                         text: operator_reply,
                         reply_to: None,
                         steps: operator_steps,
                     });
-                    channel_responses.extend(delegated);
+                    channel_responses.extend(turn.bubbles);
                 }
                 CompanyEvent::TaskDispatched { task_id } => {
                     if let Some(message) = self.run_task(task_id).await? {
@@ -745,13 +780,26 @@ impl Brain for HarnessBrain {
         // No `ledger_deltas` / `token_usage` here on purpose: `HarnessPool::run`
         // is the single cost-accounting site (it writes the ledger entry and the
         // usage sample through `deps`), so surfacing the same spend again would
-        // double-count it.
+        // double-count it — the runtime meters a non-zero `token_usage` for every
+        // brain (issue #174), and `cognition()` below declares that this path has
+        // already done it.
         Ok(CycleResult {
             channel_responses,
             new_traces: vec![trace],
             ledger_deltas: Vec::new(),
             token_usage: TokenUsage::default(),
         })
+    }
+
+    /// The harness meters itself per turn in [`HarnessPool::run`], against the
+    /// live provider slug the turn resolved to — which is why `run_cycle` reports
+    /// zero `token_usage` and the runtime's cycle-level metering is a no-op here.
+    fn cognition(&self) -> Cognition {
+        Cognition {
+            path: "harness",
+            provider: "per-turn",
+            metering: UsageMetering::PerTurn,
+        }
     }
 }
 
@@ -869,6 +917,7 @@ description = "Runs Acme."
             workspace_root: dir.to_path_buf(),
             model_override: None,
             tasks: None,
+            artifacts: None,
             skills: None,
             skills_source_dir: None,
             mcp_servers: Vec::new(),
@@ -1013,6 +1062,7 @@ description = "Builds it."
             workspace_root: dir.to_path_buf(),
             model_override: None,
             tasks: Some(tasks.clone()),
+            artifacts: None,
             skills: None,
             skills_source_dir: None,
             mcp_servers: Vec::new(),
@@ -1037,6 +1087,45 @@ description = "Builds it."
         )
     }
 
+    /// As [`brain_with_tasks`], but with the artifact store wired to the same
+    /// [`FsOps`] handle (it implements both), so a dispatch's versioned output
+    /// is observable.
+    fn brain_with_artifacts(dir: &std::path::Path) -> (HarnessBrain, Arc<FsOps>) {
+        let ops = Arc::new(FsOps::new(dir));
+        let deps = HarnessDeps {
+            provider: Arc::new(MockProvider::new("mock: ")),
+            provider_slug: "mock".to_string(),
+            context: Arc::new(FsContextStore::new(dir)),
+            store: Arc::new(FsCompanyStore::new(dir)),
+            meter: Some(Arc::new(FsOps::new(dir))),
+            workspace_root: dir.to_path_buf(),
+            model_override: None,
+            tasks: Some(ops.clone()),
+            artifacts: Some(ops.clone()),
+            skills: None,
+            skills_source_dir: None,
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: orchestrator::DelegationQueue::default(),
+            workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
+            approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan: None,
+            media: None,
+            composio: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+        };
+        (
+            HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
+            ops,
+        )
+    }
+
     fn card(id: &str, assignee: &str) -> TaskRecord {
         TaskRecord {
             id: id.to_string(),
@@ -1047,59 +1136,18 @@ description = "Builds it."
             assignee: assignee.to_string(),
             updated_at_millis: 0,
             origin_chat_id: None,
+            parent_task_id: None,
         }
     }
 
     // ── Issue #151 §3.2: a finished card answers where it was asked ──────
 
-    /// The post-back names the card, where it landed, and the result — so the
-    /// operator reads one bubble instead of going to find the note.
-    #[test]
-    fn postback_reports_the_card_title_status_and_result() {
-        let mut finished = card("t1", "maya");
-        finished.column = "in_review".to_string();
-        finished.note = Some("[maya] Draft is up.".to_string());
-
-        let text = task_postback_text(&finished);
-        assert!(text.contains("Ship the thing"), "{text}");
-        assert!(text.contains("is ready for review"), "{text}");
-        assert!(text.contains("Draft is up."), "{text}");
-    }
-
-    /// A cancelled or paused run must not claim an answer it does not have —
-    /// the post-back reads the card, not the raw turn reply.
-    #[test]
-    fn postback_reflects_the_landing_column_not_a_presumed_success() {
-        let mut paused = card("t1", "maya");
-        paused.column = "paused".to_string();
-        paused.note = Some("[maya] [paused] halfway".to_string());
-        assert!(task_postback_text(&paused).contains("is paused"));
-
-        let mut cancelled = card("t1", "maya");
-        cancelled.column = "backlog".to_string();
-        cancelled.note = Some("[operator] cancelled while in flight".to_string());
-        let text = task_postback_text(&cancelled);
-        assert!(text.contains("went back to the backlog"), "{text}");
-        assert!(!text.contains("ready for review"), "{text}");
-    }
-
-    /// A card with no note still posts a readable line rather than a title
-    /// followed by a dangling blank block.
-    #[test]
-    fn postback_without_a_note_is_still_a_complete_sentence() {
-        let mut finished = card("t1", "maya");
-        finished.column = "in_review".to_string();
-        finished.note = None;
-        let text = task_postback_text(&finished);
-        assert_eq!(text, "\"Ship the thing\" is ready for review.");
-
-        finished.note = Some("   ".to_string());
-        assert_eq!(
-            task_postback_text(&finished),
-            "\"Ship the thing\" is ready for review.",
-            "a whitespace-only note must not append an empty block"
-        );
-    }
+    // The post-back's *text* rules — title, landing status, note folding,
+    // whitespace-only notes — moved with the renderer to
+    // `crate::harness::lifecycle` (issue #186), which owns them now and covers
+    // each case plus the new assignee-credit rule. What stays here is the
+    // wiring: that `run_task` reaches the relay at all, and attributes it to
+    // the orchestrator.
 
     /// The compatibility guarantee: a card with no remembered origin — one made
     /// straight on the board, or written before `origin_chat_id` existed —
@@ -1124,13 +1172,18 @@ description = "Builds it."
         assert!(only_card(&tasks).await.note.is_some());
     }
 
-    /// …and one that does remember its origin answers there, attributed to the
-    /// responder and threaded with `reply_to`.
+    /// …and one that does remember its origin answers there, threaded with
+    /// `reply_to` and — since issue #186 — attributed to the **orchestrator**
+    /// rather than to the assignee that did the work.
     #[tokio::test]
     async fn a_card_with_an_origin_posts_back_to_that_thread() {
         let dir = tempfile::tempdir().unwrap();
         let (brain, tasks) = brain_with_tasks(dir.path());
-        let mut c = card("t-origin", "maya");
+        // A roster assignee, deliberately: an off-roster one falls back to the
+        // default responder (`task_responder`), which in this fixture *is* the
+        // orchestrator — so the credit would be correctly suppressed and this
+        // test would prove nothing about the one-voice relay.
+        let mut c = card("t-origin", "engineer");
         c.origin_chat_id = Some("strategy".to_string());
         tasks
             .upsert(&CompanyId::new("acme"), &c)
@@ -1146,11 +1199,24 @@ description = "Builds it."
             posted.reply_to.as_ref().map(|r| r.chat_id.as_str()),
             Some("strategy")
         );
-        assert!(
-            !posted.channel.is_empty(),
-            "the bubble must be attributed to the responder"
+        // Issue #186: one voice. The bubble belongs to the orchestrator, and
+        // the assignee that ran the card is credited in the text instead of
+        // speaking to the operator directly.
+        assert_eq!(
+            posted.channel,
+            brain.orchestrator(),
+            "the orchestrator relays a finished card, not the assignee"
+        );
+        assert_ne!(
+            posted.channel, "engineer",
+            "the assignee must not address the operator directly"
         );
         assert!(posted.text.contains("Ship the thing"), "{}", posted.text);
+        assert!(
+            posted.text.contains("engineer"),
+            "the relay must still credit who did the work: {}",
+            posted.text
+        );
         // A dispatched card discards its steps into the note.
         assert!(posted.steps.is_empty());
     }
@@ -1211,6 +1277,16 @@ description = "Builds it."
             .upsert(&CompanyId::new("acme"), &c)
             .await
             .expect("seed");
+        // `run_task` is driven directly here rather than through `run_cycle`,
+        // so the roster the turn runs on has to be built explicitly. Without it
+        // every dispatch fails with "company not found" and settles to
+        // `backlog` — which still satisfies this test's post-back assertions
+        // while proving nothing about the terminal column.
+        brain
+            .pool
+            .ensure(&brain.record, &brain.deps)
+            .await
+            .expect("roster");
 
         let posted = brain
             .run_task("t-origin")
@@ -1230,16 +1306,103 @@ description = "Builds it."
         assert!(!posted.text.contains("ready for review"), "{}", posted.text);
     }
 
+    /// Issue #179 split the success terminal in two, and artifact capture (#187)
+    /// keys off it: a delegated card completes to `done` rather than parking in
+    /// `in_review`, and its deliverable must still be versioned.
+    ///
+    /// Gating capture on the literal `in_review` would silently stop versioning
+    /// exactly the cards nobody is watching the board for — the run succeeded
+    /// and produced output either way, so the guard has to track "landed on the
+    /// success terminal", not one particular column name.
+    #[tokio::test]
+    async fn a_delegated_card_completing_to_done_still_records_an_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, ops) = brain_with_artifacts(dir.path());
+        // Empty assignee → the default responder, so the turn actually runs.
+        let mut c = card("t-origin", "");
+        c.origin_chat_id = Some("strategy".to_string());
+        ops.upsert(&CompanyId::new("acme"), &c).await.expect("seed");
+
+        brain
+            .run_cycle(
+                request(vec![CompanyEvent::TaskDispatched {
+                    task_id: "t-origin".into(),
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        let moved = only_card(&ops).await;
+        assert_eq!(
+            moved.column, "done",
+            "a delegated card lands on the `done` success terminal (#179)"
+        );
+        let artifacts = crate::ports::artifacts::ArtifactStore::list(
+            &*ops,
+            &CompanyId::new("acme"),
+            Some("t-origin"),
+        )
+        .await
+        .expect("list");
+        assert_eq!(
+            artifacts.len(),
+            1,
+            "a delegated card's deliverable must still be versioned"
+        );
+        assert_eq!(artifacts[0].versions.len(), 1);
+    }
+
+    /// The other half of the same guard: a run that did NOT succeed still
+    /// writes its note but must not open an artifact, whichever terminal the
+    /// card would otherwise have used.
+    #[tokio::test]
+    async fn a_cancelled_delegated_card_records_no_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, ops, _provider) =
+            brain_that_steers_itself(dir.path(), "t-cancel", vec![SteerAction::Cancel]);
+        let mut c = card("t-cancel", "");
+        c.origin_chat_id = Some("strategy".to_string());
+        ops.upsert(&CompanyId::new("acme"), &c).await.expect("seed");
+
+        brain
+            .run_cycle(
+                request(vec![CompanyEvent::TaskDispatched {
+                    task_id: "t-cancel".into(),
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        assert_eq!(only_card(&ops).await.column, "backlog");
+        let artifacts = crate::ports::artifacts::ArtifactStore::list(
+            &*ops,
+            &CompanyId::new("acme"),
+            Some("t-cancel"),
+        )
+        .await
+        .expect("list");
+        assert!(
+            artifacts.is_empty(),
+            "a cancelled run has no deliverable to version"
+        );
+    }
+
     /// The success terminal is chosen by origin, not by outcome: a board-created
-    /// card keeps its `in_review` review gate.
+    /// card keeps its `in_review` review gate. The decision itself now lives in
+    /// [`lifecycle`] (and is unit-tested there); this pins that `settle` — every
+    /// run-ending path in this file — actually consults it.
     #[test]
     fn success_terminal_column_is_done_only_for_a_card_with_an_origin() {
-        let board_card = card("t1", "maya");
-        assert_eq!(success_terminal_column(&board_card), "in_review");
+        let mut board_card = card("t1", "maya");
+        settle(&mut board_card, TaskRunEnd::Completed, "maya", "shipped");
+        assert_eq!(board_card.column, "in_review");
 
         let mut delegated = card("t2", "maya");
         delegated.origin_chat_id = Some("strategy".to_string());
-        assert_eq!(success_terminal_column(&delegated), "done");
+        settle(&mut delegated, TaskRunEnd::Completed, "maya", "shipped");
+        assert_eq!(delegated.column, "done");
     }
 
     /// The redirect-cap finalize branch is the other success terminal, so it has
@@ -1272,14 +1435,17 @@ description = "Builds it."
         assert_eq!(only_card(&tasks).await.column, "done");
     }
 
-    /// The post-back has to have wording for the new landing column — without it
+    /// The relay has to have wording for the `done` landing column — without it
     /// the fallback arm renders the raw column id into the sentence.
     #[test]
     fn postback_reads_naturally_for_a_done_card() {
         let mut finished = card("t1", "maya");
         finished.column = "done".to_string();
         finished.note = None;
-        assert_eq!(task_postback_text(&finished), "\"Ship the thing\" is done.");
+        assert_eq!(
+            lifecycle::relay_text(&finished, "maya", "ceo"),
+            "\"Ship the thing\" is done (maya ran it)."
+        );
     }
 
     /// An `assignee` that names a roster member routes the turn to that member.
@@ -1414,6 +1580,7 @@ members = ["engineer"]
             workspace_root: dir.to_path_buf(),
             model_override: None,
             tasks: Some(tasks.clone()),
+            artifacts: None,
             skills: None,
             skills_source_dir: None,
             mcp_servers: Vec::new(),
@@ -1710,6 +1877,148 @@ members = ["eng1", "eng2"]
         assert_eq!(cards[0].assignee, "engineer");
     }
 
+    // ── Issue #186 part b: orchestrator lifecycle authority ────────────────
+
+    /// `assign_task` changes who owns an existing card, records the change in
+    /// the orchestrator's voice, and — deliberately — does **not** touch the
+    /// column: dispatch fires from `CompanyRuntime::upsert_task`, which the
+    /// `TaskStore` port this drain writes through cannot reach.
+    #[tokio::test]
+    async fn assign_task_reassigns_the_card_without_dispatching_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, tasks) = brain_with_tasks(dir.path());
+        let mut c = card("t-assign", "engineer");
+        c.column = "backlog".to_string();
+        tasks.upsert(&CompanyId::new("acme"), &c).await.unwrap();
+
+        let out = brain
+            .run_delegation(
+                Delegation::AssignTask {
+                    task_id: "t-assign".to_string(),
+                    assignee: "ceo".to_string(),
+                    note: Some("closer to the customer".to_string()),
+                },
+                None,
+            )
+            .await
+            .expect("delegation runs");
+        assert!(
+            out.bubble.is_none() && out.desk_reply.is_none(),
+            "the orchestrator is mid-turn; a second voice here would be it talking to itself"
+        );
+
+        let after = only_card(&tasks).await;
+        assert_eq!(after.assignee, "ceo");
+        assert_eq!(
+            after.column, "backlog",
+            "assignment records ownership; it must not start the work"
+        );
+        let note = after.note.expect("note");
+        assert!(note.contains("assigned to ceo"), "{note}");
+        assert!(note.contains("closer to the customer"), "{note}");
+        assert!(
+            note.contains(&format!("[{}]", brain.orchestrator())),
+            "the assignment is recorded in the orchestrator's voice: {note}"
+        );
+    }
+
+    /// Approving finishes a board-created card: this is #171's `in_review →
+    /// done` write (PR #179) for the card shape #179's own origin rule cannot
+    /// reach, with the verdict recorded on the note.
+    #[tokio::test]
+    async fn review_approve_records_the_verdict_and_completes_the_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, tasks) = brain_with_tasks(dir.path());
+        let mut c = card("t-review", "engineer");
+        c.column = "in_review".to_string();
+        tasks.upsert(&CompanyId::new("acme"), &c).await.unwrap();
+
+        brain
+            .run_delegation(
+                Delegation::ReviewTask {
+                    task_id: "t-review".to_string(),
+                    decision: lifecycle::ReviewDecision::Approve,
+                    note: Some("ships as-is".to_string()),
+                },
+                None,
+            )
+            .await
+            .expect("delegation runs");
+
+        let after = only_card(&tasks).await;
+        assert_eq!(
+            after.column, "done",
+            "an approving verdict is the in_review -> done transition (#171)"
+        );
+        let note = after.note.expect("note");
+        assert!(note.contains("reviewed: approved"), "{note}");
+        assert!(note.contains("ships as-is"), "{note}");
+    }
+
+    /// `revise` is a transition #186 does own: the card goes back to the
+    /// backlog so it can be picked up and re-dispatched.
+    #[tokio::test]
+    async fn review_revise_sends_the_card_back_to_the_backlog() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, tasks) = brain_with_tasks(dir.path());
+        let mut c = card("t-revise", "engineer");
+        c.column = "in_review".to_string();
+        tasks.upsert(&CompanyId::new("acme"), &c).await.unwrap();
+
+        brain
+            .run_delegation(
+                Delegation::ReviewTask {
+                    task_id: "t-revise".to_string(),
+                    decision: lifecycle::ReviewDecision::Revise,
+                    note: None,
+                },
+                None,
+            )
+            .await
+            .expect("delegation runs");
+
+        let after = only_card(&tasks).await;
+        assert_eq!(after.column, "backlog");
+        assert!(
+            after.note.expect("note").contains("needs another pass"),
+            "the verdict must be recorded even without a reviewer comment"
+        );
+    }
+
+    /// A card that has since been deleted is a silent no-op, matching every
+    /// other task path in this file — never an error that kills the turn.
+    #[tokio::test]
+    async fn a_lifecycle_delegation_for_a_missing_card_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, tasks) = brain_with_tasks(dir.path());
+
+        for delegation in [
+            Delegation::AssignTask {
+                task_id: "ghost".to_string(),
+                assignee: "ceo".to_string(),
+                note: None,
+            },
+            Delegation::ReviewTask {
+                task_id: "ghost".to_string(),
+                decision: lifecycle::ReviewDecision::Approve,
+                note: None,
+            },
+        ] {
+            let out = brain
+                .run_delegation(delegation, None)
+                .await
+                .expect("a missing card must not error");
+            assert!(out.bubble.is_none() && out.desk_reply.is_none());
+        }
+        assert!(
+            tasks
+                .list(&CompanyId::new("acme"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     /// A `delegate_to_desk` delegation runs the desk lead and hands its reply
     /// back to relay (a `DeskReply` attributed to the lead, no standalone
     /// bubble); an unknown desk yields nothing.
@@ -1786,6 +2095,7 @@ members = ["eng1", "eng2"]
             workspace_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
+            artifacts: None,
             skills: None,
             skills_source_dir: None,
             mcp_servers: Vec::new(),
@@ -1816,8 +2126,10 @@ members = ["eng1", "eng2"]
         });
 
         let mut steps: Vec<TurnStep> = Vec::new();
+        // `None` — this is the chat-turn drain, which journals no `task_id`
+        // (#185). The dispatch drain passes the card id; see `run_task`.
         brain
-            .surface_mcp_failures(&mut steps)
+            .surface_mcp_failures(&mut steps, None)
             .await
             .expect("drain surfaces failures");
 
@@ -1845,6 +2157,122 @@ members = ["eng1", "eng2"]
         );
     }
 
+    /// #185 review follow-up: one bad journal write must not swallow the rest of
+    /// the batch.
+    ///
+    /// `McpFailureQueue::drain` is a `mem::take` — by the time the loop runs the
+    /// queue is empty and the batch exists only in that iterator. Propagating
+    /// the first append error with `?` therefore did not merely skip one audit
+    /// event, it discarded every failure behind it with nothing left to retry
+    /// from. Journaling is per-item best-effort so the drain always completes.
+    #[tokio::test]
+    async fn a_failed_journal_write_does_not_swallow_the_rest_of_the_drain() {
+        use crate::harness::mcp_probe::McpFailure;
+        use crate::ports::EventLog;
+        use crate::ports::types::{EventSeq, StoredEvent};
+        use futures::stream::{self, BoxStream};
+
+        /// An event log whose FIRST append fails and whose later appends
+        /// succeed, recording what got through.
+        #[derive(Default)]
+        struct FailFirstLog {
+            seen: StdMutex<Vec<CompanyEvent>>,
+            appends: std::sync::atomic::AtomicUsize,
+        }
+
+        #[async_trait]
+        impl EventLog for FailFirstLog {
+            async fn append(&self, _id: &CompanyId, event: CompanyEvent) -> Result<EventSeq> {
+                let nth = self
+                    .appends
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if nth == 0 {
+                    return Err(crate::error::OpenCompanyError::Store(
+                        "journal unavailable".to_string(),
+                    ));
+                }
+                let mut guard = self.seen.lock().unwrap();
+                guard.push(event);
+                Ok(EventSeq::new(guard.len() as u64))
+            }
+            async fn read_from(
+                &self,
+                _id: &CompanyId,
+                _seq: EventSeq,
+                _limit: usize,
+            ) -> Result<Vec<StoredEvent>> {
+                Ok(Vec::new())
+            }
+            fn subscribe(&self, _id: &CompanyId) -> BoxStream<'static, StoredEvent> {
+                Box::pin(stream::empty())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let log = Arc::new(FailFirstLog::default());
+        let failures = crate::harness::mcp_probe::McpFailureQueue::default();
+        let deps = HarnessDeps {
+            provider: Arc::new(MockProvider::new("mock: ")),
+            provider_slug: "mock".to_string(),
+            context: Arc::new(FsContextStore::new(dir.path())),
+            store: Arc::new(FsCompanyStore::new(dir.path())),
+            meter: None,
+            workspace_root: dir.path().to_path_buf(),
+            model_override: None,
+            tasks: None,
+            artifacts: None,
+            skills: None,
+            skills_source_dir: None,
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: Some(log.clone()),
+            delegations: orchestrator::DelegationQueue::default(),
+            workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: failures.clone(),
+            approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan: None,
+            media: None,
+            composio: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+        };
+        let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record());
+
+        for server in ["first", "second", "third"] {
+            failures.push(McpFailure {
+                server: server.into(),
+                tool: "browse".into(),
+                status: "tool_call_rejected".into(),
+                hint: None,
+                scrubbed_message: "server rejected the call".into(),
+            });
+        }
+
+        let mut steps: Vec<TurnStep> = Vec::new();
+        brain
+            .surface_mcp_failures(&mut steps, Some("t1"))
+            .await
+            .expect("a journal error is best-effort, not fatal");
+
+        // Every failure is re-skinned onto the timeline regardless…
+        assert_eq!(steps.len(), 3, "all three failures surfaced as steps");
+        // …and the two after the failed write still reached the journal. Before
+        // this fix `seen` was empty: the `?` returned on `first` and `second` /
+        // `third` were dropped with the drained batch.
+        let seen = log.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "the drain continued past the failed append");
+        assert!(
+            seen.iter().any(|e| matches!(
+                e,
+                CompanyEvent::McpCallFailed { server, .. } if server == "third"
+            )),
+            "the last failure in the batch was still journaled"
+        );
+    }
+
     // --- Approval parking (issue #172) --------------------------------------
 
     /// A brain over `dir` whose deps carry `requests` as the shared
@@ -1863,6 +2291,7 @@ members = ["eng1", "eng2"]
             workspace_root: dir.to_path_buf(),
             model_override: None,
             tasks: None,
+            artifacts: None,
             skills: None,
             skills_source_dir: None,
             mcp_servers: Vec::new(),
@@ -2140,6 +2569,9 @@ members = ["eng1", "eng2"]
             workspace_root: dir.to_path_buf(),
             model_override: None,
             tasks: Some(tasks.clone()),
+            // Same handle as `tasks` (FsOps is both stores), so a steered run's
+            // artifact side effect — or the absence of one — is observable.
+            artifacts: Some(tasks.clone()),
             skills: None,
             skills_source_dir: None,
             mcp_servers: Vec::new(),
@@ -2370,9 +2802,11 @@ members = ["eng1", "eng2"]
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
+            artifacts: None,
             delegations: queue,
             workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
+            approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,

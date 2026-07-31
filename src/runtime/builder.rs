@@ -38,9 +38,9 @@ use crate::policy::ManifestApprovalGate;
 use crate::ports::WorkflowRunner;
 use crate::ports::types::{CompanyId, CompanyRecord, SecretValue, TemplateProvenance};
 use crate::ports::{
-    AgentEconomy, Brain, ChannelAdapter, CompanyStore, ContextStore, EventLog, FactStore,
-    InboxStore, LoginCodeStore, MemoryStore, SecretStore, SessionStore, SkillStateStore, TaskStore,
-    ToolProvider, UsageMeter, UserStore, WorkspaceStore,
+    AgentEconomy, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore, EventLog,
+    FactStore, InboxStore, LoginCodeStore, MemoryStore, SecretStore, SessionStore, SkillStateStore,
+    TaskStore, ToolProvider, UsageMeter, UserStore, WorkspaceStore,
 };
 use crate::runtime::channel::{OPERATOR_CHANNEL, OperatorChannel};
 use crate::runtime::journal::RuntimeJournal;
@@ -167,6 +167,7 @@ pub struct RuntimeBuilder {
     tasks: Option<Arc<dyn TaskStore>>,
     workspace: Option<Arc<dyn WorkspaceStore>>,
     facts: Option<Arc<dyn FactStore>>,
+    artifacts: Option<Arc<dyn ArtifactStore>>,
     usage: Option<Arc<dyn UsageMeter>>,
     skills: Option<Arc<dyn SkillStateStore>>,
     users: Option<Arc<dyn UserStore>>,
@@ -237,6 +238,7 @@ impl RuntimeBuilder {
             tasks: None,
             workspace: None,
             facts: None,
+            artifacts: None,
             usage: None,
             skills: None,
             users: None,
@@ -338,6 +340,7 @@ impl RuntimeBuilder {
         self.tasks = Some(handles.tasks.clone());
         self.workspace = Some(handles.workspace.clone());
         self.facts = Some(handles.facts.clone());
+        self.artifacts = Some(handles.artifacts.clone());
         self.usage = Some(handles.usage.clone());
         self.skills = Some(handles.skills.clone());
         self.users = Some(handles.users.clone());
@@ -395,6 +398,12 @@ impl RuntimeBuilder {
     /// Swaps the facts store (default: fs-backed).
     pub fn with_facts(mut self, facts: Arc<dyn FactStore>) -> Self {
         self.facts = Some(facts);
+        self
+    }
+
+    /// Swaps the artifact store (default: fs-backed).
+    pub fn with_artifacts(mut self, artifacts: Arc<dyn ArtifactStore>) -> Self {
+        self.artifacts = Some(artifacts);
         self
     }
 
@@ -632,6 +641,7 @@ impl RuntimeBuilder {
             tasks: self.tasks.unwrap_or_else(|| fs_ops.clone()),
             workspace: self.workspace.unwrap_or_else(|| fs_ops.clone()),
             facts: self.facts.unwrap_or_else(|| fs_ops.clone()),
+            artifacts: self.artifacts.unwrap_or_else(|| fs_ops.clone()),
             usage: self.usage.unwrap_or_else(|| fs_ops.clone()),
             skills: self.skills.unwrap_or_else(|| fs_ops.clone()),
             users: self.users.unwrap_or_else(|| fs_ops.clone()),
@@ -814,7 +824,10 @@ impl RuntimeBuilder {
                                 .as_ref()
                                 .map(|(config, _)| EnvDefault {
                                     base_url: config.base_url.clone(),
-                                    api_key: config.api_key.clone(),
+                                    // A handle, not a value: the managed
+                                    // credential may be a platform token that
+                                    // rotates in place, so it is read per request.
+                                    credential: config.credential.clone(),
                                 });
                         // An explicit `OPENCOMPANY_INFERENCE_MODEL` flattens the
                         // whole roster to one workload; otherwise each agent keeps
@@ -871,15 +884,16 @@ impl RuntimeBuilder {
                                 Vec::new()
                             });
                             // Issue #110: resolve the per-tenant Composio config
-                            // at boot from the company secret store (token) + the
-                            // manifest toolkit allowlist + the env URL override,
-                            // falling back to the tenant API base so staging
-                            // Composio follows staging. Only companies that
-                            // explicitly grant `composio` touch the store; the
-                            // token has no env fallback, so a missing token stays
-                            // `None` (fail closed). `HarnessPool::ensure`
-                            // re-resolves this each turn so a console token change
-                            // takes effect without restart.
+                            // at boot from the company secret store (its own
+                            // token, if any) else this instance's platform
+                            // identity, plus the manifest toolkit allowlist and
+                            // the env URL override, falling back to the tenant API
+                            // base so staging Composio follows staging. Only
+                            // companies that explicitly grant `composio` resolve at
+                            // all; with no credential obtainable it stays `None`
+                            // (fail closed). `HarnessPool::ensure` re-resolves this
+                            // each turn so a console token change takes effect
+                            // without restart.
                             let composio_config = if crate::company::grants_composio_explicit(
                                 &self.manifest.tools.allow,
                             ) {
@@ -896,6 +910,11 @@ impl RuntimeBuilder {
                                     toolkits,
                                     url,
                                     api_url,
+                                    // Falls back to this instance's platform
+                                    // identity when the company stored no token
+                                    // of its own.
+                                    crate::company::TinyhumansTokenSource::from_env(&env)
+                                        .map(Arc::new),
                                 )
                                 .await
                             } else {
@@ -921,6 +940,7 @@ impl RuntimeBuilder {
                                 workspace_root: home.join("harness"),
                                 model_override,
                                 tasks: Some(ops.tasks.clone()),
+                                artifacts: Some(ops.artifacts.clone()),
                                 // Skill read surface (#28): the operator delta
                                 // store + the company source dir (`companies/<name>`,
                                 // held as `seed_dir`) whose `skills/` subtree
@@ -1020,6 +1040,22 @@ impl RuntimeBuilder {
                             wf_runner = Some(runner);
                             Some(Arc::new(HarnessBrain::new(pool, deps, record)) as Arc<dyn Brain>)
                         } else {
+                            // Do not degrade silently (issue #174): an openhuman
+                            // build with no resolvable inference source disables
+                            // the harness path and falls through to
+                            // `select_hosted_or_echo`. Say that much and no more —
+                            // whether Usage then reads zero depends on what that
+                            // selection lands on (hosted Medulla with a credential
+                            // and a transport does meter per cycle; the echo brain
+                            // runs no model at all), so promising zero tokens here
+                            // would be wrong half the time. The inference-status
+                            // route reports the path actually selected.
+                            tracing::warn!(
+                                company = %id,
+                                "no inference source resolved (no runtime override, no manifest [inference], no managed default); \
+                                 the openhuman harness is disabled for this company — falling back to hosted/echo cognition, \
+                                 see the inference-status route for the path actually selected"
+                            );
                             None
                         }
                     }
@@ -1031,7 +1067,7 @@ impl RuntimeBuilder {
                 if let Some(brain) = harness_brain {
                     brain
                 } else {
-                    let tool_catalog: Vec<ToolManifestEntry> = self
+                    let mut tool_catalog: Vec<ToolManifestEntry> = self
                         .manifest
                         .tools
                         .allow
@@ -1042,6 +1078,18 @@ impl RuntimeBuilder {
                             input_schema: None,
                         })
                         .collect();
+                    // Issue #176: advertise the delegation tools to Medulla on
+                    // the hosted path, so a hosted company's orchestrator can
+                    // delegate exactly as the harness one does. The device
+                    // services the resulting tool-call frames in `CycleHostImpl`
+                    // (a durable board-card hand-off) with no local cognition.
+                    // De-duped against `tools.allow` so a manifest that already
+                    // lists a delegation tool is not advertised twice.
+                    for entry in crate::runtime::delegation_tools::delegation_manifest_entries() {
+                        if !tool_catalog.iter().any(|e| e.name == entry.name) {
+                            tool_catalog.push(entry);
+                        }
+                    }
                     select_hosted_or_echo(
                         self.brain_mode.unwrap_or(BrainMode::Hosted),
                         self.credential,
@@ -1934,7 +1982,7 @@ mod test {
             .with_harness_inference(
                 HostedProviderConfig {
                     base_url: stub,
-                    api_key: "k".to_string(),
+                    credential: crate::company::Credential::from_value("k"),
                     extra_headers: Vec::new(),
                 },
                 None,

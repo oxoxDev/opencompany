@@ -40,6 +40,7 @@ pub mod build;
 pub mod capability_budget;
 pub mod composio;
 pub mod cost;
+pub mod lifecycle;
 pub mod mcp;
 pub mod mcp_probe;
 pub mod memory;
@@ -47,6 +48,7 @@ pub mod memory_loop;
 pub mod orchestrator;
 pub mod policy;
 pub mod provider;
+pub mod run_turn;
 pub mod skills;
 pub mod steer;
 pub mod steps;
@@ -78,7 +80,8 @@ use crate::harness::policy::{ApprovalPolicy, ApprovalRequestQueue};
 use crate::ports::skills_state::{SkillState, SkillStateStore};
 use crate::ports::types::{CompanyId, CompanyRecord, OverlayAgent, TurnStep};
 use crate::ports::{
-    CompanyStore, ContextStore, EventLog, FactStore, SecretStore, TaskStore, UsageMeter,
+    ArtifactStore, CompanyStore, ContextStore, EventLog, FactStore, SecretStore, TaskStore,
+    UsageMeter,
 };
 use crate::runtime::builder::agent_effective_grants;
 
@@ -112,6 +115,12 @@ pub struct HarnessDeps {
     ///
     /// [`TaskDispatched`]: crate::ports::types::CompanyEvent::TaskDispatched
     pub tasks: Option<Arc<dyn TaskStore>>,
+    /// The company's artifact store, so a dispatched card's output is recorded
+    /// as a versioned artifact (#187) instead of only as note text. `None`
+    /// leaves the board's behaviour exactly as before — the note is still
+    /// written either way, so an unwired artifact store loses nothing that
+    /// existed previously.
+    pub artifacts: Option<Arc<dyn ArtifactStore>>,
     /// The company's skill-delta store, so a built agent can see its effective
     /// skill set (company-dir skills ∪ operator deltas ∪ custom docs) as read
     /// tools + a prompt catalogue. `None` leaves the agent skill-less (the chat
@@ -220,13 +229,13 @@ pub struct HarnessDeps {
     pub media: Option<toolbelt::MediaBackend>,
     /// The per-tenant Composio configuration (issue #110). `None` (the default
     /// at every construction site) fails closed — no Composio tools are wired.
-    /// [`HarnessPool::ensure`] re-resolves it from the [`SecretStore`] under
-    /// [`composio::TOKEN_KEY`](crate::harness::composio::TOKEN_KEY) each turn
-    /// (folded into the roster fingerprint) so a console token set/rotate takes
-    /// effect next turn with no restart. Only wired when a company **explicitly**
-    /// grants `composio` **and** a non-empty token is stored; the token has no
-    /// env fallback, so an absent token means no tools (never a borrowed
-    /// identity).
+    /// [`HarnessPool::ensure`] re-resolves it each turn (folded into the roster
+    /// fingerprint) so a console token set/rotate takes effect next turn with no
+    /// restart. Only wired when a company **explicitly** grants `composio` **and**
+    /// a credential can be obtained: the company's own token under
+    /// [`composio::TOKEN_KEY`](crate::harness::composio::TOKEN_KEY) if it has one,
+    /// else this instance's platform identity. With neither, no tools are wired —
+    /// never a borrowed identity.
     pub composio: Option<composio::TenantComposio>,
     /// Issue #111 — the shared registry of in-flight, steerable runs. The
     /// [`HarnessBrain`] registers a dispatched task / desk delegation here before
@@ -253,6 +262,14 @@ pub struct CompanyAgent {
 /// The graceful reply returned when a turn yields the transient empty-response
 /// class twice — so chat never shows a bare "Couldn't send" for a model hiccup.
 const GRACEFUL_EMPTY_REPLY: &str = "Sorry — I hit a temporary model hiccup and couldn't produce a reply. Please resend your message.";
+
+/// The operator-facing notice returned when the plan-level total token ceiling
+/// (issue #188) is reached — a hard dispatch refusal, so no model call is made.
+/// Surfaced as the turn's reply on every dispatch path (operator chat, task,
+/// steered/background), since they all funnel through
+/// [`HarnessPool::run_inner`](HarnessPool::run_inner).
+const TOTAL_BUDGET_EXHAUSTED_NOTICE: &str =
+    "Token budget for this period is exhausted — dispatch paused until the period resets.";
 
 /// The classification of a single `agent.turn` attempt, for the retry wrapper.
 enum AttemptOutcome {
@@ -709,12 +726,16 @@ impl HarnessPool {
     /// secret store on this axis; others resolve to `None` (no tools). With no
     /// secret store wired this degrades to the static [`HarnessDeps::composio`].
     ///
-    /// The token has no env fallback — an absent/empty secret yields `None` (fail
-    /// closed). The backend URL resolves from
-    /// [`composio::COMPOSIO_BACKEND_URL_ENV`], then the tenant API base
-    /// [`composio::TINYHUMANS_API_URL_ENV`], then the prod default — read
-    /// process-globally so a live re-resolution keeps the override even when no
-    /// token was stored at boot.
+    /// Resolution prefers the company's own stored token and falls back to this
+    /// instance's platform identity; with neither it yields `None` (fail closed).
+    /// Both the backend URL (from [`composio::COMPOSIO_BACKEND_URL_ENV`], then the
+    /// tenant API base [`composio::TINYHUMANS_API_URL_ENV`], then the prod
+    /// default) and the platform identity are read process-globally here, so a
+    /// live re-resolution keeps them even when nothing was stored at boot.
+    ///
+    /// Re-deriving the token source every turn costs nothing — building it reads
+    /// no file — and the roster that keeps it holds one instance for its whole
+    /// lifetime, so its rotation cache still works.
     async fn resolve_composio(
         &self,
         company: &CompanyRecord,
@@ -736,6 +757,7 @@ impl HarnessPool {
                     toolkits,
                     url,
                     api_url,
+                    crate::company::TinyhumansTokenSource::from_env(&env).map(std::sync::Arc::new),
                 )
                 .await
             }
@@ -939,6 +961,65 @@ impl HarnessPool {
                     ))
                 })?
         };
+
+        // Plan-level total-token ceiling (issue #188): a HARD dispatch refusal
+        // that never reaches the model once the tenant's total period spend
+        // crosses the cap. The per-namespace budget gate in `ensure` is *soft* —
+        // it only trims which exec tools the roster carries; an exhausted
+        // tenant's turn still runs on intrinsic tools and burns model tokens.
+        // This closes that gap by refusing dispatch outright, before any model
+        // call, on every path that funnels through `run_inner` (operator chat,
+        // task, steered/background). We return early here — before retrieve→
+        // inject and the memory writeback — so a refused turn costs nothing and
+        // leaves no fabricated outcome in the memory store.
+        //
+        // Fail-closed tradeoff (issue #188): the hard refusal fires ONLY when
+        // spend is actually readable. With no meter, or a meter whose query
+        // errors, we do NOT brick the tenant on a transient read failure — we
+        // fall through to run the turn, which the per-namespace fail-closed path
+        // in `resolve_filter`/`ensure` has already stripped of every exec tool.
+        // A `warn!` records the deferral. Refusing every turn on a flaky meter
+        // read would be a strictly worse failure mode than letting an
+        // intrinsic-tools-only turn through.
+        if let Some(plan) = deps.plan.as_ref()
+            && plan.total_budget.is_some()
+        {
+            match deps.meter.as_deref() {
+                Some(meter) => {
+                    let since = plan.period.period_start_millis(crate::ports::now_millis());
+                    match meter.query(company, since).await {
+                        Ok(samples) => {
+                            let spent = capability_budget::tokens_in(&samples);
+                            if plan.total_exhausted(spent) {
+                                tracing::info!(
+                                    company = %company,
+                                    agent = agent_id,
+                                    spent,
+                                    "[capability-budget] total token ceiling reached; refusing dispatch (no model call) until the period resets"
+                                );
+                                return Ok(TurnOutcome {
+                                    reply: TOTAL_BUDGET_EXHAUSTED_NOTICE.to_string(),
+                                    steps: Vec::new(),
+                                });
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                company = %company,
+                                %error,
+                                "[capability-budget] total-ceiling spend query failed; not hard-refusing — deferring to the per-namespace fail-closed roster"
+                            );
+                        }
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        company = %company,
+                        "[capability-budget] no usage meter; cannot enforce the total token ceiling — deferring to the per-namespace fail-closed roster"
+                    );
+                }
+            }
+        }
 
         // Retrieve→inject: pull the top-K prior task outcomes relevant to this
         // message and prepend them as context. On a cold store this yields no
@@ -1442,6 +1523,7 @@ description = "Builds the product."
                 workspace_root: dir.path().to_path_buf(),
                 model_override: None,
                 tasks: None,
+                artifacts: None,
                 skills: None,
                 skills_source_dir: None,
                 mcp_servers: Vec::new(),
@@ -1500,6 +1582,7 @@ description = "Builds the product."
             workspace_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
+            artifacts: None,
             skills: None,
             skills_source_dir: Some(source.path().to_path_buf()),
             mcp_servers: Vec::new(),
@@ -1783,6 +1866,7 @@ description = "Builds the product."
             workspace_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
+            artifacts: None,
             skills: None,
             skills_source_dir: None,
             mcp_servers: Vec::new(),
@@ -1938,6 +2022,7 @@ description = "Builds the product."
             workspace_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
+            artifacts: None,
             skills: None,
             skills_source_dir: None,
             mcp_servers: Vec::new(),
@@ -2245,6 +2330,7 @@ description = "Builds the product."
             workspace_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
+            artifacts: None,
             skills: None,
             skills_source_dir: None,
             mcp_servers: Vec::new(),
@@ -2384,6 +2470,7 @@ description = "Sets direction."
         let plan = crate::harness::capability_budget::CapabilityPlan {
             period: crate::harness::capability_budget::BudgetPeriod::Daily,
             budgets: std::collections::BTreeMap::from([("shell".to_string(), 100u64)]),
+            total_budget: None,
         };
         let deps = HarnessDeps {
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -2394,6 +2481,7 @@ description = "Sets direction."
             workspace_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
+            artifacts: None,
             skills: None,
             skills_source_dir: None,
             mcp_servers: Vec::new(),
@@ -2509,6 +2597,158 @@ description = "Sets direction."
             pool.capability_fingerprint_of(&rec.id).await,
             Some(fp),
             "no plan → stable fingerprint → no capability-driven rebuild"
+        );
+    }
+
+    /// Builds a `HarnessDeps` carrying the given plan + meter, for the total-
+    /// ceiling dispatch tests (issue #188). Everything else is the inert fixture
+    /// wiring (mock provider/context, recording store).
+    fn deps_with_plan(
+        dir: &std::path::Path,
+        context: Arc<MockContext>,
+        meter: Option<Arc<RecordingMeter>>,
+        plan: Option<crate::harness::capability_budget::CapabilityPlan>,
+    ) -> HarnessDeps {
+        HarnessDeps {
+            provider: Arc::new(MockProvider::new("mock: ")),
+            provider_slug: "mock".to_string(),
+            context,
+            store: Arc::new(RecordingStore::default()),
+            meter: meter.map(|m| m as Arc<dyn UsageMeter>),
+            workspace_root: dir.to_path_buf(),
+            model_override: None,
+            tasks: None,
+            skills: None,
+            skills_source_dir: None,
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: DelegationQueue::default(),
+            workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: McpFailureQueue::default(),
+            approval_requests: ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan,
+            media: None,
+            composio: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+        }
+    }
+
+    /// The hard total-token ceiling (issue #188): once the tenant's total period
+    /// spend crosses the plan's `total_budget`, the very next dispatch is refused
+    /// **before any model call** — the reply is the fixed operator notice, the
+    /// prompt is never echoed (proving the model was not run), and no fabricated
+    /// outcome lands in memory. A turn under the ceiling still runs normally.
+    #[tokio::test]
+    async fn run_refuses_dispatch_once_the_total_ceiling_is_crossed() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        let meter = Arc::new(RecordingMeter::default());
+        let plan = crate::harness::capability_budget::CapabilityPlan {
+            period: crate::harness::capability_budget::BudgetPeriod::Daily,
+            budgets: std::collections::BTreeMap::new(),
+            total_budget: Some(100),
+        };
+        let deps = deps_with_plan(dir.path(), context.clone(), Some(meter.clone()), Some(plan));
+        let pool = HarnessPool::new();
+        let rec = record();
+        pool.ensure(&rec, &deps).await.expect("ensure");
+
+        // Under the ceiling (0 spend < 100): the turn runs and echoes the prompt.
+        let ok = pool
+            .run(&rec.id, "ceo", "hello-marker", &deps, None)
+            .await
+            .expect("under-ceiling turn runs")
+            .reply;
+        assert!(
+            ok.contains("hello-marker"),
+            "under the ceiling the model runs: {ok:?}"
+        );
+
+        // Push total period spend to 150 — past the 100-token ceiling.
+        meter
+            .record(
+                &rec.id,
+                &UsageSample {
+                    at_millis: crate::ports::now_millis(),
+                    agent: "ceo".into(),
+                    provider: "managed".into(),
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    cached_input_tokens: 0,
+                    cost_usd: 0.0,
+                    kind: crate::ports::SampleKind::Inference,
+                },
+            )
+            .await
+            .unwrap();
+
+        let before = context
+            .list(&rec.id, memory_loop::OUTCOME_LABEL_PREFIX)
+            .await
+            .unwrap()
+            .len();
+
+        // Over the ceiling: dispatch is refused with a benign notice — NOT an Err.
+        let refused = pool
+            .run(&rec.id, "ceo", "should-not-echo", &deps, None)
+            .await
+            .expect("a refusal is a benign outcome, not a hard error")
+            .reply;
+        assert_eq!(
+            refused, TOTAL_BUDGET_EXHAUSTED_NOTICE,
+            "the refusal returns the fixed operator notice"
+        );
+        assert!(
+            !refused.contains("should-not-echo"),
+            "the model was never called, so the prompt is not echoed: {refused:?}"
+        );
+
+        // A refused turn writes no outcome back to memory.
+        let after = context
+            .list(&rec.id, memory_loop::OUTCOME_LABEL_PREFIX)
+            .await
+            .unwrap()
+            .len();
+        assert_eq!(before, after, "a refused turn stores nothing in memory");
+    }
+
+    /// Fail-closed tradeoff (issue #188): with a total ceiling configured but no
+    /// meter to read spend from, the hard refusal does NOT fire — a transient
+    /// unreadable-spend condition must not brick every turn. The turn runs (the
+    /// per-namespace fail-closed roster already handles exec-tool stripping).
+    #[tokio::test]
+    async fn run_does_not_refuse_when_spend_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        // A zero ceiling would refuse from the first token IF spend were readable;
+        // with no meter wired the gate must defer, not brick.
+        let plan = crate::harness::capability_budget::CapabilityPlan {
+            period: crate::harness::capability_budget::BudgetPeriod::Daily,
+            budgets: std::collections::BTreeMap::new(),
+            total_budget: Some(0),
+        };
+        let deps = deps_with_plan(dir.path(), context.clone(), None, Some(plan));
+        let pool = HarnessPool::new();
+        let rec = record();
+        pool.ensure(&rec, &deps).await.expect("ensure");
+
+        let reply = pool
+            .run(&rec.id, "ceo", "hello-marker", &deps, None)
+            .await
+            .expect("no meter must not brick the turn")
+            .reply;
+        assert!(
+            reply.contains("hello-marker"),
+            "an unreadable ceiling defers to running the turn: {reply:?}"
+        );
+        assert_ne!(
+            reply, TOTAL_BUDGET_EXHAUSTED_NOTICE,
+            "the hard refusal must not fire without a spend read"
         );
     }
 }

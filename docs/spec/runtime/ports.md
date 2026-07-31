@@ -17,8 +17,39 @@ to a `Brain` and services the brain's callbacks through a `CycleHost`.
 pub trait Brain: Send + Sync {
     async fn run_cycle(&self, req: CycleRequest, host: &dyn CycleHost)
         -> Result<CycleResult>;
+
+    /// How this brain does cognition and where its usage is metered.
+    /// Defaults to an injected brain: per-cycle metering, unknown provider.
+    fn cognition(&self) -> Cognition { Cognition::default() }
 }
 
+/// Metering + diagnosis descriptor for a cognition path (issue #174).
+pub struct Cognition {
+    /// `harness` | `hosted` | `sidecar` | `echo` | `custom`.
+    pub path: &'static str,
+    /// Provider slug the path's cycle usage is metered under.
+    pub provider: &'static str,
+    pub metering: UsageMetering,
+}
+
+pub enum UsageMetering {
+    /// The path meters each agent turn itself (the openhuman harness) and MUST
+    /// report a zero `CycleResult::token_usage`, or its spend is double-counted.
+    PerTurn,
+    /// `CycleRunner` meters whatever the cycle reports (hosted Medulla reads it
+    /// off the `orch:usage` frame).
+    PerCycle,
+    /// No model runs on this path (the echo brain) — a zero Usage reading is the
+    /// truth, not a missing hook.
+    None,
+}
+```
+
+`CycleRunner` **enforces** both non-`PerCycle` arms: a path that declares
+`PerTurn` or `None` and then reports non-zero cycle usage is warned about and
+dropped, never metered. Only `PerCycle` reaches the meter.
+
+```rust
 /// Callbacks the brain makes into the host mid-cycle.
 pub trait CycleHost: Send + Sync {
     async fn call_tool(&self, call: ToolCall) -> Result<ToolResult>;
@@ -45,7 +76,10 @@ it back through `emit_effect` would re-decide it against the coarser
 
 `CycleRequest` carries `{cycle_id, company_id, events, compressed_history,
 roster, context_index}`; `CycleResult` carries channel responses, new
-compressed traces, ledger deltas, and token usage. Implementations:
+compressed traces, ledger deltas, and `token_usage` — tokens **and** cost, which
+`CycleRunner` meters onto the `UsageMeter` + ledger for every path that is not
+`PerTurn`-metered (issue #174), so hosted/sidecar cognition is accounted for and
+not only the openhuman harness. Implementations:
 `HostedMedullaBrain` (default — see
 [integrations/medulla.md](../integrations/medulla.md)), `StubBrain`
 (single TinyAgents call, offline tests), `SidecarBrain` (feature `sidecar`),
@@ -90,7 +124,28 @@ pub trait EventLog: Send + Sync {
 graph was authored + enabled via the console `POST …/workflows` route or the
 orchestrator's `create_workflow` tool; journaled best-effort after persist),
 `TaskSteered` (an operator paused, cancelled, or redirected an in-flight task
-or delegation).
+or delegation), `DeskTaskCompleted` (a dispatched board task finished its run —
+the terminal anchor a per-task timeline ends on; "completed" means the run
+stopped, not that it succeeded, and `column` carries where the card landed).
+
+### Per-task event correlation (issue #185)
+
+The journal is company-scoped, so the events a dispatch *produces* cannot be
+filtered back to their task by shape alone. `AgentReply` and `McpCallFailed`
+therefore carry an optional `task_id`, stamped by the harness when the
+producing turn ran inside a `TaskDispatched` cycle and absent for an ordinary
+chat turn. Together with the `TaskDispatched` / `DeskTaskCompleted` anchors,
+that is what `GET …/tasks/{task_id}` filters on to assemble a task's timeline.
+
+Both fields are additive — `#[serde(default, skip_serializing_if = …)]` — so
+every already-persisted event loads unchanged and an untagged event serializes
+byte-for-byte as it did before the field existed. No stored log needs
+migrating, and the cross-backend export/import round-trip is unaffected.
+
+`TaskRecord` gains `parent_task_id` on the same contract, recording the
+task-to-task edge that `origin_chat_id` (a *conversation*, shared by every
+sibling spawned in that thread, and absent entirely on a board-native card)
+cannot express. It is the parent half of the Task Detail screen's lineage.
 
 ## MemoryStore
 
@@ -266,6 +321,43 @@ pub trait TaskStore: Send + Sync {
 `TaskRecord` carries `{id, title, note, column, priority, assignee,
 updated_at}`. `column` ∈ `backlog|in_progress|in_review|done`.
 
+### ArtifactStore
+
+Versioned task outputs and the human-edit diff (`src/ports/artifacts.rs`,
+issue #187) — what the Task Detail **Artifacts** tab renders.
+
+```rust
+pub trait ArtifactStore: Send + Sync {
+    async fn list(&self, company: &CompanyId, task_id: Option<&str>)
+        -> Result<Vec<ArtifactRecord>>;
+    async fn get(&self, company: &CompanyId, id: &str) -> Result<Option<ArtifactRecord>>;
+    async fn upsert(&self, company: &CompanyId, artifact: &ArtifactRecord) -> Result<()>;
+    async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool>;
+}
+```
+
+`ArtifactRecord` carries `{id, task_id, title, kind, versions, created_at,
+updated_at}`; `ArtifactKind` ∈ `text|markdown|image|file`. Each
+`ArtifactVersion` carries `{version, body, author, author_id, created_at,
+step_seq?, note?}`; `ArtifactAuthor` ∈ `agent|operator`.
+
+**Versions are append-only.** An operator's pre-approval edit is recorded as a
+*new version by a different author*, never as a mutation of the agent's — which
+is what makes `human_edit_diff()` ("the agent wrote X, the operator shipped Y")
+answerable at any later point, and why no route rewrites a stored version.
+Editing in place would destroy the single highest-signal quality datum the
+product can produce: sustained high `churn` on an agent's artifacts means its
+instructions need work.
+
+Independent of the per-task timeline (#185). A version may cross-reference the
+step that produced it via the optional `step_seq`, but this port never reads the
+event journal, so an artifact stands on its own.
+
+Backends must uphold `store::conformance::assert_artifact_store`, which asserts
+the full ordered version history survives a round-trip — a backend that stored
+only the latest body would otherwise pass a naive check while silently
+destroying the diff.
+
 ### WorkspaceStore
 
 The Obsidian-style note tree (`src/ports/workspace.rs`), seeded from the
@@ -320,7 +412,19 @@ pub trait UsageMeter: Send + Sync {
 ```
 
 `UsageSample` records one metered event (`SampleKind::Inference` tokens or
-`SampleKind::OauthCall`). **Retention:** backends evict samples older than
+`SampleKind::OauthCall`). **Writers** — three, and they do **not** share failure
+semantics:
+
+| Writer | Called | On write failure |
+| --- | --- | --- |
+| `metering::inference::record_inference_usage` (always compiled) | per cycle by `CycleRunner`, for every cognition path that is not `PerTurn`-metered | logs and swallows — returns `()`, so the cycle still succeeds |
+| `metering::oauth::record_oauth_call` | per connected-tool call | logs and swallows — returns `()` |
+| `harness::cost::record_turn_cost` | per turn by the openhuman harness's cost hook | **propagates** — returns `Result<()>` and `HarnessPool::run_inner` applies `?`, so a ledger or meter failure fails the turn |
+
+The per-cycle and OAuth paths hold "accounting never fails the work it accounts
+for"; the per-turn harness path deliberately does not, because it writes the
+`inference.spend` ledger entry in the same call and a silently dropped ledger
+write is a money bug. **Retention:** backends evict samples older than
 **90 days** (`RETENTION_DAYS`, the console's maximum `D90` window) on write,
 anchored to the newest observed sample for deterministic eviction. Samples are
 non-secret accounting rows; money still resolves from the ledger and `[budget]`.

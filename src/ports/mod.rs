@@ -9,6 +9,7 @@
 mod ids;
 
 pub mod approvals;
+pub mod artifacts;
 pub mod brain;
 pub mod channel;
 pub mod context;
@@ -31,7 +32,11 @@ pub mod workflow_runner;
 pub mod workspace;
 
 pub use approvals::ApprovalGate;
-pub use brain::{Brain, CycleHost};
+pub use artifacts::{
+    ArtifactAuthor, ArtifactDiff, ArtifactKind, ArtifactRecord, ArtifactStore, ArtifactVersion,
+    DiffLine, DiffOp,
+};
+pub use brain::{Brain, Cognition, CycleHost, UsageMetering};
 pub use channel::ChannelAdapter;
 pub use context::ContextStore;
 pub use economy::AgentEconomy;
