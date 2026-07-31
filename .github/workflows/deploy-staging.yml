@@ -121,11 +121,42 @@ jobs:
           set -euo pipefail
           export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
-          # Tenants pull with the ecr-creds Secret, which expires after 12h and is
+          # The manager namespace's ecr-creds Secret expires after 12h and is
           # refreshed every 6h by a systemd timer. Force a refresh so a deploy
-          # landing late in that window cannot leave tenants in ImagePullBackOff.
+          # landing late in that window cannot fail on a stale token.
           echo "Refreshing ECR pull secret..."
           /usr/local/bin/ecr-refresh.sh
+
+          # Pre-pull the tenant image into the node's containerd.
+          #
+          # This is REQUIRED, not an optimisation. Tenant StatefulSets carry no
+          # imagePullSecrets, tenant namespaces have no ecr-creds, and there is no
+          # node-level registries.yaml — so a tenant pod pulling from ECR itself
+          # gets `403 Forbidden` and sits in ImagePullBackOff. containerd's image
+          # store is node-wide, so pulling here (with the credential the kubelet
+          # already holds) means every tenant's imagePullPolicy: IfNotPresent
+          # finds the image locally and never authenticates.
+          #
+          # This works because staging is a single node. The durable fix is for
+          # the manager to provision a per-tenant-namespace pull secret and set
+          # imagePullSecrets on the tenant pod spec; until that lands, this step
+          # is what makes a freshly pushed tenant image actually runnable.
+          echo "Pre-pulling ${IMAGE} into containerd..."
+          ECR_HOST="${IMAGE%%/*}"
+          PULL_USER=$(kubectl -n "${K8S_NAMESPACE}" get secret ecr-creds \
+            -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d \
+            | jq -r --arg r "${ECR_HOST}" '.auths[$r].username // "AWS"')
+          PULL_PW=$(kubectl -n "${K8S_NAMESPACE}" get secret ecr-creds \
+            -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d \
+            | jq -r --arg r "${ECR_HOST}" '.auths[$r].password')
+          if [ -z "${PULL_PW}" ] || [ "${PULL_PW}" = "null" ]; then
+            echo "ERROR: could not read an ECR credential for ${ECR_HOST} from ecr-creds" >&2
+            exit 1
+          fi
+          # Credential is passed as an argument to ctr only; never echoed.
+          k3s ctr images pull --user "${PULL_USER}:${PULL_PW}" "${IMAGE}"
+          k3s ctr images ls | awk '{print $1}' | grep -qx "${IMAGE}" \
+            || { echo "ERROR: ${IMAGE} is not in containerd after pull" >&2; exit 1; }
 
           # Tenant pods pin imagePullPolicy: IfNotPresent, so a moving tag is not
           # re-pulled. The manager must be pointed at the immutable
