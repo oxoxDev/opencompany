@@ -94,7 +94,7 @@ engine layered on top of that base. The base still owns every other port
 | Value | Engine | Feature flag | Notes |
 |---|---|---|---|
 | `store` (default) | The base backend's own memory | — | fs substring recall, or sqlite/mongodb |
-| `tinycortex` | In-pod TinyCortex engine | `tinycortex` | Persistent per-company store; degraded lexical/recency recall |
+| `tinycortex` | In-pod TinyCortex engine | `tinycortex` | Persistent per-company store; vector-first recall with lexical/recency fallback when no embeddings backend resolves |
 
 This is why TinyCortex is not a `StorageKind`: it implements only memory +
 context, so it cannot be a full backend — it overlays. `serve` and platform
@@ -117,27 +117,45 @@ present (tests, no-data-dir callers) the overlay falls back to the offline
 in-memory backend (`InMemoryCortex`), which is also the compiled fallback when a
 company workspace cannot be opened.
 
-**Degraded (lexical/recency) recall — no embedding compute.** This slice builds
-the engine's `MemoryConfig` directly with `embedding.strict = false`, so an inert
-embedder is tolerated and recall degrades to **lexical token-overlap** ranking
-(the same `[0, 1]`-scored, snippet-bearing contract the in-memory backend
-defines) rather than semantic. This is a real behavioural contract, not an
-implementation footnote: when **no** embedding backend resolves, `search_chunks`
-is substring/recency overlap, **not** the vector/semantic recall the `tinycortex`
-name implies, so the overlay announces the degraded mode once, loudly, at open
-(`tracing::warn` in `src/store/select.rs`). When an embeddings backend **does**
-resolve (188c2), each stored chunk is embedded and recall runs vector-first
-(cosine) with a lexical top-up/fallback — see the two-tier recall in
-`src/store/tinycortex_engine.rs`. In the degraded path **zero** embedding compute
-is injected. Because
-the crate's retrieval primitives rank only by admission-score/recency in this
-mode (their keyword/graph scorers are defined but not yet wired), and its ingest
-path re-chunks documents under its own ids — which cannot round-trip
-OpenCompany's content-address / label-prefix / peek contract — chunk bodies and
-metadata are persisted through the engine's **KV tier** (on the same per-company
-workspace database) and searched lexically in the adapter. Injecting a real
-embedding provider — and thereby the summary-tree + hybrid-retrieval path — is a
-follow-up slice.
+**Vector-first recall, with a loud lexical/recency fallback (188c2).** This
+slice builds the engine's `MemoryConfig` directly with `embedding.strict =
+false`, so the crate's own summary-tree embedder stays inert regardless — but
+when a hosted embeddings backend resolves from the environment (see
+"Embeddings configuration" below), each stored chunk is separately embedded
+into a per-company [`VectorStore`], and `search_chunks` runs cosine recall
+**first**, topped up with the existing lexical token-overlap scorer (the same
+`[0, 1]`-scored, snippet-bearing contract the in-memory backend defines) up to
+the caller's limit — see the two-tier recall in
+`src/store/tinycortex_engine.rs`. When **no** embeddings backend resolves — or
+on any embedding/search outage — recall degrades to **pure lexical**
+(substring/recency token-overlap), **not** the vector/semantic recall the
+`tinycortex` name implies, so the overlay announces the degraded mode once,
+loudly, at open (`tracing::warn` in `src/store/select.rs`). Because the
+crate's retrieval primitives rank only by admission-score/recency in fully
+degraded mode (their keyword/graph scorers are defined but not yet wired), and
+its `ingest` path re-chunks documents under its own ids — which cannot
+round-trip OpenCompany's content-address / label-prefix / peek contract —
+chunk bodies and metadata are persisted through the engine's **KV tier** (on
+the same per-company workspace database) rather than the crate's
+ingest/retrieval primitives, with the vector index layered beside it. Wiring
+the crate's own retrieval-scorer `Embedder` / summary-tree seal path (the
+hard-768-dim path, plus a full-corpus reconcile beyond the bounded backfill) is
+deferred to #198 — this slice injects only the `VectorStore` store+search
+compute, which is dimension-agnostic and runs at the backend's native 1024.
+
+#### Embeddings configuration
+
+The hosted embeddings backend (`src/harness/embeddings.rs`, `openhuman`-gated
+harness build only) shares its credential + base URL with the chat inference
+client and layers two overrides on top:
+
+| Env var | Default | Notes |
+|---|---|---|
+| `OPENCOMPANY_EMBEDDINGS_MODEL` | `embedding-v1` | The managed embeddings model id. `embedding-v1` is 1024-dim and rejects the OpenAI `dimensions` request param. |
+| `OPENCOMPANY_EMBEDDINGS_DIM` | `1024` | The model's native dimensionality. Must parse as a positive integer; only meaningful alongside a model whose native dim differs from 1024. |
+
+Every returned vector is validated against the configured dimensionality; a
+wrong length is an error, never silently truncated.
 
 ### Durability contract & the `/data`-is-scratch caveat
 
