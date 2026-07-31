@@ -64,10 +64,24 @@ fn sample_provenance() -> TemplateProvenance {
     }
 }
 
+/// The runtime-authored workflow graph the fixture seeds every record with, so
+/// each backend (fs, sqlite, mongodb) proves it persists and rehydrates
+/// console-created workflow bodies (issue #168) — on a hosted tenant this is the
+/// ONLY copy of that graph.
+fn sample_overlay_workflow() -> crate::ports::types::OverlayWorkflow {
+    crate::ports::types::OverlayWorkflow {
+        id: "conformance_flow".to_string(),
+        toml: "id = \"conformance_flow\"\nname = \"Conformance flow\"\n\
+               [[node]]\nid = \"start\"\nkind = \"trigger\"\nname = \"Start\"\n"
+            .to_string(),
+    }
+}
+
 /// Builds a running record for `id` carrying a non-empty desk-order overlay (so
-/// the store round-trip covers the operator desk-hierarchy field, issue #131)
-/// and stamped with the sample template provenance (so round-trips assert it
-/// survives persistence, issue #85).
+/// the store round-trip covers the operator desk-hierarchy field, issue #131), a
+/// runtime-authored workflow body (issue #168), and stamped with the sample
+/// template provenance (so round-trips assert it survives persistence, issue
+/// #85).
 fn record(id: &CompanyId) -> CompanyRecord {
     CompanyRecord {
         id: id.clone(),
@@ -81,6 +95,7 @@ fn record(id: &CompanyId) -> CompanyRecord {
             ordered: vec!["ceo".to_string(), "eng".to_string()],
         }],
         overlay_desks: Vec::new(),
+        overlay_workflows: vec![sample_overlay_workflow()],
         template_provenance: Some(sample_provenance()),
     }
 }
@@ -172,6 +187,13 @@ pub async fn assert_isolation_by_company(
             ordered: vec!["ceo".to_string(), "eng".to_string()],
         }],
         "overlay_desk_order did not survive save/load"
+    );
+    // The runtime-authored workflow body survives the store round-trip too
+    // (issue #168) — losing it would delete a hosted tenant's workflow.
+    assert_eq!(
+        loaded.overlay_workflows,
+        vec![sample_overlay_workflow()],
+        "overlay_workflows did not survive save/load"
     );
     assert_eq!(
         events
@@ -387,6 +409,13 @@ pub async fn assert_export_totality(
         loaded.template_provenance,
         Some(sample_provenance()),
         "template provenance did not round-trip through the store"
+    );
+    // Issue #168: the runtime-authored graph bodies round-trip too — an export
+    // that dropped them would lose every console-created workflow.
+    assert_eq!(
+        loaded.overlay_workflows,
+        vec![sample_overlay_workflow()],
+        "overlay_workflows did not round-trip through the store"
     );
 
     // Full event log round-trips with seqs and payloads intact.

@@ -1049,6 +1049,30 @@ pub struct OverlayDesk {
     pub members: Vec<String>,
 }
 
+/// A workflow graph body authored at runtime (the console's create dialog or
+/// the orchestrator's `create_workflow` tool) and persisted on the
+/// [`CompanyRecord`] rather than written into the company source tree.
+///
+/// The source tree (`companies/<name>/workflows/<id>.toml`) is the
+/// version-controlled seed and, in hosted mode, a **read-only** crate mount —
+/// writing a graph there fails with `EROFS` (issue #168). So a created graph
+/// lands here instead, next to the enabled id, and every reader unions the two
+/// sets (see [`load_workflow_union`](crate::company::load_workflow_union)).
+///
+/// The stored value is the **rendered TOML**, already validated at create time:
+/// readers re-parse it through
+/// [`parse_workflow`](crate::company::parse_workflow), so an overlay graph
+/// passes exactly the same validation an on-disk seed file does, with no second
+/// model shape to drift. Deliberately no `name` field — the name lives inside
+/// the TOML, one source of truth.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverlayWorkflow {
+    /// The workflow id — what the seed file would be named (`<id>.toml`).
+    pub id: String,
+    /// The rendered, already-validated workflow graph TOML.
+    pub toml: String,
+}
+
 /// The operator overlays persisted as a single JSON blob by the string-column
 /// stores (sqlite + mongodb `overlay_json`). The filesystem store keeps the two
 /// collections as typed fields on its own `Meta` instead.
@@ -1071,6 +1095,11 @@ pub struct OverlayBlob {
     /// creation existed, so `#[serde(default)]` loads them as empty.
     #[serde(default)]
     pub desks: Vec<OverlayDesk>,
+    /// The operator-authored workflow graph bodies. Absent on rows written
+    /// before runtime workflow authoring persisted through the store, so
+    /// `#[serde(default)]` loads them as empty.
+    #[serde(default)]
+    pub workflows: Vec<OverlayWorkflow>,
     /// The source-template provenance recorded at launch. `None` for companies
     /// provisioned from a raw manifest and for legacy rows written before
     /// provenance existed (the `#[serde(default)]` keeps those rows loading).
@@ -1086,6 +1115,7 @@ impl OverlayBlob {
             desk_members: record.overlay_desk_members.clone(),
             desk_order: record.overlay_desk_order.clone(),
             desks: record.overlay_desks.clone(),
+            workflows: record.overlay_workflows.clone(),
             provenance: record.template_provenance.clone(),
         }
     }
@@ -1107,6 +1137,7 @@ impl OverlayBlob {
                     desk_members: Vec::new(),
                     desk_order: Vec::new(),
                     desks: Vec::new(),
+                    workflows: Vec::new(),
                     provenance: None,
                 })
                 .map_err(|_| original),
@@ -1142,6 +1173,14 @@ pub struct CompanyRecord {
     /// overlay). Merged with the manifest's `[[group_chat]]` desks at read time.
     #[serde(default)]
     pub overlay_desks: Vec<OverlayDesk>,
+    /// Workflow graphs authored at runtime (console create dialog / orchestrator
+    /// `create_workflow`), persisted here instead of in the company source tree —
+    /// which is read-only in hosted mode (issue #168). Unioned with the seed
+    /// `workflows/*.toml` files by every reader; the seed wins on an id
+    /// collision. The `#[serde(default)]` keeps records written before runtime
+    /// authoring persisted through the store loading without a migration.
+    #[serde(default)]
+    pub overlay_workflows: Vec<OverlayWorkflow>,
     /// Where this company's manifest was seeded from — the source template's
     /// stable identity, stamped once at launch and carried across rebuilds.
     /// `None` for companies provisioned from a raw manifest body. The
@@ -1929,6 +1968,7 @@ mod test {
             overlay_desk_members: overlay,
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
             template_provenance: None,
         }
     }
@@ -2171,6 +2211,39 @@ mod test {
         let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
         let blob = OverlayBlob::parse(&json).expect("reparse");
         assert_eq!(blob.provenance, record.template_provenance);
+    }
+
+    /// Issue #168: a runtime-authored workflow body round-trips through the
+    /// `OverlayBlob` the sqlite/mongodb stores persist as `overlay_json`. On a
+    /// hosted tenant this blob is the ONLY copy of the graph, so a serialization
+    /// gap here would silently delete the workflow.
+    #[test]
+    fn overlay_blob_round_trips_workflows() {
+        let mut record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
+        record.overlay_workflows.push(OverlayWorkflow {
+            id: "greeter".to_string(),
+            toml: "id = \"greeter\"\nname = \"Greeter\"\n".to_string(),
+        });
+        let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
+        let blob = OverlayBlob::parse(&json).expect("reparse");
+        assert_eq!(blob.workflows, record.overlay_workflows);
+
+        // A row written before workflow bodies persisted (no `workflows` key)
+        // loads as empty — no migration needed.
+        let legacy = r#"{"agents":[],"desk_members":[]}"#;
+        assert!(
+            OverlayBlob::parse(legacy)
+                .expect("pre-workflows object")
+                .workflows
+                .is_empty()
+        );
+        // …and so does the legacy bare-array form.
+        assert!(
+            OverlayBlob::parse("[]")
+                .expect("legacy array")
+                .workflows
+                .is_empty()
+        );
     }
 
     /// An operator-created overlay desk resolves through the same

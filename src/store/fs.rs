@@ -142,6 +142,11 @@ struct Meta {
     /// The operator desk-creation overlay (desks created at runtime).
     #[serde(default)]
     overlay_desks: Vec<crate::ports::types::OverlayDesk>,
+    /// The operator workflow-authoring overlay (graphs created at runtime).
+    /// Absent on meta files written before runtime workflow bodies persisted
+    /// through the store, so `#[serde(default)]` keeps those loading.
+    #[serde(default)]
+    overlay_workflows: Vec<crate::ports::types::OverlayWorkflow>,
     /// The source-template provenance stamped at launch. `None` for companies
     /// provisioned from a raw manifest and for legacy meta files written before
     /// provenance existed (the `#[serde(default)]` keeps those loading).
@@ -195,10 +200,12 @@ impl CompanyStore for FsCompanyStore {
             overlay_desk_members,
             overlay_desk_order,
             overlay_desks,
+            overlay_workflows,
             template_provenance,
         ) = if meta_src.trim().is_empty() {
             (
                 "running".to_string(),
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
@@ -213,6 +220,7 @@ impl CompanyStore for FsCompanyStore {
                 meta.overlay_desk_members,
                 meta.overlay_desk_order,
                 meta.overlay_desks,
+                meta.overlay_workflows,
                 meta.template_provenance,
             )
         };
@@ -228,6 +236,7 @@ impl CompanyStore for FsCompanyStore {
             overlay_desk_members,
             overlay_desk_order,
             overlay_desks,
+            overlay_workflows,
             template_provenance,
         }))
     }
@@ -246,6 +255,7 @@ impl CompanyStore for FsCompanyStore {
             overlay_desk_members: record.overlay_desk_members.clone(),
             overlay_desk_order: record.overlay_desk_order.clone(),
             overlay_desks: record.overlay_desks.clone(),
+            overlay_workflows: record.overlay_workflows.clone(),
             template_provenance: record.template_provenance.clone(),
         };
         write_atomic(&bundle.meta_json(), &serde_json::to_string(&meta)?).await?;
@@ -943,6 +953,7 @@ mod test {
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
             template_provenance: None,
         };
         store.save(&record).await.unwrap();
@@ -981,6 +992,7 @@ mod test {
                 overlay_desk_members: Vec::new(),
                 overlay_desk_order: Vec::new(),
                 overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
                 template_provenance: None,
             })
             .await

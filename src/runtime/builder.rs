@@ -798,6 +798,13 @@ impl RuntimeBuilder {
             .as_ref()
             .map(|r| r.overlay_desks.clone())
             .unwrap_or_default();
+        // Issue #168: the runtime-authored workflow graph bodies. A rebuild that
+        // dropped these would delete every workflow the console created on a
+        // hosted tenant — they have no on-disk copy to fall back to.
+        let overlay_workflows = existing
+            .as_ref()
+            .map(|r| r.overlay_workflows.clone())
+            .unwrap_or_default();
         // Issue #85: carry an existing record's source-template provenance
         // forward across the rebuild (a rebuild never re-stamps it); on the very
         // first launch, stamp from the value the launch path recorded (a slug for
@@ -1020,6 +1027,7 @@ impl RuntimeBuilder {
                                 overlay_desk_members: overlay_desk_members.clone(),
                                 overlay_desk_order: overlay_desk_order.clone(),
                                 overlay_desks: overlay_desks.clone(),
+                                overlay_workflows: overlay_workflows.clone(),
                                 template_provenance: template_provenance.clone(),
                             };
                             // Workflow agent nodes execute on the same pool as the
@@ -1107,7 +1115,8 @@ impl RuntimeBuilder {
         // (before the brain was constructed, so the brain could be seeded from
         // them); a rebuild never rewrites the version-controlled manifest, and must
         // not drop the operator-added teammates, desk memberships, desk order,
-        // operator-created desks, or the source-template provenance either.
+        // operator-created desks, runtime-authored workflow graphs, or the
+        // source-template provenance either.
         store
             .save(&CompanyRecord {
                 id: id.clone(),
@@ -1118,6 +1127,7 @@ impl RuntimeBuilder {
                 overlay_desk_members,
                 overlay_desk_order,
                 overlay_desks,
+                overlay_workflows,
                 template_provenance,
             })
             .await?;
@@ -1968,6 +1978,7 @@ mod test {
                     ordered: vec!["eng2".to_string(), "eng1".to_string()],
                 }],
                 overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
                 template_provenance: None,
             })
             .await
