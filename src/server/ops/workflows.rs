@@ -368,6 +368,7 @@ impl TryFrom<CreateWorkflowBody> for RawWorkflow {
                 name: n.name,
                 summary: n.summary,
                 agent: n.agent,
+                schedule: None,
                 config,
                 on_error: n.on_error,
                 retry: n.retry.map(WorkflowRetryDef::from),
@@ -622,6 +623,7 @@ mod tests {
                 name: "Call".into(),
                 summary: None,
                 agent: None,
+                schedule: None,
                 config: Some(serde_json::json!({ "slug": "csv_export" })),
                 on_error: Some("continue".into()),
                 retry: Some(WorkflowRetryDef {

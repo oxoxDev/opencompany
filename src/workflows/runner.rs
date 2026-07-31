@@ -408,6 +408,7 @@ to = "done"
                 name: "Only".to_string(),
                 summary: None,
                 agent: None,
+                schedule: None,
                 config: None,
                 on_error: None,
                 retry: None,

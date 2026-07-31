@@ -4,6 +4,14 @@
 //! canvas and referenced by `[workflows].enabled` in the manifest. This module
 //! parses those files into a validated [`WorkflowFile`], reporting every problem
 //! at once in prosumer language, matching [`super::manifest`].
+//!
+//! A `trigger` node may carry a `schedule`: a standard 5-field cron expression,
+//! **always interpreted in UTC**, in the same dialect as the manifest's
+//! `[[schedule]]` entries. It is validated here with
+//! [`CronExpr`](crate::runtime::cron::CronExpr) and driven at runtime by
+//! [`WorkflowScheduler`](crate::runtime::workflow_scheduler::WorkflowScheduler),
+//! so a saved schedule actually fires instead of sitting in prose. No other node
+//! kind may carry one.
 
 use std::path::{Path, PathBuf};
 
@@ -129,12 +137,23 @@ pub struct WorkflowNodeDef {
     pub summary: Option<String>,
     /// The roster agent id — only meaningful on `agent` nodes.
     pub agent: Option<String>,
+    /// A standard 5-field cron expression saying *when* this workflow starts on
+    /// its own — only meaningful on `trigger` nodes, and always **UTC**.
+    ///
+    /// Same dialect as the manifest's `[[schedule]]` crons: it is parsed by
+    /// [`CronExpr`](crate::runtime::cron::CronExpr) at validation, so a
+    /// malformed expression is rejected with the parser's own prosumer message
+    /// rather than being persisted as inert prose. `None` (the default) means
+    /// the workflow only runs when something else starts it — an operator
+    /// clicking Run, the REST run route, or another workflow.
+    pub schedule: Option<String>,
     /// Free-form, kind-specific node configuration ([`tool_call`] slug/args,
     /// [`http_request`] descriptor, …). Layered under the derived defaults and
     /// the first-class fields below by [`translate`](crate::workflows::translate)
     /// before it reaches the engine. Reserved keys (`on_error` / `retry` /
-    /// `requires_approval`, plus `agent_ref` on `agent` nodes) are rejected at
-    /// validation so they cannot silently shadow a first-class field.
+    /// `requires_approval` / `schedule`, plus `agent_ref` on `agent` nodes) are
+    /// rejected at validation so they cannot silently shadow a first-class
+    /// field.
     ///
     /// [`tool_call`]: WorkflowNodeKind::ToolCall
     /// [`http_request`]: WorkflowNodeKind::HttpRequest
@@ -212,6 +231,10 @@ pub(crate) struct RawNode {
     pub(crate) summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) agent: Option<String>,
+    /// The trigger node's 5-field UTC cron. Declared before `config` so the
+    /// rendered TOML keeps every scalar above the `[node.config]` table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) schedule: Option<String>,
     /// Free-form node config, read as a TOML value (not `serde_json`) so the
     /// `Serialize` half — used by the workflow creator's
     /// [`render_workflow`] round-trip — stays representable in TOML (TOML has no
@@ -286,6 +309,7 @@ pub fn parse_workflow(toml_src: &str) -> Result<WorkflowFile> {
                 name: node.name,
                 summary: node.summary,
                 agent: node.agent,
+                schedule: node.schedule,
                 // Validation rejects TOML's non-finite floats before this
                 // conversion because JSON cannot represent them.
                 config: node.config.map(|value| {
@@ -527,6 +551,31 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
             switch_nodes.insert(node.id.as_str());
         }
 
+        // `schedule` says *when* the workflow starts, so it is trigger-only —
+        // anywhere else it would sit inert and mislead (the same footgun the
+        // stray-`agent` check above prevents). On a trigger it must be a real
+        // 5-field cron: the workflow scheduler parses it with the same
+        // `CronExpr` the manifest `[[schedule]]` crons use, so an expression
+        // that cannot fire is rejected here rather than silently never firing.
+        if let Some(schedule) = node.schedule.as_deref() {
+            match kind {
+                Some(WorkflowNodeKind::Trigger) => {
+                    if let Err(err) = crate::runtime::cron::CronExpr::parse(schedule) {
+                        problems.push(format!(
+                            "{label} has a `schedule` that is not a valid cron — {err}. Times are UTC."
+                        ));
+                    }
+                }
+                Some(kind) => problems.push(format!(
+                    "{label} sets `schedule` but is a `{}` node — only `trigger` nodes carry a schedule.",
+                    kind.as_str()
+                )),
+                // The unknown-kind problem is already reported above; do not
+                // pile a second, confusing message onto the same node.
+                None => {}
+            }
+        }
+
         if node.config.as_ref().is_some_and(contains_non_finite_float) {
             problems.push(format!(
                 "{label} has a non-finite number in `config` — JSON workflow config only supports finite numbers."
@@ -606,7 +655,7 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
         // silently ignored — reject it as a footgun instead. `agent_ref` is
         // reserved on `agent` nodes (translation binds it from `agent`).
         if let Some(toml::Value::Table(table)) = &node.config {
-            for reserved in ["on_error", "retry", "requires_approval"] {
+            for reserved in ["on_error", "retry", "requires_approval", "schedule"] {
                 if table.contains_key(reserved) {
                     problems.push(format!(
                         "{label} puts `{reserved}` inside `config` — set it as a first-class node field, not in `config`."
@@ -712,6 +761,7 @@ mod tests {
                     name: "Start".to_string(),
                     summary: None,
                     agent: None,
+                    schedule: None,
                     config: None,
                     on_error: None,
                     retry: None,
@@ -723,6 +773,7 @@ mod tests {
                     name: "Worker".to_string(),
                     summary: Some("Does the thing.".to_string()),
                     agent: Some("ceo".to_string()),
+                    schedule: None,
                     config: None,
                     on_error: None,
                     retry: None,
@@ -760,6 +811,7 @@ mod tests {
                 name: "Only".to_string(),
                 summary: None,
                 agent: None,
+                schedule: None,
                 config: None,
                 on_error: None,
                 retry: None,
@@ -1368,6 +1420,200 @@ mod tests {
         assert!(start.on_error.is_none());
         assert!(start.retry.is_none());
         assert!(start.requires_approval.is_none());
+    }
+
+    // --- trigger schedule (issue #169) --------------------------------------
+
+    /// A trigger's `schedule` survives the render → parse round trip the create
+    /// endpoint runs, and lands on the parsed node.
+    #[test]
+    fn trigger_schedule_round_trips_render_and_parse() {
+        let raw = RawWorkflow {
+            id: "wf".to_string(),
+            name: "WF".to_string(),
+            description: None,
+            nodes: vec![
+                RawNode {
+                    id: "start".to_string(),
+                    kind: "trigger".to_string(),
+                    name: "Start".to_string(),
+                    summary: None,
+                    agent: None,
+                    schedule: Some("0 * * * *".to_string()),
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                },
+                RawNode {
+                    id: "done".to_string(),
+                    kind: "output".to_string(),
+                    name: "Done".to_string(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                },
+            ],
+            edges: vec![RawEdge {
+                from: "start".to_string(),
+                to: "done".to_string(),
+                label: None,
+            }],
+        };
+        let toml_src = render_workflow(&raw).expect("renders");
+        let file = parse_workflow(&toml_src).expect("re-parses");
+        let start = file.nodes.iter().find(|n| n.id == "start").unwrap();
+        assert_eq!(start.schedule.as_deref(), Some("0 * * * *"));
+        let done = file.nodes.iter().find(|n| n.id == "done").unwrap();
+        assert!(done.schedule.is_none());
+    }
+
+    /// A trigger schedule parses from hand-authored TOML too, including the
+    /// named-weekday dialect the manifest `[[schedule]]` crons already accept.
+    #[test]
+    fn trigger_schedule_parses_from_toml() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            schedule = "0 9 * * MON"
+        "#;
+        let file = parse_workflow(src).expect("parses");
+        assert_eq!(file.nodes[0].schedule.as_deref(), Some("0 9 * * MON"));
+    }
+
+    /// `schedule` says when the *workflow* starts, so it is trigger-only.
+    #[test]
+    fn schedule_on_a_non_trigger_node_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "worker"
+            kind = "agent"
+            name = "Worker"
+            agent = "ceo"
+            schedule = "0 * * * *"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("only `trigger` nodes carry a schedule"),
+            "{message}"
+        );
+    }
+
+    /// A malformed cron is rejected at validation with the parser's own
+    /// message, so it can never be persisted as an expression that never fires.
+    #[test]
+    fn invalid_trigger_schedule_cron_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            schedule = "every hour"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("not a valid cron"), "{message}");
+        assert!(message.contains("needs 5 fields"), "{message}");
+        assert!(message.contains("UTC"), "{message}");
+
+        // An out-of-range field is caught by the same parser.
+        let out_of_range = src.replace("every hour", "0 99 * * *");
+        let err = parse_workflow(&out_of_range).unwrap_err();
+        assert!(err.to_string().contains("not a valid cron"), "{err}");
+    }
+
+    /// `config.schedule` would be silently ignored (the first-class field wins),
+    /// so it is a reserved key like the other first-class node fields.
+    #[test]
+    fn config_schedule_is_rejected_as_a_reserved_key() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [node.config]
+            schedule = "0 * * * *"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("`schedule` inside `config`"), "{message}");
+    }
+
+    /// A graph authored before `schedule` existed parses with the field unset
+    /// and re-renders byte-identically — the field is skipped when `None`, so
+    /// adding it rewrites nothing on disk.
+    #[test]
+    fn legacy_graph_without_schedule_re_renders_byte_identically() {
+        let raw = RawWorkflow {
+            id: "wf".to_string(),
+            name: "WF".to_string(),
+            description: Some("Legacy.".to_string()),
+            nodes: vec![RawNode {
+                id: "start".to_string(),
+                kind: "trigger".to_string(),
+                name: "Start".to_string(),
+                summary: Some("Kicks off.".to_string()),
+                agent: None,
+                schedule: None,
+                config: None,
+                on_error: None,
+                retry: None,
+                requires_approval: None,
+            }],
+            edges: Vec::new(),
+        };
+        let first = render_workflow(&raw).expect("renders");
+        assert!(
+            !first.contains("schedule"),
+            "an unset schedule must not be written: {first}"
+        );
+
+        let file = parse_workflow(&first).expect("parses");
+        assert!(file.nodes[0].schedule.is_none());
+
+        // Re-render the parsed graph through the same shape: byte-identical.
+        let round_tripped = RawWorkflow {
+            id: file.id.clone(),
+            name: file.name.clone(),
+            description: file.description.clone(),
+            nodes: file
+                .nodes
+                .iter()
+                .map(|n| RawNode {
+                    id: n.id.clone(),
+                    kind: n.kind.as_str().to_string(),
+                    name: n.name.clone(),
+                    summary: n.summary.clone(),
+                    agent: n.agent.clone(),
+                    schedule: n.schedule.clone(),
+                    config: None,
+                    on_error: n.on_error.clone(),
+                    retry: n.retry.clone(),
+                    requires_approval: n.requires_approval,
+                })
+                .collect(),
+            edges: Vec::new(),
+        };
+        assert_eq!(render_workflow(&round_tripped).expect("re-renders"), first);
     }
 
     // --- seed ∪ overlay union (issue #168) ----------------------------------

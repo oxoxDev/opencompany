@@ -1301,6 +1301,7 @@ impl From<CreateWorkflowArgs> for RawWorkflow {
                     name: n.name,
                     summary: n.summary,
                     agent: n.agent,
+                    schedule: None,
                     config: None,
                     on_error: None,
                     retry: None,
