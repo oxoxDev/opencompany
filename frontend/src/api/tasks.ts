@@ -14,6 +14,12 @@ export interface Task {
   /** The desk/teammate label that owns it (a roster agent id routes a turn). */
   assignee: string;
   updatedAt: number;
+  /**
+   * The card this one was spawned from (#185), when it has a parent. Omitted on
+   * a lineage root — every card the board creates today — so the board's wire
+   * shape is unchanged.
+   */
+  parentTaskId?: string;
 }
 
 /** The create body; the host defaults column→`backlog`, priority→`medium`. */
@@ -36,6 +42,71 @@ export interface PatchTask {
 
 export function listTasks(client: OpenCompanyClient, company: string | null): Promise<Task[]> {
   return client.get<Task[]>(`${client.scopeFor(company)}/tasks`);
+}
+
+/**
+ * A stable wire word for what a {@link TimelineEntry} records (#185). The host
+ * emits exactly this set today; re-transcribed here so `tsc` pins the contract.
+ */
+export type TimelineKind = "dispatched" | "reply" | "tool_failed" | "approval" | "completed";
+
+/**
+ * One entry on a task's timeline (#185) — the same scrubbed vocabulary the host
+ * uses for a chat bubble's steps. `detail`, when present, is a value the
+ * producing event already scrubbed at source; nothing here carries raw tool
+ * arguments, output, or call ids.
+ */
+export interface TimelineEntry {
+  /** The journal sequence — the stable render key, and the strict order. */
+  seq: number;
+  /** Epoch-millis the event was journaled. */
+  atMillis: number;
+  /** What happened: `dispatched` | `reply` | `tool_failed` | `approval` | `completed`. */
+  kind: TimelineKind;
+  /** A short, past-tense human label rendered verbatim. */
+  label: string;
+  /** Optional scrubbed detail; expands under the row when present. */
+  detail?: string;
+}
+
+/** A neighbouring card in the lineage, trimmed to what a link needs (#185). */
+export interface LineageRef {
+  id: string;
+  title: string;
+  column: string;
+}
+
+/** The parent/children view of a task (#185). */
+export interface TaskLineage {
+  /** The card this one was spawned from, when it has one. */
+  parent?: LineageRef;
+  /** Cards spawned from this one, oldest-updated first for a stable render. */
+  children: LineageRef[];
+}
+
+/** The assembled Task Detail response (#185): one read for the whole screen. */
+export interface TaskDetail {
+  /** The card header — the same shape a board card carries. */
+  task: Task;
+  /** The per-task event stream, oldest first. */
+  timeline: TimelineEntry[];
+  /** Parent and children. */
+  lineage: TaskLineage;
+}
+
+/**
+ * The Task Detail screen's single read (#185): assembles the card header, the
+ * per-task timeline, the approvals trail (as `approval` timeline rows), and the
+ * lineage into one response. 404s when the id names no card.
+ */
+export function getTaskDetail(
+  client: OpenCompanyClient,
+  company: string | null,
+  id: string,
+): Promise<TaskDetail> {
+  return client.get<TaskDetail>(
+    `${client.scopeFor(company)}/tasks/${encodeURIComponent(id)}`,
+  );
 }
 
 export function createTask(

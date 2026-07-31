@@ -124,6 +124,16 @@ struct StoredChunk {
 /// injected (188c2).
 struct CompanyEngine {
     kv: KvStore,
+    /// Serializes read-modify-write sequences over this company's shared
+    /// aggregate keys (`oc:traces` / `oc:archive`). The KV tier upserts a whole
+    /// JSON array per key, so an unguarded `append`/`archive`/`hard_delete`/
+    /// `redact` reads the array, mutates it in memory, and writes it back — two
+    /// concurrent calls would both read N entries and both write N+1, silently
+    /// dropping one. Holding this async mutex across each such sequence makes the
+    /// aggregate updates serializable per company. It is an async
+    /// [`tokio::sync::Mutex`] (not [`std::sync::Mutex`]) because it is held across
+    /// `.await` points in the trait methods.
+    write_lock: tokio::sync::Mutex<()>,
     /// The per-company vector index (`<workspace>/vectors.db`), present only
     /// when an [`EmbeddingBackend`] was injected. `None` ⇒ pure lexical recall.
     vectors: Option<VectorStore>,
@@ -163,7 +173,11 @@ impl CompanyEngine {
 
         let vectors = embeddings.and_then(|backend| open_vector_store(&workspace, backend));
 
-        Ok(Self { kv, vectors })
+        Ok(Self {
+            kv,
+            write_lock: tokio::sync::Mutex::new(()),
+            vectors,
+        })
     }
 
     /// Best-effort, bounded one-time backfill of the meaning tier: when the
@@ -279,8 +293,13 @@ impl CompanyEngine {
 /// A persistent, in-pod [`CortexClient`] over the OpenHuman `tinycortex` engine.
 ///
 /// Per-company engine handles are opened lazily and cached, each rooted at
-/// `<memory_root>/<company>/`. Isolation is physical: two companies never share
-/// a workspace or a database file, so company A cannot observe company B's data.
+/// `<memory_root>/<workspace_name(company)>/`. Isolation is physical: two
+/// companies never share a workspace or a database file, so company A cannot
+/// observe company B's data. That guarantee rests on [`workspace_name`] being
+/// *injective* — distinct company ids must map to distinct directories (see it
+/// for why a sanitized prefix alone is not enough).
+///
+/// [`workspace_name`]: EngineCortex::workspace_name
 pub struct EngineCortex {
     memory_root: PathBuf,
     companies: StdMutex<HashMap<String, Arc<CompanyEngine>>>,
@@ -315,9 +334,20 @@ impl EngineCortex {
         }
     }
 
-    /// Sanitizes a company id into a single path-safe workspace directory name.
+    /// Maps a company id to its path-safe, **injective** workspace directory name.
+    ///
+    /// A readable sanitized prefix alone is *not* injective: mapping every char
+    /// outside `[A-Za-z0-9-_]` to `_` collapses distinct ids like `acme:1`,
+    /// `acme/1`, and `acme_1` onto the same `acme_1` directory — so those
+    /// companies would share one workspace and one SQLite DB and read each other's
+    /// traces and chunks, breaking the physical-isolation contract this type
+    /// promises. To keep the name injective, a suffix derived from a stable hash
+    /// of the **full raw** id is always appended: even when two sanitized prefixes
+    /// collide, their raw ids differ and so do their hashes, yielding distinct
+    /// directories. The same id is always stable across calls (durability rests on
+    /// a company's directory not moving across restarts).
     fn workspace_name(company: &str) -> String {
-        let name: String = company
+        let prefix: String = company
             .chars()
             .map(|c| {
                 if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
@@ -327,10 +357,11 @@ impl EngineCortex {
                 }
             })
             .collect();
-        if name.is_empty() {
-            "_".to_string()
+        let suffix = stable_hash_hex(company);
+        if prefix.is_empty() {
+            format!("h-{suffix}")
         } else {
-            name
+            format!("{prefix}-{suffix}")
         }
     }
 
@@ -398,6 +429,9 @@ fn open_vector_store(
 impl CortexClient for EngineCortex {
     async fn append_trace(&self, company: &str, trace: CompressedTrace) -> Result<()> {
         let engine = self.engine(company).await?;
+        // Serialize the read-modify-write against this company's trace array so
+        // concurrent appends cannot both read N and both write N+1 (dropping one).
+        let _guard = engine.write_lock.lock().await;
         let mut traces: Vec<CompressedTrace> = engine.get_json(KEY_TRACES)?.unwrap_or_default();
         traces.push(trace);
         engine.put_json(KEY_TRACES, &traces)
@@ -418,6 +452,8 @@ impl CortexClient for EngineCortex {
 
     async fn archive_traces(&self, company: &str, policy: EvictionPolicy) -> Result<u64> {
         let engine = self.engine(company).await?;
+        // Serialize the move-between-arrays against concurrent trace mutations.
+        let _guard = engine.write_lock.lock().await;
         let mut traces: Vec<CompressedTrace> = engine.get_json(KEY_TRACES)?.unwrap_or_default();
         let mut archive: Vec<CompressedTrace> = engine.get_json(KEY_ARCHIVE)?.unwrap_or_default();
 
@@ -534,6 +570,8 @@ impl CortexClient for EngineCortex {
 
     async fn hard_delete_trace(&self, company: &str, cycle_id: &str) -> Result<bool> {
         let engine = self.engine(company).await?;
+        // Serialize the delete-across-both-arrays against concurrent mutations.
+        let _guard = engine.write_lock.lock().await;
         let mut traces: Vec<CompressedTrace> = engine.get_json(KEY_TRACES)?.unwrap_or_default();
         let mut archive: Vec<CompressedTrace> = engine.get_json(KEY_ARCHIVE)?.unwrap_or_default();
         let before = traces.len() + archive.len();
@@ -570,6 +608,9 @@ impl CortexClient for EngineCortex {
             return Ok(0);
         }
         let engine = self.engine(company).await?;
+        // Serialize the sweep-and-rewrite over traces, archive, and chunks against
+        // concurrent trace/chunk mutations for this company.
+        let _guard = engine.write_lock.lock().await;
         let mut replaced = 0u64;
 
         let mut traces: Vec<CompressedTrace> = engine.get_json(KEY_TRACES)?.unwrap_or_default();
@@ -708,6 +749,27 @@ fn leading_snippet(body: &str) -> String {
 // Degraded lexical scoring (mirrors InMemoryCortex)
 // ---------------------------------------------------------------------------
 
+/// A stable 64-bit FNV-1a hash of `s`, hex-encoded (16 lowercase digits).
+///
+/// Used to derive the injective suffix of a company's [`workspace_name`]. FNV-1a
+/// is chosen deliberately over [`std::hash::DefaultHasher`]: its algorithm is
+/// fixed by the two constants below, so a given id hashes identically across Rust
+/// versions and process restarts. That determinism is a durability requirement —
+/// a company's workspace directory must not move (and orphan its SQLite DB) just
+/// because the binary was rebuilt with a newer toolchain.
+///
+/// [`workspace_name`]: EngineCortex::workspace_name
+fn stable_hash_hex(s: &str) -> String {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for byte in s.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")
+}
+
 /// Replaces every occurrence of `needle` in `s`, returning the count replaced.
 fn replace_in_place(s: &mut String, needle: &str, replacement: &str) -> u64 {
     let count = s.matches(needle).count() as u64;
@@ -839,6 +901,40 @@ mod test {
         CompanyId::new("acme")
     }
 
+    /// `workspace_name` is injective and path-safe: ids whose sanitized prefixes
+    /// collide (`acme:1`, `acme/1`, `acme_1`) still map to DISTINCT directories,
+    /// so distinct companies never share a workspace/DB — and the mapping is
+    /// stable across calls (a company's directory must not move across restarts).
+    #[test]
+    fn workspace_name_is_injective_and_stable() {
+        let colon = EngineCortex::workspace_name("acme:1");
+        let slash = EngineCortex::workspace_name("acme/1");
+        let under = EngineCortex::workspace_name("acme_1"); // the literal id
+
+        // The three distinct ids get three distinct directories, even though a
+        // sanitize-only scheme would collapse all of them onto `acme_1`.
+        assert_ne!(colon, slash);
+        assert_ne!(colon, under);
+        assert_ne!(slash, under);
+
+        // Stable across calls for the same id (durability depends on it).
+        assert_eq!(colon, EngineCortex::workspace_name("acme:1"));
+        assert_eq!(under, EngineCortex::workspace_name("acme_1"));
+
+        // Every produced name is a single path-safe segment.
+        for name in [&colon, &slash, &under] {
+            assert!(
+                name.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')),
+                "workspace name must be path-safe: {name}"
+            );
+        }
+
+        // The empty id still yields a non-empty, path-safe name.
+        let empty = EngineCortex::workspace_name("");
+        assert!(!empty.is_empty());
+    }
+
     /// Data written through one engine instance survives dropping it and
     /// reopening a fresh engine at the same root — the durability contract, plus
     /// a real on-disk SQLite artifact under the company workspace.
@@ -865,7 +961,10 @@ mod test {
         };
 
         // The engine wrote a real on-disk database under the company workspace.
-        let db = root.join("acme").join("memory_tree").join("chunks.db");
+        let db = root
+            .join(EngineCortex::workspace_name(id.as_ref()))
+            .join("memory_tree")
+            .join("chunks.db");
         assert!(
             db.exists(),
             "engine must persist a SQLite db on disk: {db:?}"
@@ -1049,6 +1148,52 @@ mod test {
         // Hard delete reaches the archive, not just the live set.
         assert!(mem.hard_delete_trace(&id, "c0").await.unwrap());
         assert!(!mem.hard_delete_trace(&id, "missing").await.unwrap());
+    }
+
+    /// Concurrent `append_trace` calls for one company never lose a write. The
+    /// KV tier upserts the whole trace array per key, so without the per-company
+    /// `write_lock` two racing appends both read N and both write N+1, dropping
+    /// one. A multi-thread runtime with many concurrent appends over one shared
+    /// [`EngineCortex`] asserts all of them land.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_append_trace_never_loses_a_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let cortex = Arc::new(EngineCortex::new(dir.path().join("memory")));
+        let company = "acme";
+        let n = 64usize;
+
+        let mut handles = Vec::with_capacity(n);
+        for i in 0..n {
+            let cortex = cortex.clone();
+            handles.push(tokio::spawn(async move {
+                cortex
+                    .append_trace(
+                        company,
+                        CompressedTrace::now(format!("c{i}"), format!("s{i}")),
+                    )
+                    .await
+                    .unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let traces = cortex.recent_traces(company, n * 2).await.unwrap();
+        assert_eq!(
+            traces.len(),
+            n,
+            "every concurrent append must land under the per-company write lock"
+        );
+        // No trace was clobbered: all cycle ids c0..cN are present.
+        let mut ids: Vec<String> = traces.into_iter().map(|t| t.cycle_id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            n,
+            "each concurrent append persisted a distinct trace"
+        );
     }
 
     #[tokio::test]

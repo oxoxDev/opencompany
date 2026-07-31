@@ -1,0 +1,159 @@
+# Build this repo's OWN image (the tenant workload) and put it in front of new
+# tenants on k3s staging.
+#
+# One repo, one image. This used to be built from the platform superproject
+# (tinyhumansai/opencompany-microservice), which meant a change here only shipped
+# when that repo's cron happened to notice the submodule pointer move. Now this
+# repo builds and publishes its own workload image, and the superproject builds
+# only the manager control plane.
+#
+# Required repository secrets:
+#   AWS_ROLE_ARN     — role assumed via OIDC to push to ECR. Its trust policy
+#                      must allow `repo:tinyhumansai/opencompany:*`.
+#   SSH_PRIVATE_KEY  — key trusted by root@ on the staging node.
+#   SSH_HOST         — staging node address.
+#
+# No PAT is needed: this repo and every crate the build compiles
+# (openhuman and its nested vendor graph) are public, so the default
+# GITHUB_TOKEN clones them all.
+name: Deploy tenant image to staging
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'frontend/**'
+      - 'companies/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'vendor/**'
+      - '.github/workflows/deploy-staging.yml'
+  workflow_dispatch:
+    inputs:
+      refresh_all_tenants:
+        description: 'Also restart already-running tenants onto the new image (disruptive: wakes idle tenants)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # assume the AWS role via OIDC to push to ECR
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: tinyhumansai/opencompany-tenant
+  K8S_NAMESPACE: opencompany-system
+  MANAGER_DEPLOY: opencompany-manager
+  # The feature set the hosted tenant ships with. Kept verbatim from the
+  # pipeline this replaces — changing it changes what every tenant can do, so
+  # treat edits here as a product change, not a CI tweak.
+  TENANT_FEATURES: mongodb,openhuman,openhuman-rpc,tinyplace,github,smtp,dns,tinyhumans,webhooks,platform-jwt,export
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      # Path-limited on purpose. `--features openhuman` compiles the vendored
+      # openhuman crate and its nested graph, and cargo must be able to read the
+      # manifests behind [patch.crates-io], so both of these must be present.
+      # Recursing from the repo root instead would also drag in openhuman's
+      # desktop-only submodules (tauri-cef is a heavy CEF checkout) that no
+      # server build compiles.
+      - name: Fetch build vendor submodules
+        run: git submodule update --init --recursive vendor/openhuman vendor/tinyagents
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image to ECR
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          build-args: |
+            FEATURES=${{ env.TENANT_FEATURES }}
+          push: true
+          tags: |
+            ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:staging-${{ github.sha }}
+            ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:staging
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add server to known hosts
+        run: ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Point the manager at the new tenant image
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          IMAGE: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:staging-${{ github.sha }}
+          REFRESH_ALL: ${{ inputs.refresh_all_tenants }}
+        run: |
+          ssh root@${SSH_HOST} \
+            "IMAGE='${IMAGE}' K8S_NAMESPACE='${{ env.K8S_NAMESPACE }}' MANAGER_DEPLOY='${{ env.MANAGER_DEPLOY }}' REFRESH_ALL='${REFRESH_ALL:-false}' bash -s" << 'EOF'
+          set -euo pipefail
+          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
+          # Tenants pull with the ecr-creds Secret, which expires after 12h and is
+          # refreshed every 6h by a systemd timer. Force a refresh so a deploy
+          # landing late in that window cannot leave tenants in ImagePullBackOff.
+          echo "Refreshing ECR pull secret..."
+          /usr/local/bin/ecr-refresh.sh
+
+          # Tenant pods pin imagePullPolicy: IfNotPresent, so a moving tag is not
+          # re-pulled. The manager must be pointed at the immutable
+          # staging-<sha> tag, which a tag not already present locally always
+          # fetches. Never "deploy" by re-pushing :staging.
+          echo "Setting OCM_TENANT_IMAGE=${IMAGE}"
+          kubectl -n "${K8S_NAMESPACE}" set env "deploy/${MANAGER_DEPLOY}" "OCM_TENANT_IMAGE=${IMAGE}"
+
+          if ! kubectl -n "${K8S_NAMESPACE}" rollout status "deploy/${MANAGER_DEPLOY}" --timeout=300s; then
+            echo "ERROR: manager did not roll out; events and logs follow" >&2
+            kubectl -n "${K8S_NAMESPACE}" describe "deploy/${MANAGER_DEPLOY}" | tail -30 >&2
+            kubectl -n "${K8S_NAMESPACE}" logs "deploy/${MANAGER_DEPLOY}" --tail=100 >&2 || true
+            echo "Rolling back..." >&2
+            kubectl -n "${K8S_NAMESPACE}" rollout undo "deploy/${MANAGER_DEPLOY}"
+            kubectl -n "${K8S_NAMESPACE}" rollout status "deploy/${MANAGER_DEPLOY}" --timeout=180s >&2 || true
+            exit 1
+          fi
+
+          # New and woken tenants boot on the new image from here. ALREADY
+          # RUNNING tenants keep their current image until recreated — that is
+          # deliberate, since restarting them interrupts live agent work.
+          if [ "${REFRESH_ALL}" = "true" ]; then
+            echo "Restarting all running tenants onto the new image (requested)..."
+            kubectl rollout restart statefulset -A -l app=opencompany
+          else
+            echo "Running tenants keep their current image; re-run with refresh_all_tenants=true to roll them."
+          fi
+
+          kubectl -n "${K8S_NAMESPACE}" get deploy "${MANAGER_DEPLOY}" \
+            -o jsonpath='{range .spec.template.spec.containers[0].env[?(@.name=="OCM_TENANT_IMAGE")]}OCM_TENANT_IMAGE={.value}{"\n"}{end}'
+          EOF

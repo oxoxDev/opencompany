@@ -26,7 +26,8 @@ use crate::company::steer::{
     InflightEntry, InflightKind, InflightRegistry, SteerAction, SteerControl,
 };
 use crate::harness::TurnOutcome;
-use crate::harness::orchestrator::{Delegation, DelegationQueue};
+use crate::harness::lifecycle;
+use crate::harness::orchestrator::{self, Delegation, DelegationQueue};
 use crate::ports::types::{CompanyId, CompanyRecord, OutboundMessage, TurnStep};
 use crate::ports::{TaskRecord, TaskStore, generate_id, now_millis};
 
@@ -336,6 +337,100 @@ impl<'a> DelegationRunner<'a> {
                     }),
                 })
             }
+            // ── Issue #186 part b: orchestrator lifecycle authority ─────────
+            //
+            // Both write through the same `TaskStore` path the console uses, so
+            // an orchestrator-driven change is persisted identically to an
+            // operator-driven one. Neither yields anything for the cycle to
+            // surface — no bubble and nothing to relay: the orchestrator is
+            // mid-turn and will describe what it did in its own reply, and a
+            // second voice would be it talking to itself.
+            //
+            // A card that has since vanished is a silent no-op, matching every
+            // other task path on this seam.
+            Delegation::AssignTask {
+                task_id,
+                assignee,
+                note,
+            } => {
+                let Some((tasks, mut card)) = self.load_card(&task_id).await? else {
+                    return Ok(DelegationOutcome::default());
+                };
+                card.assignee = assignee.clone();
+                card.note = Some(append_note(
+                    card.note.as_deref(),
+                    &self.orchestrator_id(),
+                    &match note {
+                        Some(note) => format!("assigned to {assignee} — {note}"),
+                        None => format!("assigned to {assignee}"),
+                    },
+                ));
+                // The column is untouched on purpose: dispatch fires from
+                // `CompanyRuntime::upsert_task`, which this port cannot reach.
+                // Assignment records ownership; the board's
+                // `column → in_progress` PATCH still starts the work.
+                card.updated_at_millis = now_millis();
+                tasks.upsert(self.company, &card).await?;
+                Ok(DelegationOutcome::default())
+            }
+            Delegation::ReviewTask {
+                task_id,
+                decision,
+                note,
+            } => {
+                let Some((tasks, mut card)) = self.load_card(&task_id).await? else {
+                    return Ok(DelegationOutcome::default());
+                };
+                card.note = Some(append_note(
+                    card.note.as_deref(),
+                    &self.orchestrator_id(),
+                    &lifecycle::review_note(decision, note.as_deref()),
+                ));
+                // `Approve` finishes the card — this is #171's `in_review →
+                // done` write (PR #179) for a board-created card, which #179's
+                // own origin rule cannot reach.
+                card.column = lifecycle::review_landing_column(decision).to_string();
+                card.updated_at_millis = now_millis();
+                tasks.upsert(self.company, &card).await?;
+                Ok(DelegationOutcome::default())
+            }
         }
+    }
+
+    /// Loads one board card by id, with the store handle. `None` when there is
+    /// no task store wired, or the card has since been deleted — both a silent
+    /// no-op rather than an error (issue #186).
+    async fn load_card(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<(&'a Arc<dyn TaskStore>, TaskRecord)>> {
+        let Some(tasks) = self.tasks else {
+            return Ok(None);
+        };
+        let card = tasks
+            .list(self.company)
+            .await?
+            .into_iter()
+            .find(|t| t.id == task_id);
+        Ok(card.map(|card| (tasks, card)))
+    }
+
+    /// The company orchestrator's agent id — the single voice a lifecycle
+    /// delegation's note is recorded under (issue #186). Mirrors
+    /// `HarnessBrain::orchestrator`; on an empty roster it is the empty string,
+    /// which `orchestrator_id` already tolerates.
+    fn orchestrator_id(&self) -> String {
+        orchestrator::orchestrator_id(&self.record.manifest.agents).unwrap_or_default()
+    }
+}
+
+/// Appends a responder-attributed result block to a card's note, preserving any
+/// prior note above it (issue #186). Mirrors `harness::brain::append_result`,
+/// kept local to the seam so the lifecycle arms never reach back into the brain.
+fn append_note(prev: Option<&str>, responder: &str, body: &str) -> String {
+    let block = format!("[{responder}] {body}");
+    match prev.filter(|p| !p.is_empty()) {
+        Some(p) => format!("{p}\n\n{block}"),
+        None => block,
     }
 }

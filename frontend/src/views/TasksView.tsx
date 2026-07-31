@@ -1,14 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, Play, Plus, Trash2 } from "lucide-react";
+import { Loader2, Play, Plus } from "lucide-react";
 
-import {
-  createTask,
-  deleteTask,
-  listTasks,
-  patchTask,
-  type PatchTask,
-  type Task,
-} from "@/api/tasks";
+import { createTask, listTasks, patchTask, type Task } from "@/api/tasks";
 import type { OpenCompanyClient } from "@/api/client";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -35,6 +28,24 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { PRIORITY_STYLES, TASK_COLUMNS } from "@/lib/tasks-sample";
 import { toast } from "sonner";
+import { TaskDetailView } from "./TaskDetailView";
+
+/**
+ * Reads the `#/tasks/<id>` sub-hash, or null on the bare board. The app shell's
+ * `useHashView` only inspects the first path segment (`tasks`), so this second
+ * segment is ours to own — no app-shell change needed to route the detail.
+ */
+function readTaskDetailId(): string | null {
+  try {
+    const parts = window.location.hash.replace(/^#\/?/, "").split(/[/?]/);
+    return parts[0] === "tasks" && parts[1] ? decodeURIComponent(parts[1]) : null;
+  } catch {
+    // Malformed percent-encoding (e.g. `#/tasks/%`) throws URIError — fall back
+    // to the bare board instead of blowing up the render. Covers both the
+    // useState initializer and the hashchange handler, since both call here.
+    return null;
+  }
+}
 
 const PRIORITIES = ["low", "medium", "high"] as const;
 
@@ -64,7 +75,9 @@ export function TasksView({
   const [error, setError] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
   const [overCol, setOverCol] = useState<string | null>(null);
-  const [selected, setSelected] = useState<Task | null>(null);
+  // The open card's id, mirrored in `#/tasks/<id>` so the detail survives a
+  // refresh and honors back/forward.
+  const [detailId, setDetailId] = useState<string | null>(readTaskDetailId);
   const [creatingIn, setCreatingIn] = useState<string | null>(null);
   const mounted = useRef(true);
   // A real HTML5 drag fires a trailing click; suppress it so a drag never also
@@ -94,6 +107,22 @@ export function TasksView({
       clearInterval(timer);
     };
   }, [refresh]);
+
+  // Follow browser back/forward and manual edits of the `#/tasks/<id>` sub-hash.
+  useEffect(() => {
+    const onHash = () => setDetailId(readTaskDetailId());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  const openDetail = useCallback((id: string) => {
+    window.location.hash = `/tasks/${encodeURIComponent(id)}`;
+    setDetailId(id);
+  }, []);
+  const closeDetail = useCallback(() => {
+    window.location.hash = "/tasks";
+    setDetailId(null);
+  }, []);
 
   async function moveTo(column: string) {
     const id = dragId;
@@ -140,7 +169,23 @@ export function TasksView({
       dragged.current = false;
       return;
     }
-    setSelected(task);
+    openDetail(task.id);
+  }
+
+  // The detail screen replaces the board in place; the board keeps polling
+  // underneath so its state is reconciled by the time we return.
+  if (detailId) {
+    return (
+      <TaskDetailView
+        client={client}
+        company={company}
+        taskId={detailId}
+        onBack={closeDetail}
+        onNavigate={openDetail}
+        onSaved={(saved) => setTasks((ts) => ts.map((t) => (t.id === saved.id ? saved : t)))}
+        onDeleted={(id) => setTasks((ts) => ts.filter((t) => t.id !== id))}
+      />
+    );
   }
 
   return (
@@ -232,21 +277,6 @@ export function TasksView({
         <div aria-hidden className="w-4 shrink-0" />
       </div>
 
-      <TaskDetailDialog
-        task={selected}
-        onClose={() => setSelected(null)}
-        onSaved={(saved) => {
-          setTasks((ts) => ts.map((t) => (t.id === saved.id ? saved : t)));
-          setSelected(null);
-        }}
-        onDeleted={(id) => {
-          setTasks((ts) => ts.filter((t) => t.id !== id));
-          setSelected(null);
-        }}
-        client={client}
-        company={company}
-      />
-
       <CreateTaskDialog
         column={creatingIn}
         onClose={() => setCreatingIn(null)}
@@ -334,166 +364,6 @@ function TaskItem({
         </Button>
       )}
     </div>
-  );
-}
-
-function TaskDetailDialog({
-  task,
-  onClose,
-  onSaved,
-  onDeleted,
-  client,
-  company,
-}: {
-  task: Task | null;
-  onClose: () => void;
-  onSaved: (t: Task) => void;
-  onDeleted: (id: string) => void;
-  client: OpenCompanyClient;
-  company: string | null;
-}) {
-  const [draft, setDraft] = useState<PatchTask>({});
-  const [busy, setBusy] = useState(false);
-
-  // Reset the edit draft each time a different card is opened.
-  useEffect(() => {
-    if (task) {
-      setDraft({
-        title: task.title,
-        note: task.note ?? "",
-        column: task.column,
-        priority: task.priority,
-        assignee: task.assignee,
-      });
-    }
-  }, [task]);
-
-  if (!task) return null;
-
-  async function save() {
-    if (!task) return;
-    setBusy(true);
-    try {
-      const saved = await patchTask(client, company, task.id, draft);
-      onSaved(saved);
-      toast.success("Saved.");
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "could not save");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function remove() {
-    if (!task) return;
-    setBusy(true);
-    try {
-      await deleteTask(client, company, task.id);
-      onDeleted(task.id);
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "could not delete");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Dialog open={!!task} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-lg">
-        <DialogHeader>
-          <DialogTitle>Task detail</DialogTitle>
-          <DialogDescription>
-            Edit the card, or drop it into “In progress” on the board to dispatch it.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="grid gap-3">
-          <div className="grid gap-1.5">
-            <Label htmlFor="task-title">Title</Label>
-            <Input
-              id="task-title"
-              value={draft.title ?? ""}
-              onChange={(e) => setDraft((d) => ({ ...d, title: e.target.value }))}
-            />
-          </div>
-
-          <div className="grid gap-1.5">
-            <Label htmlFor="task-note">Note / result</Label>
-            <Textarea
-              id="task-note"
-              rows={8}
-              className="font-mono text-xs"
-              value={draft.note ?? ""}
-              onChange={(e) => setDraft((d) => ({ ...d, note: e.target.value }))}
-            />
-          </div>
-
-          <div className="grid grid-cols-3 gap-3">
-            <div className="grid gap-1.5">
-              <Label>Column</Label>
-              <Select
-                value={draft.column}
-                onValueChange={(v) => setDraft((d) => ({ ...d, column: v ?? undefined }))}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {TASK_COLUMNS.map((c) => (
-                    <SelectItem key={c.id} value={c.id}>
-                      {c.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="grid gap-1.5">
-              <Label>Priority</Label>
-              <Select
-                value={draft.priority}
-                onValueChange={(v) => setDraft((d) => ({ ...d, priority: v ?? undefined }))}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {PRIORITIES.map((p) => (
-                    <SelectItem key={p} value={p} className="capitalize">
-                      {p}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="task-assignee">Assignee</Label>
-              <Input
-                id="task-assignee"
-                value={draft.assignee ?? ""}
-                placeholder="agent id"
-                onChange={(e) => setDraft((d) => ({ ...d, assignee: e.target.value }))}
-              />
-            </div>
-          </div>
-        </div>
-
-        <DialogFooter className="justify-between sm:justify-between">
-          <Button variant="ghost" size="sm" onClick={() => void remove()} disabled={busy}>
-            <Trash2 className="mr-1.5 size-4" />
-            Delete
-          </Button>
-          <div className="flex gap-2">
-            <Button variant="outline" onClick={onClose} disabled={busy}>
-              Cancel
-            </Button>
-            <Button onClick={() => void save()} disabled={busy}>
-              {busy && <Loader2 className="mr-1.5 size-4 animate-spin" />}
-              Save
-            </Button>
-          </div>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }
 
