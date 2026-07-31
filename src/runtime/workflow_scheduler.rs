@@ -256,11 +256,23 @@ impl WorkflowScheduler {
             }
         }
 
+        // --- sweep stale per-company/per-workflow state -------------------
+        // Both maps are keyed on things that can disappear (a workflow is
+        // deleted, a company is archived out of the registry), so both need a
+        // sweep or they grow for the life of the process. One place, so there
+        // is a single obvious point where this happens.
+
         // Only the CURRENT minute can dedupe a fire, so every older entry is
-        // dead weight — and without this the map grows one entry per
-        // (company, workflow) ever fired and never shrinks, holding ids of
-        // companies and workflows that have since been deleted.
+        // dead weight.
         self.last_fired.retain(|_, fired_at| *fired_at >= minute);
+
+        // A company removed from the registry is never visited again, so
+        // NEITHER re-arm path in `note_unwired` (a runner appearing, or the
+        // scheduled count dropping to zero) can ever clear its latch — the
+        // entry would be orphaned forever.
+        let registry = &self.registry;
+        self.warned_unwired
+            .retain(|company| registry.get(company).is_some());
 
         fired
     }
@@ -277,7 +289,9 @@ impl WorkflowScheduler {
     /// * **Once per company, not once per tick.** The tick is every minute
     ///   forever; logging there would be ~1440 lines a day per tenant, which
     ///   buries the signal it is trying to raise. The latch is re-armed in
-    ///   [`tick`](Self::tick) as soon as a runner appears.
+    ///   [`tick`](Self::tick) as soon as a runner appears, and swept there when
+    ///   the company leaves the registry — neither re-arm path can reach a
+    ///   company that is no longer visited.
     fn note_unwired(&mut self, company: &CompanyId, scheduled: usize) {
         if scheduled == 0 {
             self.warned_unwired.remove(company);
@@ -921,6 +935,42 @@ to = "done"
             "the workflow must be schedulable once its run completed"
         );
         wait_for(|| started.lock().unwrap().len() == 2).await;
+
+        cleanup(&home).await;
+    }
+
+    /// A company removed from the registry (archived) is swept out of the
+    /// warning latch. Neither re-arm path in `note_unwired` can reach it — both
+    /// require the company to still be visited by a tick — so without the sweep
+    /// its entry would be orphaned for the life of the process.
+    #[tokio::test]
+    async fn a_removed_company_is_swept_from_the_warning_latch() {
+        let home = tmp_home();
+        let company = CompanyId::new("acme");
+        let registry = company_with_overlays(
+            &home,
+            "acme",
+            vec![overlay("digest", Some("* * * * *"))],
+            None, // no runner, so the company latches a warning
+            "running",
+        )
+        .await;
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry.clone(), clock.clone());
+
+        assert_eq!(scheduler.tick().await, 0);
+        assert_eq!(scheduler.unwired_warnings, 1);
+        assert!(scheduler.warned_unwired.contains(&company));
+
+        // The company is archived out of the registry.
+        assert!(registry.remove(&company).is_some());
+
+        clock.set(millis_at(2026, 7, 13, 9, 1));
+        assert_eq!(scheduler.tick().await, 0);
+        assert!(
+            scheduler.warned_unwired.is_empty(),
+            "a company that no longer exists must not be held in the latch"
+        );
 
         cleanup(&home).await;
     }
