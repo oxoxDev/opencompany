@@ -51,10 +51,14 @@ env:
   ECR_REPOSITORY: tinyhumansai/opencompany-tenant
   K8S_NAMESPACE: opencompany-system
   MANAGER_DEPLOY: opencompany-manager
-  # The feature set the hosted tenant ships with. Kept verbatim from the
-  # pipeline this replaces — changing it changes what every tenant can do, so
-  # treat edits here as a product change, not a CI tweak.
-  TENANT_FEATURES: mongodb,openhuman,openhuman-rpc,tinyplace,github,smtp,dns,tinyhumans,webhooks,platform-jwt,export
+  # The feature set the hosted tenant ships with. Changing it changes what
+  # every tenant can do, so treat edits here as a product change, not a CI
+  # tweak. Full belt: adds mcp/media/composio (the credential/real-money tool
+  # families, fail-closed until their config exists), imap/telegram (channels),
+  # medulla (hosted brain transport), tinycortex (local memory backend), and
+  # sidecar. `sqlite` is intentionally omitted — its bundled rusqlite needs a C
+  # compiler the slim build image lacks, and it is redundant on a mongodb tenant.
+  TENANT_FEATURES: mongodb,openhuman,openhuman-rpc,tinyplace,github,smtp,dns,tinyhumans,webhooks,platform-jwt,export,mcp,media,composio,imap,telegram,medulla,tinycortex,sidecar
 
 jobs:
   deploy:
