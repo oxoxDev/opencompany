@@ -1654,7 +1654,8 @@ to = "done"
         "#;
         let err = parse_workflow(src).unwrap_err();
         assert!(
-            err.to_string().contains("only `output` nodes route a report"),
+            err.to_string()
+                .contains("only `output` nodes route a report"),
             "{err}"
         );
     }
