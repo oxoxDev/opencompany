@@ -107,6 +107,26 @@ function nextKey(): string {
   return `row-${seq}`;
 }
 
+/** The field updates for changing a node's kind: the new kind, plus a reset of
+ * every field only the OLD kind's controls could edit.
+ *
+ * The rule is "draft state matches the visible controls", and it covers EVERY
+ * kind-conditional field — `agent` (agent nodes), `schedule` (trigger nodes),
+ * and the destination pair (output nodes). Clearing beats tolerating a stale
+ * value: `submit()` already drops fields that don't match the kind, but a stale
+ * `destinationKind` also had to pass validation, and there was no control left
+ * on screen to fix it with. `agent` and `schedule` never trapped the form that
+ * way; they are cleared so there is one rule here rather than three, and so
+ * that switching a node's kind and back doesn't silently resurrect a value the
+ * author can no longer see.
+ *
+ * Anything added to `DraftNode` behind a `node.kind === …` control belongs in
+ * this reset.
+ */
+function changeKind(kind: string): Partial<DraftNode> {
+  return { kind, agent: "", schedule: "", destinationKind: "", destinationTarget: "" };
+}
+
 /** A blank node row, so every construction site stays in step as the shape grows. */
 function blankNode(fields: Partial<DraftNode> = {}): DraftNode {
   return {
@@ -230,16 +250,16 @@ export function WorkflowCreateDialog({
       if (n.kind === "agent" && !n.agent.trim()) {
         return `Node \`${n.id}\` is an agent node — pick who does it.`;
       }
+      // Only fires for a node that IS a trigger, so this is a check on visible
+      // state, never an off-kind trap.
       if (n.kind === "trigger" && n.schedule.trim() && !looksLikeCron(n.schedule)) {
         return "A schedule is a 5-field cron, e.g. `0 9 * * MON` (minute hour day month weekday).";
       }
-      // Mirrors the host's `destination` validation so a wrong target is caught
-      // here rather than after a round trip. Only output nodes carry one; the
-      // row that offers the control is already output-only, so this guards the
-      // case where the author picked a destination then changed the kind.
-      if (n.destinationKind && n.kind !== "output") {
-        return `Node \`${n.id}\` routes a report but isn't an output node — only output nodes report back.`;
-      }
+      // Mirrors the host's `destination` target rules so a wrong target is
+      // caught here rather than after a round trip. There is deliberately NO
+      // "destination on a non-output node" check: `changeKind` makes that state
+      // unreachable, and re-adding the check would only recreate the trap of an
+      // error the author has no visible control to clear.
       const target = n.destinationTarget.trim();
       if (n.destinationKind === "email" && !target.includes("@")) {
         return `Node \`${n.id}\` emails its report — give the recipient's full address.`;
@@ -453,7 +473,11 @@ function NodeRow({
           placeholder="node id"
           aria-label="Node id"
         />
-        <Select value={node.kind} onValueChange={(v) => onChange({ kind: v ?? "" })}>
+        {/* Changing the kind clears every kind-conditional field, so the draft
+            never holds a value whose control is no longer on screen. Without
+            this, picking a destination and then changing the kind left the row
+            un-submittable with nothing visible to clear. */}
+        <Select value={node.kind} onValueChange={(v) => onChange(changeKind(v ?? ""))}>
           <SelectTrigger className="h-8" aria-label="Node kind">
             <SelectValue />
           </SelectTrigger>
