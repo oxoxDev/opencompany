@@ -243,7 +243,7 @@ export function TaskDetailView({
   }
 
   return (
-    <div className="flex flex-1 flex-col overflow-hidden">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div className="flex items-center gap-2 border-b px-4 py-3">
         <Button variant="ghost" size="sm" className="-ml-2 h-8 px-2" onClick={onBack}>
           <ArrowLeft className="mr-1.5 size-4" />
@@ -267,7 +267,7 @@ export function TaskDetailView({
           <Skeleton className="h-48 rounded-xl" />
         </div>
       ) : detail ? (
-        <ScrollArea className="flex-1">
+        <ScrollArea className="min-h-0 flex-1">
           <div className="mx-auto w-full max-w-3xl space-y-5 p-4">
             <DetailHeader task={detail.task} worked={worked} />
 

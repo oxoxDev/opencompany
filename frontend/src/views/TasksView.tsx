@@ -189,7 +189,7 @@ export function TasksView({
   }
 
   return (
-    <div className="flex flex-1 flex-col overflow-hidden">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div className="flex items-center justify-between border-b px-4 py-3">
         <div className="flex items-center gap-2">
           <h2 className="text-sm font-semibold">Board</h2>
@@ -208,7 +208,7 @@ export function TasksView({
         </div>
       )}
 
-      <div className="flex flex-1 gap-4 overflow-x-auto py-4 pl-4">
+      <div className="flex min-h-0 flex-1 gap-4 overflow-x-auto py-4 pl-4">
         {TASK_COLUMNS.map((col) => {
           const items = tasks.filter((t) => t.column === col.id);
           return (
@@ -221,7 +221,7 @@ export function TasksView({
               onDragLeave={() => setOverCol((c) => (c === col.id ? null : c))}
               onDrop={() => void moveTo(col.id)}
               className={cn(
-                "flex w-72 shrink-0 flex-col rounded-xl border bg-card/40 transition-colors",
+                "flex min-h-0 w-72 shrink-0 flex-col rounded-xl border bg-card/40 transition-colors",
                 overCol === col.id && "border-primary/40 bg-accent/40",
               )}
             >
@@ -238,7 +238,7 @@ export function TasksView({
                   <Plus className="size-4" />
                 </button>
               </div>
-              <div className="flex flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2">
+              <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2">
                 {loading && items.length === 0 ? (
                   <Skeleton className="h-20 rounded-lg" />
                 ) : (
