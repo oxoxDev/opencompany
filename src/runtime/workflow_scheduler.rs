@@ -324,10 +324,21 @@ impl WorkflowScheduler {
     /// `shutdown` so the scheduler stops cleanly when the server does.
     pub fn spawn(mut self, shutdown: Arc<Notify>) -> JoinHandle<()> {
         tokio::spawn(async move {
+            // The `Notified` future is built ONCE and pinned across iterations,
+            // not rebuilt inside the `select!`. Boot signals with
+            // `notify_waiters()`, which wakes only the waiters registered at
+            // that instant — a future created fresh each iteration is not
+            // registered while `tick` is running, so a shutdown arriving
+            // mid-tick would be dropped and the scheduler would sleep another
+            // full minute before noticing. Polled once here, this one stays
+            // registered, and a notification delivered during `tick` is
+            // latched: the next `select!` sees it immediately.
+            let notified = shutdown.notified();
+            tokio::pin!(notified);
             loop {
                 let sleep_ms = millis_to_next_minute(self.clock.now_millis());
                 tokio::select! {
-                    _ = shutdown.notified() => break,
+                    _ = &mut notified => break,
                     _ = tokio::time::sleep(Duration::from_millis(sleep_ms)) => {
                         self.tick().await;
                     }
