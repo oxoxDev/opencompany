@@ -46,6 +46,7 @@ async fn state_with(home: &std::path::Path, connections: ConnectionsRuntime) -> 
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
             template_provenance: None,
         })
         .await
