@@ -2634,6 +2634,7 @@ description = "Sets direction."
             plan,
             media: None,
             composio: None,
+            artifacts: None,
             steer: crate::company::steer::InflightRegistry::default(),
         }
     }
