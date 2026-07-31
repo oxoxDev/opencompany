@@ -146,10 +146,11 @@ impl CompanyEngine {
     /// own summary-tree embedder stays inert), then rides a [`KvStore`] on the
     /// engine's shared per-workspace SQLite connection. When `embeddings` is
     /// `Some`, a [`VectorStore`] is also opened at `<workspace>/vectors.db` for
-    /// the meaning tier; a dimension/signature drift against a pre-existing
-    /// index is recovered by clearing and rebuilding it (the backfill then
-    /// re-populates), and a hard failure degrades to lexical-only rather than
-    /// failing the open. The workspace directory is created if absent.
+    /// the meaning tier; only a confirmed dimension/signature drift against a
+    /// pre-existing index is recovered by clearing and rebuilding it (the
+    /// backfill then re-populates) — any other open failure degrades to
+    /// lexical-only *without deleting the existing index files*, and never
+    /// fails the whole open. The workspace directory is created if absent.
     fn open(workspace: PathBuf, embeddings: Option<Arc<dyn EmbeddingBackend>>) -> Result<Self> {
         std::fs::create_dir_all(&workspace).map_err(|e| {
             OpenCompanyError::Store(format!(
@@ -390,14 +391,29 @@ impl EngineCortex {
     }
 }
 
+/// Substring [`VectorStore::open`] emits only for a dimension mismatch between
+/// the persisted `store_meta` and the runtime backend (see the vendored
+/// `check_or_store_meta` in `tinycortex::memory::store::vectors::store`) —
+/// `"vector store dimension mismatch: database was created with {stored}-dim
+/// embeddings but the current backend ({name}) uses {runtime} dims. Delete the
+/// database or reconfigure the backend."`. Matching on this exact, stable
+/// substring is what distinguishes a recoverable embedding-space drift from any
+/// other open failure (I/O error, permissions, corrupt sqlite file, corrupt
+/// `embed_dims` metadata) — none of which should destroy a healthy index.
+const DIMENSION_DRIFT_MARKER: &str = "vector store dimension mismatch";
+
 /// Opens (or rebuilds) the per-company [`VectorStore`] at `<workspace>/vectors.db`,
 /// or `None` to degrade to lexical-only.
 ///
-/// On a dimension/signature drift against an existing index, [`VectorStore::open`]
-/// fails closed; we clear the index files and rebuild once (the backfill then
-/// re-populates against the current backend), so a model change never wedges the
-/// engine. A second failure returns `None` — the engine keeps serving lexical
-/// recall rather than failing its whole open.
+/// Only a confirmed dimension/signature drift against an existing index (the
+/// [`DIMENSION_DRIFT_MARKER`] error [`VectorStore::open`] emits when the
+/// persisted `store_meta` disagrees with the runtime backend's dimensionality)
+/// clears the index files and rebuilds once (the backfill then re-populates
+/// against the current backend), so a model change never wedges the engine.
+/// Any other open error (I/O, permissions, corrupt sqlite file, corrupt
+/// `embed_dims` metadata) is logged and returns `None` immediately **without**
+/// deleting anything — a transient or unrelated failure must never destroy a
+/// healthy vector index.
 fn open_vector_store(
     workspace: &std::path::Path,
     backend: Arc<dyn EmbeddingBackend>,
@@ -406,10 +422,18 @@ fn open_vector_store(
     match VectorStore::open(&db, backend.clone()) {
         Ok(store) => Some(store),
         Err(first) => {
+            if !first.to_string().contains(DIMENSION_DRIFT_MARKER) {
+                tracing::warn!(
+                    db = %db.display(),
+                    error = %first,
+                    "[tinycortex] vector store open failed (not a dimension drift); lexical-only, index left untouched"
+                );
+                return None;
+            }
             tracing::warn!(
                 db = %db.display(),
                 error = %first,
-                "[tinycortex] vector store open failed (likely embedding-space drift); clearing + rebuilding"
+                "[tinycortex] vector store open failed (embedding-space dimension drift); clearing + rebuilding"
             );
             for suffix in ["", "-wal", "-shm"] {
                 let _ = std::fs::remove_file(workspace.join(format!("vectors.db{suffix}")));
