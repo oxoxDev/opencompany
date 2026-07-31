@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use opencompany::company::Schedule;
-use opencompany::runtime::{CompanyScheduler, SystemClock};
+use opencompany::runtime::{CompanyScheduler, SystemClock, WorkflowScheduler};
 use opencompany::{
     AppConfig, AppState, CompanyId, CompanyManifest, Result,
     app::config::{ConfigFile, ProcessEnv, resolve},
@@ -287,6 +287,21 @@ fn spawn_scheduler(
             None
         }
     }
+}
+
+/// Starts the process-wide workflow scheduler: one task that fires every saved
+/// workflow whose `trigger` node carries a cron (issue #169).
+///
+/// Deliberately NOT per company, unlike [`spawn_scheduler`]. Workflow schedules
+/// are runtime data — creating a workflow in the console adds a cron with no
+/// reboot, and a hosted tenant can be registered after boot — so the scheduler
+/// re-reads the registry on every tick instead of snapshotting a company's
+/// schedules at registration time.
+fn spawn_workflow_scheduler(
+    state: &AppState,
+    shutdown: &Arc<Notify>,
+) -> tokio::task::JoinHandle<()> {
+    WorkflowScheduler::new(state.registry().clone(), Arc::new(SystemClock)).spawn(shutdown.clone())
 }
 
 /// Starts a company's IMAP mailbox poller as a background task, if the
@@ -854,6 +869,11 @@ async fn main() -> Result<()> {
             if companies.is_empty() {
                 println!("serving with no companies; pass --company <dir> to load one");
             }
+
+            // One workflow scheduler for the whole process, started even with no
+            // companies loaded: it re-reads the registry each minute, so a
+            // company registered later is picked up without a restart.
+            scheduler_handles.push(spawn_workflow_scheduler(&state, &shutdown));
 
             // Stop the schedulers on Ctrl-C so background cycle work halts with
             // the process (lifecycle shutdown).
