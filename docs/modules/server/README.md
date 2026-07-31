@@ -62,9 +62,54 @@ because the orchestrator's `run_workflow` tool and the trigger scheduler drive
 that same port — and a scheduled run is exactly the case where nobody is
 watching the console. The run response therefore carries `deliveries`: one row
 per attempt (`sent` / `skipped` / `denied` / `failed`) with an operator-readable
-reason. A delivery failure never fails the run, so that list is the only place
-an operator learns a report did not go out; an unwired runtime writes a loud
-`failed` row rather than skipping silently.
+reason. A delivery failure never fails the run, so that list is where an
+operator learns a report did not go out; an unwired runtime writes a loud
+`failed` row rather than skipping silently. A **scheduled** run has no response
+to carry those rows, so the scheduler logs each undelivered one instead — see
+`src/runtime/workflow_scheduler.rs`, which is also honest that a host log line
+is not the same as an operator-visible surface (issue #228).
+
+Authoring a destination and reading the result back:
+
+```bash
+# Create a graph whose output node reports to the company's admins.
+curl -X POST "$HOST/api/v1/company/workflows" -H 'content-type: application/json' -d '{
+  "id": "weekly_digest",
+  "name": "Weekly digest",
+  "nodes": [
+    { "id": "start", "kind": "trigger", "name": "Monday 09:00", "schedule": "0 9 * * MON" },
+    { "id": "write", "kind": "agent",  "name": "Draft it", "agent": "chief_of_staff" },
+    { "id": "done",  "kind": "output", "name": "Owner summary",
+      "destination": { "kind": "owner" } }
+  ],
+  "edges": [ { "from": "start", "to": "write" }, { "from": "write", "to": "done" } ]
+}'
+
+# Run it now. `deliveries` says what happened to the report.
+curl -X POST "$HOST/api/v1/company/workflows/weekly_digest/run" \
+     -H 'content-type: application/json' -d '{"input":{"request":"last week"}}'
+```
+
+```jsonc
+{
+  "output": { "nodes": { "done": { "items": [ { "json": { "text": "…" } } ] } } },
+  "pendingApprovals": [],
+  "deliveries": [
+    { "node": "done", "kind": "owner", "target": "ada@acme.test",
+      "status": "sent", "detail": "emailed the company's admin" }
+  ]
+}
+```
+
+Swap `{ "kind": "owner" }` for `{ "kind": "email", "target": "ada@example.com" }`
+and a recipient who has never written in comes back as
+`"status": "skipped"` with the reason, having sent nothing:
+
+```jsonc
+{ "node": "done", "kind": "email", "target": "ada@example.com",
+  "status": "skipped",
+  "detail": "this recipient has never written to the company, so a workflow may not open the conversation — send once from the inbox first" }
+```
 
 The gating is fail-closed and differs per kind. `owner` resolves server-side to
 the company's active admins (the graph names nobody) and falls back to the
@@ -72,7 +117,11 @@ the company's active admins (the graph names nobody) and falls back to the
 wired. `email` is the only kind that can address an outsider, and it needs
 **both** an `email` grant in the manifest's `[tools].allow` **and** an
 established inbound thread from that address — the same rule the agent send
-path applies; a cold recipient is skipped and reported, never mailed.
+path applies; a cold recipient is skipped and reported, never mailed. Note the
+grant half is satisfied by default: since #230 an unset `[tools].allow` defaults
+to `["*", "media", "composio"]` and `*` covers `email`, so on a
+default-configured company the established-thread rule is the gate actually
+holding the line. Narrow `[tools].allow` explicitly to close the first one.
 
 Every credential-shaped value written here lands in the `SecretStore`; the
 responses expose only non-secret status. The networked seams (DNS, SMTP, OAuth
