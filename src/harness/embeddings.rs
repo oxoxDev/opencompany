@@ -98,12 +98,20 @@ impl HostedEmbeddings {
         model: impl Into<String>,
         dimensions: usize,
     ) -> Self {
+        // A stalled hosted endpoint must degrade to lexical recall, never hang
+        // the request path (put_chunk/search_chunks) indefinitely — and the 401
+        // retry in `send_with_retry` would otherwise double the worst case.
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             base_url: base_url.into(),
             credential,
             model: model.into(),
             dimensions,
-            client: reqwest::Client::new(),
+            client,
         }
     }
 
