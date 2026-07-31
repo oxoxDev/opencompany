@@ -521,19 +521,24 @@ fn company_address(rt: &CompanyRuntime) -> String {
 /// `to` — an established thread, so replying is auto-allowed instead of
 /// parking for approval. Fails closed (`false`) on a missing mail handle or a
 /// store error, which routes the caller to the cold-recipient park path.
+///
+/// Delegates the lookup to [`has_inbound_from`](crate::ports::InboxStore::has_inbound_from)
+/// rather than scanning a page of
+/// [`messages`](crate::ports::InboxStore::messages): this answer decides
+/// an approval gate, and a gate built on a capped oldest-first page silently
+/// stops finding real correspondents once the inbox outgrows the cap — past
+/// that point every reply parks, and an approval queue full of legitimate mail
+/// is one operators learn to rubber-stamp (issue #232).
 async fn recipient_is_established(rt: &CompanyRuntime, to: &str) -> bool {
     let address = company_address(rt);
     if address.is_empty() {
         return false;
     }
     let key = crate::server::ops::smtp::local_part(&address);
-    let to = to.trim().to_ascii_lowercase();
-    match rt.inbox().messages(rt.id(), &key, 500, 0).await {
-        Ok(records) => records
-            .iter()
-            .any(|r| !r.outbound && r.from_email.trim().to_ascii_lowercase() == to),
-        Err(_) => false, // fail closed → parks for approval
-    }
+    rt.inbox()
+        .has_inbound_from(rt.id(), &key, to)
+        .await
+        .unwrap_or(false) // fail closed → parks for approval
 }
 
 /// The host the brain calls back into mid-cycle. Bridges tool, context, and
@@ -1920,6 +1925,83 @@ mod test {
             .unwrap();
         assert_eq!(res.output["status"], "sent");
         assert_eq!(sender.sent().len(), 1);
+        tokio::fs::remove_dir_all(&home).await.ok();
+    }
+
+    /// Issue #232: the established-correspondent gate must not weaken as the
+    /// inbox grows.
+    ///
+    /// [`InboxStore::messages`] returns **oldest-first**, so the old
+    /// `messages(.., 500, 0)` scan only ever saw the 500 *oldest* messages.
+    /// Past that size every newer correspondent read as unknown, and every
+    /// reply to a real thread parked for approval — an approval queue nobody
+    /// can distinguish from noise is an approval queue everyone rubber-stamps.
+    ///
+    /// So the correspondent here is filed **last**, past the old cap. Policy is
+    /// `full` (every effect executes) to isolate the flags on the effect from
+    /// the gate decision they feed: this asserts what the send path *believes*
+    /// about the recipient, not what the policy did with that belief.
+    #[tokio::test]
+    async fn established_recipient_past_the_old_page_cap_is_not_first_time() {
+        let home = tmp_home();
+        let sender = Arc::new(RecordingMailSender::new());
+        let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
+            .with_mail(CompanyMail {
+                sender: sender.clone(),
+                smtp: test_smtp("ceo@acme.test"),
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let file = async |id: usize, from: &str| {
+            rt.inbox()
+                .append(
+                    rt.id(),
+                    &crate::ports::inbox::EmailRecord {
+                        id: format!("m{id}"),
+                        inbox: "ceo".into(),
+                        from_name: String::new(),
+                        from_email: from.to_string(),
+                        subject: "hi".into(),
+                        body: String::new(),
+                        at_millis: id as u64,
+                        read: false,
+                        outbound: false,
+                    },
+                )
+                .await
+                .unwrap();
+        };
+
+        // 501 older messages from other people, so the real correspondent lands
+        // at index 501 — one past the end of the old 500-message page.
+        for i in 0..501 {
+            file(i, &format!("filler{i}@ext.com")).await;
+        }
+        file(501, "known@ext.com").await;
+
+        let host = CycleHostImpl::new(rt.id().clone(), "cyc-deep".into(), &rt);
+        let res = host
+            .send_email(serde_json::json!({ "to": "known@ext.com", "subject": "s", "body": "b" }))
+            .await
+            .unwrap();
+        assert_eq!(res.output["status"], "sent");
+
+        let (executed, parked) = host.into_outcomes();
+        assert!(parked.is_empty(), "an established thread must not park");
+        let effect = executed
+            .iter()
+            .find(|e| e.kind == EMAIL_SEND_KIND)
+            .expect("the send path emitted an email.send effect");
+        assert!(
+            effect.established_thread,
+            "a correspondent who wrote in past message 500 is still established"
+        );
+        assert!(
+            !effect.first_time_counterparty,
+            "a correspondent who wrote in is never a first-time counterparty"
+        );
         tokio::fs::remove_dir_all(&home).await.ok();
     }
 
