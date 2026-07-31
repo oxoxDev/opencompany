@@ -125,6 +125,7 @@ async fn run_workflow_inner(
     Ok(WorkflowRun {
         output: outcome.output,
         pending_approvals: outcome.pending_approvals,
+        deliveries: Vec::new(),
     })
 }
 

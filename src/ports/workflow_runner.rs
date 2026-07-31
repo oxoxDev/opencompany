@@ -27,6 +27,59 @@ pub struct WorkflowRun {
     /// Node ids that paused the run awaiting human approval. Empty for a run
     /// that reached its terminal node(s) without gating.
     pub pending_approvals: Vec<String>,
+    /// One row per attempt to route a reached `output` node's report to its
+    /// configured destination (issue #170), in graph order.
+    ///
+    /// Empty for a graph whose `output` nodes name no destination — the
+    /// pre-#170 shape — which is why it is `#[serde(default)]`: a `WorkflowRun`
+    /// deserialized from an older payload still loads.
+    ///
+    /// A delivery failure is reported here rather than failing the run: the work
+    /// the run did is still valid. An output node the run never reached
+    /// contributes no row at all, so an absent row means "not reached", never
+    /// "silently dropped".
+    #[serde(default)]
+    pub deliveries: Vec<DeliveryReport>,
+}
+
+/// What became of one attempt to deliver an `output` node's report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeliveryStatus {
+    /// The transport accepted the report.
+    Sent,
+    /// Deliberately not attempted — a policy precondition was unmet (a cold
+    /// email recipient, no mailbox configured). Not an error; the report simply
+    /// was not owed to that address under the current rules.
+    Skipped,
+    /// Refused by policy: the company does not grant what the destination needs.
+    Denied,
+    /// Attempted (or attemptable) and did not work — a transport error, an
+    /// unwired channel, or a runtime with no delivery ports at all.
+    Failed,
+}
+
+/// One attempt to route a reached `output` node's report somewhere.
+///
+/// Rides the run response into the console's run-result panel, so an operator
+/// can tell a delivered report from an undelivered one without reading a log.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliveryReport {
+    /// The `output` node whose report this was.
+    pub node: String,
+    /// The destination kind as authored (`owner` / `email` / `channel`).
+    pub kind: String,
+    /// The address or channel actually addressed. For `owner` this is the
+    /// server-resolved recipient, not something the graph named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// What became of the attempt.
+    pub status: DeliveryStatus,
+    /// An operator-readable reason, always populated — including on success, so
+    /// a `sent` row still says *how* it was sent (which matters for `owner`,
+    /// whose recipient the graph never named).
+    pub detail: String,
 }
 
 /// Runs a company's workflow graph to completion.

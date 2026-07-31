@@ -1974,6 +1974,7 @@ name = "Morning"
             Self::new(WorkflowRun {
                 output: Value::Null,
                 pending_approvals: Vec::new(),
+                deliveries: Vec::new(),
             })
         }
     }
@@ -2059,6 +2060,7 @@ name = "Morning"
                 "nodes": { "worker": { "items": ["did the thing"] }, "done": { "items": [] } }
             }),
             pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
         });
         let calls = runner_impl.calls.clone();
         let runner: Arc<dyn WorkflowRunner> = Arc::new(runner_impl);
@@ -2092,6 +2094,7 @@ name = "Morning"
         let runner: Arc<dyn WorkflowRunner> = Arc::new(StubRunner::new(WorkflowRun {
             output: json!({ "nodes": { "worker": { "items": [] } } }),
             pending_approvals: vec!["worker".to_string()],
+            deliveries: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -2266,6 +2269,7 @@ name = "Morning"
         let runner: Arc<dyn WorkflowRunner> = Arc::new(StubRunner::new(WorkflowRun {
             output: json!({ "nodes": { "worker": { "items": ["hi"] } } }),
             pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -2342,6 +2346,7 @@ name = "Morning"
         let runner: Arc<dyn WorkflowRunner> = Arc::new(StubRunner::new(WorkflowRun {
             output: json!({ "nodes": { "done": { "items": ["ok"] } } }),
             pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
