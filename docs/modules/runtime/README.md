@@ -31,8 +31,22 @@ enumerates graphs through the seed ∪ overlay union
 record overlays — are scheduled too. A matching minute fires the workflow on its
 own tokio task (a scheduled run is a *new* causal chain at `WORKFLOW_DEPTH` 0,
 exactly like an operator clicking Run) with an in-flight guard per
-`(company, workflow)` so a slow run never overlaps itself. Missed runs are
-skipped, never caught up. All cron times are UTC.
+`(company, workflow)` so a slow run never overlaps itself — held as an RAII
+guard, so a run that panics releases its slot on the unwind instead of retiring
+that schedule for the life of the process. Missed runs are skipped, never caught
+up. All cron times are UTC, and a graph may carry at most one scheduled trigger
+(validated in `workflow_file.rs`).
+
+**When a company has schedules but no runner**, the scheduler says so once. This
+is the default build's inert seam, but it is *also* what a configured build looks
+like when its inference source fails to resolve at boot — in which case a saved
+schedule silently never fires and looks identical to a working one. The warning
+is latched per company rather than emitted per tick (once a minute forever would
+be ~1440 lines a day per tenant, burying the signal it raises), and re-armed on
+either state change: a runner appearing, or the company's scheduled-workflow
+count dropping to zero — so a schedule saved later onto a still-unwired company
+is reported rather than swallowed by the latch. A company with no scheduled
+workflows and no runner is not misconfigured and stays silent.
 
 ## Harness pool (`src/harness/`, feature `openhuman`)
 
