@@ -920,6 +920,14 @@ type WorkflowNode {
 	Whether the node pauses awaiting operator approval before it runs.
 	"""
 	requiresApproval: Boolean
+	"""
+	Where an `output` node's report is routed once the run finishes (issue
+	#170), as a JSON scalar: `{"kind": "owner"|"email"|"channel",
+	"target"?: "…"}`. Exposed for the same reason `config` is — so
+	`Company.workflow(id)` does not drop model data. Both keys are single
+	words, so the model shape needs no camelCase mirror the way `retry` does.
+	"""
+	destination: JSON
 }
 
 """

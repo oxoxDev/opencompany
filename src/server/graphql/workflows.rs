@@ -73,6 +73,12 @@ pub struct WorkflowNodeGql {
     pub retry: Option<async_graphql::Json<RetryGql>>,
     /// Whether the node pauses awaiting operator approval before it runs.
     pub requires_approval: Option<bool>,
+    /// Where an `output` node's report is routed once the run finishes (issue
+    /// #170), as a JSON scalar: `{"kind": "owner"|"email"|"channel",
+    /// "target"?: "…"}`. Exposed for the same reason `config` is — so
+    /// `Company.workflow(id)` does not drop model data. Both keys are single
+    /// words, so the model shape needs no camelCase mirror the way `retry` does.
+    pub destination: Option<async_graphql::Json<crate::company::WorkflowDestinationDef>>,
 }
 
 /// The camelCase retry shape the console reads back over GraphQL, mirroring the
@@ -129,6 +135,7 @@ impl From<WorkflowFile> for WorkflowGql {
                     on_error: node.on_error,
                     retry: node.retry.map(|r| async_graphql::Json(RetryGql::from(r))),
                     requires_approval: node.requires_approval,
+                    destination: node.destination.map(async_graphql::Json),
                 })
                 .collect(),
             edges: file
@@ -273,6 +280,67 @@ mod tests {
                 "backoffMs": 250,
                 "backoff": "exponential"
             })
+        );
+        // A node with no destination carries none.
+        assert!(node.destination.is_none());
+    }
+
+    /// An `output` node's destination reaches the GraphQL read shape too — the
+    /// console's REST path is not the only reader, and a resolver that dropped
+    /// it would report the graph as routing nowhere (issue #170).
+    #[test]
+    fn node_conversion_preserves_the_output_destination() {
+        let file = parse_workflow(
+            r#"
+            id = "wf"
+            name = "Workflow"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "done"
+            kind = "output"
+            name = "Report"
+            [node.destination]
+            kind = "email"
+            target = "ada@example.com"
+            [[edge]]
+            from = "start"
+            to = "done"
+            "#,
+        )
+        .expect("workflow parses");
+
+        let gql = WorkflowGql::from(file);
+        let done = gql.nodes.iter().find(|n| n.id.as_str() == "done").unwrap();
+        assert_eq!(
+            serde_json::to_value(&done.destination.as_ref().unwrap().0).unwrap(),
+            json!({ "kind": "email", "target": "ada@example.com" })
+        );
+        // `owner` carries no target, and the key stays absent rather than null.
+        let owner = parse_workflow(
+            r#"
+            id = "wf2"
+            name = "Workflow 2"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "done"
+            kind = "output"
+            name = "Report"
+            [node.destination]
+            kind = "owner"
+            "#,
+        )
+        .expect("parses");
+        let gql = WorkflowGql::from(owner);
+        let done = gql.nodes.iter().find(|n| n.id.as_str() == "done").unwrap();
+        assert_eq!(
+            serde_json::to_value(&done.destination.as_ref().unwrap().0).unwrap(),
+            json!({ "kind": "owner" })
         );
     }
 }
