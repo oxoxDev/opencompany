@@ -163,7 +163,21 @@ jobs:
           # `ctr`, which defaults to `default`), but naming it means this does not
           # silently break if that wrapper default ever changes.
           k3s ctr -n k8s.io images pull --user "${PULL_USER}:${PULL_PW}" "${IMAGE}"
-          k3s ctr -n k8s.io images ls -q | grep -Fqx "${IMAGE}" \
+
+          # Retry the check: `images ls` can lag a just-finished pull by a beat
+          # while containerd commits the record (observed failing 147ms after a
+          # successful pull, with layers still reporting `extracted`). The
+          # assertion is worth keeping — a silent pull failure would leave tenants
+          # unable to start — but it must not fail the deploy on that race.
+          present=no
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            if k3s ctr -n k8s.io images ls -q | grep -Fqx "${IMAGE}"; then
+              present=yes
+              break
+            fi
+            sleep 2
+          done
+          [ "${present}" = yes ] \
             || { echo "ERROR: ${IMAGE} is not in the k8s.io containerd namespace after pull" >&2; exit 1; }
 
           # Tenant pods pin imagePullPolicy: IfNotPresent, so a moving tag is not
