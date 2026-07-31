@@ -29,6 +29,24 @@
 //!
 //! Missed runs are skipped, never caught up — identical to the manifest cron
 //! scheduler, so a restart after downtime does not burst.
+//!
+//! ## Report delivery on a scheduled run
+//!
+//! An `output` node may route its report to a person or a channel (issue #170).
+//! The runner delivers it either way — the scheduler drives the same
+//! [`WorkflowRunner`] port the console's Run button does — but only a manual run
+//! gets the [`WorkflowRun::deliveries`](crate::ports::WorkflowRun) rows back in
+//! an HTTP response for the console to render. A scheduled run has no response
+//! and no one watching, so this module logs them instead.
+//!
+//! **Be clear about the ceiling of that.** A log line reaches whoever can read
+//! the host's stdout. On a self-hosted deployment that is the operator; on a
+//! hosted tenant it is emphatically not — it is us. So this makes a failed
+//! scheduled delivery *diagnosable*, not *operator-visible*. Closing that gap
+//! needs somewhere durable an operator actually looks, and no such run-history
+//! surface exists for workflows yet (a manual run's deliveries are transient
+//! too — they live only in the drawer until it is dismissed). That is issue
+//! #228; this is the half that can be done without inventing a subsystem.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -40,12 +58,47 @@ use tokio::task::JoinHandle;
 
 use crate::company::{WorkflowFile, list_workflows_union};
 use crate::ports::types::CompanyId;
+use crate::ports::{DeliveryReport, DeliveryStatus};
 use crate::runtime::CompanyRegistry;
 use crate::runtime::cron::{CivilTime, CronExpr};
 use crate::runtime::scheduler::{Clock, MINUTE_MS, millis_to_next_minute};
 
 /// Identifies one schedulable workflow: which company, which graph.
 type WorkflowKey = (CompanyId, String);
+
+/// How a scheduled run's report deliveries came out, folded for one log line.
+///
+/// A count per status rather than a bare total: `skipped` and `denied` mean
+/// policy refused to send (a cold recipient, a missing `email` grant) while
+/// `failed` means something broke, and an operator reading a scheduled run's
+/// outcome needs to tell those apart before deciding whether to act.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DeliveryCounts {
+    sent: usize,
+    skipped: usize,
+    denied: usize,
+    failed: usize,
+}
+
+impl DeliveryCounts {
+    fn of(reports: &[DeliveryReport]) -> Self {
+        let mut counts = Self::default();
+        for report in reports {
+            match report.status {
+                DeliveryStatus::Sent => counts.sent += 1,
+                DeliveryStatus::Skipped => counts.skipped += 1,
+                DeliveryStatus::Denied => counts.denied += 1,
+                DeliveryStatus::Failed => counts.failed += 1,
+            }
+        }
+        counts
+    }
+
+    /// Reports that did NOT reach their destination, whatever the reason.
+    fn undelivered(&self) -> usize {
+        self.skipped + self.denied + self.failed
+    }
+}
 
 /// Drives the cron schedules authored on saved workflow graphs.
 pub struct WorkflowScheduler {
@@ -238,12 +291,44 @@ impl WorkflowScheduler {
                     let _claim = claim;
                     let (company, workflow_id) = key;
                     match runner.run(&company, &workflow, input).await {
-                        Ok(run) => tracing::info!(
-                            %company,
-                            workflow = %workflow_id,
-                            pending_approvals = run.pending_approvals.len(),
-                            "workflow scheduler: scheduled run finished"
-                        ),
+                        Ok(run) => {
+                            // A manual run hands `deliveries` back in the HTTP
+                            // response and the console renders it. A scheduled
+                            // run has no response and nobody watching, so
+                            // without this the exact case the operator most
+                            // needs to know about — the owner summary that did
+                            // NOT go out — would be the quietest thing the
+                            // system does.
+                            let counts = DeliveryCounts::of(&run.deliveries);
+                            // One line per undelivered report: a count alone
+                            // says something is wrong without saying what to
+                            // fix, and `detail` is the part that names the fix.
+                            for report in &run.deliveries {
+                                if report.status == DeliveryStatus::Sent {
+                                    continue;
+                                }
+                                tracing::warn!(
+                                    %company,
+                                    workflow = %workflow_id,
+                                    node = %report.node,
+                                    kind = %report.kind,
+                                    target = report.target.as_deref().unwrap_or("-"),
+                                    status = ?report.status,
+                                    detail = %report.detail,
+                                    "workflow scheduler: a scheduled run's report was NOT delivered"
+                                );
+                            }
+                            tracing::info!(
+                                %company,
+                                workflow = %workflow_id,
+                                pending_approvals = run.pending_approvals.len(),
+                                sent = counts.sent,
+                                skipped = counts.skipped,
+                                denied = counts.denied,
+                                failed = counts.failed,
+                                "workflow scheduler: scheduled run finished"
+                            );
+                        }
                         Err(err) => tracing::warn!(
                             %company,
                             workflow = %workflow_id,
@@ -426,6 +511,84 @@ mod test {
     use crate::ports::{WorkflowRun, WorkflowRunner};
     use crate::runtime::{FakeClock, RuntimeBuilder};
 
+    // --- tracing capture -----------------------------------------------------
+    //
+    // The scheduler's only channel for a failed scheduled delivery IS a log
+    // line (see the module docs), so proving it is "observable rather than
+    // silent" means reading what it actually emitted. The run happens on a
+    // spawned task, and a thread-local subscriber does not reach one, so the
+    // capture is installed process-wide exactly once. Every test in this binary
+    // therefore shares one buffer — assertions must key on something unique to
+    // their own company id, never on "the buffer contains one line".
+
+    /// The shared capture buffer. `None` until `captured_logs()` installs it.
+    static CAPTURE: std::sync::OnceLock<Arc<Mutex<Vec<u8>>>> = std::sync::OnceLock::new();
+
+    /// A writer that accumulates one event and appends it to the shared buffer
+    /// in a single locked write on drop, so events from concurrent tests
+    /// interleave whole-line rather than mid-line.
+    struct CaptureWriter {
+        buf: Vec<u8>,
+        sink: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.buf.extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Drop for CaptureWriter {
+        fn drop(&mut self) {
+            if !self.buf.is_empty() {
+                self.sink.lock().unwrap().extend_from_slice(&self.buf);
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct MakeCapture(Arc<Mutex<Vec<u8>>>);
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for MakeCapture {
+        type Writer = CaptureWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            CaptureWriter {
+                buf: Vec::new(),
+                sink: self.0.clone(),
+            }
+        }
+    }
+
+    /// Installs the process-wide capture on first call and returns the buffer.
+    fn captured_logs() -> Arc<Mutex<Vec<u8>>> {
+        CAPTURE
+            .get_or_init(|| {
+                let sink = Arc::new(Mutex::new(Vec::new()));
+                let subscriber = tracing_subscriber::fmt()
+                    .with_writer(MakeCapture(sink.clone()))
+                    .with_max_level(tracing::Level::INFO)
+                    .with_ansi(false)
+                    .finish();
+                // Only this module installs one, so it cannot lose the race to
+                // another test; if some future test adds a subscriber, this
+                // returns Err and the capture tests would fail loudly rather
+                // than silently asserting on an empty buffer.
+                tracing::subscriber::set_global_default(subscriber)
+                    .expect("no other global tracing subscriber in the test binary");
+                sink
+            })
+            .clone()
+    }
+
+    /// The captured log text so far.
+    fn captured_text(sink: &Arc<Mutex<Vec<u8>>>) -> String {
+        String::from_utf8_lossy(&sink.lock().unwrap()).to_string()
+    }
+
     fn tmp_home() -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
             "opencompany-wfsched-{}",
@@ -481,6 +644,9 @@ mod test {
         completed: Arc<AtomicUsize>,
         /// When set, a run parks until the test adds a permit.
         gate: Option<Arc<Semaphore>>,
+        /// The delivery rows every run reports back, so a test can drive the
+        /// scheduler's undelivered-report path.
+        deliveries: Vec<DeliveryReport>,
     }
 
     impl RecordingRunner {
@@ -491,6 +657,7 @@ mod test {
                 started: started.clone(),
                 completed: completed.clone(),
                 gate: None,
+                deliveries: Vec::new(),
             });
             (runner, started, completed)
         }
@@ -502,8 +669,21 @@ mod test {
                 started: started.clone(),
                 completed: completed.clone(),
                 gate: Some(gate),
+                deliveries: Vec::new(),
             });
             (runner, started, completed)
+        }
+
+        /// A runner whose every run reports `deliveries` back.
+        fn with_deliveries(deliveries: Vec<DeliveryReport>) -> (Arc<Self>, Arc<AtomicUsize>) {
+            let completed = Arc::new(AtomicUsize::new(0));
+            let runner = Arc::new(Self {
+                started: Arc::new(Mutex::new(Vec::new())),
+                completed: completed.clone(),
+                gate: None,
+                deliveries,
+            });
+            (runner, completed)
         }
     }
 
@@ -528,7 +708,7 @@ mod test {
             Ok(WorkflowRun {
                 output: Value::Null,
                 pending_approvals: Vec::new(),
-                deliveries: Vec::new(),
+                deliveries: self.deliveries.clone(),
             })
         }
     }
@@ -716,6 +896,166 @@ to = "done"
         assert!(request.contains("Scheduled run"), "{request}");
         assert!(request.contains("* * * * *"), "{request}");
         assert!(!request.trim().is_empty());
+
+        cleanup(&home).await;
+    }
+
+    // --- report delivery on a scheduled run (issue #170) ---------------------
+
+    fn report(node: &str, status: DeliveryStatus, detail: &str) -> DeliveryReport {
+        DeliveryReport {
+            node: node.to_string(),
+            kind: "email".to_string(),
+            target: Some("ada@example.com".to_string()),
+            status,
+            detail: detail.to_string(),
+        }
+    }
+
+    /// The fold behind the summary line counts each status separately, because
+    /// "policy refused to send" and "something broke" are different problems.
+    #[test]
+    fn delivery_counts_separate_the_four_outcomes() {
+        let counts = DeliveryCounts::of(&[
+            report("a", DeliveryStatus::Sent, ""),
+            report("b", DeliveryStatus::Sent, ""),
+            report("c", DeliveryStatus::Skipped, ""),
+            report("d", DeliveryStatus::Denied, ""),
+            report("e", DeliveryStatus::Failed, ""),
+        ]);
+        assert_eq!(
+            counts,
+            DeliveryCounts {
+                sent: 2,
+                skipped: 1,
+                denied: 1,
+                failed: 1,
+            }
+        );
+        assert_eq!(counts.undelivered(), 3);
+        // The common case: nothing routed anywhere.
+        assert_eq!(DeliveryCounts::of(&[]), DeliveryCounts::default());
+        assert_eq!(DeliveryCounts::of(&[]).undelivered(), 0);
+    }
+
+    /// **The finding CodeRabbit raised.** A scheduled run whose report did not
+    /// go out must not be silent. There is no HTTP response and no drawer, so
+    /// the log line is the whole channel — this reads what the scheduler
+    /// actually emitted and asserts the operator-actionable parts are in it:
+    /// which company, which workflow, which node, and the `detail` that says
+    /// what to do about it.
+    #[tokio::test]
+    async fn a_scheduled_run_reports_an_undelivered_report() {
+        let sink = captured_logs();
+        let home = tmp_home();
+        // A company id unique to this test: the capture buffer is shared with
+        // every other test in the binary, so this is what makes the assertions
+        // about *this* run rather than about whatever else logged.
+        let company = "undelivered-co";
+        let (runner, completed) = RecordingRunner::with_deliveries(vec![
+            report(
+                "owner_summary",
+                DeliveryStatus::Skipped,
+                "this recipient has never written to the company",
+            ),
+            report("also_sent", DeliveryStatus::Sent, "emailed the recipient"),
+        ]);
+        let registry = company_with_overlays(
+            &home,
+            company,
+            vec![overlay("digest", Some("* * * * *"))],
+            Some(runner),
+            "running",
+        )
+        .await;
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry, clock);
+
+        assert_eq!(scheduler.tick().await, 1);
+        wait_for(|| completed.load(Ordering::SeqCst) == 1).await;
+        // The run task logs after `completed` is bumped, so wait for the line
+        // itself rather than racing it.
+        wait_for(|| captured_text(&sink).contains("owner_summary")).await;
+
+        let logs = captured_text(&sink);
+        let line = logs
+            .lines()
+            .find(|l| l.contains(company) && l.contains("was NOT delivered"))
+            .unwrap_or_else(|| panic!("no undelivered-report line for {company}: {logs}"));
+        assert!(line.contains("digest"), "names the workflow: {line}");
+        assert!(line.contains("owner_summary"), "names the node: {line}");
+        assert!(line.contains("Skipped"), "names the status: {line}");
+        assert!(
+            line.contains("never written to the company"),
+            "carries the detail, which is the part that says what to fix: {line}"
+        );
+
+        // The delivery that DID land gets no warning of its own — otherwise a
+        // healthy run would look broken.
+        assert_eq!(
+            logs.lines()
+                .filter(|l| l.contains(company) && l.contains("was NOT delivered"))
+                .count(),
+            1,
+            "{logs}"
+        );
+        // …and the run's own summary still reports the split.
+        let summary = logs
+            .lines()
+            .find(|l| l.contains(company) && l.contains("scheduled run finished"))
+            .unwrap_or_else(|| panic!("no summary line for {company}: {logs}"));
+        assert!(summary.contains("sent=1"), "{summary}");
+        assert!(summary.contains("skipped=1"), "{summary}");
+
+        cleanup(&home).await;
+    }
+
+    /// A scheduled run that delivered everything says so without crying wolf:
+    /// no warning line, and a summary that still accounts for what went out.
+    #[tokio::test]
+    async fn a_clean_scheduled_run_logs_no_delivery_warning() {
+        let sink = captured_logs();
+        let home = tmp_home();
+        let company = "clean-delivery-co";
+        let (runner, completed) = RecordingRunner::with_deliveries(vec![report(
+            "owner_summary",
+            DeliveryStatus::Sent,
+            "emailed the company's admin",
+        )]);
+        let registry = company_with_overlays(
+            &home,
+            company,
+            vec![overlay("digest", Some("* * * * *"))],
+            Some(runner),
+            "running",
+        )
+        .await;
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry, clock);
+
+        assert_eq!(scheduler.tick().await, 1);
+        wait_for(|| completed.load(Ordering::SeqCst) == 1).await;
+        wait_for(|| {
+            captured_text(&sink)
+                .lines()
+                .any(|l| l.contains(company) && l.contains("scheduled run finished"))
+        })
+        .await;
+
+        let logs = captured_text(&sink);
+        assert!(
+            !logs
+                .lines()
+                .any(|l| l.contains(company) && l.contains("was NOT delivered")),
+            "a fully delivered run must not warn: {logs}"
+        );
+        let summary = logs
+            .lines()
+            .find(|l| l.contains(company) && l.contains("scheduled run finished"))
+            .expect("a summary line");
+        assert!(summary.contains("sent=1"), "{summary}");
+        assert!(summary.contains("skipped=0"), "{summary}");
+        assert!(summary.contains("failed=0"), "{summary}");
 
         cleanup(&home).await;
     }
