@@ -2467,7 +2467,6 @@ members = ["eng1", "eng2"]
             facts: None,
             events: None,
             delegations: queue,
-            approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
