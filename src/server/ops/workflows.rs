@@ -48,8 +48,9 @@ use serde_json::Value;
 
 use crate::AppState;
 use crate::company::{
-    RawEdge, RawNode, RawWorkflow, WorkflowEdgeDef, WorkflowFile, WorkflowNodeDef,
-    WorkflowRetryDef, create_company_workflow, list_workflows_union, load_workflow_union,
+    RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowEdgeDef, WorkflowFile,
+    WorkflowNodeDef, WorkflowRetryDef, create_company_workflow, list_workflows_union,
+    load_workflow_union,
 };
 use crate::error::OpenCompanyError;
 use crate::ports::types::{CompanyRecord, OverlayWorkflow};
@@ -134,6 +135,12 @@ struct WorkflowNode {
     retry: Option<WorkflowRetryOut>,
     #[serde(skip_serializing_if = "Option::is_none")]
     requires_approval: Option<bool>,
+    /// Where an `output` node's report is routed once the run finishes (issue
+    /// #170). The model shape is reused verbatim in both directions: its two
+    /// fields (`kind` / `target`) are single words, so there is no snake_case →
+    /// camelCase gap to bridge and no second shape to drift from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    destination: Option<WorkflowDestinationDef>,
 }
 
 /// The camelCase retry policy shape the console reads back (`maxAttempts` /
@@ -173,6 +180,7 @@ impl From<WorkflowNodeDef> for WorkflowNode {
             on_error: n.on_error,
             retry: n.retry.map(WorkflowRetryOut::from),
             requires_approval: n.requires_approval,
+            destination: n.destination,
         }
     }
 }
@@ -320,6 +328,12 @@ struct CreateNode {
     /// When `true`, the node pauses awaiting operator approval before it runs.
     #[serde(default)]
     requires_approval: Option<bool>,
+    /// Where an `output` node's report goes once the run finishes:
+    /// `{"kind": "owner"|"email"|"channel", "target"?: "…"}`. Rejected on any
+    /// other node kind, and each kind's target contract is enforced by
+    /// `parse_workflow` before anything is persisted.
+    #[serde(default)]
+    destination: Option<WorkflowDestinationDef>,
 }
 
 /// The camelCase retry policy the create body carries (`maxAttempts` /
@@ -383,7 +397,7 @@ impl TryFrom<CreateWorkflowBody> for RawWorkflow {
                 on_error: n.on_error,
                 retry: n.retry.map(WorkflowRetryDef::from),
                 requires_approval: n.requires_approval,
-                destination: None,
+                destination: n.destination,
             });
         }
         Ok(Self {
@@ -464,6 +478,11 @@ struct RunWorkflowBody {
 struct RunWorkflowResponse {
     output: Value,
     pending_approvals: Vec<String>,
+    /// One row per attempt to route a reached `output` node's report to its
+    /// destination (issue #170). Empty for a graph that routes nothing. This is
+    /// where an operator learns a report was NOT delivered — a delivery failure
+    /// never fails the run, so it has nowhere else to surface.
+    deliveries: Vec<crate::ports::DeliveryReport>,
 }
 
 /// `POST …/workflows/{wid}/run` (both scope forms).
@@ -505,6 +524,7 @@ async fn run_workflow(
     Ok(Json(RunWorkflowResponse {
         output: run.output,
         pending_approvals: run.pending_approvals,
+        deliveries: run.deliveries,
     }))
 }
 
@@ -830,6 +850,7 @@ mod tests {
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    destination: None,
                 },
                 WorkflowNodeDef {
                     id: "done".into(),
@@ -842,6 +863,7 @@ mod tests {
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    destination: None,
                 },
             ],
             edges: Vec::new(),
@@ -864,6 +886,164 @@ mod tests {
         .unwrap();
         let raw = RawWorkflow::try_from(body).expect("converts");
         assert!(raw.nodes[0].schedule.is_none());
+    }
+
+    // --- Output destination on the wire (issue #170) ------------------------
+
+    /// A create body's `destination` survives the render → parse pipeline the
+    /// endpoint runs before persisting, and comes back out on the GET shape
+    /// under the same key — so the console can post exactly what it reads.
+    #[test]
+    fn create_body_round_trips_an_output_destination() {
+        let body: CreateWorkflowBody = serde_json::from_value(serde_json::json!({
+            "id": "wf",
+            "name": "WF",
+            "nodes": [
+                { "id": "start", "kind": "trigger", "name": "Start" },
+                {
+                    "id": "done", "kind": "output", "name": "Report",
+                    "destination": { "kind": "email", "target": "ada@example.com" }
+                }
+            ],
+            "edges": [ { "from": "start", "to": "done" } ]
+        }))
+        .expect("body deserializes");
+
+        let raw = RawWorkflow::try_from(body).expect("converts");
+        let toml_src = crate::company::render_workflow(&raw).expect("renders");
+        let file = crate::company::parse_workflow(&toml_src).expect("re-parses");
+
+        let done = file.nodes.iter().find(|n| n.id == "done").unwrap();
+        let dest = done.destination.as_ref().expect("destination survived");
+        assert_eq!(dest.kind, "email");
+        assert_eq!(dest.target.as_deref(), Some("ada@example.com"));
+
+        // …and back out on the read shape, under the same key.
+        let json = serde_json::to_value(WorkflowGraph::from(file)).unwrap();
+        let node = json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == "done")
+            .unwrap()
+            .clone();
+        assert_eq!(node["destination"]["kind"], "email");
+        assert_eq!(node["destination"]["target"], "ada@example.com");
+    }
+
+    /// An `owner` destination carries no target, and the key is omitted rather
+    /// than serialized as `null`.
+    #[test]
+    fn an_owner_destination_omits_the_target_key() {
+        let body: CreateWorkflowBody = serde_json::from_value(serde_json::json!({
+            "id": "wf",
+            "name": "WF",
+            "nodes": [
+                { "id": "start", "kind": "trigger", "name": "Start" },
+                {
+                    "id": "done", "kind": "output", "name": "Report",
+                    "destination": { "kind": "owner" }
+                }
+            ],
+            "edges": [ { "from": "start", "to": "done" } ]
+        }))
+        .unwrap();
+        let raw = RawWorkflow::try_from(body).expect("converts");
+        let file = crate::company::parse_workflow(
+            &crate::company::render_workflow(&raw).expect("renders"),
+        )
+        .expect("re-parses");
+        let json = serde_json::to_value(WorkflowGraph::from(file)).unwrap();
+        let node = &json["nodes"][1];
+        assert_eq!(node["destination"]["kind"], "owner");
+        assert!(node["destination"].get("target").is_none());
+    }
+
+    /// A node with no destination omits the key entirely — the pre-#170 read
+    /// shape is byte-identical for every existing graph.
+    #[test]
+    fn a_node_without_a_destination_omits_the_key() {
+        let dir = seed_demo();
+        let file = load_workflow_union(Some(dir.path()), &[], "demo")
+            .unwrap()
+            .unwrap();
+        let json = serde_json::to_value(WorkflowGraph::from(file)).unwrap();
+        for node in json["nodes"].as_array().unwrap() {
+            assert!(node.get("destination").is_none(), "{node}");
+        }
+    }
+
+    /// A destination the host cannot honour is rejected before anything is
+    /// persisted — the create route surfaces the same prosumer-language problem
+    /// a hand-authored file gets.
+    #[test]
+    fn create_body_with_a_bad_destination_is_rejected_at_validation() {
+        for (dest, expected) in [
+            (
+                serde_json::json!({ "kind": "email", "target": "ada" }),
+                "not an email address",
+            ),
+            (
+                serde_json::json!({ "kind": "carrier_pigeon" }),
+                "unknown `destination.kind`",
+            ),
+            (serde_json::json!({ "kind": "channel" }), "no `target`"),
+        ] {
+            let body: CreateWorkflowBody = serde_json::from_value(serde_json::json!({
+                "id": "wf",
+                "name": "WF",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    { "id": "done", "kind": "output", "name": "Report", "destination": dest }
+                ],
+                "edges": [ { "from": "start", "to": "done" } ]
+            }))
+            .unwrap();
+            let raw = RawWorkflow::try_from(body).expect("converts");
+            let toml_src = crate::company::render_workflow(&raw).expect("renders");
+            let err = crate::company::parse_workflow(&toml_src)
+                .expect_err("an unhonourable destination must not persist");
+            assert!(err.to_string().contains(expected), "{err}");
+        }
+    }
+
+    /// The run response carries `deliveries` in camelCase — this is the ONLY
+    /// place an operator learns a report was not delivered, since a delivery
+    /// failure never fails the run.
+    #[test]
+    fn run_response_serializes_delivery_rows_in_camelcase() {
+        use crate::ports::{DeliveryReport, DeliveryStatus};
+
+        let json = serde_json::to_value(RunWorkflowResponse {
+            output: serde_json::json!({ "nodes": {} }),
+            pending_approvals: Vec::new(),
+            deliveries: vec![DeliveryReport {
+                node: "done".into(),
+                kind: "email".into(),
+                target: Some("ada@example.com".into()),
+                status: DeliveryStatus::Skipped,
+                detail: "never written in".into(),
+            }],
+        })
+        .unwrap();
+        assert_eq!(json["deliveries"][0]["node"], "done");
+        assert_eq!(json["deliveries"][0]["status"], "skipped");
+        assert_eq!(json["deliveries"][0]["target"], "ada@example.com");
+        assert_eq!(json["deliveries"][0]["detail"], "never written in");
+        assert!(json["pendingApprovals"].is_array());
+    }
+
+    /// A graph that routes nothing serializes an empty list, not a missing key —
+    /// the console can render "no deliveries" without a null check.
+    #[test]
+    fn run_response_with_no_deliveries_is_an_empty_list() {
+        let json = serde_json::to_value(RunWorkflowResponse {
+            output: Value::Null,
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+        })
+        .unwrap();
+        assert_eq!(json["deliveries"], serde_json::json!([]));
     }
 
     #[test]

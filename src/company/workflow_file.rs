@@ -203,6 +203,10 @@ pub struct WorkflowNodeDef {
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct WorkflowDestinationDef {
     /// One of [`WORKFLOW_DESTINATION_KINDS`].
+    /// `#[serde(default)]` like every other field on the raw shapes: an omitted
+    /// `kind` becomes a prosumer-language validation problem rather than a raw
+    /// serde trace out of the TOML parser or the create route.
+    #[serde(default)]
     pub kind: String,
     /// The recipient address (`email`) or channel id (`channel`). Absent for
     /// `owner`, which the host resolves from the company's own directory.
@@ -738,6 +742,10 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
                         ));
                     }
                 }
+                "" => problems.push(format!(
+                    "{label} has a `destination` that names no `kind` — use one of {}.",
+                    WORKFLOW_DESTINATION_KINDS.join(", ")
+                )),
                 other => problems.push(format!(
                     "{label} has an unknown `destination.kind` `{other}` — use one of {}.",
                     WORKFLOW_DESTINATION_KINDS.join(", ")
