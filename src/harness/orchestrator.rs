@@ -1245,6 +1245,25 @@ fn preview_item(item: &Value) -> String {
 /// graph shape the console's creator posts to `POST …/workflows` and the read
 /// routes return (`id`/`name`/`description?`/`nodes`/`edges`), so a graph the
 /// orchestrator authors is indistinguishable from one authored in the console.
+///
+/// **This is deliberately a narrower surface than the REST body**, and the node
+/// shape below is where that shows: it accepts only `id`/`kind`/`name`/`summary`
+/// /`agent`, omitting `config`, `onError`, `retry`, `requiresApproval` — and
+/// `schedule` (issue #169). The omission is the policy, not an oversight:
+///
+/// * A field the model cannot set is a field it cannot get wrong. Each of these
+///   carries real consequence — retry/error policy changes failure behavior, and
+///   a `schedule` makes a workflow run *on its own, forever*, with no operator
+///   in the loop at the moment it fires.
+/// * So **agent-authored workflows are manual-run only**. Schedules are
+///   operator-authored, through the console's creator or `POST …/workflows`,
+///   where a human chose the cron. An agent can build the graph; a human decides
+///   whether it runs unattended.
+///
+/// Whether agents should be able to schedule themselves is an open product
+/// question. If the answer becomes yes, add the field here and to
+/// [`RawWorkflow`] construction below — the model and validation already support
+/// it, so nothing else has to change.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateWorkflowArgs {
