@@ -454,7 +454,12 @@ impl Default for Tools {
     fn default() -> Self {
         Self {
             provider: default_tool_provider(),
-            allow: Vec::new(),
+            // Grant the full tool belt by default: `*` covers files/docs/shell/
+            // code/web/subagent, and `media`/`composio` are listed literally
+            // because the `*` wildcard deliberately excludes those two
+            // (real-money + per-tenant-credential) namespaces. A company that
+            // wants a narrower belt overrides `[tools].allow` explicitly.
+            allow: vec!["*".into(), "media".into(), "composio".into()],
             web_allowed_domains: Vec::new(),
             composio: ComposioTools::default(),
         }
