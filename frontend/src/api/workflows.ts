@@ -25,6 +25,13 @@ export interface WorkflowNode {
   summary?: string;
   /** The roster agent id — only present on `agent` nodes. */
   agent?: string;
+  /**
+   * A standard 5-field cron saying when the workflow starts on its own — only
+   * present on `trigger` nodes, and always interpreted in **UTC** (issue #169).
+   * Absent means the workflow only runs when something starts it (the Run
+   * button, the run route, or another workflow).
+   */
+  schedule?: string;
   /** Kind-specific configuration (a slug, URL, case labels, schema, …). */
   config?: unknown;
   /** How the engine handles an error on this node, when set. */

@@ -46,6 +46,41 @@ interface DraftNode {
   name: string;
   summary: string;
   agent: string;
+  /** The trigger's cron expression (issue #169). Empty means "no schedule";
+   * only ever set on the trigger node, which is where the host allows it. */
+  schedule: string;
+}
+
+/** "No schedule" — the workflow runs only when something starts it. A sentinel
+ * rather than `""` because a select option with an empty value is ambiguous. */
+const NO_SCHEDULE = "none";
+/** "Type your own cron." Neither sentinel is a valid 5-field cron, so neither
+ * can collide with a preset or a custom value. */
+const CUSTOM_SCHEDULE = "custom";
+
+/** The friendly schedule choices offered on the trigger row. Each preset emits
+ * a real 5-field cron — the host only ever stores and matches cron, so the
+ * friendliness lives here rather than in a second wire format. Times are UTC,
+ * which the hint under the field says out loud. */
+const SCHEDULE_PRESETS = [
+  { value: NO_SCHEDULE, label: "No schedule (run manually)" },
+  { value: "0 * * * *", label: "Hourly — on the hour" },
+  { value: "0 9 * * *", label: "Daily — 09:00 UTC" },
+  { value: "0 9 * * MON", label: "Weekly — Monday 09:00 UTC" },
+] as const;
+
+/** Whether `cron` is one of the presets (so the Select shows it directly rather
+ * than dropping into the custom input). An empty schedule is "none". */
+function isPresetSchedule(cron: string): boolean {
+  if (cron === "") return true;
+  return SCHEDULE_PRESETS.some((p) => p.value === cron);
+}
+
+/** A cheap 5-field shape check, mirroring the host's `CronExpr::parse` arity
+ * rule so the obvious mistake ("hourly", "every day") is caught before a round
+ * trip. Real validation — ranges, names, steps — is the server's 400. */
+function looksLikeCron(cron: string): boolean {
+  return cron.trim().split(/\s+/).length === 5;
 }
 
 interface DraftEdge {
@@ -62,7 +97,17 @@ function nextKey(): string {
 }
 
 function starterNodes(): DraftNode[] {
-  return [{ key: nextKey(), id: "start", kind: "trigger", name: "Start", summary: "", agent: "" }];
+  return [
+    {
+      key: nextKey(),
+      id: "start",
+      kind: "trigger",
+      name: "Start",
+      summary: "",
+      agent: "",
+      schedule: "",
+    },
+  ];
 }
 
 /** A safe on-disk id: only letters, digits, `_`, and `-` — a subset of what the
@@ -124,7 +169,7 @@ export function WorkflowCreateDialog({
   function addNode() {
     setNodes((rows) => [
       ...rows,
-      { key: nextKey(), id: "", kind: "agent", name: "", summary: "", agent: "" },
+      { key: nextKey(), id: "", kind: "agent", name: "", summary: "", agent: "", schedule: "" },
     ]);
   }
 
@@ -171,6 +216,9 @@ export function WorkflowCreateDialog({
       if (n.kind === "agent" && !n.agent.trim()) {
         return `Node \`${n.id}\` is an agent node — pick who does it.`;
       }
+      if (n.kind === "trigger" && n.schedule.trim() && !looksLikeCron(n.schedule)) {
+        return "A schedule is a 5-field cron, e.g. `0 9 * * MON` (minute hour day month weekday).";
+      }
     }
     const triggerCount = nodes.filter((n) => n.kind === "trigger").length;
     if (triggerCount !== 1) {
@@ -204,6 +252,10 @@ export function WorkflowCreateDialog({
           name: n.name.trim(),
           summary: n.summary.trim() || undefined,
           agent: n.kind === "agent" ? n.agent.trim() : undefined,
+          // The host rejects a schedule on any non-trigger node, so only the
+          // trigger's value is ever sent.
+          schedule:
+            n.kind === "trigger" && n.schedule.trim() ? n.schedule.trim() : undefined,
         }),
       ),
       edges: edges.map(
@@ -404,12 +456,20 @@ function NodeRow({
             />
           ))}
       </div>
-      <Input
-        value={node.summary}
-        onChange={(e) => onChange({ summary: e.target.value })}
-        placeholder="summary (optional)"
-        aria-label="Node summary"
-      />
+      <div className="grid gap-1">
+        <Input
+          value={node.summary}
+          onChange={(e) => onChange({ summary: e.target.value })}
+          placeholder="summary (optional)"
+          aria-label="Node summary"
+        />
+        {node.kind === "trigger" && (
+          <ScheduleField
+            schedule={node.schedule}
+            onChange={(schedule) => onChange({ schedule })}
+          />
+        )}
+      </div>
       <Button
         type="button"
         variant="ghost"
@@ -420,6 +480,66 @@ function NodeRow({
       >
         <Trash2 className="size-4" />
       </Button>
+    </div>
+  );
+}
+
+/** The trigger row's schedule control (issue #169): a preset picker that emits
+ * real cron strings, plus a Custom escape hatch for anything the presets don't
+ * cover. Rendered only on the trigger node, mirroring how the teammate picker
+ * appears only on agent nodes. */
+function ScheduleField({
+  schedule,
+  onChange,
+}: {
+  schedule: string;
+  onChange: (schedule: string) => void;
+}) {
+  // A non-empty value that isn't a preset means the operator typed their own.
+  const custom = schedule !== "" && !isPresetSchedule(schedule);
+  // Track "Custom is selected but nothing typed yet" so the input stays open.
+  const [customOpen, setCustomOpen] = useState(custom);
+  const showCustom = custom || customOpen;
+
+  return (
+    <div className="grid gap-1">
+      <Select
+        value={showCustom ? CUSTOM_SCHEDULE : schedule || NO_SCHEDULE}
+        onValueChange={(v) => {
+          if (v === CUSTOM_SCHEDULE) {
+            setCustomOpen(true);
+            return;
+          }
+          setCustomOpen(false);
+          onChange(v === NO_SCHEDULE || !v ? "" : v);
+        }}
+      >
+        <SelectTrigger className="h-8" aria-label="Schedule">
+          <SelectValue placeholder="No schedule (run manually)" />
+        </SelectTrigger>
+        <SelectContent>
+          {SCHEDULE_PRESETS.map((p) => (
+            <SelectItem key={p.value} value={p.value}>
+              {p.label}
+            </SelectItem>
+          ))}
+          <SelectItem value={CUSTOM_SCHEDULE}>Custom cron…</SelectItem>
+        </SelectContent>
+      </Select>
+      {showCustom && (
+        <Input
+          className="h-8 font-mono text-xs"
+          value={schedule}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="0 9 * * MON"
+          aria-label="Custom cron schedule"
+        />
+      )}
+      {(showCustom || schedule) && (
+        <p className="text-[10px] text-muted-foreground">
+          5-field cron. Times are UTC.
+        </p>
+      )}
     </div>
   );
 }
