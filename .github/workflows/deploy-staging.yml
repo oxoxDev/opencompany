@@ -221,7 +221,7 @@ jobs:
             # patch took: a tenant scaled to zero has no pod to roll, so
             # `rollout status` would block forever on it.
             kubectl get statefulset -A -l app=opencompany \
-              -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image
+              -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,IMAGE:.spec.template.spec.containers[?(@.name=="opencompany")].image
           else
             echo "Running tenants keep their current image; re-run with refresh_all_tenants=true to move them."
           fi
