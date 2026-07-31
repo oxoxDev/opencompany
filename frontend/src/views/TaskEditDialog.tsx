@@ -8,6 +8,17 @@ import { Loader2, Trash2 } from "lucide-react";
 
 import { deleteTask, patchTask, type PatchTask, type Task } from "@/api/tasks";
 import type { OpenCompanyClient } from "@/api/client";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -130,12 +141,12 @@ export function TaskEditDialog({
 
           <div className="grid grid-cols-3 gap-3">
             <div className="grid gap-1.5">
-              <Label>Column</Label>
+              <Label htmlFor="task-column">Column</Label>
               <Select
                 value={draft.column}
                 onValueChange={(v) => setDraft((d) => ({ ...d, column: v ?? undefined }))}
               >
-                <SelectTrigger>
+                <SelectTrigger id="task-column">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -148,12 +159,12 @@ export function TaskEditDialog({
               </Select>
             </div>
             <div className="grid gap-1.5">
-              <Label>Priority</Label>
+              <Label htmlFor="task-priority">Priority</Label>
               <Select
                 value={draft.priority}
                 onValueChange={(v) => setDraft((d) => ({ ...d, priority: v ?? undefined }))}
               >
-                <SelectTrigger>
+                <SelectTrigger id="task-priority">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -178,10 +189,33 @@ export function TaskEditDialog({
         </div>
 
         <DialogFooter className="justify-between sm:justify-between">
-          <Button variant="ghost" size="sm" onClick={() => void remove()} disabled={busy}>
-            <Trash2 className="mr-1.5 size-4" />
-            Delete
-          </Button>
+          <AlertDialog>
+            <AlertDialogTrigger
+              render={
+                <Button variant="ghost" size="sm" disabled={busy}>
+                  <Trash2 className="mr-1.5 size-4" />
+                  Delete
+                </Button>
+              }
+            />
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete “{task.title}”?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This permanently removes the task and can’t be undone.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Keep task</AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={() => void remove()}
+                  className="bg-destructive text-white hover:bg-destructive/90"
+                >
+                  Delete task
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
           <div className="flex gap-2">
             <Button variant="outline" onClick={onClose} disabled={busy}>
               Cancel
