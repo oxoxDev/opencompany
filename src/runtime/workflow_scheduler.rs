@@ -601,6 +601,26 @@ to = "done"
         panic!("condition never became true");
     }
 
+    /// Waits until no scheduled run still holds its in-flight claim.
+    ///
+    /// **Any test that ticks a second time and expects another fire must call
+    /// this first.** `tick` is not a synchronisation point: it spawns the run
+    /// and returns without awaiting it, so whether the spawned task has been
+    /// polled by the next tick depends on whether some await inside `tick`
+    /// (the record load) happens to yield. When it does not, the previous run
+    /// still holds the claim, the overlap guard correctly rejects the fire, and
+    /// the tick returns 0 — which is the code working as designed and the test
+    /// being wrong. That is exactly how
+    /// `the_dedupe_map_does_not_grow_without_bound` passed locally and failed
+    /// in CI.
+    ///
+    /// Waiting on the mock's `started` vec is NOT a substitute: it records the
+    /// run's start, not its completion, so it proves nothing about the claim.
+    /// This keys on the claim itself, which is the state the guard reads.
+    async fn drain(scheduler: &WorkflowScheduler) {
+        wait_for(|| !scheduler.is_running_any()).await;
+    }
+
     async fn cleanup(home: &std::path::Path) {
         tokio::fs::remove_dir_all(home).await.ok();
     }
@@ -640,7 +660,9 @@ to = "done"
         clock.set(millis_at(2026, 7, 13, 9, 1));
         assert_eq!(scheduler.tick().await, 0);
 
-        // The following Monday fires again.
+        // The following Monday fires again — after the first run has let go of
+        // its claim, or the overlap guard would rightly refuse.
+        drain(&scheduler).await;
         clock.set(millis_at(2026, 7, 20, 9, 0));
         assert_eq!(scheduler.tick().await, 1);
         wait_for(|| started.lock().unwrap().len() == 2).await;
@@ -888,7 +910,7 @@ to = "done"
         // Let the first run finish, then wait for its task to release the claim.
         gate.add_permits(1);
         wait_for(|| completed.load(Ordering::SeqCst) == 1).await;
-        wait_for(|| !scheduler.is_running_any()).await;
+        drain(&scheduler).await;
 
         // Minute 3: the workflow is schedulable again.
         gate.add_permits(1);
@@ -929,10 +951,13 @@ to = "done"
         assert_eq!(scheduler.tick().await, 0, "same minute: deduped");
 
         // Many minutes later the map still holds exactly one entry, not one per
-        // minute elapsed.
+        // minute elapsed. Each iteration drains first: without that, the
+        // previous run may still hold its claim and the overlap guard would
+        // (correctly) refuse the fire.
         for minute in 1..10 {
+            drain(&scheduler).await;
             clock.set(millis_at(2026, 7, 13, 9, minute));
-            assert_eq!(scheduler.tick().await, 1);
+            assert_eq!(scheduler.tick().await, 1, "minute {minute}");
             assert_eq!(scheduler.last_fired.len(), 1, "minute {minute}");
         }
         wait_for(|| started.lock().unwrap().len() == 10).await;
@@ -983,7 +1008,7 @@ to = "done"
         assert_eq!(scheduler.tick().await, 1);
         wait_for(|| calls.load(Ordering::SeqCst) == 1).await;
         // The unwind must have released the slot.
-        wait_for(|| !scheduler.is_running_any()).await;
+        drain(&scheduler).await;
 
         // Minute 2: the schedule is still alive. Before the RAII guard this
         // fired 0 forever.
