@@ -2,42 +2,41 @@
 //! saved graphs (`GET /workflows`, `GET /workflows/{wid}`), and run one
 //! (`POST /workflows/{wid}/run`) — under both scope forms.
 //!
-//! Graphs are loaded from the company's on-disk source directory
-//! (`companies/<name>/workflows/<wid>.toml`) via
-//! [`load_company_workflows`](crate::company::load_company_workflows), which
-//! takes an explicit id list (it never scans) — so `list_workflows` enumerates
-//! the `workflows/` directory itself to build that list.
+//! A company's graphs come from two places, unioned by
+//! [`load_workflow_union`](crate::company::load_workflow_union) /
+//! [`list_workflows_union`](crate::company::list_workflows_union):
 //!
-//! A platform-provisioned tenant has no source directory, so there is nothing
-//! to scan — but it can still declare `[workflows].enabled` ids in its
-//! manifest. `list_workflows` unions those manifest-enabled ids in (deduped by
-//! id) so the console's picker isn't empty just because the deployment has no
-//! `workflows/*.toml` files on disk, mirroring the `Company.workflows`
-//! GraphQL resolver. Where the definition body isn't available to load (no
-//! source directory, or the id has no matching file), the summary falls back
-//! to the id as its name — the same fallback the GraphQL resolver uses. Full
-//! graphs (`GET …/workflows/{wid}`) still require a source directory, since
-//! there is currently no other place a graph body can come from.
+//! * the **seed** files committed to the company source directory
+//!   (`companies/<name>/workflows/<wid>.toml`), and
+//! * the **runtime-authored** graph bodies persisted on the [`CompanyRecord`]
+//!   overlay.
 //!
-//! Creation (issue #69) writes a new `workflows/<id>.toml` into that same
-//! source directory — reusing [`parse_workflow`](crate::company::parse_workflow)
-//! to validate the graph a caller posts before anything touches disk — and
-//! records the id as enabled on the operator's live [`CompanyRecord`], mirroring
-//! the team overlay convention: the version-controlled `company.toml` is never
-//! rewritten (see `crate::server::ops::team`). A deployment with no source
-//! directory (platform-provisioned mode with nothing seeded on disk yet) has
-//! nowhere to write the graph file, so creation is refused with a 4xx rather
-//! than crashing.
+//! The seed wins on an id collision. A hosted tenant has no source directory at
+//! all (or a read-only one), so every graph it owns is an overlay body — which
+//! is why these routes never require a source directory to answer.
+//!
+//! Creation (issues #69, #112, #168) delegates to
+//! [`create_company_workflow`](crate::company::create_company_workflow), the
+//! single validated-persist core the orchestrator's `create_workflow` tool also
+//! runs, so the two surfaces cannot drift. It persists the graph body **and**
+//! the enabled id on the operator's live record in one save; the
+//! version-controlled `company.toml` and the source tree are never written
+//! (see `crate::server::ops::team`) — the source tree is read-only in hosted
+//! mode, which is what issue #168 reports.
+//!
+//! `list_workflows` additionally unions in the manifest's `[workflows].enabled`
+//! ids that have no body in either source, falling back to the id as the display
+//! name — the same fallback the GraphQL `Company.workflows` resolver uses — so a
+//! provisioned tenant's picker isn't empty.
 //!
 //! Execution is dependency-inverted behind the [`WorkflowRunner`] port: when no
 //! runner is wired (the default build, or a runtime built without a harness) the
 //! run route reports `not_wired` — the same 404 seam the DNS/SMTP surfaces use —
 //! so the default build stays inert. The read routes need no runner: they only
-//! parse the committed graph files, so the console can list and render workflows
-//! even on a build that cannot execute them.
+//! parse the saved graphs, so the console can list and render workflows even on
+//! a build that cannot execute them.
 
 use std::collections::HashSet;
-use std::io::Write;
 use std::path::Path as FsPath;
 
 use axum::extract::Path;
@@ -50,12 +49,11 @@ use serde_json::Value;
 use crate::AppState;
 use crate::company::{
     RawEdge, RawNode, RawWorkflow, WorkflowEdgeDef, WorkflowFile, WorkflowNodeDef,
-    WorkflowRetryDef, list_source_workflows, load_company_workflows, parse_workflow,
-    render_workflow,
+    WorkflowRetryDef, create_company_workflow, list_workflows_union, load_workflow_union,
 };
 use crate::error::OpenCompanyError;
+use crate::ports::types::{CompanyRecord, OverlayWorkflow};
 use crate::server::error::ApiError;
-use crate::server::ops::language;
 use crate::server::ops::{ScopedCompany, scoped};
 
 /// Builds the workflow route fragment: create + list, one graph read, and the
@@ -195,20 +193,33 @@ impl From<WorkflowEdgeDef> for WorkflowEdge {
     }
 }
 
+/// The company's runtime-authored graph bodies, read once per request from the
+/// live record. A company with no persisted record contributes none — the read
+/// routes stay tolerant (they still serve the seed files), and the create route
+/// re-loads the record under its write lock and 404s properly there.
+async fn overlay_workflows(company: &ScopedCompany) -> Result<Vec<OverlayWorkflow>, ApiError> {
+    let record: Option<CompanyRecord> = company
+        .runtime
+        .store()
+        .load(company.id())
+        .await
+        .map_err(ApiError)?;
+    Ok(record.map(|r| r.overlay_workflows).unwrap_or_default())
+}
+
 /// `GET …/workflows` — the company's saved workflows as picker summaries.
 ///
-/// The loader takes an explicit id list rather than scanning, so this reads the
-/// company's `workflows/` directory to collect the `*.toml` file stems as ids,
-/// then loads and summarizes them. No source directory (platform-provisioned
-/// mode) or no `workflows/` directory yields an empty filesystem scan — but not
-/// necessarily an empty response: the manifest's `[workflows].enabled` ids are
-/// unioned in (deduped against the filesystem scan by id), falling back to the
-/// id as the name when there's no file to load a real name from. Only when
-/// both the scan and the manifest are empty does this return `200 []`, so the
-/// console renders "no workflows yet" rather than a failure.
+/// Summaries come from the union of the company's two graph sources — the seed
+/// `workflows/*.toml` files and the record's runtime-authored bodies — so a
+/// hosted tenant with no source directory still lists everything it created.
+/// The manifest's `[workflows].enabled` ids are then unioned in (deduped by id),
+/// falling back to the id as the name for an id with no body in either source —
+/// the same fallback the GraphQL resolver uses. Only when all three are empty
+/// does this return `200 []`, so the console renders "no workflows yet" rather
+/// than a failure.
 async fn list_workflows(company: ScopedCompany) -> Result<Json<Vec<WorkflowSummary>>, ApiError> {
-    let source_dir = company.runtime.source_dir();
-    let files = list_source_workflows(source_dir);
+    let overlays = overlay_workflows(&company).await?;
+    let files = list_workflows_union(company.runtime.source_dir(), &overlays);
     let mut seen: HashSet<String> = files.iter().map(|f| f.id.clone()).collect();
     let mut summaries: Vec<WorkflowSummary> =
         files.into_iter().map(WorkflowSummary::from).collect();
@@ -219,22 +230,15 @@ async fn list_workflows(company: ScopedCompany) -> Result<Json<Vec<WorkflowSumma
         .await
         .map_err(ApiError)?;
     for id in enabled_ids {
-        // Already present from the filesystem scan — skip so hosted mode
-        // (source dir present, manifest also lists the same ids) doesn't
-        // double-list.
+        // Already summarized from a real body — skip so an id that is both
+        // enabled and saved doesn't double-list.
         if !seen.insert(id.clone()) {
             continue;
         }
-        let loaded = source_dir
-            .and_then(|dir| load_company_workflows(dir, std::slice::from_ref(&id)).ok())
-            .and_then(|mut files| files.pop());
-        summaries.push(match loaded {
-            Some(file) => WorkflowSummary::from(file),
-            None => WorkflowSummary {
-                id: id.clone(),
-                name: id,
-                description: None,
-            },
+        summaries.push(WorkflowSummary {
+            id: id.clone(),
+            name: id,
+            description: None,
         });
     }
 
@@ -243,34 +247,23 @@ async fn list_workflows(company: ScopedCompany) -> Result<Json<Vec<WorkflowSumma
 
 /// `GET …/workflows/{wid}` — the full graph for one workflow.
 ///
-/// An unknown `wid` (or a deployment with no source directory) is a `404`,
+/// Reads through the seed ∪ overlay union, so a graph created on a hosted
+/// tenant (no source directory) resolves here too. An unknown `wid` is a `404`,
 /// mirroring the sub-resource-not-found shape the task routes use.
 async fn get_workflow(
     company: ScopedCompany,
     Path(WorkflowPath { wid }): Path<WorkflowPath>,
 ) -> Result<Json<WorkflowGraph>, ApiError> {
-    // `wid` becomes a filename — reject anything that could escape `workflows/`.
+    // `wid` may become a filename on the seed side — reject anything that could
+    // escape `workflows/`.
     if !safe_wid(&wid) {
         return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
             "workflow {wid}"
         ))));
     }
-    let source_dir = company
-        .runtime
-        .source_dir()
-        .ok_or_else(|| ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))))?;
-    // Only try to load ids that exist on disk, so a missing file is a clean 404
-    // rather than the loader's `DataRead` (a 500).
-    let path = source_dir.join("workflows").join(format!("{wid}.toml"));
-    if !path.is_file() {
-        return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
-            "workflow {wid}"
-        ))));
-    }
-    let file = load_company_workflows(source_dir, std::slice::from_ref(&wid))
+    let overlays = overlay_workflows(&company).await?;
+    let file = load_workflow_union(company.runtime.source_dir(), &overlays, &wid)
         .map_err(ApiError)?
-        .into_iter()
-        .next()
         .ok_or_else(|| ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))))?;
     Ok(Json(WorkflowGraph::from(file)))
 }
@@ -399,161 +392,34 @@ impl TryFrom<CreateWorkflowBody> for RawWorkflow {
     }
 }
 
-/// `POST …/workflows` — authors a new workflow graph (issue #69): the console's
-/// form creator, or any direct API caller, posts the graph shape and it lands
-/// as a new `workflows/<id>.toml` in the company's source directory.
+/// `POST …/workflows` — authors a new workflow graph (issues #69, #112, #168):
+/// the console's form creator, or any direct API caller, posts the graph shape
+/// and it is persisted on the company record.
 ///
-/// Order of checks, each returning an actionable 4xx before anything is
-/// written: the id must be a safe filename, the deployment must have a source
-/// directory to write into, the id must not already be taken (409), every
-/// `agent` node must name a real roster teammate, and the graph must pass the
-/// same structural validation ([`parse_workflow`]) a hand-authored file would
-/// (at least one trigger, unique node ids, edges that reference real nodes, no
-/// stray `agent` field on a non-agent node).
+/// The whole validated-persist sequence lives in
+/// [`create_company_workflow`] — the same core the orchestrator's
+/// `create_workflow` tool runs — so the two surfaces cannot drift: safe id,
+/// size caps, exactly one trigger, every `agent` node on the roster, unique id
+/// (409) and unique display name (409), full [`parse_workflow`] structural
+/// validation, one atomic record save, and an audit event.
+///
+/// No source directory is required: the body lands on the record, so a hosted
+/// tenant whose source tree is a read-only mount can create workflows (issue
+/// #168 — this used to fail with `EROFS`).
 async fn create_workflow(
     company: ScopedCompany,
     Json(body): Json<CreateWorkflowBody>,
 ) -> Result<Json<WorkflowGraph>, ApiError> {
-    if !safe_wid(&body.id) {
-        return Err(ApiError(OpenCompanyError::InvalidRequest(
-            language::WORKFLOW_ID_INVALID.to_string(),
-        )));
-    }
-
-    let source_dir = company.runtime.source_dir().ok_or_else(|| {
-        ApiError(OpenCompanyError::InvalidRequest(
-            language::WORKFLOW_NEEDS_SOURCE_DIR.to_string(),
-        ))
-    })?;
-
-    let workflows_dir = source_dir.join("workflows");
-    let path = workflows_dir.join(format!("{}.toml", body.id));
-
-    std::fs::create_dir_all(&workflows_dir).map_err(|source| {
-        ApiError(OpenCompanyError::StoreIo {
-            path: workflows_dir.clone(),
-            source,
-        })
-    })?;
-
-    // `parse_workflow` only rejects zero triggers (a saved graph may legally
-    // have more, e.g. multiple entry points); the creator is stricter — a
-    // freshly authored graph must name exactly one starting point.
-    let trigger_count = body.nodes.iter().filter(|n| n.kind == "trigger").count();
-    if trigger_count != 1 {
-        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
-            "a workflow needs exactly one `trigger` node to say what starts it (found {trigger_count})."
-        ))));
-    }
-
-    // Cross-check every `agent` node against the company's effective roster
-    // (manifest agents + operator overlay teammates) before writing anything.
-    // `parse_workflow` validates the graph's own shape but has no roster to
-    // check names against.
-    let mut record = company
-        .runtime
-        .store()
-        .load(company.id())
-        .await?
-        .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.id().to_string()))?;
-    let roster: HashSet<&str> = record
-        .manifest
-        .agents
-        .iter()
-        .map(|a| a.id.as_str())
-        .chain(record.overlay_agents.iter().map(|a| a.id.as_str()))
-        .collect();
-    for node in &body.nodes {
-        if node.kind != "agent" {
-            continue;
-        }
-        match node.agent.as_deref() {
-            Some(agent_id) if roster.contains(agent_id) => {}
-            Some(agent_id) => {
-                return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
-                    "node `{}` names teammate `{agent_id}`, which is not on this company's roster.",
-                    node.id
-                ))));
-            }
-            None => {
-                return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
-                    "node `{}` is an agent node but names no teammate.",
-                    node.id
-                ))));
-            }
-        }
-    }
-
-    // Save `body.id` before `body` is consumed by `Into<RawWorkflow>` below.
-    let body_id = body.id.clone();
-
-    // Render the candidate graph to TOML and reuse `parse_workflow` to
-    // validate its structure end to end — the same rules a hand-authored
-    // `workflows/<id>.toml` must satisfy. Any problem becomes a 400, never the
-    // 500 a malformed on-disk file gets from the read routes.
-    let toml_src = render_workflow(&RawWorkflow::try_from(body)?)?;
-    let file = parse_workflow(&toml_src).map_err(|err| match err {
-        OpenCompanyError::DataInvalid { problems, .. } => {
-            ApiError(OpenCompanyError::InvalidRequest(problems.join(" ")))
-        }
-        OpenCompanyError::DataParse { message, .. } => {
-            ApiError(OpenCompanyError::InvalidRequest(message))
-        }
-        other => ApiError(other),
-    })?;
-
-    // Write the file atomically: `create_new(true)` fails if the path already
-    // exists, closing the TOCTOU gap between a separate `is_file()` check and
-    // `fs::write`. If `write_all` fails, clean up the empty file so the id is
-    // not permanently blocked. Also, save the store record **after** the file
-    // lands so a store failure doesn't orphan a file — if the save fails the
-    // file is cleaned up and the caller can retry.
-    let mut wf_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::AlreadyExists => ApiError(OpenCompanyError::Conflict(format!(
-                "A workflow named `{}` already exists.",
-                body_id
-            ))),
-            _ => ApiError(OpenCompanyError::StoreIo {
-                path: path.clone(),
-                source: e,
-            }),
-        })?;
-    wf_file.write_all(toml_src.as_bytes()).map_err(|source| {
-        let _ = std::fs::remove_file(&path);
-        ApiError(OpenCompanyError::StoreIo {
-            path: path.clone(),
-            source,
-        })
-    })?;
-    drop(wf_file);
-
-    // Record the id as enabled on the operator's live copy of the manifest —
-    // mirrors the team overlay: the version-controlled `company.toml` on disk
-    // is never rewritten (see `crate::server::ops::team`).
-    let save_result = if !record
-        .manifest
-        .workflows
-        .enabled
-        .iter()
-        .any(|e| e == &file.id)
-    {
-        record.manifest.workflows.enabled.push(file.id.clone());
-        company.runtime.store().save(&record).await
-    } else {
-        Ok(())
-    };
-
-    // If the store save failed, remove the file we just wrote so a retry can
-    // succeed without admin intervention.
-    if let Err(e) = save_result {
-        let _ = std::fs::remove_file(&path);
-        return Err(ApiError(e));
-    }
-
+    let draft = RawWorkflow::try_from(body)?;
+    let file = create_company_workflow(
+        company.id(),
+        company.runtime.source_dir(),
+        company.runtime.store(),
+        Some(company.runtime.events()),
+        draft,
+    )
+    .await
+    .map_err(ApiError)?;
     Ok(Json(WorkflowGraph::from(file)))
 }
 
@@ -607,15 +473,13 @@ async fn run_workflow(
         );
     }
 
-    // Load the saved graph from the company's on-disk source directory. Without
-    // one (platform-provisioned mode) there is nothing to run.
-    let source_dir = company.runtime.source_dir().ok_or_else(|| {
-        super::not_wired("workflow source (no company definition directory on this deployment)")
-    })?;
-    let file = load_company_workflows(source_dir, std::slice::from_ref(&wid))
+    // Load the saved graph from the seed ∪ overlay union, so a graph created on
+    // a hosted tenant (no source directory) runs the same as a committed one.
+    let overlays = overlay_workflows(&company)
+        .await
+        .map_err(IntoResponse::into_response)?;
+    let file = load_workflow_union(company.runtime.source_dir(), &overlays, &wid)
         .map_err(|e| ApiError(e).into_response())?
-        .into_iter()
-        .next()
         .ok_or_else(|| {
             ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response()
         })?;
@@ -676,7 +540,7 @@ mod tests {
     #[test]
     fn list_returns_a_summary_per_saved_workflow() {
         let dir = seed_demo();
-        let files = list_source_workflows(Some(dir.path()));
+        let files = list_workflows_union(Some(dir.path()), &[]);
         let summaries: Vec<WorkflowSummary> =
             files.into_iter().map(WorkflowSummary::from).collect();
         assert_eq!(summaries.len(), 1);
@@ -691,11 +555,8 @@ mod tests {
     #[test]
     fn get_returns_the_full_graph_with_nodes_and_edges() {
         let dir = seed_demo();
-        let ids = ["demo".to_string()];
-        let file = load_company_workflows(dir.path(), &ids)
+        let file = load_workflow_union(Some(dir.path()), &[], "demo")
             .expect("loads")
-            .into_iter()
-            .next()
             .expect("one file");
         let graph = WorkflowGraph::from(file);
 
@@ -718,24 +579,21 @@ mod tests {
     }
 
     #[test]
-    fn no_source_dir_lists_empty() {
-        assert!(list_source_workflows(None).is_empty());
+    fn no_source_dir_and_no_overlay_lists_empty() {
+        assert!(list_workflows_union(None, &[]).is_empty());
     }
 
     #[test]
     fn no_workflows_dir_lists_empty() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(list_source_workflows(Some(dir.path())).is_empty());
+        assert!(list_workflows_union(Some(dir.path()), &[]).is_empty());
     }
 
     #[test]
     fn json_serializes_camelcase_and_omits_empty_options() {
         let dir = seed_demo();
-        let ids = ["demo".to_string()];
-        let file = load_company_workflows(dir.path(), &ids)
+        let file = load_workflow_union(Some(dir.path()), &[], "demo")
             .unwrap()
-            .into_iter()
-            .next()
             .unwrap();
         let json = serde_json::to_value(WorkflowGraph::from(file)).unwrap();
         // A node with no summary/agent omits those keys entirely.
@@ -813,8 +671,8 @@ mod tests {
         .expect("body deserializes");
 
         let raw = RawWorkflow::try_from(body).expect("converts");
-        let toml_src = render_workflow(&raw).expect("renders");
-        let file = parse_workflow(&toml_src).expect("re-parses");
+        let toml_src = crate::company::render_workflow(&raw).expect("renders");
+        let file = crate::company::parse_workflow(&toml_src).expect("re-parses");
 
         let tf = file.nodes.iter().find(|n| n.id == "tf").unwrap();
         assert_eq!(tf.kind, WorkflowNodeKind::Transform);
@@ -897,7 +755,7 @@ mod tests {
             "id = \"broken\"\nname = \n[[node]] oops",
         )
         .unwrap();
-        let files = list_source_workflows(Some(dir.path()));
+        let files = list_workflows_union(Some(dir.path()), &[]);
         let ids: Vec<_> = files.iter().map(|f| f.id.as_str()).collect();
         assert_eq!(ids, vec!["demo"]);
     }
@@ -951,6 +809,7 @@ mod tests {
                     overlay_desk_members: Vec::new(),
                     overlay_desk_order: Vec::new(),
                     overlay_desks: Vec::new(),
+                    overlay_workflows: Vec::new(),
                     template_provenance: None,
                 })
                 .await
@@ -1000,6 +859,210 @@ mod tests {
             // name — same fallback the GraphQL `Company.workflows` resolver
             // uses for the same case.
             assert_eq!(items[0]["name"], "demo");
+
+            std::fs::remove_dir_all(&home).ok();
+        }
+
+        /// A hosted tenant's record with no manifest-enabled workflows — the
+        /// blank-slate a real tenant starts from before it creates anything.
+        fn empty_manifest() -> CompanyManifest {
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap()
+        }
+
+        /// Same as [`state_with_hosted_company`] but with nothing enabled, and
+        /// returning the store so a test can rebuild state from it.
+        async fn hosted_state(home: &std::path::Path) -> (AppState, FsCompanyStore, CompanyId) {
+            let store = FsCompanyStore::new(home.to_path_buf());
+            let id = CompanyId::new("acme");
+            store
+                .save(&CompanyRecord {
+                    id: id.clone(),
+                    manifest: empty_manifest(),
+                    ledger: Vec::new(),
+                    lifecycle: "running".to_string(),
+                    overlay_agents: Vec::new(),
+                    overlay_desk_members: Vec::new(),
+                    overlay_desk_order: Vec::new(),
+                    overlay_desks: Vec::new(),
+                    overlay_workflows: Vec::new(),
+                    template_provenance: None,
+                })
+                .await
+                .unwrap();
+            let state = state_over(home, &id, true).await;
+            (state, store, id)
+        }
+
+        /// Builds an `AppState` whose runtime for `id` has **no source
+        /// directory** — the hosted shape — over the store rooted at `home`.
+        ///
+        /// `seed_admin` seeds the fixed admin + session; a *rebuild* over the
+        /// same home must pass `false` (the durable user store already has that
+        /// admin, and its session survives with it).
+        async fn state_over(home: &std::path::Path, id: &CompanyId, seed_admin: bool) -> AppState {
+            let runtime = RuntimeBuilder::new(home.to_path_buf(), empty_manifest())
+                .with_id(id.clone())
+                .build()
+                .await
+                .unwrap();
+            assert!(
+                runtime.source_dir().is_none(),
+                "test setup must simulate hosted mode: no source dir"
+            );
+            let state = AppState::new(AppConfig::default());
+            state
+                .registry()
+                .insert(id.clone(), std::sync::Arc::new(runtime));
+            if seed_admin {
+                crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+            }
+            state
+        }
+
+        /// The graph body the console posts.
+        fn create_body() -> serde_json::Value {
+            serde_json::json!({
+                "id": "greeter",
+                "name": "Greeter",
+                "description": "Say hi.",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [ { "from": "start", "to": "done", "label": "ok" } ]
+            })
+        }
+
+        fn request(method: &str, uri: &str, body: Option<serde_json::Value>) -> Request<Body> {
+            let builder = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"));
+            match body {
+                Some(json) => builder
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&json).unwrap()))
+                    .unwrap(),
+                None => builder.body(Body::empty()).unwrap(),
+            }
+        }
+
+        async fn json_body(response: axum::response::Response) -> serde_json::Value {
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+        }
+
+        /// **The #168 regression test.** Creating a workflow on a tenant with no
+        /// (writable) source directory used to fail with
+        /// `Read-only file system (os error 30)` — the handler wrote the graph
+        /// into the crate's read-only company source tree. It now persists on
+        /// the record, so the create succeeds, the graph lists under its real
+        /// name, and the full body reads back.
+        #[tokio::test]
+        async fn create_persists_and_reads_back_with_no_source_dir() {
+            let home = home();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            // POST → 200 with the graph echoed back.
+            let response = router(state.clone())
+                .oneshot(request(
+                    "POST",
+                    "/api/v1/company/workflows",
+                    Some(create_body()),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let created = json_body(response).await;
+            assert_eq!(created["id"], "greeter");
+            assert_eq!(created["nodes"].as_array().unwrap().len(), 2);
+
+            // GET list → the real name, not the id fallback.
+            let response = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let listed = json_body(response).await;
+            let items = listed.as_array().expect("array");
+            assert_eq!(items.len(), 1, "body: {listed}");
+            assert_eq!(items[0]["id"], "greeter");
+            assert_eq!(items[0]["name"], "Greeter");
+            assert_eq!(items[0]["description"], "Say hi.");
+
+            // GET one → the full graph.
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let graph = json_body(response).await;
+            assert_eq!(graph["id"], "greeter");
+            assert_eq!(graph["edges"][0]["label"], "ok");
+
+            std::fs::remove_dir_all(&home).ok();
+        }
+
+        /// A duplicate id is a clean 409, not a 500 — the id-uniqueness check
+        /// that replaced the filesystem's `create_new(true)`.
+        #[tokio::test]
+        async fn duplicate_create_is_a_conflict() {
+            let home = home();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            let first = router(state.clone())
+                .oneshot(request(
+                    "POST",
+                    "/api/v1/company/workflows",
+                    Some(create_body()),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(first.status(), StatusCode::OK);
+
+            let second = router(state)
+                .oneshot(request(
+                    "POST",
+                    "/api/v1/company/workflows",
+                    Some(create_body()),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(second.status(), StatusCode::CONFLICT);
+
+            std::fs::remove_dir_all(&home).ok();
+        }
+
+        /// Restart survival: a workflow created through the API is still listed
+        /// by a completely fresh `AppState` rebuilt over the same store — proving
+        /// the body is durable, not process-local.
+        #[tokio::test]
+        async fn a_created_workflow_survives_a_state_rebuild() {
+            let home = home();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "POST",
+                    "/api/v1/company/workflows",
+                    Some(create_body()),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            // Rebuild everything from the same durable store.
+            let rebuilt = state_over(&home, &id, false).await;
+            let response = router(rebuilt)
+                .oneshot(request("GET", "/api/v1/company/workflows", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let listed = json_body(response).await;
+            let items = listed.as_array().expect("array");
+            assert_eq!(items.len(), 1, "body: {listed}");
+            assert_eq!(items[0]["id"], "greeter");
+            assert_eq!(items[0]["name"], "Greeter");
 
             std::fs::remove_dir_all(&home).ok();
         }

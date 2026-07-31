@@ -42,6 +42,7 @@ async fn state_with_company(home: &std::path::Path) -> AppState {
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -1328,6 +1329,7 @@ async fn state_with_manifest(home: &std::path::Path, manifest: CompanyManifest) 
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -1576,6 +1578,7 @@ async fn state_with_source_dir(
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -1611,8 +1614,11 @@ fn workflow_body(id: &str) -> Value {
     })
 }
 
+/// Issue #168: the create path persists the graph **on the record**, never in
+/// the company source tree (which is a read-only mount in hosted mode), and
+/// both read routes serve it from there.
 #[tokio::test]
-async fn workflow_create_writes_file_appends_enabled_and_is_listed() {
+async fn workflow_create_persists_on_the_record_appends_enabled_and_is_listed() {
     let home = home();
     let seed_dir = home.join("seed");
     std::fs::create_dir_all(&seed_dir).unwrap();
@@ -1630,22 +1636,23 @@ async fn workflow_create_writes_file_appends_enabled_and_is_listed() {
     assert_eq!(created["nodes"].as_array().unwrap().len(), 3);
     assert_eq!(created["edges"].as_array().unwrap().len(), 2);
 
-    // The graph landed on disk as TOML under the seed dir.
+    // Nothing was written into the company source tree — the read-only mount in
+    // hosted mode, and the whole reason #168 failed with EROFS.
     let path = seed_dir.join("workflows").join("greet.toml");
-    assert!(path.is_file(), "workflow file was written to {path:?}");
-    let on_disk = std::fs::read_to_string(&path).unwrap();
-    assert!(on_disk.contains("id = \"greet\""));
-    assert!(on_disk.contains("agent = \"ceo\""));
+    assert!(!path.exists(), "the source tree must not be written to");
 
-    // The operator's live manifest record gained the id in `[workflows].enabled`
-    // — the version-controlled seed dir's own `company.toml` was never touched
+    // The body and the enabled id both landed on the operator's live record —
+    // the version-controlled seed dir's own `company.toml` was never touched
     // (there isn't one here; only the store's copy is checked).
     use crate::ports::CompanyStore;
     let store = FsCompanyStore::new(home.to_path_buf());
     let record = store.load(&CompanyId::new("acme")).await.unwrap().unwrap();
     assert_eq!(record.manifest.workflows.enabled, vec!["greet".to_string()]);
+    assert_eq!(record.overlay_workflows.len(), 1);
+    assert_eq!(record.overlay_workflows[0].id, "greet");
+    assert!(record.overlay_workflows[0].toml.contains("agent = \"ceo\""));
 
-    // `GET …/workflows` (which scans the seed dir) now lists it.
+    // `GET …/workflows` (seed ∪ overlay) now lists it.
     let (status, list) = send(&state, "GET", "/api/v1/company/workflows", None).await;
     assert_eq!(status, StatusCode::OK);
     let rows = list.as_array().unwrap();
@@ -1761,21 +1768,27 @@ async fn workflow_create_rejects_bad_edges_missing_agent_and_no_trigger() {
 }
 
 #[tokio::test]
-async fn workflow_create_without_source_dir_is_bad_request() {
+async fn workflow_create_without_source_dir_succeeds() {
     let home = home();
     // `state_with_company` boots with no `seed_dir`, so the company has no
-    // writable source directory — the platform-provisioned-mode case.
+    // source directory at all — the platform-provisioned-mode case. Issue #168:
+    // creation used to be refused here with a 400; the body now lands on the
+    // record, so it succeeds and reads back.
     let state = state_with_company(&home).await;
 
-    let (status, body) = send(
+    let (status, created) = send(
         &state,
         "POST",
         "/api/v1/company/workflows",
         Some(workflow_body("greet")),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["code"], "invalid_request");
+    assert_eq!(status, StatusCode::OK, "body: {created}");
+    assert_eq!(created["id"], "greet");
+
+    let (status, graph) = send(&state, "GET", "/api/v1/company/workflows/greet", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(graph["nodes"].as_array().unwrap().len(), 3);
 
     tokio::fs::remove_dir_all(&home).await.ok();
 }
@@ -1876,6 +1889,7 @@ async fn state_with_telegram(home: &std::path::Path, api: RecordingTelegramApi) 
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
             template_provenance: None,
         })
         .await
