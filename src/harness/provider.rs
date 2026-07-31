@@ -101,17 +101,7 @@ pub trait HarnessModel: ChatModel<()> {
 pub fn harness_inference_from_env(
     env: &dyn EnvSource,
 ) -> Option<(HostedProviderConfig, Option<String>)> {
-    let credential = match env
-        .get("OPENCOMPANY_INFERENCE_KEY")
-        .map(|key| key.trim().to_string())
-        .filter(|key| !key.is_empty())
-    {
-        Some(key) => Credential::from_value(key),
-        None => Credential::from_source(Arc::new(TinyhumansTokenSource::from_env(env)?)),
-    };
-    let base_url = env
-        .get("OPENCOMPANY_INFERENCE_URL")
-        .unwrap_or_else(|| DEFAULT_TINYHUMANS_INFERENCE_URL.to_string());
+    let (credential, base_url) = hosted_endpoint_from_env(env)?;
     // The model is a per-roster **override** now: only an explicit
     // `OPENCOMPANY_INFERENCE_MODEL` flattens every agent to one workload. When
     // unset, each agent keeps its tier-derived model, which the tenant
@@ -125,6 +115,37 @@ pub fn harness_inference_from_env(
         },
         model_override,
     ))
+}
+
+/// Resolve the shared hosted-endpoint `(credential, base_url)` pair every hosted
+/// TinyHumans surface addresses — the **one** credential path both chat
+/// inference ([`harness_inference_from_env`]) and embeddings
+/// ([`hosted_embeddings_from_env`](crate::harness::embeddings::hosted_embeddings_from_env))
+/// resolve against, so a rotation or a per-tenant key reaches both without a
+/// second, drifting resolution.
+///
+/// Precedence mirrors the documented inference order, most specific first:
+///
+/// * credential — `OPENCOMPANY_INFERENCE_KEY` if set, else the platform token
+///   source ([`TinyhumansTokenSource::from_env`]: a projected `TINYHUMANS_TOKEN_FILE`
+///   ahead of a static `TINYHUMANS_API_KEY`). **Nothing configured ⇒ `None`.**
+/// * url — `OPENCOMPANY_INFERENCE_URL`, else [`DEFAULT_TINYHUMANS_INFERENCE_URL`].
+///
+/// The embeddings client POSTs to `{base_url}/embeddings`, the chat client to
+/// `{base_url}/chat/completions` — the same OpenAI-compatible surface.
+pub(crate) fn hosted_endpoint_from_env(env: &dyn EnvSource) -> Option<(Credential, String)> {
+    let credential = match env
+        .get("OPENCOMPANY_INFERENCE_KEY")
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+    {
+        Some(key) => Credential::from_value(key),
+        None => Credential::from_source(Arc::new(TinyhumansTokenSource::from_env(env)?)),
+    };
+    let base_url = env
+        .get("OPENCOMPANY_INFERENCE_URL")
+        .unwrap_or_else(|| DEFAULT_TINYHUMANS_INFERENCE_URL.to_string());
+    Some((credential, base_url))
 }
 
 /// Default media-generation backend base URL when only a bare
