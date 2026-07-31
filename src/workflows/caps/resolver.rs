@@ -3,10 +3,16 @@
 //! tinyflows is persistence-free: when a `sub_workflow` node references a child
 //! by `workflow_id`, the engine asks the host to resolve that id to a runnable
 //! [`WorkflowGraph`](tinyflows::model::WorkflowGraph). [`StoreWorkflowResolver`]
-//! serves that from the company's on-disk source directory
-//! (`companies/<name>/workflows/<id>.toml`), running the child through the SAME
-//! full [`parse_workflow`](crate::company::parse_workflow) validation a
+//! serves that from the union of the company's two graph sources — the seed
+//! files (`companies/<name>/workflows/<id>.toml`) and the runtime-authored
+//! bodies on the [`CompanyRecord`](crate::ports::types::CompanyRecord) overlay —
+//! running the child through the SAME full
+//! [`parse_workflow`](crate::company::parse_workflow) validation a
 //! hand-authored or console-created workflow gets, then translating it.
+//!
+//! Reading the overlay matters for more than availability: a hosted tenant's
+//! children live *only* there, so a resolver that saw the seed side alone would
+//! both fail to resolve them and — worse — miss them in the cycle scan below.
 //!
 //! ## Cycle safety
 //!
@@ -23,18 +29,22 @@
 //!   [`MAX_SUB_WORKFLOW_DEPTH`](tinyflows::engine::MAX_SUB_WORKFLOW_DEPTH) bound
 //!   still terminates any cycle formed through expression-computed ids.
 //!
-//! The resolver is stateless per call — each `resolve` re-derives everything from
-//! the source directory, so a workflow edited on disk between steps is picked up.
+//! The resolver is stateless per call — each `resolve` re-loads the record and
+//! re-reads the source directory, so a workflow edited between steps is picked
+//! up.
 
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use tinyflows::caps::WorkflowResolver;
 use tinyflows::error::{EngineError, Result as TfResult};
 use tinyflows::model::WorkflowGraph;
 
-use crate::company::{WorkflowFile, WorkflowNodeKind, load_company_workflows};
+use crate::company::{WorkflowFile, WorkflowNodeKind, load_workflow_union};
+use crate::ports::CompanyStore;
+use crate::ports::types::{CompanyId, OverlayWorkflow};
 
 /// Hard bound on how many workflows the static cycle scan visits before giving
 /// up. A store this deep is either pathological or adversarial; refusing to run
@@ -44,20 +54,33 @@ const MAX_STATIC_RESOLVE_NODES: usize = 64;
 /// A [`WorkflowResolver`] serving `sub_workflow`-by-id from a company's on-disk
 /// `workflows/` directory, with a static transitive-closure cycle guard.
 pub struct StoreWorkflowResolver {
-    /// The company source directory (`companies/<name>`); children live under
-    /// its `workflows/<id>.toml`.
-    source_dir: PathBuf,
+    /// The company source directory (`companies/<name>`); seed children live
+    /// under its `workflows/<id>.toml`. `None` on a hosted tenant, whose
+    /// children are all overlay bodies.
+    source_dir: Option<PathBuf>,
+    /// The company store, read per resolve for the runtime-authored graph
+    /// bodies (the overlay half of the union).
+    store: Arc<dyn CompanyStore>,
+    /// The company whose record carries those bodies.
+    company: CompanyId,
     /// The id of the top-level workflow the current run started from — a child
     /// whose closure reaches back to it would loop the whole run.
     root_id: String,
 }
 
 impl StoreWorkflowResolver {
-    /// Builds a resolver serving children from `source_dir` for a run rooted at
-    /// `root_id`.
-    pub fn new(source_dir: PathBuf, root_id: String) -> Self {
+    /// Builds a resolver serving children from `source_dir` ∪ `company`'s
+    /// overlay bodies, for a run rooted at `root_id`.
+    pub fn new(
+        source_dir: Option<PathBuf>,
+        store: Arc<dyn CompanyStore>,
+        company: CompanyId,
+        root_id: String,
+    ) -> Self {
         Self {
             source_dir,
+            store,
+            company,
             root_id,
         }
     }
@@ -87,7 +110,8 @@ impl StoreWorkflowResolver {
     /// [`MAX_STATIC_RESOLVE_NODES`]; an unresolvable child is not a cycle (it
     /// fails loudly at its own resolve) so it is skipped here.
     fn guard_cycle(
-        source_dir: PathBuf,
+        source_dir: Option<PathBuf>,
+        overlays: Vec<OverlayWorkflow>,
         root_id: String,
         start_id: String,
         start_file: WorkflowFile,
@@ -117,12 +141,8 @@ impl StoreWorkflowResolver {
             }
             // An unresolvable / invalid child is not itself a cycle — it will
             // fail loudly when the engine resolves it. Skip it in the scan.
-            let Ok(mut loaded) =
-                load_company_workflows(&source_dir, std::slice::from_ref(&current))
+            let Ok(Some(file)) = load_workflow_union(source_dir.as_deref(), &overlays, &current)
             else {
-                continue;
-            };
-            let Some(file) = loaded.pop() else {
                 continue;
             };
             for referenced in Self::static_refs(&file) {
@@ -150,27 +170,39 @@ impl WorkflowResolver for StoreWorkflowResolver {
             )));
         }
 
-        // (b) Load the child, re-running full OpenCompany parse + validation on
-        // it (the same rules a hand-authored or console-created graph passes).
-        let id = workflow_id.to_string();
-        let file = load_company_workflows(&self.source_dir, std::slice::from_ref(&id))
+        // (b) The company's runtime-authored bodies, read once and reused by the
+        // load and the cycle scan below so both see the same snapshot.
+        let overlays = self
+            .store
+            .load(&self.company)
+            .await
+            .map_err(|err| {
+                EngineError::Capability(format!(
+                    "sub_workflow '{workflow_id}': could not read saved workflows: {err}"
+                ))
+            })?
+            .map(|record| record.overlay_workflows)
+            .unwrap_or_default();
+
+        // (c) Load the child from the seed ∪ overlay union, re-running full
+        // OpenCompany parse + validation on it (the same rules a hand-authored
+        // or console-created graph passes).
+        let file = load_workflow_union(self.source_dir.as_deref(), &overlays, workflow_id)
             .map_err(|err| EngineError::Capability(format!("sub_workflow '{workflow_id}': {err}")))?
-            .into_iter()
-            .next()
             .ok_or_else(|| {
                 EngineError::Capability(format!(
                     "sub_workflow '{workflow_id}' is not a saved workflow on this company"
                 ))
             })?;
 
-        // (c) Static cycle guard over the store, before the child is handed back
-        // to the engine to compile + run.
+        // (d) Static cycle guard over the same union, before the child is handed
+        // back to the engine to compile + run.
         let source_dir = self.source_dir.clone();
         let root_id = self.root_id.clone();
         let start_id = workflow_id.to_string();
         let start_file = file.clone();
         tokio::task::spawn_blocking(move || {
-            Self::guard_cycle(source_dir, root_id, start_id, start_file)
+            Self::guard_cycle(source_dir, overlays, root_id, start_id, start_file)
         })
         .await
         .map_err(|err| {
@@ -179,7 +211,7 @@ impl WorkflowResolver for StoreWorkflowResolver {
             ))
         })??;
 
-        // (d) Translate to a runnable tinyflows graph.
+        // (e) Translate to a runnable tinyflows graph.
         Ok(crate::workflows::translate::translate(&file))
     }
 }
@@ -196,6 +228,77 @@ fn is_safe_workflow_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::company::CompanyManifest;
+    use crate::error::Result as OcResult;
+    use crate::ports::types::{CompanyRecord, CompanySummary, LedgerEntry};
+
+    /// An in-memory `CompanyStore` holding one record, so the resolver's overlay
+    /// half can be seeded without a real backend.
+    struct MemStore(std::sync::Mutex<Option<CompanyRecord>>);
+
+    #[async_trait]
+    impl CompanyStore for MemStore {
+        async fn load(&self, _id: &CompanyId) -> OcResult<Option<CompanyRecord>> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+        async fn save(&self, record: &CompanyRecord) -> OcResult<()> {
+            *self.0.lock().unwrap() = Some(record.clone());
+            Ok(())
+        }
+        async fn list(&self) -> OcResult<Vec<CompanySummary>> {
+            Ok(Vec::new())
+        }
+        async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> OcResult<()> {
+            Ok(())
+        }
+    }
+
+    /// A store whose record carries `overlays` as its runtime-authored graphs.
+    fn store_with(overlays: Vec<OverlayWorkflow>) -> Arc<dyn CompanyStore> {
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n").expect("valid manifest");
+        Arc::new(MemStore(std::sync::Mutex::new(Some(CompanyRecord {
+            id: CompanyId::new("acme"),
+            manifest,
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: overlays,
+            template_provenance: None,
+        }))))
+    }
+
+    /// A resolver over a seed directory only (no runtime-authored graphs).
+    fn seed_resolver(dir: &std::path::Path, root_id: &str) -> StoreWorkflowResolver {
+        StoreWorkflowResolver::new(
+            Some(dir.to_path_buf()),
+            store_with(Vec::new()),
+            CompanyId::new("acme"),
+            root_id.to_string(),
+        )
+    }
+
+    /// A resolver with NO seed directory, serving only overlay bodies — the
+    /// hosted shape (issue #168).
+    fn overlay_resolver(overlays: Vec<OverlayWorkflow>, root_id: &str) -> StoreWorkflowResolver {
+        StoreWorkflowResolver::new(
+            None,
+            store_with(overlays),
+            CompanyId::new("acme"),
+            root_id.to_string(),
+        )
+    }
+
+    fn overlay(id: &str, toml: String) -> OverlayWorkflow {
+        OverlayWorkflow {
+            id: id.to_string(),
+            toml,
+        }
+    }
 
     /// Writes `src` to `<dir>/workflows/<id>.toml`.
     fn write_wf(dir: &std::path::Path, id: &str, src: &str) {
@@ -252,7 +355,7 @@ to = "sub"
     async fn resolves_a_saved_child_into_a_compilable_graph() {
         let dir = tempfile::tempdir().unwrap();
         write_wf(dir.path(), "child", &leaf("child"));
-        let resolver = StoreWorkflowResolver::new(dir.path().to_path_buf(), "root".to_string());
+        let resolver = seed_resolver(dir.path(), "root");
 
         let graph = resolver.resolve("child").await.expect("resolves");
         assert_eq!(graph.id.as_deref(), Some("child"));
@@ -263,7 +366,7 @@ to = "sub"
     #[tokio::test]
     async fn unknown_child_is_a_capability_error() {
         let dir = tempfile::tempdir().unwrap();
-        let resolver = StoreWorkflowResolver::new(dir.path().to_path_buf(), "root".into());
+        let resolver = seed_resolver(dir.path(), "root");
         let err = resolver.resolve("ghost").await.unwrap_err();
         assert!(err.to_string().contains("ghost"), "{err}");
     }
@@ -271,7 +374,7 @@ to = "sub"
     #[tokio::test]
     async fn traversal_id_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let resolver = StoreWorkflowResolver::new(dir.path().to_path_buf(), "root".into());
+        let resolver = seed_resolver(dir.path(), "root");
         let err = resolver.resolve("../secrets").await.unwrap_err();
         assert!(err.to_string().contains("not a valid workflow id"), "{err}");
     }
@@ -284,7 +387,7 @@ to = "sub"
         // reject because `a` is in `b`'s closure.
         write_wf(dir.path(), "a", &parent_of("a", "b"));
         write_wf(dir.path(), "b", &parent_of("b", "a"));
-        let resolver = StoreWorkflowResolver::new(dir.path().to_path_buf(), "a".into());
+        let resolver = seed_resolver(dir.path(), "a");
         let err = resolver.resolve("b").await.unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("cycle"), "{msg}");
@@ -303,7 +406,7 @@ to = "sub"
         write_wf(dir.path(), "flow_a", &parent_of("flow_a", "flow_b"));
         write_wf(dir.path(), "flow_b", &parent_of("flow_b", "flow_a"));
         // Root is flow_a; the engine resolves flow_b first.
-        let resolver = StoreWorkflowResolver::new(dir.path().to_path_buf(), "flow_a".into());
+        let resolver = seed_resolver(dir.path(), "flow_a");
         let err = resolver.resolve("flow_b").await.unwrap_err();
         assert!(err.to_string().contains("cycle"), "{err}");
     }
@@ -316,9 +419,65 @@ to = "sub"
         write_wf(dir.path(), "b", &parent_of("b", "d"));
         write_wf(dir.path(), "c", &parent_of("c", "d"));
         write_wf(dir.path(), "d", &leaf("d"));
-        let resolver = StoreWorkflowResolver::new(dir.path().to_path_buf(), "root".into());
+        let resolver = seed_resolver(dir.path(), "root");
         resolver.resolve("b").await.expect("b resolves");
         resolver.resolve("c").await.expect("c resolves");
         resolver.resolve("d").await.expect("d resolves");
+    }
+
+    // --- #168: overlay-only (hosted) children --------------------------------
+
+    /// A `sub_workflow` child that exists ONLY as a runtime-authored body — the
+    /// hosted case — resolves into a compilable graph.
+    #[tokio::test]
+    async fn resolves_an_overlay_child_with_no_source_dir() {
+        let resolver = overlay_resolver(vec![overlay("child", leaf("child"))], "root");
+        let graph = resolver.resolve("child").await.expect("resolves");
+        assert_eq!(graph.id.as_deref(), Some("child"));
+        tinyflows::compiler::compile(&graph).expect("resolved overlay child compiles");
+    }
+
+    /// The static cycle scan must walk overlay children too — otherwise a cycle
+    /// formed entirely from console-created workflows would only be caught by the
+    /// engine's depth backstop, deep into the run.
+    #[tokio::test]
+    async fn cycle_through_overlay_children_is_rejected() {
+        let resolver = overlay_resolver(
+            vec![
+                overlay("flow_a", parent_of("flow_a", "flow_b")),
+                overlay("flow_b", parent_of("flow_b", "flow_a")),
+            ],
+            "flow_a",
+        );
+        let err = resolver.resolve("flow_b").await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cycle"), "{msg}");
+        assert!(
+            !msg.contains("depth"),
+            "should be the static cycle msg: {msg}"
+        );
+    }
+
+    /// A seed file and an overlay body sharing one id: the seed wins, matching
+    /// `load_workflow_union`'s documented precedence.
+    #[tokio::test]
+    async fn a_seed_file_shadows_an_overlay_of_the_same_id() {
+        let dir = tempfile::tempdir().unwrap();
+        write_wf(dir.path(), "child", &leaf("child"));
+        // The overlay body of the same id is a *parent* graph — if it won, the
+        // resolved graph would carry a sub_workflow node.
+        let resolver = StoreWorkflowResolver::new(
+            Some(dir.path().to_path_buf()),
+            store_with(vec![overlay("child", parent_of("child", "other"))]),
+            CompanyId::new("acme"),
+            "root".to_string(),
+        );
+        let graph = resolver.resolve("child").await.expect("resolves");
+        assert_eq!(graph.id.as_deref(), Some("child"));
+        assert_eq!(
+            graph.nodes.len(),
+            2,
+            "the seed leaf must win over the overlay parent"
+        );
     }
 }

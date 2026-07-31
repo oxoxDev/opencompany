@@ -26,11 +26,11 @@
 //!
 //! * **sub_workflow** ([`StoreWorkflowResolver`](resolver::StoreWorkflowResolver))
 //!   — a `sub_workflow` node referencing a child by `workflow_id` resolves it
-//!   from the company's on-disk `workflows/` directory (full validation + a
-//!   static cycle guard), when a source directory is wired
-//!   ([`HarnessDeps::workflow_source_dir`](crate::harness::HarnessDeps)). A
-//!   platform-provisioned tenant with no source directory keeps the
-//!   [`UnwiredResolver`] stub.
+//!   from the union of the company's seed `workflows/` directory
+//!   ([`HarnessDeps::workflow_source_dir`](crate::harness::HarnessDeps)) and the
+//!   record's runtime-authored graph bodies (full validation + a static cycle
+//!   guard). A platform-provisioned tenant has no source directory, so every
+//!   child it owns resolves from the record.
 //!
 //! Still **not wired**: the bare-completion `LlmProvider` fallback and `code`
 //! nodes. They are explicit stubs that return a clear capability error rather
@@ -50,7 +50,6 @@ use tinyflows::caps::{
     AgentRunner, Capabilities, CodeLanguage, CodeRunner, LlmProvider, StateStore, WorkflowResolver,
 };
 use tinyflows::error::{EngineError, Result as TfResult};
-use tinyflows::model::WorkflowGraph;
 
 use crate::harness::policy::PolicyMode;
 use crate::harness::{HarnessDeps, HarnessPool, toolbelt};
@@ -133,16 +132,16 @@ pub async fn build_capabilities(
         }
     };
 
-    // sub_workflow-by-id resolves children from the company's on-disk
-    // `workflows/` directory when a source dir is wired; a platform tenant with
-    // none keeps the loud stub. Read before `deps` moves into the agent runner.
-    let resolver: Arc<dyn WorkflowResolver> = match &deps.workflow_source_dir {
-        Some(source_dir) => Arc::new(StoreWorkflowResolver::new(
-            source_dir.clone(),
-            workflow_id.to_string(),
-        )),
-        None => Arc::new(UnwiredResolver),
-    };
+    // sub_workflow-by-id resolves children from the union of the company's seed
+    // `workflows/` directory and the record's runtime-authored bodies — so a
+    // platform tenant with no source dir still resolves the workflows it
+    // created (issue #168). Read before `deps` moves into the agent runner.
+    let resolver: Arc<dyn WorkflowResolver> = Arc::new(StoreWorkflowResolver::new(
+        deps.workflow_source_dir.clone(),
+        deps.store.clone(),
+        company.clone(),
+        workflow_id.to_string(),
+    ));
 
     Capabilities {
         llm: Arc::new(UnwiredLlm),
@@ -340,22 +339,6 @@ impl CodeRunner for UnwiredCode {
         Err(EngineError::Capability(
             "code execution is not supported for company workflows".to_string(),
         ))
-    }
-}
-
-/// The `sub_workflow`-by-id fallback for a deployment with no source directory
-/// (platform-provisioned mode): there is nowhere on disk to resolve a child
-/// graph from, so a reached `sub_workflow` node fails loudly rather than
-/// silently. A deployment WITH a source directory uses
-/// [`StoreWorkflowResolver`](resolver::StoreWorkflowResolver) instead.
-struct UnwiredResolver;
-
-#[async_trait]
-impl WorkflowResolver for UnwiredResolver {
-    async fn resolve(&self, workflow_id: &str) -> TfResult<WorkflowGraph> {
-        Err(EngineError::Capability(format!(
-            "sub_workflow reference '{workflow_id}' is not supported for company workflows"
-        )))
     }
 }
 
