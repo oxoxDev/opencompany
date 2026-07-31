@@ -4,7 +4,7 @@
 // the card is open. Cost/₹ is intentionally absent everywhere. Several tabs are
 // honest stubs pending their own issues (see the tab bodies).
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
 import {
   AlertCircle,
   ArrowLeft,
@@ -146,40 +146,46 @@ export function TaskDetailView({
   const [notFound, setNotFound] = useState(false);
   const [editing, setEditing] = useState(false);
   const [now, setNow] = useState(() => Date.now());
-  const mounted = useRef(true);
 
-  const load = useCallback(async () => {
-    try {
-      const [d, runs] = await Promise.all([
-        getTaskDetail(client, company, taskId),
-        listInflight(client, company).catch(() => [] as InflightRun[]),
-      ]);
-      if (!mounted.current) return;
-      setDetail(d);
-      setInflight(runs.find((r) => r.taskId === taskId) ?? null);
-      setNotFound(false);
-      setError(null);
-    } catch (e) {
-      if (!mounted.current) return;
-      if (e instanceof ApiError && e.status === 404) {
-        setNotFound(true);
+  // `isActive` is a per-effect-run token, not a shared ref: a superseded run
+  // (e.g. taskId A→B) flips its own token to false so an in-flight `load()` from
+  // run A can never apply task A's data while the screen is showing task B.
+  const load = useCallback(
+    async (isActive: () => boolean = () => true) => {
+      try {
+        const [d, runs] = await Promise.all([
+          getTaskDetail(client, company, taskId),
+          listInflight(client, company).catch(() => [] as InflightRun[]),
+        ]);
+        if (!isActive()) return;
+        setDetail(d);
+        setInflight(runs.find((r) => r.taskId === taskId) ?? null);
+        setNotFound(false);
         setError(null);
-      } else {
-        setError(e instanceof Error ? e.message : "could not load the task");
+      } catch (e) {
+        if (!isActive()) return;
+        if (e instanceof ApiError && e.status === 404) {
+          setNotFound(true);
+          setError(null);
+        } else {
+          setError(e instanceof Error ? e.message : "could not load the task");
+        }
+      } finally {
+        if (isActive()) setLoading(false);
       }
-    } finally {
-      if (mounted.current) setLoading(false);
-    }
-  }, [client, company, taskId]);
+    },
+    [client, company, taskId],
+  );
 
   // 4s poll, paused while the tab is hidden and resumed (with an immediate
   // fetch) when it returns to the foreground. Re-keys on `taskId`, so a lineage
   // navigation reloads the screen for the new card.
   useEffect(() => {
-    mounted.current = true;
+    let cancelled = false;
+    const isActive = () => !cancelled;
     setLoading(true);
     setDetail(null);
-    void load();
+    void load(isActive);
     let timer: number | undefined;
     const stop = () => {
       if (timer !== undefined) {
@@ -188,20 +194,20 @@ export function TaskDetailView({
       }
     };
     const start = () => {
-      if (timer === undefined) timer = window.setInterval(() => void load(), POLL_MS);
+      if (timer === undefined) timer = window.setInterval(() => void load(isActive), POLL_MS);
     };
     const onVisibility = () => {
       if (document.visibilityState === "hidden") {
         stop();
       } else {
-        void load();
+        void load(isActive);
         start();
       }
     };
     if (document.visibilityState !== "hidden") start();
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
-      mounted.current = false;
+      cancelled = true;
       stop();
       document.removeEventListener("visibilitychange", onVisibility);
     };
