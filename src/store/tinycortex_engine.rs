@@ -722,6 +722,12 @@ fn merge_hits(
     query: &str,
     limit: usize,
 ) -> Vec<ChunkHit> {
+    // Build the addr → chunk index once so each vector result is an O(1)
+    // lookup instead of a linear scan over `chunks` (was O(results × chunks)).
+    let by_addr: HashMap<&str, &StoredChunk> = chunks
+        .iter()
+        .map(|(addr, chunk)| (addr.as_str(), chunk))
+        .collect();
     let mut hits: Vec<ChunkHit> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for result in results {
@@ -729,7 +735,7 @@ fn merge_hits(
             break;
         }
         // Prune dangling ids: a vector row with no live KV chunk is skipped.
-        let Some((_, chunk)) = chunks.iter().find(|(addr, _)| addr == &result.id) else {
+        let Some(chunk) = by_addr.get(result.id.as_str()).copied() else {
             continue;
         };
         if !seen.insert(result.id.clone()) {
