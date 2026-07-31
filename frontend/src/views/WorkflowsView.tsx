@@ -19,6 +19,8 @@ import {
   getWorkflow,
   listWorkflows,
   runWorkflow,
+  type DeliveryReport,
+  type DeliveryStatus,
   type WorkflowGraph,
   type WorkflowNode as WorkflowNodeModel,
   type WorkflowRunResult,
@@ -405,18 +407,85 @@ function NodeDetailPanel({
           </DetailField>
         )}
 
+        {node.destination && (
+          <DetailField label="Destination">
+            <p className="text-sm leading-snug">{describeDestination(node.destination)}</p>
+          </DetailField>
+        )}
+
         {!node.summary &&
           !node.agent &&
           !hasConfig &&
           !node.onError &&
           !node.retry &&
           !node.schedule &&
+          !node.destination &&
           !node.requiresApproval && (
             <p className="text-xs text-muted-foreground">
               This node has no extra details beyond its kind and name.
             </p>
           )}
       </div>
+    </div>
+  );
+}
+
+/** Where an output node's report goes, in a sentence. `owner` deliberately has
+ * no target to show — it resolves to the company's admins server-side, which is
+ * exactly why an author can't point it at an outsider. */
+function describeDestination(destination: NonNullable<WorkflowNodeModel["destination"]>): string {
+  switch (destination.kind) {
+    case "owner":
+      return "Reports to the company's admins.";
+    case "email":
+      return `Emails ${destination.target ?? "(no address)"}.`;
+    case "channel":
+      return `Posts to the ${destination.target ?? "(unnamed)"} channel.`;
+    default:
+      return `${destination.kind}${destination.target ? ` → ${destination.target}` : ""}`;
+  }
+}
+
+/** Badge styling per delivery outcome. A report that did NOT go out must not
+ * look like one that did — `denied` and `failed` are the two an operator has to
+ * act on, so they get the loud treatment. */
+const DELIVERY_TONE: Record<DeliveryStatus, string> = {
+  sent: "border-emerald-500/40 bg-emerald-500/10",
+  skipped: "border-amber-500/40 bg-amber-500/10",
+  denied: "border-red-500/40 bg-red-500/10",
+  failed: "border-red-500/40 bg-red-500/10",
+};
+
+/** The delivery block of the run drawer: one line per attempt to route an
+ * output node's report. This is the ONLY place an operator learns a report
+ * didn't leave the building — a delivery failure never fails the run. */
+function DeliveryRows({ deliveries }: { deliveries: DeliveryReport[] }) {
+  const undelivered = deliveries.filter((d) => d.status !== "sent").length;
+  return (
+    <div className="mb-3 space-y-1.5 rounded-lg border bg-background/40 p-2">
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-medium">Report delivery</span>
+        {undelivered > 0 && (
+          <Badge variant="outline" className="h-4 px-1.5 text-[10px] font-normal border-red-500/40 bg-red-500/10">
+            {undelivered} not delivered
+          </Badge>
+        )}
+      </div>
+      {deliveries.map((d, i) => (
+        <div key={`${d.node}-${d.target ?? ""}-${i}`} className="flex flex-wrap items-baseline gap-1.5">
+          <Badge
+            variant="outline"
+            className={`h-4 px-1.5 text-[10px] font-normal ${DELIVERY_TONE[d.status] ?? ""}`}
+          >
+            {d.status}
+          </Badge>
+          <span className="font-mono text-[11px]">{d.node}</span>
+          <span className="text-[11px] text-muted-foreground">
+            → {d.kind}
+            {d.target ? ` ${d.target}` : ""} — {d.detail}
+          </span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -453,12 +522,19 @@ function RunResultPanel({
     () => parseRunNodes(result.output, graph),
     [result.output, graph],
   );
+  const deliveries = result.deliveries ?? [];
+  const undeliveredCount = deliveries.filter((d) => d.status !== "sent").length;
 
   return (
     <div className="border-t bg-card/60">
       <div className="flex items-center justify-between px-4 py-2">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">Run result</span>
+          {undeliveredCount > 0 && (
+            <Badge variant="outline" className="border-red-500/40 bg-red-500/10">
+              {undeliveredCount} report{undeliveredCount === 1 ? "" : "s"} not delivered
+            </Badge>
+          )}
           {result.pendingApprovals.length > 0 && (
             <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10">
               {result.pendingApprovals.length} pending approval
@@ -481,6 +557,8 @@ function RunResultPanel({
             Waiting on: {result.pendingApprovals.join(", ")}
           </p>
         )}
+
+        {deliveries.length > 0 && <DeliveryRows deliveries={deliveries} />}
 
         {nodeResults && nodeResults.length > 0 ? (
           <div className="mb-2 space-y-2">

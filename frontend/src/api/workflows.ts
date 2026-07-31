@@ -44,7 +44,31 @@ export interface WorkflowNode {
   };
   /** Whether the node pauses for a human approval before proceeding. */
   requiresApproval?: boolean;
+  /** Where an `output` node's report goes when the run finishes. */
+  destination?: WorkflowDestination;
 }
+
+/**
+ * Where a terminal `output` node routes its report once the run completes.
+ *
+ * `owner` is resolved server-side from the company's admins and carries no
+ * target — the graph names nobody, which is what keeps it safe by construction.
+ * `email` names an address and only sends when the company grants `email` AND
+ * the recipient has already written in. `channel` must name a channel the
+ * deployment already wired.
+ */
+export interface WorkflowDestination {
+  kind: "owner" | "email" | "channel";
+  /** Required for `email` (an address) and `channel` (an id); absent for `owner`. */
+  target?: string;
+}
+
+/** The destination kinds the creator's picker offers, with prosumer labels. */
+export const DESTINATION_KINDS: { value: WorkflowDestination["kind"]; label: string }[] = [
+  { value: "owner", label: "Owner — the company's admins" },
+  { value: "email", label: "Email — a specific address" },
+  { value: "channel", label: "Channel — a wired chat channel" },
+];
 
 /** A directed edge between two node ids, with an optional branch label. */
 export interface WorkflowEdge {
@@ -62,12 +86,39 @@ export interface WorkflowGraph {
   edges: WorkflowEdge[];
 }
 
+/** What became of one attempt to deliver an output node's report. */
+export type DeliveryStatus = "sent" | "skipped" | "denied" | "failed";
+
+/**
+ * One attempt to route a reached `output` node's report to its destination.
+ *
+ * This is the ONLY place an operator learns a report was not delivered: a
+ * delivery failure never fails the run, so it has nowhere else to surface. An
+ * output node the run never reached contributes no row at all.
+ */
+export interface DeliveryReport {
+  /** The output node whose report this was. */
+  node: string;
+  /** The destination kind as authored. */
+  kind: string;
+  /** The address or channel actually addressed, when there was one. */
+  target?: string;
+  status: DeliveryStatus;
+  /** An operator-readable reason — populated even on success. */
+  detail: string;
+}
+
 /** The result of a run: the engine's final state and any pending approvals. */
 export interface WorkflowRunResult {
   /** The engine's final run state — a nested JSON payload. */
   output: unknown;
   /** Node ids left waiting on a human approval, if any. */
   pendingApprovals: string[];
+  /**
+   * One row per report-delivery attempt. Optional on the type (not the wire)
+   * so a response from a host predating issue #170 still parses.
+   */
+  deliveries?: DeliveryReport[];
 }
 
 export function listWorkflows(
