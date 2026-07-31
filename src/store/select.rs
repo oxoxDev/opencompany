@@ -259,11 +259,37 @@ fn open_tinycortex(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> 
                      volume at the data dir, or keep memory on the base store (OPENCOMPANY_MEMORY=store).",
                 );
             }
-            crate::store::tinycortex_engine::engine(dir.join("memory"))
+            // Meaning tier (188c2): inject a hosted embeddings backend resolved
+            // from the environment when one is configured, so recall is semantic
+            // rather than lexical-only. `None` (no hosted credential, or a
+            // default build without the `openhuman` harness) keeps the lexical
+            // path — the embeddings client lives in the openhuman-gated harness,
+            // so the type is only reachable there.
+            let embeddings = hosted_embeddings_backend();
+            crate::store::tinycortex_engine::engine_with_embeddings(dir.join("memory"), embeddings)
         }
         None => crate::store::tinycortex::in_memory(),
     };
     Ok(Some(MemoryOverlay { memory, context }))
+}
+
+/// Resolves the hosted embeddings backend for the memory meaning tier from the
+/// process environment, as an `Arc<dyn EmbeddingBackend>` the vector store
+/// consumes. Only the `openhuman` build can build one (that is where the hosted
+/// embeddings client lives); every other build gets `None` and lexical recall.
+#[cfg(feature = "tinycortex")]
+fn hosted_embeddings_backend()
+-> Option<Arc<dyn tinycortex::memory::store::vectors::embedding::EmbeddingBackend>> {
+    #[cfg(feature = "openhuman")]
+    {
+        use tinycortex::memory::store::vectors::embedding::EmbeddingBackend;
+        crate::harness::embeddings::hosted_embeddings_from_env(&crate::app::config::ProcessEnv)
+            .map(|backend| Arc::new(backend) as Arc<dyn EmbeddingBackend>)
+    }
+    #[cfg(not(feature = "openhuman"))]
+    {
+        None
+    }
 }
 
 #[cfg(not(feature = "tinycortex"))]
