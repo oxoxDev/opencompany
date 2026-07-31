@@ -121,7 +121,11 @@ company workspace cannot be opened.
 the engine's `MemoryConfig` directly with `embedding.strict = false`, so an inert
 embedder is tolerated and recall degrades to **lexical token-overlap** ranking
 (the same `[0, 1]`-scored, snippet-bearing contract the in-memory backend
-defines) rather than semantic. **Zero** embedding compute is injected. Because
+defines) rather than semantic. This is a real behavioural contract, not an
+implementation footnote: `search_chunks` here is substring/recency overlap, **not**
+the vector/semantic recall the `tinycortex` name implies, so the overlay announces
+it once, loudly, at open (`tracing::warn` in `src/store/select.rs`). Real
+embedding-backed recall lands in **#201**. **Zero** embedding compute is injected. Because
 the crate's retrieval primitives rank only by admission-score/recency in this
 mode (their keyword/graph scorers are defined but not yet wired), and its ingest
 path re-chunks documents under its own ids — which cannot round-trip
@@ -139,10 +143,12 @@ default `$HOME/.opencompany`), engine memory survives restarts. But under the
 hosted multi-tenant model with `OPENCOMPANY_STORAGE=mongodb`, the durable base is
 the database and the container's `/data` is treated as **ephemeral scratch** — so
 engine memory written to `<data_dir>/memory` would **not** survive a container
-restart. Selecting `OPENCOMPANY_MEMORY=tinycortex` together with
-`OPENCOMPANY_STORAGE=mongodb` therefore emits a loud boot warning
-(`src/store/select.rs`): mount a durable volume at the data dir, or keep memory
-on the base store (`OPENCOMPANY_MEMORY=store`).
+restart. Because that failure mode is *silent* memory loss on restart, selecting
+`OPENCOMPANY_MEMORY=tinycortex` together with `OPENCOMPANY_STORAGE=mongodb` is a
+hard **refuse-to-open** error at boot (`src/store/select.rs`), not a warning: the
+overlay never opens a doomed engine. To run the in-pod engine, mount a persistent
+volume at `OPENCOMPANY_DATA_DIR`, use `OPENCOMPANY_STORAGE=fs` or `sqlite` (durable
+`/data`), or keep memory on the base store (`OPENCOMPANY_MEMORY=store`).
 
 ## MongoDB backend (`src/store/mongodb.rs`)
 

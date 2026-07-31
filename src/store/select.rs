@@ -243,24 +243,51 @@ pub fn open_memory_overlay(settings: &StorageSettings) -> Result<Option<MemoryOv
 /// in-pod [`EngineCortex`](crate::store::tinycortex_engine::EngineCortex) rooted
 /// at `<data_dir>/memory/`; without one (tests, no-data-dir callers) it is the
 /// offline in-memory backend.
+///
+/// Two boot-time contracts are enforced here rather than left to silently
+/// surprise an operator at runtime:
+///
+/// 1. **Refuse-to-open on ephemeral `/data`.** `OPENCOMPANY_STORAGE=mongodb`
+///    makes the container's data dir ephemeral scratch (the database is the
+///    durable base), so an in-pod engine rooted there would lose *all* memory on
+///    every restart. That is silent data loss, so this combination is a hard
+///    [`OpenCompanyError::Config`] — we never open a doomed engine.
+/// 2. **Loud degraded-mode contract.** This slice ships *lexical*
+///    (substring/recency token-overlap) recall, **not** the vector/semantic
+///    recall the `tinycortex` name implies. That is announced once, loudly, at
+///    open so it is never mistaken for real embedding recall (which lands in
+///    #201).
 #[cfg(feature = "tinycortex")]
 fn open_tinycortex(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
     let (memory, context) = match &settings.data_dir {
         Some(dir) => {
-            // Durability caveat: the engine persists to `<data_dir>/memory` on the
-            // local container filesystem. Under `OPENCOMPANY_STORAGE=mongodb` the
-            // hosting model treats `/data` as ephemeral scratch (the durable base
-            // is the database), so engine memory would be lost on restart. Warn
-            // loudly rather than silently drop memory. See docs/spec/runtime/storage.md.
+            // Refuse-to-open contract: the engine persists to `<data_dir>/memory`
+            // on the local container filesystem. Under `OPENCOMPANY_STORAGE=mongodb`
+            // the hosting model treats `/data` as ephemeral scratch (the durable
+            // base is the database), so engine memory would be silently lost on
+            // every restart. Refusing to open beats warning-then-losing-data: the
+            // failure mode we are guarding against is exactly a quiet memory wipe on
+            // restart. See docs/spec/runtime/storage.md.
             if settings.kind == StorageKind::Mongodb {
-                tracing::warn!(
-                    data_dir = %dir.display(),
-                    "OPENCOMPANY_MEMORY=tinycortex persists to <data_dir>/memory on the local \
-                     container filesystem, but OPENCOMPANY_STORAGE=mongodb implies /data is \
-                     ephemeral scratch — engine memory will NOT survive a restart. Mount a durable \
-                     volume at the data dir, or keep memory on the base store (OPENCOMPANY_MEMORY=store).",
-                );
+                return Err(OpenCompanyError::Config(
+                    "OPENCOMPANY_MEMORY=tinycortex needs a persistent volume at the data dir, but \
+                     OPENCOMPANY_STORAGE=mongodb makes /data ephemeral scratch, so in-pod memory \
+                     would be silently lost on restart. Mount a persistent volume at \
+                     OPENCOMPANY_DATA_DIR, use OPENCOMPANY_STORAGE=fs or sqlite (durable /data), or \
+                     keep memory on the base store with OPENCOMPANY_MEMORY=store."
+                        .into(),
+                ));
             }
+            // Loud, one-time degraded-mode contract: recall here is lexical
+            // (substring/recency token-overlap), NOT the vector/semantic recall the
+            // name implies. Announce it once at open so it is never mistaken for
+            // real embedding recall — that lands in #201.
+            tracing::warn!(
+                data_dir = %dir.display(),
+                "OPENCOMPANY_MEMORY=tinycortex is running in DEGRADED lexical fallback mode: recall \
+                 is substring/recency token-overlap, NOT vector/semantic recall. Real \
+                 embedding-backed recall lands in #201.",
+            );
             crate::store::tinycortex_engine::engine(dir.join("memory"))
         }
         None => crate::store::tinycortex::in_memory(),
