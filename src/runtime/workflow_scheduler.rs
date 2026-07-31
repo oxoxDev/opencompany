@@ -326,6 +326,9 @@ impl WorkflowScheduler {
                                 skipped = counts.skipped,
                                 denied = counts.denied,
                                 failed = counts.failed,
+                                // The one number worth alerting on, so a log
+                                // query need not sum the three refusal kinds.
+                                undelivered = counts.undelivered(),
                                 "workflow scheduler: scheduled run finished"
                             );
                         }
@@ -1006,6 +1009,7 @@ to = "done"
             .unwrap_or_else(|| panic!("no summary line for {company}: {logs}"));
         assert!(summary.contains("sent=1"), "{summary}");
         assert!(summary.contains("skipped=1"), "{summary}");
+        assert!(summary.contains("undelivered=1"), "{summary}");
 
         cleanup(&home).await;
     }
@@ -1056,6 +1060,7 @@ to = "done"
         assert!(summary.contains("sent=1"), "{summary}");
         assert!(summary.contains("skipped=0"), "{summary}");
         assert!(summary.contains("failed=0"), "{summary}");
+        assert!(summary.contains("undelivered=0"), "{summary}");
 
         cleanup(&home).await;
     }
