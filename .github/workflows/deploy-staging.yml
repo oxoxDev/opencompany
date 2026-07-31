@@ -188,7 +188,17 @@ jobs:
           # deliberate, since restarting them interrupts live agent work.
           if [ "${REFRESH_ALL}" = "true" ]; then
             echo "Restarting all running tenants onto the new image (requested)..."
-            kubectl rollout restart statefulset -A -l app=opencompany
+            # `kubectl rollout restart` has no -A/--all-namespaces (only `get`
+            # does), so enumerate first and restart per namespace. Each tenant
+            # lives in its own namespace, so this is the only way to reach them
+            # all in one pass.
+            kubectl get statefulset -A -l app=opencompany \
+              -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' \
+            | while read -r ns name; do
+                [ -n "${ns}" ] || continue
+                echo "  restarting ${ns}/${name}"
+                kubectl -n "${ns}" rollout restart "statefulset/${name}"
+              done
           else
             echo "Running tenants keep their current image; re-run with refresh_all_tenants=true to roll them."
           fi
