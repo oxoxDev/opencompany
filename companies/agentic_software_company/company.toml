@@ -8,9 +8,13 @@ output = "An entire SaaS product"
 human_role = "Product direction"
 
 [tools]
-# Composio integration tools (Gmail/Slack/GitHub). Fail-closed until a
-# per-company Composio bearer is set via the console.
-allow = ["composio"]
+# Full tool belt. `*` covers files/docs/shell/code/web/subagent; `media` and
+# `composio` are listed literally because `*` deliberately excludes those two
+# (real-money + per-tenant-credential) namespaces. media/composio/mcp also
+# require their Cargo features compiled into the tenant image, and each is
+# fail-closed at runtime until its credential/config is present (Composio
+# bearer, media backend, per-server MCP config).
+allow = ["*", "media", "composio"]
 
 [[agent]]
 id = "product_manager"
