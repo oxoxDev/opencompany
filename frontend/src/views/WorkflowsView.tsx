@@ -314,7 +314,8 @@ export function WorkflowsView({
 /** A read-only inspector for a single graph node, overlaid on the canvas when
  * the operator clicks a node. Surfaces the fields already on the wire from
  * `GET …/workflows/{wid}`: kind, name, summary, the assigned agent (agent
- * nodes), and any kind-specific config / error-handling policy. */
+ * nodes), the trigger's cron schedule (trigger nodes, issue #169), and any
+ * kind-specific config / error-handling policy. */
 function NodeDetailPanel({
   node,
   onClose,
@@ -354,7 +355,21 @@ function NodeDetailPanel({
               requires approval
             </Badge>
           )}
+          {node.schedule && (
+            <Badge variant="outline" className="border-sky-500/40 bg-sky-500/10 font-normal">
+              scheduled
+            </Badge>
+          )}
         </div>
+
+        {/* A saved schedule must be visible, not write-only — otherwise an
+            operator cannot tell a self-running workflow from a manual one. */}
+        {node.schedule && (
+          <DetailField label="Schedule">
+            <p className="font-mono text-xs">{node.schedule}</p>
+            <p className="text-[10px] text-muted-foreground">5-field cron, UTC.</p>
+          </DetailField>
+        )}
 
         {node.summary && (
           <DetailField label="Summary">
@@ -395,6 +410,7 @@ function NodeDetailPanel({
           !hasConfig &&
           !node.onError &&
           !node.retry &&
+          !node.schedule &&
           !node.requiresApproval && (
             <p className="text-xs text-muted-foreground">
               This node has no extra details beyond its kind and name.
