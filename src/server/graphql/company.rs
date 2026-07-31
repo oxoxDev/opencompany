@@ -139,7 +139,9 @@ impl CompanyGql {
         memory_facts::resolve(&self.runtime, query, kind, first, offset).await
     }
 
-    /// The enabled workflows, as one-line summaries.
+    /// The company's saved workflows, as one-line summaries — seed graphs and
+    /// runtime-authored ones alike. Each carries an `enabled` flag reporting
+    /// manifest membership; listing is not gated on it.
     async fn workflows(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<WorkflowSummaryGql>> {
         workflows::resolve_summaries(ctx, &self.runtime).await
     }

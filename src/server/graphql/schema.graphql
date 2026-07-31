@@ -137,7 +137,9 @@ type Company {
 	"""
 	memory(query: String, kind: MemoryKind, first: Int! = 50, offset: Int! = 0): MemoryFactPage!
 	"""
-	The enabled workflows, as one-line summaries.
+	The company's saved workflows, as one-line summaries — seed graphs and
+	runtime-authored ones alike. Each carries an `enabled` flag reporting
+	manifest membership; listing is not gated on it.
 	"""
 	workflows: [WorkflowSummary!]!
 	"""
@@ -932,7 +934,14 @@ type WorkflowSummary {
 	"""
 	name: String!
 	"""
-	Whether the workflow is enabled in the manifest.
+	Whether the workflow id appears in the company manifest's
+	`[workflows].enabled` list.
+	
+	This is manifest membership, **not** "does this workflow exist and can it
+	run". A runtime-authored workflow is listed here whether or not it is
+	manifest-enabled, and `Company.workflow(id)` / the run routes serve any
+	saved graph regardless of this flag — nothing consults it to decide
+	whether a workflow may run. Treat it as "declared by the blueprint".
 	"""
 	enabled: Boolean!
 }

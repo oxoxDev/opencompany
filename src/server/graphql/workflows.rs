@@ -8,12 +8,13 @@
 //! its graphs are overlay bodies; resolving only the seed side used to render
 //! them as bare ids with no graph (issue #168).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_graphql::{Context, ID, SimpleObject};
 
 use crate::company::runtime::CompanyRuntime;
-use crate::company::{WorkflowFile, load_workflow_union};
+use crate::company::{WorkflowFile, list_workflows_union, load_workflow_union};
 use crate::ports::types::OverlayWorkflow;
 
 /// A one-line workflow summary for the workflows list.
@@ -24,7 +25,14 @@ pub struct WorkflowSummaryGql {
     pub id: ID,
     /// The workflow display name.
     pub name: String,
-    /// Whether the workflow is enabled in the manifest.
+    /// Whether the workflow id appears in the company manifest's
+    /// `[workflows].enabled` list.
+    ///
+    /// This is manifest membership, **not** "does this workflow exist and can it
+    /// run". A runtime-authored workflow is listed here whether or not it is
+    /// manifest-enabled, and `Company.workflow(id)` / the run routes serve any
+    /// saved graph regardless of this flag — nothing consults it to decide
+    /// whether a workflow may run. Treat it as "declared by the blueprint".
     pub enabled: bool,
 }
 
@@ -165,26 +173,54 @@ async fn overlays(runtime: &Arc<CompanyRuntime>) -> async_graphql::Result<Vec<Ov
         .unwrap_or_default())
 }
 
-/// Resolves `Company.workflows`.
+/// Resolves `Company.workflows` — every workflow the company has saved.
+///
+/// The id set is built exactly the way the REST picker
+/// (`GET …/workflows`) builds it, so the two read surfaces cannot disagree:
+/// first every graph that has a body (seed ∪ overlay, deduped with the seed
+/// winning), then any manifest-`enabled` id that has no body in either source,
+/// named after itself.
+///
+/// Driving this off the manifest's enabled list alone — as it used to — made a
+/// runtime-authored workflow invisible here while `Company.workflow(id)`
+/// returned its full graph. That gap is not hypothetical: the boot rebuild
+/// overwrites the persisted record's manifest with the seed manifest
+/// (`RuntimeBuilder`), so a runtime-added enabled id is gone after a restart and
+/// the graph body on the record is the only surviving evidence the workflow
+/// exists.
 pub(crate) async fn resolve_summaries(
     _ctx: &Context<'_>,
     runtime: &Arc<CompanyRuntime>,
 ) -> async_graphql::Result<Vec<WorkflowSummaryGql>> {
     let overlays = overlays(runtime).await?;
-    let ids = enabled_ids(runtime).await?;
-    Ok(ids
-        .into_iter()
-        .map(|id| {
-            let name = load_one(runtime, &overlays, &id)
-                .map(|file| file.name)
-                .unwrap_or_else(|| id.clone());
-            WorkflowSummaryGql {
-                id: ID(id),
-                name,
-                enabled: true,
-            }
-        })
-        .collect())
+    let enabled = enabled_ids(runtime).await?;
+    let enabled_set: HashSet<&str> = enabled.iter().map(String::as_str).collect();
+
+    let mut summaries = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for file in list_workflows_union(runtime.source_dir(), &overlays) {
+        seen.insert(file.id.clone());
+        summaries.push(WorkflowSummaryGql {
+            enabled: enabled_set.contains(file.id.as_str()),
+            id: ID(file.id),
+            name: file.name,
+        });
+    }
+
+    // Manifest-enabled ids with no loadable graph anywhere still list, named
+    // after themselves — the same fallback the REST picker uses.
+    for id in enabled {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        summaries.push(WorkflowSummaryGql {
+            id: ID(id.clone()),
+            name: id,
+            enabled: true,
+        });
+    }
+
+    Ok(summaries)
 }
 
 /// Resolves `Company.workflow(id)`, returning null when the graph is unavailable.

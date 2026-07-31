@@ -686,6 +686,105 @@ async fn workflows_resolve_from_the_record_overlay_with_no_source_dir() {
     tokio::fs::remove_dir_all(&home).await.ok();
 }
 
+/// Issue #168: a runtime-authored workflow with an **empty** manifest
+/// `[workflows].enabled` — the post-restart state on the fs backend, since the
+/// boot rebuild overwrites the record's manifest with the seed manifest — must
+/// still appear in `Company.workflows`. The resolver used to drive its id set
+/// off the enabled list alone, so this returned `[]` while `Company.workflow`
+/// happily returned the full graph.
+///
+/// Also pins REST/GraphQL agreement: both surfaces must report the same id set.
+#[tokio::test]
+async fn workflows_summary_lists_an_overlay_workflow_with_no_enabled_entry() {
+    let home = home();
+    let id = CompanyId::new("acme");
+
+    // Nothing enabled in the manifest — the graph body is the only evidence.
+    let manifest: CompanyManifest =
+        toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+    let store = FsCompanyStore::new(home.to_path_buf());
+    store
+        .save(&CompanyRecord {
+            id: id.clone(),
+            manifest: manifest.clone(),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: vec![crate::ports::types::OverlayWorkflow {
+                id: "orphan".to_string(),
+                toml: "id = \"orphan\"\nname = \"Orphan Flow\"\n\
+                       [[node]]\nid = \"n1\"\nkind = \"trigger\"\nname = \"Start\"\n"
+                    .to_string(),
+            }],
+            template_provenance: None,
+        })
+        .await
+        .unwrap();
+
+    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+    assert!(
+        runtime.source_dir().is_none(),
+        "no source dir in hosted mode"
+    );
+    let state = AppState::new(AppConfig::default()).with_home(home.to_path_buf());
+    state.registry().insert(id, Arc::new(runtime));
+    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+    let value = query(
+        router(state.clone()),
+        r#"{"query":"{ company(id:\"acme\"){ workflows { id name enabled } } }"}"#,
+    )
+    .await;
+    let summaries = value["data"]["company"]["workflows"]
+        .as_array()
+        .expect("summaries");
+    assert_eq!(summaries.len(), 1, "value: {value}");
+    assert_eq!(summaries[0]["id"], "orphan");
+    assert_eq!(summaries[0]["name"], "Orphan Flow");
+    // Honest flag: the graph exists and is runnable, but the manifest does not
+    // declare it, so `enabled` reads false rather than being faked to true.
+    assert_eq!(
+        summaries[0]["enabled"], false,
+        "`enabled` reports manifest membership, not existence"
+    );
+
+    // REST and GraphQL must report the same id set.
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/company/workflows")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let rest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let rest_ids: Vec<&str> = rest
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    let gql_ids: Vec<&str> = summaries
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(rest_ids, gql_ids, "REST and GraphQL disagree on the id set");
+
+    tokio::fs::remove_dir_all(&home).await.ok();
+}
+
 /// The committed SDL snapshot freezes the read contract. Regenerate with
 /// `cargo test -- --ignored regenerate_sdl_snapshot` after any schema change.
 #[test]
