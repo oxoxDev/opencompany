@@ -46,6 +46,33 @@ address check for `{id}`, operator + `sole()` for the alias).
 | `domain` | `PUT …/domain`, `POST …/domain/verify` |
 | `smtp` | `PUT …/smtp`, `POST …/smtp/test` |
 | `connections` (feature `oauth`) | `POST …/connections/{provider}/start\|disconnect`, `GET /api/v1/oauth/callback` |
+| `workflows` | `POST …/workflows`, `GET …/workflows`, `GET …/workflows/{wid}`, `POST …/workflows/{wid}/run` |
+
+### Workflow runs and report delivery
+
+A workflow's terminal `output` node may carry a `destination` — `owner`,
+`email`, or `channel` — saying where its report goes once the run finishes. It
+rides the create body and the read shape under the same key, and the model
+type is reused verbatim in both directions (`kind` / `target` are single words,
+so there is no camelCase mirror to drift from).
+
+Delivery itself is **not** a route concern. It runs host-side in the shared
+`WorkflowRunner` path (`src/workflows/delivery.rs`) once the engine returns,
+because the orchestrator's `run_workflow` tool and the trigger scheduler drive
+that same port — and a scheduled run is exactly the case where nobody is
+watching the console. The run response therefore carries `deliveries`: one row
+per attempt (`sent` / `skipped` / `denied` / `failed`) with an operator-readable
+reason. A delivery failure never fails the run, so that list is the only place
+an operator learns a report did not go out; an unwired runtime writes a loud
+`failed` row rather than skipping silently.
+
+The gating is fail-closed and differs per kind. `owner` resolves server-side to
+the company's active admins (the graph names nobody) and falls back to the
+`operator` channel. `channel` must name an adapter the deployment already
+wired. `email` is the only kind that can address an outsider, and it needs
+**both** an `email` grant in the manifest's `[tools].allow` **and** an
+established inbound thread from that address — the same rule the agent send
+path applies; a cold recipient is skipped and reported, never mailed.
 
 Every credential-shaped value written here lands in the `SecretStore`; the
 responses expose only non-secret status. The networked seams (DNS, SMTP, OAuth
