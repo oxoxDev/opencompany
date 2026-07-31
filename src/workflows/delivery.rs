@@ -1093,6 +1093,53 @@ allow = [{allow}]
         assert_eq!(h.mail.sent().len(), 1);
     }
 
+    /// **The default-configuration case (after #230).** A company with no
+    /// `[tools]` section at all now defaults to `["*", "media", "composio"]`,
+    /// and `*` satisfies the `email` grant — so on the majority of tenants the
+    /// grant gate is open and the established-thread gate is the one actually
+    /// holding the line. Pin that it does: a default-configured company still
+    /// cannot cold-email a stranger.
+    #[tokio::test]
+    async fn a_default_configured_company_still_cannot_cold_email() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::new(dir.path(), true, true);
+        let manifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[policy]
+mode = "full"
+"#,
+        )
+        .expect("valid manifest");
+        let mut rec = record(&[]);
+        rec.manifest = manifest;
+        // Sanity: the default really does grant `email` — if this ever stops
+        // being true the test below would pass for the wrong reason.
+        assert!(
+            crate::harness::build::grants_cover(&rec.manifest.tools.allow, "email"),
+            "expected the post-#230 default belt to cover `email`, got {:?}",
+            rec.manifest.tools.allow
+        );
+
+        let reports = deliver_outputs(
+            Some(&h.deps),
+            &rec,
+            &graph("email", Some("stranger@example.com")),
+            &reached_output(),
+        )
+        .await;
+
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(
+            reports[0].status,
+            DeliveryStatus::Skipped,
+            "the established-thread gate must still refuse a stranger: {reports:?}"
+        );
+        assert!(h.mail.sent().is_empty(), "nothing may leave the process");
+    }
+
     /// The company's OWN prior outbound mail to an address does not make that
     /// address established — otherwise one send would bootstrap the next.
     #[tokio::test]

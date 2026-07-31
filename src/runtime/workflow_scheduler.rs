@@ -528,6 +528,7 @@ mod test {
             Ok(WorkflowRun {
                 output: Value::Null,
                 pending_approvals: Vec::new(),
+                deliveries: Vec::new(),
             })
         }
     }

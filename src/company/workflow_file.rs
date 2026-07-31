@@ -1710,6 +1710,7 @@ to = "done"
                     name: "Start".to_string(),
                     summary: None,
                     agent: None,
+                    schedule: None,
                     config: None,
                     on_error: None,
                     retry: None,
@@ -1722,6 +1723,7 @@ to = "done"
                     name: "Report".to_string(),
                     summary: None,
                     agent: None,
+                    schedule: None,
                     config: None,
                     on_error: None,
                     retry: None,
@@ -1760,6 +1762,7 @@ to = "done"
                 name: "Start".to_string(),
                 summary: None,
                 agent: None,
+                schedule: None,
                 config: None,
                 on_error: None,
                 retry: None,
@@ -1794,6 +1797,7 @@ to = "done"
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    destination: None,
                 },
                 RawNode {
                     id: "done".to_string(),
@@ -1806,6 +1810,7 @@ to = "done"
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    destination: None,
                 },
             ],
             edges: vec![RawEdge {
@@ -2021,6 +2026,7 @@ to = "done"
                 on_error: None,
                 retry: None,
                 requires_approval: None,
+                destination: None,
             }],
             edges: Vec::new(),
         };
@@ -2052,6 +2058,7 @@ to = "done"
                     on_error: n.on_error.clone(),
                     retry: n.retry.clone(),
                     requires_approval: n.requires_approval,
+                    destination: n.destination.clone(),
                 })
                 .collect(),
             edges: Vec::new(),
