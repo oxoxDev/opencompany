@@ -16,6 +16,21 @@ human_role = "Product direction"
 # bearer, media backend, per-server MCP config).
 allow = ["*", "media", "composio"]
 
+# The Composio toolkits this company may reach. Two effects, and the second is
+# the reason this is set rather than left empty:
+#
+#  1. Runtime narrowing — a toolkit outside this list is rejected client-side,
+#     before any network call. Empty would defer to the backend's own
+#     server-enforced allowlist ("open mode"), which is not unsafe, just wider.
+#  2. The console's per-provider "Sign in" list renders from THIS list. With it
+#     empty the Connections tab shows no provider rows at all, so an operator has
+#     no way to start an OAuth handoff from the UI.
+#
+# Keep it to the toolkits a company is actually expected to use; adding one here
+# is what makes it appear in the Connections tab.
+[tools.composio]
+toolkits = ["gmail", "slack", "github"]
+
 [[agent]]
 id = "product_manager"
 role = "Product Manager"
