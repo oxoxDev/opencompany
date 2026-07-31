@@ -413,6 +413,7 @@ to = "done"
                 on_error: None,
                 retry: None,
                 requires_approval: None,
+                destination: None,
             }],
             edges: Vec::new(),
         };

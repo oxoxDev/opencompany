@@ -40,6 +40,13 @@ pub const WORKFLOW_NODE_KINDS: &[&str] = &[
     "sub_workflow",
 ];
 
+/// The destination kinds an `output` node may route its report to.
+///
+/// Deliberately closed: each kind has its own server-side resolution and its
+/// own policy gate (see [`crate::workflows::delivery`]), so a new kind is a
+/// deliberate addition, never a free-form string an author can invent.
+pub const WORKFLOW_DESTINATION_KINDS: &[&str] = &["owner", "email", "channel"];
+
 /// A node kind in a workflow graph.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkflowNodeKind {
@@ -169,6 +176,38 @@ pub struct WorkflowNodeDef {
     /// When `true`, the node pauses awaiting operator approval before it runs —
     /// the engine surfaces it on `WorkflowRun.pending_approvals`.
     pub requires_approval: Option<bool>,
+    /// Where this node's report is delivered once the run finishes — `output`
+    /// nodes only. `None` (every legacy graph) keeps the pre-#170 behaviour: the
+    /// value surfaces in the run-result drawer and goes nowhere else.
+    pub destination: Option<WorkflowDestinationDef>,
+}
+
+/// Where an `output` node's report goes when the run completes.
+///
+/// **The engine never sees this.** Delivery executes host-side, after
+/// `tinyflows::engine::run` returns, in
+/// [`deliver_outputs`](crate::workflows::delivery::deliver_outputs) — so this is
+/// not engine config and must not live in [`WorkflowNodeDef::config`], where it
+/// would be an inert key silently riding into the engine graph. It is first-class
+/// model data for the same reason [`WorkflowRetryDef`] is: the console and
+/// validation see exactly one shape.
+///
+/// Each `kind` carries a different target contract, enforced by
+/// [`validate`]:
+///
+/// | `kind`    | `target`                      | Who it reaches |
+/// |-----------|-------------------------------|----------------|
+/// | `owner`   | must be **absent**            | the company's active Admin users, else the operator channel |
+/// | `email`   | required, must contain `@`    | that address — **only** if the company grants `email` and the recipient is an established thread |
+/// | `channel` | required, a wired channel id  | that [`ChannelAdapter`](crate::ports::ChannelAdapter) |
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct WorkflowDestinationDef {
+    /// One of [`WORKFLOW_DESTINATION_KINDS`].
+    pub kind: String,
+    /// The recipient address (`email`) or channel id (`channel`). Absent for
+    /// `owner`, which the host resolves from the company's own directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 /// A node's typed retry policy. Mirrors the free-form `retry.*` keys the
@@ -249,6 +288,10 @@ pub(crate) struct RawNode {
     pub(crate) retry: Option<WorkflowRetryDef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) requires_approval: Option<bool>,
+    /// Kept LAST in the struct: `toml::to_string` refuses to emit a scalar after
+    /// a table, so a table-valued field must not be followed by a scalar one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) destination: Option<WorkflowDestinationDef>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -320,6 +363,7 @@ pub fn parse_workflow(toml_src: &str) -> Result<WorkflowFile> {
                 on_error: node.on_error,
                 retry: node.retry,
                 requires_approval: node.requires_approval,
+                destination: node.destination,
             })
             .collect(),
         edges: raw
@@ -660,12 +704,62 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
             }
         }
 
+        // `destination` routes an `output` node's report to a person or a
+        // channel after the run finishes. Only `output` nodes report back, and
+        // each kind has its own target contract — an author who gets this wrong
+        // must hear about it here, not discover a silently undelivered report.
+        if let Some(destination) = &node.destination {
+            if kind != Some(WorkflowNodeKind::Output) {
+                problems.push(format!(
+                    "{label} sets `destination` but is a `{}` node — only `output` nodes route a report.",
+                    node.kind
+                ));
+            }
+            let target = destination.target.as_deref().map(str::trim).unwrap_or("");
+            match destination.kind.trim() {
+                "owner" => {
+                    if !target.is_empty() {
+                        problems.push(format!(
+                            "{label} sets a `target` on an `owner` destination — the owner is resolved from the company's own admins, so leave it out."
+                        ));
+                    }
+                }
+                "email" => {
+                    if !target.contains('@') {
+                        problems.push(format!(
+                            "{label} has an `email` destination whose `target` `{target}` is not an email address — give the recipient's full address."
+                        ));
+                    }
+                }
+                "channel" => {
+                    if target.is_empty() {
+                        problems.push(format!(
+                            "{label} has a `channel` destination with no `target` — name the channel to post the report to."
+                        ));
+                    }
+                }
+                other => problems.push(format!(
+                    "{label} has an unknown `destination.kind` `{other}` — use one of {}.",
+                    WORKFLOW_DESTINATION_KINDS.join(", ")
+                )),
+            }
+        }
+
         // Reserved config keys: the first-class fields above are written into
         // the engine config LAST, so a `config` entry naming one would be
-        // silently ignored — reject it as a footgun instead. `agent_ref` is
+        // silently ignored — reject it as a footgun instead. `destination` is
+        // reserved for a different reason: it is never engine config at all
+        // (delivery runs host-side), so a `config.destination` would ride into
+        // the engine graph as an inert key and deliver nothing. `agent_ref` is
         // reserved on `agent` nodes (translation binds it from `agent`).
         if let Some(toml::Value::Table(table)) = &node.config {
-            for reserved in ["on_error", "retry", "requires_approval", "schedule"] {
+            for reserved in [
+                "on_error",
+                "retry",
+                "requires_approval",
+                "schedule",
+                "destination",
+            ] {
                 if table.contains_key(reserved) {
                     problems.push(format!(
                         "{label} puts `{reserved}` inside `config` — set it as a first-class node field, not in `config`."
@@ -792,6 +886,7 @@ mod tests {
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    destination: None,
                 },
                 RawNode {
                     id: "worker".to_string(),
@@ -804,6 +899,7 @@ mod tests {
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    destination: None,
                 },
             ],
             edges: vec![RawEdge {
@@ -842,6 +938,7 @@ mod tests {
                 on_error: None,
                 retry: None,
                 requires_approval: None,
+                destination: None,
             }],
             edges: vec![],
         };
@@ -1446,6 +1543,224 @@ mod tests {
         assert!(start.on_error.is_none());
         assert!(start.retry.is_none());
         assert!(start.requires_approval.is_none());
+        assert!(start.destination.is_none());
+    }
+
+    // --- Output destination (issue #170) ------------------------------------
+
+    /// A graph with one `output` node carrying `destination` of `kind`, plus an
+    /// optional `target` line.
+    fn with_destination(kind: &str, target: Option<&str>) -> String {
+        let target_line = target
+            .map(|t| format!("target = \"{t}\"\n"))
+            .unwrap_or_default();
+        format!(
+            r#"
+id = "wf"
+name = "WF"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "done"
+kind = "output"
+name = "Report back"
+[node.destination]
+kind = "{kind}"
+{target_line}
+[[edge]]
+from = "start"
+to = "done"
+"#
+        )
+    }
+
+    /// Each of the three destination kinds parses onto the first-class field
+    /// with its target contract intact.
+    #[test]
+    fn output_destinations_parse_for_every_kind() {
+        let owner = parse_workflow(&with_destination("owner", None)).expect("owner parses");
+        let dest = owner.nodes[1].destination.as_ref().expect("present");
+        assert_eq!(dest.kind, "owner");
+        assert_eq!(dest.target, None);
+
+        let email = parse_workflow(&with_destination("email", Some("ada@example.com")))
+            .expect("email parses");
+        let dest = email.nodes[1].destination.as_ref().expect("present");
+        assert_eq!(dest.kind, "email");
+        assert_eq!(dest.target.as_deref(), Some("ada@example.com"));
+
+        let channel =
+            parse_workflow(&with_destination("channel", Some("operator"))).expect("channel parses");
+        let dest = channel.nodes[1].destination.as_ref().expect("present");
+        assert_eq!(dest.kind, "channel");
+        assert_eq!(dest.target.as_deref(), Some("operator"));
+    }
+
+    #[test]
+    fn unknown_destination_kind_is_rejected() {
+        let err = parse_workflow(&with_destination("carrier_pigeon", Some("x"))).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("unknown `destination.kind`"), "{message}");
+        // The message names what IS supported, not just what isn't.
+        assert!(message.contains("owner"), "{message}");
+    }
+
+    /// An `email` destination MUST name an address. This is the validation half
+    /// of the security boundary: a workflow cannot mail "somebody" — the
+    /// recipient is pinned in the graph, where a reviewer can see it.
+    #[test]
+    fn email_destination_without_an_address_is_rejected() {
+        let err = parse_workflow(&with_destination("email", Some("ada"))).unwrap_err();
+        assert!(err.to_string().contains("not an email address"), "{err}");
+        let err = parse_workflow(&with_destination("email", None)).unwrap_err();
+        assert!(err.to_string().contains("not an email address"), "{err}");
+    }
+
+    #[test]
+    fn channel_destination_without_a_target_is_rejected() {
+        let err = parse_workflow(&with_destination("channel", None)).unwrap_err();
+        assert!(err.to_string().contains("no `target`"), "{err}");
+    }
+
+    /// `owner` resolves server-side, so a target on it is a mistake worth
+    /// naming — otherwise an author writes an address there and quietly gets
+    /// the admins instead.
+    #[test]
+    fn owner_destination_with_a_target_is_rejected() {
+        let err = parse_workflow(&with_destination("owner", Some("ada@example.com"))).unwrap_err();
+        assert!(err.to_string().contains("`owner` destination"), "{err}");
+    }
+
+    /// Only `output` nodes report back, so a `destination` anywhere else is a
+    /// silent no-op waiting to happen.
+    #[test]
+    fn destination_on_a_non_output_node_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "worker"
+            kind = "agent"
+            name = "Worker"
+            agent = "ceo"
+            [node.destination]
+            kind = "owner"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(
+            err.to_string().contains("only `output` nodes route a report"),
+            "{err}"
+        );
+    }
+
+    /// `destination` inside `config` would ride into the engine graph as an
+    /// inert key and deliver nothing — reject it like the other reserved keys.
+    #[test]
+    fn destination_inside_config_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "done"
+            kind = "output"
+            name = "Done"
+            [node.config]
+            destination = "owner"
+            [[edge]]
+            from = "start"
+            to = "done"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("destination"), "{message}");
+        assert!(message.contains("inside `config`"), "{message}");
+    }
+
+    /// A destination-bearing graph renders back to TOML and re-parses to the
+    /// same model — the create route's persist path depends on this.
+    #[test]
+    fn destination_round_trips_through_render_and_parse() {
+        let raw = RawWorkflow {
+            id: "wf".to_string(),
+            name: "WF".to_string(),
+            description: None,
+            nodes: vec![
+                RawNode {
+                    id: "start".to_string(),
+                    kind: "trigger".to_string(),
+                    name: "Start".to_string(),
+                    summary: None,
+                    agent: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    destination: None,
+                },
+                RawNode {
+                    id: "done".to_string(),
+                    kind: "output".to_string(),
+                    name: "Report".to_string(),
+                    summary: None,
+                    agent: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    destination: Some(WorkflowDestinationDef {
+                        kind: "email".to_string(),
+                        target: Some("ada@example.com".to_string()),
+                    }),
+                },
+            ],
+            edges: vec![RawEdge {
+                from: "start".to_string(),
+                to: "done".to_string(),
+                label: None,
+            }],
+        };
+        let toml_src = render_workflow(&raw).expect("renders");
+        let file = parse_workflow(&toml_src).expect("re-parses");
+        let dest = file.nodes[1].destination.as_ref().expect("present");
+        assert_eq!(dest.kind, "email");
+        assert_eq!(dest.target.as_deref(), Some("ada@example.com"));
+    }
+
+    /// A legacy graph (no `destination` anywhere) renders byte-identically to
+    /// what it rendered before the field existed — `skip_serializing_if` is what
+    /// keeps an unchanged file from churning on every re-save.
+    #[test]
+    fn a_graph_without_a_destination_renders_no_destination_key() {
+        let raw = RawWorkflow {
+            id: "wf".to_string(),
+            name: "WF".to_string(),
+            description: None,
+            nodes: vec![RawNode {
+                id: "start".to_string(),
+                kind: "trigger".to_string(),
+                name: "Start".to_string(),
+                summary: None,
+                agent: None,
+                config: None,
+                on_error: None,
+                retry: None,
+                requires_approval: None,
+                destination: None,
+            }],
+            edges: Vec::new(),
+        };
+        let toml_src = render_workflow(&raw).expect("renders");
+        assert!(!toml_src.contains("destination"), "{toml_src}");
     }
 
     // --- trigger schedule (issue #169) --------------------------------------

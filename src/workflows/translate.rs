@@ -437,6 +437,7 @@ mod tests {
                 on_error: None,
                 retry: None,
                 requires_approval: None,
+                destination: None,
             }],
             edges: Vec::new(),
         };
@@ -553,6 +554,7 @@ mod tests {
                     on_error: Some("route".into()),
                     retry: None,
                     requires_approval: None,
+                    destination: None,
                 },
                 node_stub("yes_path"),
                 node_stub("no_path"),
@@ -615,6 +617,7 @@ mod tests {
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    destination: None,
                 }],
                 edges: Vec::new(),
             };
@@ -643,6 +646,7 @@ mod tests {
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    destination: None,
                 },
                 node_stub("paid"),
                 node_stub("error_case"),
@@ -681,6 +685,7 @@ mod tests {
             on_error: None,
             retry: None,
             requires_approval: None,
+            destination: None,
         }
     }
 

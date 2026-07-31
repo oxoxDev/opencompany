@@ -383,6 +383,7 @@ impl TryFrom<CreateWorkflowBody> for RawWorkflow {
                 on_error: n.on_error,
                 retry: n.retry.map(WorkflowRetryDef::from),
                 requires_approval: n.requires_approval,
+                destination: None,
             });
         }
         Ok(Self {
@@ -642,6 +643,7 @@ mod tests {
                     backoff: Some("exponential".into()),
                 }),
                 requires_approval: Some(true),
+                destination: None,
             }],
             edges: Vec::new(),
         };

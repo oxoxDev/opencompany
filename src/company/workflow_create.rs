@@ -480,6 +480,7 @@ to = "done"
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    destination: None,
                 },
                 RawNode {
                     id: "worker".to_string(),
@@ -492,6 +493,7 @@ to = "done"
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    destination: None,
                 },
                 RawNode {
                     id: "done".to_string(),
@@ -504,6 +506,7 @@ to = "done"
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    destination: None,
                 },
             ],
             edges: vec![
@@ -770,6 +773,7 @@ to = "done"
                 on_error: None,
                 retry: None,
                 requires_approval: None,
+                destination: None,
             });
         }
         assert!(draft.nodes.len() > MAX_WORKFLOW_NODES);

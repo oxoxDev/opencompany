@@ -1325,6 +1325,7 @@ impl From<CreateWorkflowArgs> for RawWorkflow {
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    destination: None,
                 })
                 .collect(),
             edges: args
