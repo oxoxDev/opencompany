@@ -255,6 +255,13 @@ impl WorkflowScheduler {
                 fired += 1;
             }
         }
+
+        // Only the CURRENT minute can dedupe a fire, so every older entry is
+        // dead weight — and without this the map grows one entry per
+        // (company, workflow) ever fired and never shrinks, holding ids of
+        // companies and workflows that have since been deleted.
+        self.last_fired.retain(|_, fired_at| *fired_at >= minute);
+
         fired
     }
 
@@ -881,6 +888,43 @@ to = "done"
             "the workflow must be schedulable once its run completed"
         );
         wait_for(|| started.lock().unwrap().len() == 2).await;
+
+        cleanup(&home).await;
+    }
+
+    /// The dedupe map keeps only the current minute. Anything older can never
+    /// dedupe again, and retaining it would grow the map forever — one entry per
+    /// (company, workflow) ever fired, including deleted ones.
+    #[tokio::test]
+    async fn the_dedupe_map_does_not_grow_without_bound() {
+        let home = tmp_home();
+        let (runner, started, _completed) = RecordingRunner::new();
+        let registry = company_with_overlays(
+            &home,
+            "acme",
+            vec![overlay("digest", Some("* * * * *"))],
+            Some(runner),
+            "running",
+        )
+        .await;
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry, clock.clone());
+
+        assert_eq!(scheduler.tick().await, 1);
+        // The entry for the minute just fired is kept — that is what dedupes a
+        // second tick inside the same minute.
+        assert_eq!(scheduler.last_fired.len(), 1);
+        clock.advance(30_000);
+        assert_eq!(scheduler.tick().await, 0, "same minute: deduped");
+
+        // Many minutes later the map still holds exactly one entry, not one per
+        // minute elapsed.
+        for minute in 1..10 {
+            clock.set(millis_at(2026, 7, 13, 9, minute));
+            assert_eq!(scheduler.tick().await, 1);
+            assert_eq!(scheduler.last_fired.len(), 1, "minute {minute}");
+        }
+        wait_for(|| started.lock().unwrap().len() == 10).await;
 
         cleanup(&home).await;
     }
