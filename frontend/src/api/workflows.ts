@@ -93,11 +93,12 @@ export function runWorkflow(
 }
 
 /**
- * Authors a new workflow graph (issue #69): the console's form creator posts
- * the same shape `getWorkflow` returns, and the host writes it to
- * `workflows/{id}.toml`. Rejections carry a prosumer-language `ApiError`
- * message (bad id, duplicate id, an edge or `agent` node the graph can't
- * support, no writable source directory on this deployment).
+ * Authors a new workflow graph (issues #69, #168): the console's form creator
+ * posts the same shape `getWorkflow` returns, and the host persists it on the
+ * company record — so this works on every deployment, including a hosted tenant
+ * whose company source tree is a read-only mount. Rejections carry a
+ * prosumer-language `ApiError` message (bad id, duplicate id or name, an edge or
+ * `agent` node the graph can't support).
  */
 export function createWorkflow(
   client: OpenCompanyClient,

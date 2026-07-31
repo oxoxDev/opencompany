@@ -93,6 +93,17 @@ construction, ≥1 response per cycle) are inherited, not re-verified.
 
 Durable company records: charter, roster, ledger, approval queue.
 
+The record also carries the **operator overlays** — teammates, desk members,
+desk order, operator-created desks, and (issue #168) `overlay_workflows`: the
+workflow graph bodies authored at runtime through the console's create dialog or
+the orchestrator's `create_workflow` tool. These are persisted here rather than
+written into `companies/<name>/workflows/<id>.toml` because the company source
+tree is the version-controlled seed and, in hosted mode, a read-only crate mount
+(writing there failed every hosted tenant with `EROFS`). Every reader unions the
+two sources — `load_workflow_union` / `list_workflows_union` in
+`src/company/workflow_file.rs` — with the committed seed file winning on an id
+collision, matching the manifest-first convention the desk resolvers use.
+
 ```rust
 // src/ports/store.rs
 pub trait CompanyStore: Send + Sync {
