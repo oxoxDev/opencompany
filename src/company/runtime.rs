@@ -30,7 +30,7 @@ use crate::ports::{
 };
 
 /// The board column a task must enter to be dispatched to its assignee.
-const IN_PROGRESS: &str = "in_progress";
+use crate::ports::tasks::COLUMN_IN_PROGRESS as IN_PROGRESS;
 
 /// Whether an upsert moves a card **into** `in_progress` (the dispatch edge).
 /// A card already in `in_progress` re-saved is not a fresh dispatch.

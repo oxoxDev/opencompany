@@ -208,7 +208,15 @@ async fn create_task(
         id: generate_id(),
         title: body.title,
         note: body.note,
-        column: body.column.unwrap_or_else(|| "backlog".to_string()),
+        // Issue #206: a card created here is manual entry — the board's `+`
+        // button, which now lives on To-do alone — so that is the default. It
+        // is deliberately NOT `backlog`: backlog is the unqueued pool and where
+        // the lifecycle returns work that needs another pass, so defaulting new
+        // work there mixed "nobody has picked this up" with "someone just
+        // asked for it".
+        column: body
+            .column
+            .unwrap_or_else(|| crate::ports::tasks::COLUMN_TODO.to_string()),
         priority: body.priority.unwrap_or_else(|| "medium".to_string()),
         assignee: body.assignee.unwrap_or_default(),
         updated_at_millis: now_millis(),

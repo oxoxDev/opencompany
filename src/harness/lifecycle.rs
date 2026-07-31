@@ -43,17 +43,16 @@
 use crate::ports::TaskRecord;
 use crate::ports::types::{OutboundMessage, ReplyTo};
 
-/// The board column a card in review sits in, awaiting the orchestrator.
-pub const COLUMN_IN_REVIEW: &str = "in_review";
-/// The board column a stopped or failed run returns its card to.
-pub const COLUMN_BACKLOG: &str = "backlog";
-/// The board column a paused run parks its card in. Resume is a plain
-/// `column → in_progress` PATCH, which re-triggers dispatch.
-pub const COLUMN_PAUSED: &str = "paused";
-/// The terminal column — nothing dispatches out of it. Reached by
-/// [`landing_column`] for a delegated card and by [`review_landing_column`] for
-/// an approved board card (issue #171 / PR #179).
-pub const COLUMN_DONE: &str = "done";
+/// The columns this module decides between. They are defined once in the
+/// always-compiled [`ports::tasks`](crate::ports::tasks) module (issue #206) —
+/// this module is behind the `openhuman` feature, and the write plane and the
+/// dispatch edge need the same vocabulary — and re-exported here so the
+/// existing `lifecycle::COLUMN_*` call sites are unchanged.
+///
+/// `COLUMN_DONE` is reached by [`landing_column`] for a delegated card and by
+/// [`review_landing_column`] for an approved board card (issue #171 / PR #179);
+/// `COLUMN_BACKLOG` is where a stopped or failed run returns its card.
+pub use crate::ports::tasks::{COLUMN_BACKLOG, COLUMN_DONE, COLUMN_IN_REVIEW, COLUMN_PAUSED};
 
 /// The note attribution used for an operator-initiated stop, as opposed to a
 /// result the assignee produced.

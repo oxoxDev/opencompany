@@ -330,7 +330,17 @@ pub trait TaskStore: Send + Sync {
 ```
 
 `TaskRecord` carries `{id, title, note, column, priority, assignee,
-updated_at}`. `column` ∈ `backlog|in_progress|in_review|done`.
+updated_at}`. `column` ∈ `backlog|todo|in_progress|paused|in_review|done`,
+defined once as `TASK_COLUMNS` in this module and re-exported by
+`harness::lifecycle`; the console mirrors the same list and order.
+
+`backlog` and `todo` are both "not started", and the split is deliberate:
+`backlog` is the unqueued pool — and where the lifecycle returns work that needs
+another pass (a failed dispatch, an orchestrator `revise` verdict) — while
+`todo` is what has been queued up next. `todo` is the board's one manual-entry
+column: the console's `+` button lives there alone and `POST …/tasks` defaults
+to it (issue #206), so an operator cannot create a card straight into
+`in_progress` or a terminal column.
 
 ### ArtifactStore
 

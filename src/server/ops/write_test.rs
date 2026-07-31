@@ -118,7 +118,8 @@ async fn tasks_crud_round_trips_under_both_scopes() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(task["title"], "Q2 brief");
-    assert_eq!(task["column"], "backlog");
+    // Issue #206: manual entry lands in To-do, not the backlog pool.
+    assert_eq!(task["column"], "todo");
     let id = task["id"].as_str().unwrap().to_string();
 
     // Drag (PATCH column) via the {id} scope.
@@ -158,6 +159,37 @@ async fn tasks_crud_round_trips_under_both_scopes() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+
+    tokio::fs::remove_dir_all(&home).await.ok();
+}
+
+/// Issue #206: `POST …/tasks` defaults a new card to To-do — the board's one
+/// manual-entry column — while an explicit `column` still wins, so the
+/// lifecycle paths that place a card themselves are untouched.
+#[tokio::test]
+async fn created_tasks_default_to_the_todo_column() {
+    let home = home();
+    let state = state_with_company(&home).await;
+
+    let (_, defaulted) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "queued work"})),
+    )
+    .await;
+    assert_eq!(defaulted["column"], crate::ports::tasks::COLUMN_TODO);
+
+    // An explicit column is still honored verbatim — `spawn_task`, the
+    // orchestrator's `revise`, and a failed run all place their own card.
+    let (_, explicit) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "parked", "column": "backlog"})),
+    )
+    .await;
+    assert_eq!(explicit["column"], crate::ports::tasks::COLUMN_BACKLOG);
 
     tokio::fs::remove_dir_all(&home).await.ok();
 }

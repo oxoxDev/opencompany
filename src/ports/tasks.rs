@@ -1,16 +1,62 @@
 //! The [`TaskStore`] port: the company's durable Kanban board.
 //!
-//! Tasks are the operator-visible work items the console's board renders
-//! (backlog / in-progress / in-review / done). They are hand-curated state, not
-//! cycle working memory — the brain's per-cycle task results live in
+//! Tasks are the operator-visible work items the console's board renders (see
+//! [`TASK_COLUMNS`]). They are hand-curated state, not cycle working memory —
+//! the brain's per-cycle task results live in
 //! [`MemoryStore`](crate::ports::MemoryStore). Each record is keyed by a stable
 //! id within the company.
+//!
+//! ## The column vocabulary lives here
+//!
+//! The column ids are defined once, in this always-compiled port module, and
+//! every other surface refers to them: the lifecycle decision layer
+//! (`harness::lifecycle`, behind the `openhuman` feature), the dispatch edge
+//! (`company::runtime`), and the write plane (`server::ops::tasks`). Before
+//! issue #206 they were bare literals spread across those files plus a separate
+//! feature-gated constant block, so adding a column meant finding every copy.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
 use crate::ports::types::CompanyId;
+
+/// Unqueued or returned work: cards nobody has committed to yet, plus the ones
+/// a run sent back (a failed dispatch, or an orchestrator `revise` verdict).
+pub const COLUMN_BACKLOG: &str = "backlog";
+/// Queued to be worked next (issue #206). This is the board's manual-entry
+/// column — the `+` button lives here alone, and it is what `POST …/tasks`
+/// defaults to.
+pub const COLUMN_TODO: &str = "todo";
+/// The column a card must **enter** to be dispatched to its assignee. The
+/// transition, not the state, is the trigger.
+pub const COLUMN_IN_PROGRESS: &str = "in_progress";
+/// Where a steered-to-pause run parks its card (issue #111). Resume is a plain
+/// `column → in_progress` PATCH, which re-triggers dispatch.
+pub const COLUMN_PAUSED: &str = "paused";
+/// A card in review, awaiting the orchestrator's verdict.
+pub const COLUMN_IN_REVIEW: &str = "in_review";
+/// The terminal column — nothing dispatches out of it.
+pub const COLUMN_DONE: &str = "done";
+
+/// Every board column, in the order the console renders them left to right.
+///
+/// `backlog` and `todo` are both "not started", and the split is deliberate:
+/// `backlog` is the pool — and where the lifecycle returns work that needs
+/// another pass — while `todo` is what has been picked up for the next stretch.
+pub const TASK_COLUMNS: [&str; 6] = [
+    COLUMN_BACKLOG,
+    COLUMN_TODO,
+    COLUMN_IN_PROGRESS,
+    COLUMN_PAUSED,
+    COLUMN_IN_REVIEW,
+    COLUMN_DONE,
+];
+
+/// Whether `column` is one of the board's known columns.
+pub fn is_known_column(column: &str) -> bool {
+    TASK_COLUMNS.contains(&column)
+}
 
 /// One card on the company's task board.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -23,7 +69,7 @@ pub struct TaskRecord {
     /// An optional longer note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    /// The board column (`backlog`, `in_progress`, `in_review`, `done`).
+    /// The board column — one of [`TASK_COLUMNS`].
     pub column: String,
     /// The priority (`low`, `medium`, `high`).
     pub priority: String,
@@ -77,4 +123,51 @@ pub trait TaskStore: Send + Sync {
     async fn upsert(&self, company: &CompanyId, task: &TaskRecord) -> Result<()>;
     /// Deletes a task by id; returns whether a task was removed.
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool>;
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// The board's columns, in the order the console renders them. Pinned
+    /// because `frontend/src/lib/tasks-sample.ts` mirrors this list by hand: a
+    /// column added here and not there (or vice versa) files cards into a
+    /// column the operator cannot see.
+    #[test]
+    fn columns_are_ordered_and_unique() {
+        assert_eq!(
+            TASK_COLUMNS,
+            [
+                "backlog",
+                "todo",
+                "in_progress",
+                "paused",
+                "in_review",
+                "done"
+            ]
+        );
+        let mut sorted = TASK_COLUMNS.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            TASK_COLUMNS.len(),
+            "column ids must be unique"
+        );
+    }
+
+    #[test]
+    fn is_known_column_accepts_only_board_columns() {
+        for column in TASK_COLUMNS {
+            assert!(is_known_column(column), "{column} is a board column");
+        }
+        // Issue #206 added To-do as a column of its own; Backlog stays.
+        assert!(is_known_column(COLUMN_TODO));
+        assert!(is_known_column(COLUMN_BACKLOG));
+        // Near-misses a typo'd client might send.
+        assert!(!is_known_column("to_do"));
+        assert!(!is_known_column("To-do"));
+        assert!(!is_known_column("inprogress"));
+        assert!(!is_known_column(""));
+    }
 }
