@@ -176,10 +176,21 @@ impl CompanyScheduler {
     /// shared `shutdown` so the scheduler stops cleanly when the server does.
     pub fn spawn(mut self, shutdown: Arc<Notify>) -> JoinHandle<()> {
         tokio::spawn(async move {
+            // The `Notified` future is built ONCE and pinned across iterations,
+            // not rebuilt inside the `select!`. Boot signals with
+            // `notify_waiters()`, which wakes only the waiters registered at
+            // that instant — a future created fresh each iteration is not
+            // registered while `tick` is running, so a shutdown arriving
+            // mid-tick would be dropped and the scheduler would sleep another
+            // full minute before noticing. Polled once here, this one stays
+            // registered, and a notification delivered during `tick` is
+            // latched: the next `select!` sees it immediately.
+            let notified = shutdown.notified();
+            tokio::pin!(notified);
             loop {
                 let sleep_ms = millis_to_next_minute(self.clock.now_millis());
                 tokio::select! {
-                    _ = shutdown.notified() => break,
+                    _ = &mut notified => break,
                     _ = tokio::time::sleep(Duration::from_millis(sleep_ms)) => {
                         if let Err(err) = self.tick().await {
                             tracing::warn!(company = %self.runtime.id(), %err, "scheduled cycle failed");
@@ -467,6 +478,85 @@ mod test {
             mode = "supervised"
         "#;
         toml::from_str(toml_src).expect("parse manifest")
+    }
+
+    /// A brain that parks inside its first cycle until released, so a test can
+    /// deliver a shutdown while a tick is provably in flight.
+    struct BlockingBrain {
+        started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+
+    #[async_trait]
+    impl Brain for BlockingBrain {
+        async fn run_cycle(&self, req: CycleRequest, _host: &dyn CycleHost) -> Result<CycleResult> {
+            if let Some(tx) = self.started.lock().expect("started lock").take() {
+                let _ = tx.send(());
+            }
+            // Taken out of the mutex first so no guard is held across the await.
+            let release = self.release.lock().expect("release lock").take();
+            if let Some(rx) = release {
+                let _ = rx.await;
+            }
+            Ok(CycleResult {
+                channel_responses: Vec::new(),
+                new_traces: vec![CompressedTrace::now(&req.cycle_id, "blocking")],
+                ledger_deltas: Vec::new(),
+                token_usage: TokenUsage::default(),
+            })
+        }
+    }
+
+    /// A shutdown delivered *while a tick is running* must still stop the loop.
+    ///
+    /// Boot signals with `notify_waiters()`, which wakes only the waiters
+    /// registered at that instant. A `spawn` that rebuilds `shutdown.notified()`
+    /// inside the `select!` has no waiter registered while `tick` runs — the
+    /// signal is dropped and the loop sleeps to the next minute boundary before
+    /// noticing it was asked to stop.
+    ///
+    /// The assertion is loop termination, not elapsed time: the clock is parked
+    /// 1ms before a minute boundary so the loop's sleep is 1ms, meaning a
+    /// scheduler that missed the signal keeps ticking (and never joins) while a
+    /// correct one exits on its very next iteration with nothing left to await.
+    /// The 5s bound only caps how long the failing case takes to report.
+    #[tokio::test]
+    async fn shutdown_during_a_tick_stops_the_loop() {
+        let home = tmp_home();
+        let manifest = scheduled_manifest();
+        let schedules = manifest.schedules.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home.clone(), manifest)
+                .with_brain(Arc::new(BlockingBrain {
+                    started: std::sync::Mutex::new(Some(started_tx)),
+                    release: std::sync::Mutex::new(Some(release_rx)),
+                }))
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        // Monday 2026-07-13 09:00:59.999 UTC: the schedule matches this civil
+        // minute, and `millis_to_next_minute` is therefore 1ms.
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0) + MINUTE_MS - 1));
+        let scheduler = CompanyScheduler::new(rt, &schedules, clock).unwrap();
+        let shutdown = Arc::new(Notify::new());
+        let handle = scheduler.spawn(shutdown.clone());
+
+        // Signal shutdown only once the cycle is provably in flight, then let
+        // that cycle finish.
+        started_rx.await.expect("tick started");
+        shutdown.notify_waiters();
+        release_tx.send(()).expect("release the in-flight cycle");
+
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("scheduler kept running after a shutdown delivered mid-tick")
+            .expect("scheduler task panicked");
+
+        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
