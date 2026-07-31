@@ -56,7 +56,7 @@ use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
 
 use crate::company::{
     Agent as ManifestAgent, RawEdge, RawNode, RawWorkflow, WorkflowFile, create_company_workflow,
-    list_source_workflows, load_company_workflows,
+    list_workflows_union, load_workflow_union,
 };
 use crate::error::OpenCompanyError;
 use crate::harness::lifecycle::ReviewDecision;
@@ -366,14 +366,19 @@ impl Tool for QueryCompanyTool {
             None => None,
         };
 
-        // Saved workflows: the on-disk `workflows/*.toml` graphs (what
-        // `create_workflow` writes and the REST picker lists), unioned with the
-        // manifest's enabled ids so seed workflows show too. This is the section
+        // Saved workflows: the seed `workflows/*.toml` graphs unioned with the
+        // record's runtime-authored bodies (what `create_workflow` persists and
+        // the REST picker lists), then with the manifest's enabled ids so
+        // provisioned-but-bodiless workflows show too. This is the section
         // that makes "what workflows do we have?" answerable — before it, the
         // orchestrator had no way to enumerate saved workflows and would fall
         // back to its skills catalog.
+        let overlay_workflows = record
+            .as_ref()
+            .map(|r| r.overlay_workflows.clone())
+            .unwrap_or_default();
         let mut workflows: Vec<(String, String)> =
-            list_source_workflows(self.workflow_source_dir.as_deref())
+            list_workflows_union(self.workflow_source_dir.as_deref(), &overlay_workflows)
                 .into_iter()
                 .map(|f| (f.id, f.name))
                 .collect();
@@ -935,6 +940,7 @@ pub fn orchestrator_tools(
     tools.push(Box::new(RunWorkflowTool::new(
         company.clone(),
         workflow_source_dir.clone(),
+        store.clone(),
         workflow_runner,
     )));
     // `create_workflow` (issue #112) shares the same source dir the run tool
@@ -1005,21 +1011,27 @@ const ITEM_PREVIEW_CHARS: usize = 120;
 pub struct RunWorkflowTool {
     company: CompanyId,
     source_dir: Option<PathBuf>,
+    /// The company store, so the tool reads the record's runtime-authored graph
+    /// bodies — the only place a hosted tenant's workflows live (issue #168).
+    store: Arc<dyn CompanyStore>,
     runner: WorkflowRunnerHandle,
 }
 
 impl RunWorkflowTool {
     /// Builds the tool over the company id, its on-disk source directory
-    /// (`companies/<name>`, whose `workflows/` subtree holds the graphs), and the
+    /// (`companies/<name>`, whose `workflows/` subtree holds the seed graphs),
+    /// the company store (holding the runtime-authored graph bodies), and the
     /// shared runner handle.
     pub fn new(
         company: CompanyId,
         source_dir: Option<PathBuf>,
+        store: Arc<dyn CompanyStore>,
         runner: WorkflowRunnerHandle,
     ) -> Self {
         Self {
             company,
             source_dir,
+            store,
             runner,
         }
     }
@@ -1093,25 +1105,23 @@ impl Tool for RunWorkflowTool {
             ));
         };
 
-        // Load the saved graph from the company's on-disk source directory.
-        let Some(source_dir) = self.source_dir.as_deref() else {
-            tracing::debug!(company = %self.company, workflow = %wid, "run_workflow: no source dir");
-            return Ok(ToolResult::error(
-                "This company has no on-disk workflow definitions on this deployment, so there is nothing to run.",
-            ));
+        // Load the saved graph from the seed ∪ overlay union, so a workflow the
+        // console (or this agent) created on a hosted tenant runs the same as a
+        // committed one.
+        let overlays = match self.store.load(&self.company).await {
+            Ok(record) => record.map(|r| r.overlay_workflows).unwrap_or_default(),
+            Err(err) => {
+                tracing::debug!(company = %self.company, workflow = %wid, error = %err, "run_workflow: record load failed");
+                return Ok(ToolResult::error(format!(
+                    "Couldn't read this company's saved workflows: {err}"
+                )));
+            }
         };
-        // Mirror the REST run route: a missing file is a clean "unknown id"
-        // rather than a raw filesystem read error (which would also leak the
+        // Mirror the REST run route: an id neither source has is a clean
+        // "unknown id" rather than a raw read error (which would also leak the
         // on-disk path into agent-visible text).
-        let path = source_dir.join("workflows").join(format!("{wid}.toml"));
-        if !path.is_file() {
-            tracing::debug!(company = %self.company, workflow = %wid, "run_workflow: unknown id");
-            return Ok(ToolResult::error(format!(
-                "No workflow with id `{wid}` exists. Check the workflows list for valid ids."
-            )));
-        }
-        let file = match load_company_workflows(source_dir, std::slice::from_ref(&wid)) {
-            Ok(files) => files.into_iter().next(),
+        let file = match load_workflow_union(self.source_dir.as_deref(), &overlays, &wid) {
+            Ok(file) => file,
             Err(err) => {
                 tracing::debug!(company = %self.company, workflow = %wid, error = %err, "run_workflow: load failed");
                 return Ok(ToolResult::error(format!(
@@ -1438,18 +1448,13 @@ impl Tool for CreateWorkflowTool {
             }
         };
 
-        // A deployment with no source directory has nowhere to write the graph.
-        let Some(source_dir) = self.source_dir.as_deref() else {
-            tracing::debug!(company = %self.company, "create_workflow: no source dir");
-            return Ok(ToolResult::error(
-                "This company has no on-disk workflow definitions on this deployment, so there's nowhere to save a new workflow.",
-            ));
-        };
-
+        // No source directory is needed: the graph body is persisted on the
+        // company record, which is the only writable surface a hosted tenant has
+        // (issue #168).
         tracing::debug!(company = %self.company, workflow = %draft.id, "create_workflow: authoring");
         match create_company_workflow(
             &self.company,
-            source_dir,
+            self.source_dir.as_deref(),
             &self.store,
             self.events.as_ref(),
             draft,
@@ -1828,6 +1833,7 @@ name = "Morning"
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
             template_provenance: None,
         }
     }
@@ -2041,6 +2047,7 @@ name = "Morning"
         let tool = RunWorkflowTool::new(
             CompanyId::new("acme"),
             Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
             handle,
         );
         let result = tool
@@ -2071,6 +2078,7 @@ name = "Morning"
         let tool = RunWorkflowTool::new(
             CompanyId::new("acme"),
             Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
             handle,
         );
         let result = tool
@@ -2091,6 +2099,7 @@ name = "Morning"
         let tool = RunWorkflowTool::new(
             CompanyId::new("acme"),
             Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
             WorkflowRunnerHandle::default(),
         );
         let result = tool
@@ -2112,6 +2121,7 @@ name = "Morning"
         let tool = RunWorkflowTool::new(
             CompanyId::new("acme"),
             Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
             handle,
         );
         let result = tool
@@ -2130,6 +2140,7 @@ name = "Morning"
         let tool = RunWorkflowTool::new(
             CompanyId::new("acme"),
             None,
+            Arc::new(MemStore::default()),
             WorkflowRunnerHandle::default(),
         );
         let result = tool.execute(json!({})).await.expect("execute");
@@ -2148,6 +2159,7 @@ name = "Morning"
         let tool = RunWorkflowTool::new(
             CompanyId::new("acme"),
             Some(std::path::PathBuf::from("/tmp")),
+            Arc::new(MemStore::default()),
             handle,
         );
         let result = tool
@@ -2175,6 +2187,7 @@ name = "Morning"
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
             template_provenance: None,
         }
     }
@@ -2235,7 +2248,12 @@ name = "Morning"
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
-        let run = RunWorkflowTool::new(company.clone(), Some(dir.path().to_path_buf()), handle);
+        let run = RunWorkflowTool::new(
+            company.clone(),
+            Some(dir.path().to_path_buf()),
+            store.clone(),
+            handle,
+        );
         let result = run
             .execute(json!({ "id": "greeter" }))
             .await
@@ -2272,19 +2290,47 @@ name = "Morning"
         );
     }
 
+    /// Issue #168: a hosted tenant has no source directory, and the tool must
+    /// still create — the graph body is persisted on the record. It used to
+    /// refuse outright with "nowhere to save".
     #[tokio::test]
-    async fn create_workflow_tool_errors_without_source_dir() {
-        let store: Arc<dyn CompanyStore> = Arc::new(MemStore::default());
-        let tool = CreateWorkflowTool::new(CompanyId::new("acme"), None, store, None);
+    async fn create_workflow_tool_creates_without_source_dir() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(company.clone(), None, store.clone(), None);
         let result = tool
-            .execute(json!({ "id": "x", "name": "X", "nodes": [] }))
+            .execute(json!({
+                "id": "hosted",
+                "name": "Hosted",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    { "id": "done", "kind": "output", "name": "Done" }
+                ],
+                "edges": [ { "from": "start", "to": "done" } ]
+            }))
             .await
             .expect("execute");
-        assert!(result.is_error);
-        assert!(
-            result.output_for_llm(false).contains("nowhere to save"),
-            "{result:?}"
-        );
+        assert!(!result.is_error, "{result:?}");
+
+        let record = store.load(&company).await.unwrap().unwrap();
+        assert_eq!(record.overlay_workflows.len(), 1);
+        assert_eq!(record.overlay_workflows[0].id, "hosted");
+
+        // And it runs, with no source directory anywhere in the picture.
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(StubRunner::new(WorkflowRun {
+            output: json!({ "nodes": { "done": { "items": ["ok"] } } }),
+            pending_approvals: Vec::new(),
+        }));
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+        let run = RunWorkflowTool::new(company, None, store, handle);
+        let result = run
+            .execute(json!({ "id": "hosted" }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "run should succeed: {result:?}");
+        assert!(result.output_for_llm(true).contains("Hosted"), "{result:?}");
     }
 
     #[tokio::test]
