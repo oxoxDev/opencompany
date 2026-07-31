@@ -19,6 +19,21 @@ learns the verdict.
 due. The clock is injectable so schedule firing is tested deterministically
 without wall-clock waits.
 
+`workflow_scheduler.rs` drives the *other* kind of cron: the `schedule` a saved
+workflow graph's `trigger` node carries (issue #169). Same `CronExpr` matcher,
+same injectable `Clock`, same minute-boundary loop — but **one process-wide
+task**, not one per company, because workflow schedules are runtime data
+(creating a workflow in the console adds a cron with no reboot, and a hosted
+tenant can be registered after boot). Each tick re-reads `CompanyRegistry`,
+skips companies that aren't `running` or have no `WorkflowRunner` wired, and
+enumerates graphs through the seed ∪ overlay union
+(`list_workflows_union`) so console-created workflows — which exist only as
+record overlays — are scheduled too. A matching minute fires the workflow on its
+own tokio task (a scheduled run is a *new* causal chain at `WORKFLOW_DEPTH` 0,
+exactly like an operator clicking Run) with an in-flight guard per
+`(company, workflow)` so a slow run never overlaps itself. Missed runs are
+skipped, never caught up. All cron times are UTC.
+
 ## Harness pool (`src/harness/`, feature `openhuman`)
 
 `src/harness/` embeds `openhuman_core` as a library (see

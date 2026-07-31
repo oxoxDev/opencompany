@@ -158,7 +158,10 @@ prompt = "Weekly review and operator digest"
     Usage view surfaces a dedicated media status row (active / awaiting
     credential / not granted / not in this build).
 - **`[[schedule]]`** entries become `ScheduleFired` events; cron syntax is
-  standard 5-field.
+  standard 5-field, interpreted in UTC. A saved *workflow* schedules itself
+  separately, with the same dialect: its `trigger` node carries a `schedule`
+  cron that the workflow scheduler fires (issue #169). A manifest schedule
+  drives a company cycle; a trigger schedule drives one workflow run.
 
 ## Layering and provenance
 

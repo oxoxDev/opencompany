@@ -102,7 +102,10 @@ tree is the version-controlled seed and, in hosted mode, a read-only crate mount
 (writing there failed every hosted tenant with `EROFS`). Every reader unions the
 two sources — `load_workflow_union` / `list_workflows_union` in
 `src/company/workflow_file.rs` — with the committed seed file winning on an id
-collision, matching the manifest-first convention the desk resolvers use.
+collision, matching the manifest-first convention the desk resolvers use. The
+workflow scheduler (issue #169) reads through the same union, which is what
+makes a schedule on a console-created workflow survive a restart: the overlay
+bodies persist here, while the record's manifest is re-seeded on a boot rebuild.
 
 ```rust
 // src/ports/store.rs
