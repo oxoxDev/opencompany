@@ -58,6 +58,15 @@ pub struct WorkflowScheduler {
     /// which remove their key on completion, so a run that outlives its minute
     /// suppresses its own next fire instead of stacking up.
     in_flight: Arc<Mutex<HashSet<WorkflowKey>>>,
+    /// Companies already warned about having scheduled workflows but no
+    /// [`WorkflowRunner`](crate::ports::WorkflowRunner) to run them on. The tick
+    /// is once a minute forever, so the warning is latched here and re-armed
+    /// only when the situation changes — see [`note_unwired`](Self::note_unwired).
+    warned_unwired: HashSet<CompanyId>,
+    /// How many unwired-company warnings have been emitted, so a test can assert
+    /// the latch actually suppresses the repeat.
+    #[cfg(test)]
+    unwired_warnings: usize,
 }
 
 impl WorkflowScheduler {
@@ -68,6 +77,9 @@ impl WorkflowScheduler {
             clock,
             last_fired: HashMap::new(),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
+            warned_unwired: HashSet::new(),
+            #[cfg(test)]
+            unwired_warnings: 0,
         }
     }
 
@@ -81,7 +93,11 @@ impl WorkflowScheduler {
     ///   uses, so schedules resume cleanly on unpause;
     /// * a company with no [`WorkflowRunner`](crate::ports::WorkflowRunner)
     ///   wired — the default build has none, so it stays inert through the same
-    ///   port seam the run route reports `not_wired` on;
+    ///   port seam the run route reports `not_wired` on. If that company *does*
+    ///   have scheduled workflows the skip is announced once (see
+    ///   [`note_unwired`](Self::note_unwired)), because a configured build whose
+    ///   inference source failed to resolve lands here too and would otherwise
+    ///   look identical to a working one;
     /// * a workflow whose graph is malformed (skipped by the union loader with a
     ///   warning, so one bad graph never silences the rest);
     /// * a workflow already fired this minute, or whose previous scheduled run
@@ -110,11 +126,6 @@ impl WorkflowScheduler {
             if runtime.ensure_running().await.is_err() {
                 continue;
             }
-            // No execution wired (default build) — nothing to fire onto.
-            let Some(runner) = runtime.workflow_runner().cloned() else {
-                continue;
-            };
-
             // The record's runtime-authored graph bodies. A company with no
             // persisted record contributes none; a store failure is logged and
             // skipped rather than aborting every other company's schedules.
@@ -127,6 +138,10 @@ impl WorkflowScheduler {
                 }
             };
 
+            // Enumerate the company's scheduled workflows BEFORE checking for a
+            // runner: whether any exist is exactly what decides if an unwired
+            // company is misconfigured or simply has nothing to run.
+            let mut scheduled: Vec<(WorkflowFile, String, CronExpr)> = Vec::new();
             for file in list_workflows_union(runtime.source_dir(), &overlays) {
                 let Some(cron) = trigger_schedule(&file) else {
                     continue; // no schedule: manual-run only
@@ -143,6 +158,27 @@ impl WorkflowScheduler {
                     );
                     continue;
                 };
+                scheduled.push((file, cron, expr));
+            }
+
+            // No execution wired. This is the default build's inert seam, but it
+            // is ALSO what a configured build looks like when its inference
+            // source failed to resolve at boot — an operator-visible
+            // misconfiguration in which a saved schedule is indistinguishable
+            // from a broken one. Say so, once.
+            let runner = match runtime.workflow_runner().cloned() {
+                Some(runner) => {
+                    // A runner appeared: re-arm the warning for this company.
+                    self.warned_unwired.remove(&company);
+                    runner
+                }
+                None => {
+                    self.note_unwired(&company, scheduled.len());
+                    continue;
+                }
+            };
+
+            for (file, cron, expr) in scheduled {
                 if !expr.matches(&civil) {
                     continue;
                 }
@@ -218,6 +254,39 @@ impl WorkflowScheduler {
             }
         }
         fired
+    }
+
+    /// Records that `company` has `scheduled` workflows but no runner to fire
+    /// them on, warning at most once per company.
+    ///
+    /// Two rules, both deliberate:
+    ///
+    /// * **Silence when `scheduled == 0`.** A company with no scheduled
+    ///   workflows and no runner is not misconfigured — it simply has nothing to
+    ///   run. The latch is cleared in that case, so if a schedule is saved later
+    ///   while the company is still unwired, the operator does get told.
+    /// * **Once per company, not once per tick.** The tick is every minute
+    ///   forever; logging there would be ~1440 lines a day per tenant, which
+    ///   buries the signal it is trying to raise. The latch is re-armed in
+    ///   [`tick`](Self::tick) as soon as a runner appears.
+    fn note_unwired(&mut self, company: &CompanyId, scheduled: usize) {
+        if scheduled == 0 {
+            self.warned_unwired.remove(company);
+            return;
+        }
+        if !self.warned_unwired.insert(company.clone()) {
+            return; // already warned for this company
+        }
+        #[cfg(test)]
+        {
+            self.unwired_warnings += 1;
+        }
+        tracing::warn!(
+            %company,
+            scheduled_workflows = scheduled,
+            "workflow scheduler: {scheduled} scheduled workflow(s) will not fire — no workflow \
+             runner is wired for this company (inference source unresolved?)"
+        );
     }
 
     /// Claims `key` for a run, returning `false` when a run already holds it.
@@ -602,9 +671,12 @@ to = "done"
     }
 
     /// No runner wired (the default build) is a clean no-op, not an error — the
-    /// same port seam the run route reports `not_wired` on.
+    /// same port seam the run route reports `not_wired` on. Because the company
+    /// *does* have a scheduled workflow, the skip is announced — exactly once,
+    /// no matter how many minutes pass, so a once-a-minute tick cannot bury the
+    /// signal it is raising.
     #[tokio::test]
-    async fn no_runner_wired_is_a_noop() {
+    async fn no_runner_wired_is_a_noop_and_warns_once() {
         let home = tmp_home();
         let registry = company_with_overlays(
             &home,
@@ -615,9 +687,83 @@ to = "done"
         )
         .await;
         let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry, clock.clone());
+
+        assert_eq!(scheduler.tick().await, 0);
+        assert_eq!(scheduler.unwired_warnings, 1, "the first skip must be said");
+
+        // Several more matching minutes: still skipped, still silent.
+        for minute in 1..5 {
+            clock.set(millis_at(2026, 7, 13, 9, minute));
+            assert_eq!(scheduler.tick().await, 0);
+        }
+        assert_eq!(
+            scheduler.unwired_warnings, 1,
+            "the warning must not repeat every tick"
+        );
+
+        cleanup(&home).await;
+    }
+
+    /// A company with no runner AND no scheduled workflows is not
+    /// misconfigured — it simply has nothing to run, so it stays silent.
+    #[tokio::test]
+    async fn no_runner_and_no_schedules_does_not_warn() {
+        let home = tmp_home();
+        let registry = company_with_overlays(
+            &home,
+            "acme",
+            vec![overlay("manual", None)],
+            None,
+            "running",
+        )
+        .await;
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
         let mut scheduler = WorkflowScheduler::new(registry, clock);
 
         assert_eq!(scheduler.tick().await, 0);
+        assert_eq!(
+            scheduler.unwired_warnings, 0,
+            "a company with nothing scheduled deserves silence"
+        );
+
+        cleanup(&home).await;
+    }
+
+    /// The latch is re-armed when the situation changes: a schedule saved onto a
+    /// still-unwired company warns, even though an earlier tick already found
+    /// that company unwired (with nothing scheduled) and said nothing.
+    #[tokio::test]
+    async fn a_schedule_added_later_still_warns() {
+        let home = tmp_home();
+        let company = CompanyId::new("acme");
+        let registry = company_with_overlays(
+            &home,
+            "acme",
+            vec![overlay("manual", None)],
+            None,
+            "running",
+        )
+        .await;
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry.clone(), clock.clone());
+
+        assert_eq!(scheduler.tick().await, 0);
+        assert_eq!(scheduler.unwired_warnings, 0);
+
+        // The operator saves a schedule on the (still unwired) company.
+        let runtime = registry.get(&company).expect("registered");
+        let store = runtime.store().clone();
+        let mut record = store.load(&company).await.unwrap().unwrap();
+        record.overlay_workflows = vec![overlay("digest", Some("* * * * *"))];
+        store.save(&record).await.unwrap();
+
+        clock.set(millis_at(2026, 7, 13, 9, 1));
+        assert_eq!(scheduler.tick().await, 0);
+        assert_eq!(
+            scheduler.unwired_warnings, 1,
+            "a schedule saved onto an unwired company must be reported"
+        );
 
         cleanup(&home).await;
     }
