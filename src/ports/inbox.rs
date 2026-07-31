@@ -83,11 +83,15 @@ pub trait InboxStore: Send + Sync {
     /// oldest-first, so any capped page stops covering the newest mail. This
     /// question has one right answer at every inbox size, so the port answers it.
     ///
-    /// The default implementation reads the whole inbox, which is correct
-    /// everywhere and cheap on the append-only file backend (whose `messages`
-    /// already parses the entire log on any call). A backend that can index
-    /// `from_email` should override this with a single indexed lookup rather
-    /// than materialising the mailbox.
+    /// The default implementation reads the whole inbox. That is correct at any
+    /// size, and it is what **every** backend does today: `fs` parses its entire
+    /// append-only log on any `messages` call regardless of limit, and the
+    /// `sqlite`/`mongodb` backends store each message as an opaque
+    /// `record_json` blob with no queryable sender column, so neither can
+    /// answer this from an index without a schema migration. Overriding with a
+    /// real indexed lookup (`… WHERE from_email = ? AND NOT outbound LIMIT 1`)
+    /// is worth doing when that migration happens — correctness is not the
+    /// reason to wait, cost is.
     ///
     /// Matching is case-insensitive on a trimmed address, mirroring
     /// [`normalize_email`](crate::ports::normalize_email). A blank `from_email`
