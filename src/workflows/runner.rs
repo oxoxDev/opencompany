@@ -391,6 +391,105 @@ to = "done"
         assert!(output.contains("hello-marker"), "{output}");
     }
 
+    // --- Output destinations, end to end (issue #170) ------------------------
+
+    /// A graph whose terminal `output` node routes its report to the operator
+    /// channel. `trigger → output` only, so it needs no roster.
+    const REPORT_TO_OPERATOR: &str = r#"
+id = "report"
+name = "Report"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "done"
+kind = "output"
+name = "Owner summary"
+[node.destination]
+kind = "channel"
+target = "operator"
+[[edge]]
+from = "start"
+to = "done"
+"#;
+
+    /// The end-to-end proof that the RUNNER (not the HTTP handler) delivers: a
+    /// run driven straight through `run_workflow` with a wired delivery bundle
+    /// posts the report and reports the send on the run result. The
+    /// orchestrator's `run_workflow` tool and the trigger scheduler reach this
+    /// same function, which is why delivery lives here.
+    #[tokio::test]
+    async fn a_run_delivers_its_output_report_through_the_runner() {
+        use crate::runtime::channel::OperatorChannel;
+
+        let dir = tempfile::tempdir().unwrap();
+        let channel = OperatorChannel::new();
+        let mut deps = deps(dir.path());
+        deps.delivery = Some(crate::workflows::WorkflowDeliveryDeps {
+            mail: None,
+            inbox: Arc::new(crate::store::FsInboxStore::new(dir.path())),
+            users: Arc::new(FsOps::new(dir.path())),
+            channels: vec![Arc::new(channel.clone())],
+        });
+
+        let file = parse_workflow(REPORT_TO_OPERATOR).expect("parses");
+        let run = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps,
+            &record(),
+            &file,
+            serde_json::json!({ "brief": "quarterly numbers" }),
+        )
+        .await
+        .expect("workflow runs");
+
+        assert_eq!(run.deliveries.len(), 1, "{:?}", run.deliveries);
+        assert_eq!(
+            run.deliveries[0].status,
+            crate::ports::DeliveryStatus::Sent,
+            "{:?}",
+            run.deliveries
+        );
+        assert_eq!(run.deliveries[0].node, "done");
+        assert_eq!(
+            channel.sent().len(),
+            1,
+            "the report should have been posted"
+        );
+    }
+
+    /// The #169 lesson, at the run level: with no delivery ports wired the run
+    /// still SUCCEEDS (its work is valid) but the result carries a loud `failed`
+    /// row — an operator can tell a working destination from a broken one
+    /// without reading a log. Every other `deps()` in this suite is unwired, so
+    /// this is the default-build shape.
+    #[tokio::test]
+    async fn an_unwired_runtime_still_runs_but_says_the_report_was_not_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = parse_workflow(REPORT_TO_OPERATOR).expect("parses");
+        let run = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps(dir.path()),
+            &record(),
+            &file,
+            serde_json::json!({}),
+        )
+        .await
+        .expect("an undeliverable report must not fail the run");
+
+        assert_eq!(run.deliveries.len(), 1, "{:?}", run.deliveries);
+        assert_eq!(
+            run.deliveries[0].status,
+            crate::ports::DeliveryStatus::Failed
+        );
+        assert!(
+            run.deliveries[0].detail.contains("not wired"),
+            "{:?}",
+            run.deliveries
+        );
+    }
+
     /// The port implementation ensures the roster itself, so a caller need not
     /// pre-`ensure`.
     #[tokio::test]
