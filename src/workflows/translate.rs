@@ -22,8 +22,8 @@
 //! returns (see [`super::delivery`]), so the engine has no use for it and a
 //! `destination` key in node config would be inert cargo. A destination-bearing
 //! `output` node therefore lowers to exactly the same bare pass-through
-//! `Transform` as one without — pinned by
-//! [`an_output_destination_never_reaches_the_engine_graph`](tests).
+//! `Transform` as one without — pinned by the
+//! `an_output_destination_never_reaches_the_engine_graph` test below.
 //!
 //! An **agent** node's roster teammate id becomes the tinyflows `agent_ref` in
 //! node config, which the engine's `agent` node routes to the injected

@@ -92,8 +92,9 @@ const MAX_REPORT_CHARS: usize = 16_000;
 /// The marker appended when a report is truncated at [`MAX_REPORT_CHARS`].
 const TRUNCATION_MARKER: &str = "\n\n… (report truncated)";
 
-/// The ports an output destination needs, bundled so [`HarnessDeps`] grows one
-/// optional field rather than four.
+/// The ports an output destination needs, bundled so
+/// [`HarnessDeps`](crate::harness::HarnessDeps) grows one optional field rather
+/// than four.
 ///
 /// [`HarnessDeps::delivery`](crate::harness::HarnessDeps) is `Option<Self>` and
 /// defaults to `None` at every construction site except the production runtime
