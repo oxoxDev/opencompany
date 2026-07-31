@@ -90,6 +90,16 @@ struct StoredChunk {
 /// One company's opened engine: the KV tier over its per-workspace SQLite DB.
 struct CompanyEngine {
     kv: KvStore,
+    /// Serializes read-modify-write sequences over this company's shared
+    /// aggregate keys (`oc:traces` / `oc:archive`). The KV tier upserts a whole
+    /// JSON array per key, so an unguarded `append`/`archive`/`hard_delete`/
+    /// `redact` reads the array, mutates it in memory, and writes it back — two
+    /// concurrent calls would both read N entries and both write N+1, silently
+    /// dropping one. Holding this async mutex across each such sequence makes the
+    /// aggregate updates serializable per company. It is an async
+    /// [`tokio::sync::Mutex`] (not [`std::sync::Mutex`]) because it is held across
+    /// `.await` points in the trait methods.
+    write_lock: tokio::sync::Mutex<()>,
 }
 
 impl CompanyEngine {
@@ -120,7 +130,10 @@ impl CompanyEngine {
         let kv = KvStore::from_shared_connection(conn)
             .map_err(|e| OpenCompanyError::Store(format!("open engine kv store: {e}")))?;
 
-        Ok(Self { kv })
+        Ok(Self {
+            kv,
+            write_lock: tokio::sync::Mutex::new(()),
+        })
     }
 
     /// Reads and JSON-decodes the value at `key`, `None` when absent.
@@ -235,6 +248,9 @@ impl EngineCortex {
 impl CortexClient for EngineCortex {
     async fn append_trace(&self, company: &str, trace: CompressedTrace) -> Result<()> {
         let engine = self.engine(company)?;
+        // Serialize the read-modify-write against this company's trace array so
+        // concurrent appends cannot both read N and both write N+1 (dropping one).
+        let _guard = engine.write_lock.lock().await;
         let mut traces: Vec<CompressedTrace> = engine.get_json(KEY_TRACES)?.unwrap_or_default();
         traces.push(trace);
         engine.put_json(KEY_TRACES, &traces)
@@ -255,6 +271,8 @@ impl CortexClient for EngineCortex {
 
     async fn archive_traces(&self, company: &str, policy: EvictionPolicy) -> Result<u64> {
         let engine = self.engine(company)?;
+        // Serialize the move-between-arrays against concurrent trace mutations.
+        let _guard = engine.write_lock.lock().await;
         let mut traces: Vec<CompressedTrace> = engine.get_json(KEY_TRACES)?.unwrap_or_default();
         let mut archive: Vec<CompressedTrace> = engine.get_json(KEY_ARCHIVE)?.unwrap_or_default();
 
@@ -344,6 +362,8 @@ impl CortexClient for EngineCortex {
 
     async fn hard_delete_trace(&self, company: &str, cycle_id: &str) -> Result<bool> {
         let engine = self.engine(company)?;
+        // Serialize the delete-across-both-arrays against concurrent mutations.
+        let _guard = engine.write_lock.lock().await;
         let mut traces: Vec<CompressedTrace> = engine.get_json(KEY_TRACES)?.unwrap_or_default();
         let mut archive: Vec<CompressedTrace> = engine.get_json(KEY_ARCHIVE)?.unwrap_or_default();
         let before = traces.len() + archive.len();
@@ -371,6 +391,9 @@ impl CortexClient for EngineCortex {
             return Ok(0);
         }
         let engine = self.engine(company)?;
+        // Serialize the sweep-and-rewrite over traces, archive, and chunks against
+        // concurrent trace/chunk mutations for this company.
+        let _guard = engine.write_lock.lock().await;
         let mut replaced = 0u64;
 
         let mut traces: Vec<CompressedTrace> = engine.get_json(KEY_TRACES)?.unwrap_or_default();
@@ -759,6 +782,52 @@ mod test {
         // Hard delete reaches the archive, not just the live set.
         assert!(mem.hard_delete_trace(&id, "c0").await.unwrap());
         assert!(!mem.hard_delete_trace(&id, "missing").await.unwrap());
+    }
+
+    /// Concurrent `append_trace` calls for one company never lose a write. The
+    /// KV tier upserts the whole trace array per key, so without the per-company
+    /// `write_lock` two racing appends both read N and both write N+1, dropping
+    /// one. A multi-thread runtime with many concurrent appends over one shared
+    /// [`EngineCortex`] asserts all of them land.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_append_trace_never_loses_a_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let cortex = Arc::new(EngineCortex::new(dir.path().join("memory")));
+        let company = "acme";
+        let n = 64usize;
+
+        let mut handles = Vec::with_capacity(n);
+        for i in 0..n {
+            let cortex = cortex.clone();
+            handles.push(tokio::spawn(async move {
+                cortex
+                    .append_trace(
+                        company,
+                        CompressedTrace::now(format!("c{i}"), format!("s{i}")),
+                    )
+                    .await
+                    .unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let traces = cortex.recent_traces(company, n * 2).await.unwrap();
+        assert_eq!(
+            traces.len(),
+            n,
+            "every concurrent append must land under the per-company write lock"
+        );
+        // No trace was clobbered: all cycle ids c0..cN are present.
+        let mut ids: Vec<String> = traces.into_iter().map(|t| t.cycle_id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            n,
+            "each concurrent append persisted a distinct trace"
+        );
     }
 
     #[tokio::test]
