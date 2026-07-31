@@ -40,6 +40,11 @@ pub mod build;
 pub mod capability_budget;
 pub mod composio;
 pub mod cost;
+/// Hosted embeddings compute for the in-pod memory engine's meaning tier (188c2).
+/// Needs the `tinycortex` crate's `EmbeddingBackend` trait, so it links only when
+/// both the harness (`openhuman`) and the memory engine (`tinycortex`) are built.
+#[cfg(feature = "tinycortex")]
+pub mod embeddings;
 pub mod mcp;
 pub mod mcp_probe;
 pub mod memory;
