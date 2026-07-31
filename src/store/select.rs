@@ -506,6 +506,49 @@ mod test {
         assert!(leaked.is_empty(), "cross-company recall must not bleed");
     }
 
+    /// Refuse-to-open contract: `OPENCOMPANY_STORAGE=mongodb` makes `/data`
+    /// ephemeral, so opening the in-pod engine there would silently lose memory
+    /// on restart. That combination must be a hard error, not a warning.
+    #[cfg(feature = "tinycortex")]
+    #[test]
+    fn tinycortex_refuses_ephemeral_mongodb_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = StorageSettings {
+            kind: StorageKind::Mongodb,
+            memory_backend: MemoryBackend::Tinycortex,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let err = open_memory_overlay(&settings).expect_err("mongodb /data must refuse to open");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("silently lost on restart"),
+            "error must name the silent-memory-loss failure mode, got: {msg}"
+        );
+    }
+
+    /// The refuse is scoped to the ephemeral-`/data` combination only: durable
+    /// base backends (fs, sqlite) still open the engine overlay normally.
+    #[cfg(feature = "tinycortex")]
+    #[test]
+    fn tinycortex_opens_on_durable_fs_and_sqlite() {
+        for kind in [StorageKind::Fs, StorageKind::Sqlite] {
+            let dir = tempfile::tempdir().unwrap();
+            let settings = StorageSettings {
+                kind,
+                memory_backend: MemoryBackend::Tinycortex,
+                data_dir: Some(dir.path().to_path_buf()),
+                ..Default::default()
+            };
+            assert!(
+                open_memory_overlay(&settings)
+                    .unwrap_or_else(|e| panic!("durable {kind:?} base must open: {e}"))
+                    .is_some(),
+                "durable {kind:?} base must yield an engine overlay"
+            );
+        }
+    }
+
     #[cfg(not(feature = "tinycortex"))]
     #[test]
     fn tinycortex_overlay_requires_feature() {
