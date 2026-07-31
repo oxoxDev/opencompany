@@ -212,6 +212,19 @@ impl CompanyEngine {
         if chunks.is_empty() {
             return;
         }
+        // `all_chunks()` returns KV listing order, which is not meaningful
+        // (implementation detail of the underlying store) — sort newest-first by
+        // `stored_at_millis` before truncating so the bounded backfill
+        // deterministically favors the most recent chunks and is reproducible
+        // across boots, instead of picking an arbitrary `BACKFILL_LIMIT`-sized
+        // slice of listing order. `addr` (a content hash, unique) breaks ties
+        // between chunks stored in the same millisecond.
+        let mut chunks = chunks;
+        chunks.sort_by(|(addr_a, a), (addr_b, b)| {
+            b.stored_at_millis
+                .cmp(&a.stored_at_millis)
+                .then_with(|| addr_a.cmp(addr_b))
+        });
         let pending: Vec<(String, String)> = chunks
             .into_iter()
             .take(BACKFILL_LIMIT)
