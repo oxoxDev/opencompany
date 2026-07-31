@@ -154,9 +154,13 @@ jobs:
             exit 1
           fi
           # Credential is passed as an argument to ctr only; never echoed.
-          k3s ctr images pull --user "${PULL_USER}:${PULL_PW}" "${IMAGE}"
-          k3s ctr images ls | awk '{print $1}' | grep -qx "${IMAGE}" \
-            || { echo "ERROR: ${IMAGE} is not in containerd after pull" >&2; exit 1; }
+          # -n k8s.io is explicit on purpose: the kubelet only sees images in that
+          # containerd namespace. `k3s ctr` already defaults to it (unlike plain
+          # `ctr`, which defaults to `default`), but naming it means this does not
+          # silently break if that wrapper default ever changes.
+          k3s ctr -n k8s.io images pull --user "${PULL_USER}:${PULL_PW}" "${IMAGE}"
+          k3s ctr -n k8s.io images ls -q | grep -Fqx "${IMAGE}" \
+            || { echo "ERROR: ${IMAGE} is not in the k8s.io containerd namespace after pull" >&2; exit 1; }
 
           # Tenant pods pin imagePullPolicy: IfNotPresent, so a moving tag is not
           # re-pulled. The manager must be pointed at the immutable
