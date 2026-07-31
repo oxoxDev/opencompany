@@ -702,6 +702,7 @@ mod tests {
             media: None,
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            delivery: None,
         }
     }
 

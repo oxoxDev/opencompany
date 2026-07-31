@@ -1013,6 +1013,23 @@ impl RuntimeBuilder {
                                 // never an env/platform key). `None` fails closed.
                                 composio: composio_config,
                                 steer,
+                                // Issue #170: the ports an `output` node's
+                                // `destination` needs. This is the ONLY site
+                                // that wires them — every other `HarnessDeps`
+                                // construction leaves `None`, which fails closed
+                                // with a loud "not wired" row on the run result.
+                                // All four are already resolved above: the
+                                // company's own mailbox handle, its inboxes (for
+                                // the established-thread gate and the outbound
+                                // audit record), its user directory (how `owner`
+                                // resolves server-side), and the wired channel
+                                // adapters (always at least `operator`).
+                                delivery: Some(crate::workflows::WorkflowDeliveryDeps {
+                                    mail: self.mail.clone(),
+                                    inbox: inbox.clone(),
+                                    users: ops.users.clone(),
+                                    channels: channels.clone(),
+                                }),
                             };
                             let record = CompanyRecord {
                                 id: id.clone(),

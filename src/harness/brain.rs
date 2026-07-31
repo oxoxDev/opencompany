@@ -1131,6 +1131,7 @@ description = "Runs Acme."
             media: None,
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            delivery: None,
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -1277,6 +1278,7 @@ description = "Builds it."
             media: None,
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            delivery: None,
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
@@ -1341,6 +1343,7 @@ members = ["engineer"]
             media: None,
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            delivery: None,
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
@@ -1982,6 +1985,7 @@ members = ["engineer"]
             media: None,
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            delivery: None,
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record),
@@ -2573,6 +2577,7 @@ members = ["eng1", "eng2"]
             media: None,
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            delivery: None,
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record());
 
@@ -2698,6 +2703,7 @@ members = ["eng1", "eng2"]
             media: None,
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            delivery: None,
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record());
 
@@ -2769,6 +2775,7 @@ members = ["eng1", "eng2"]
             media: None,
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            delivery: None,
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -3049,6 +3056,7 @@ members = ["eng1", "eng2"]
             media: None,
             composio: None,
             steer,
+            delivery: None,
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record()),
@@ -3355,6 +3363,7 @@ members = ["eng1", "eng2"]
             media: None,
             composio: None,
             steer,
+            delivery: None,
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_with_desk()),

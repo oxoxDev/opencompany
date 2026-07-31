@@ -123,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
         media: None,
         composio: None,
         steer: opencompany::company::steer::InflightRegistry::default(),
+        delivery: None,
     };
 
     let pool = HarnessPool::new();

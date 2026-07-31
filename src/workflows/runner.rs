@@ -116,16 +116,30 @@ async fn run_workflow_inner(
     // message carries the topic — a node's authored `prompt` is the same on
     // every run and cannot say what was asked this time.
     let run_request = super::caps::run_request_text(&input);
+    // Issue #170: the delivery ports are read off `deps` BEFORE it moves into
+    // the capability bundle. Delivery is host-side and post-engine, so it is not
+    // a capability — the engine never learns a report has a destination.
+    let delivery = deps.delivery.clone();
     let capabilities =
         super::caps::build_capabilities(pool, deps, record, &workflow.id, &run_id, run_request)
             .await;
     let outcome = tinyflows::engine::run(&compiled, input, &capabilities)
         .await
         .map_err(map_engine_error)?;
+
+    // Route every reached `output` node's report to its configured destination.
+    // Deliberately here rather than in the HTTP handler: the orchestrator's
+    // `run_workflow` tool and the trigger scheduler drive this same path, and a
+    // scheduled run is exactly the case where nobody is watching the console's
+    // run-result drawer. Never fails the run — each attempt is reported instead.
+    let deliveries =
+        super::delivery::deliver_outputs(delivery.as_ref(), record, workflow, &outcome.output)
+            .await;
+
     Ok(WorkflowRun {
         output: outcome.output,
         pending_approvals: outcome.pending_approvals,
-        deliveries: Vec::new(),
+        deliveries,
     })
 }
 
@@ -248,6 +262,7 @@ description = "Runs Acme."
             media: None,
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            delivery: None,
         }
     }
 

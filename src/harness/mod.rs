@@ -251,6 +251,19 @@ pub struct HarnessDeps {
     /// [`delegations`](Self::delegations)); the default is an empty registry,
     /// which simply lists nothing and rejects every steer as `not in flight`.
     pub steer: crate::company::steer::InflightRegistry,
+    /// Issue #170 — the ports an `output` node's `destination` needs to route a
+    /// finished workflow's report to a person or a channel (mail handle, inbox,
+    /// user directory, wired channels), bundled so this struct grows one field
+    /// rather than four.
+    ///
+    /// Read post-engine by
+    /// [`deliver_outputs`](crate::workflows::delivery::deliver_outputs) — never
+    /// by the engine, which knows nothing about destinations. `None` (the
+    /// default at every construction site but the production runtime builder)
+    /// **fails closed and loud**: nothing is sent and the run result carries a
+    /// `failed` row saying delivery is not wired, so an authored destination can
+    /// never quietly do nothing.
+    pub delivery: Option<crate::workflows::WorkflowDeliveryDeps>,
 }
 
 /// One live openhuman agent, keyed by its manifest id.
@@ -1547,6 +1560,7 @@ description = "Builds the product."
                 media: None,
                 composio: None,
                 steer: crate::company::steer::InflightRegistry::default(),
+                delivery: None,
             },
             store,
             meter,
@@ -1606,6 +1620,7 @@ description = "Builds the product."
             media: None,
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            delivery: None,
         };
 
         let roster = build_roster(&record(), &deps, &[]).expect("roster builds with skills");
@@ -1890,6 +1905,7 @@ description = "Builds the product."
             media: None,
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            delivery: None,
         };
         let roster = build_roster(&record(), &deps, &[]).expect("roster");
         // Keep the tempdir alive for the agent's workspace by leaking it into the
@@ -2046,6 +2062,7 @@ description = "Builds the product."
             media: None,
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            delivery: None,
         };
         let pool = HarnessPool::new();
         let rec = record();
@@ -2354,6 +2371,7 @@ description = "Builds the product."
             media: None,
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            delivery: None,
         };
         let pool = HarnessPool::new();
 
@@ -2506,6 +2524,7 @@ description = "Sets direction."
             media: None,
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            delivery: None,
         };
         let pool = HarnessPool::new();
         let rec = granting_record();
@@ -2643,6 +2662,7 @@ description = "Sets direction."
             composio: None,
             artifacts: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            delivery: None,
         }
     }
 
