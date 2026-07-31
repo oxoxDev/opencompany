@@ -110,9 +110,10 @@ impl From<WorkflowFile> for WorkflowGraph {
 
 /// A single graph node. `kind` is the on-disk string
 /// (`trigger`/`agent`/`tool_call`/`http_request`/`condition`/`output`); `agent`
-/// is only meaningful on `agent` nodes. The P1 fields (`config` / `onError` /
-/// `retry` / `requiresApproval`) are serialized so `GET …/workflows/{wid}` does
-/// not drop model data (they are omitted entirely when unset).
+/// is only meaningful on `agent` nodes; `schedule` (a 5-field UTC cron) only on
+/// `trigger` nodes. The P1 fields (`config` / `onError` / `retry` /
+/// `requiresApproval`) are serialized so `GET …/workflows/{wid}` does not drop
+/// model data (they are omitted entirely when unset).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkflowNode {
@@ -123,6 +124,8 @@ struct WorkflowNode {
     summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schedule: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     config: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -165,6 +168,7 @@ impl From<WorkflowNodeDef> for WorkflowNode {
             name: n.name,
             summary: n.summary,
             agent: n.agent,
+            schedule: n.schedule,
             config: n.config,
             on_error: n.on_error,
             retry: n.retry.map(WorkflowRetryOut::from),
@@ -294,6 +298,12 @@ struct CreateNode {
     summary: Option<String>,
     #[serde(default)]
     agent: Option<String>,
+    /// A 5-field UTC cron saying when the workflow starts on its own — only
+    /// valid on a `trigger` node (issue #169). Validated by the render → parse
+    /// round trip below, so a bad expression or a schedule on the wrong node
+    /// kind is a `400`, not a persisted graph that never fires.
+    #[serde(default)]
+    schedule: Option<String>,
     /// Free-form, kind-specific node config (P2): `switch`/`transform`
     /// `=expr` bindings, a `sub_workflow` `workflow_id`, a `tool_call` slug/args,
     /// … . Carried as JSON on the wire and converted to a `toml::Value` on the
@@ -368,7 +378,7 @@ impl TryFrom<CreateWorkflowBody> for RawWorkflow {
                 name: n.name,
                 summary: n.summary,
                 agent: n.agent,
-                schedule: None,
+                schedule: n.schedule,
                 config,
                 on_error: n.on_error,
                 retry: n.retry.map(WorkflowRetryDef::from),
@@ -733,6 +743,125 @@ mod tests {
         };
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
         assert!(matches!(err.0, OpenCompanyError::InvalidRequest(_)));
+    }
+
+    // --- trigger schedule (issue #169) --------------------------------------
+
+    /// A create body carrying a trigger `schedule` round-trips it through the
+    /// render → parse pipeline the endpoint runs before persisting.
+    #[test]
+    fn create_body_round_trips_a_trigger_schedule() {
+        let body: CreateWorkflowBody = serde_json::from_value(serde_json::json!({
+            "id": "wf",
+            "name": "WF",
+            "nodes": [
+                { "id": "start", "kind": "trigger", "name": "Start", "schedule": "0 9 * * MON" },
+                { "id": "done", "kind": "output", "name": "Done" }
+            ],
+            "edges": [ { "from": "start", "to": "done" } ]
+        }))
+        .expect("body deserializes");
+
+        let raw = RawWorkflow::try_from(body).expect("converts");
+        let toml_src = crate::company::render_workflow(&raw).expect("renders");
+        let file = crate::company::parse_workflow(&toml_src).expect("re-parses");
+
+        let start = file.nodes.iter().find(|n| n.id == "start").unwrap();
+        assert_eq!(start.schedule.as_deref(), Some("0 9 * * MON"));
+        let done = file.nodes.iter().find(|n| n.id == "done").unwrap();
+        assert!(done.schedule.is_none());
+    }
+
+    /// The create route needs no schedule-specific validation code: the same
+    /// render → parse round trip surfaces a bad cron (and a schedule on the
+    /// wrong node kind) as the model's prosumer error, which the handler maps
+    /// to a `400`.
+    #[test]
+    fn create_body_with_a_bad_schedule_fails_reparse() {
+        let bad_cron: CreateWorkflowBody = serde_json::from_value(serde_json::json!({
+            "id": "wf",
+            "name": "WF",
+            "nodes": [ { "id": "start", "kind": "trigger", "name": "Start", "schedule": "hourly" } ],
+            "edges": []
+        }))
+        .unwrap();
+        let raw = RawWorkflow::try_from(bad_cron).expect("converts");
+        let toml_src = crate::company::render_workflow(&raw).expect("renders");
+        let err = crate::company::parse_workflow(&toml_src).unwrap_err();
+        assert!(err.to_string().contains("not a valid cron"), "{err}");
+
+        let wrong_kind: CreateWorkflowBody = serde_json::from_value(serde_json::json!({
+            "id": "wf",
+            "name": "WF",
+            "nodes": [
+                { "id": "start", "kind": "trigger", "name": "Start" },
+                { "id": "done", "kind": "output", "name": "Done", "schedule": "0 * * * *" }
+            ],
+            "edges": [ { "from": "start", "to": "done" } ]
+        }))
+        .unwrap();
+        let raw = RawWorkflow::try_from(wrong_kind).expect("converts");
+        let toml_src = crate::company::render_workflow(&raw).expect("renders");
+        let err = crate::company::parse_workflow(&toml_src).unwrap_err();
+        assert!(err.to_string().contains("only `trigger` nodes"), "{err}");
+    }
+
+    /// `GET …/workflows/{wid}` serializes the schedule in camelCase (it is a
+    /// single word, so the key is `schedule`) and omits it when unset.
+    #[test]
+    fn json_serializes_the_trigger_schedule() {
+        use crate::company::{WorkflowNodeDef, WorkflowNodeKind};
+
+        let file = WorkflowFile {
+            id: "wf".into(),
+            name: "WF".into(),
+            description: None,
+            nodes: vec![
+                WorkflowNodeDef {
+                    id: "start".into(),
+                    kind: WorkflowNodeKind::Trigger,
+                    name: "Start".into(),
+                    summary: None,
+                    agent: None,
+                    schedule: Some("0 * * * *".into()),
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                },
+                WorkflowNodeDef {
+                    id: "done".into(),
+                    kind: WorkflowNodeKind::Output,
+                    name: "Done".into(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                },
+            ],
+            edges: Vec::new(),
+        };
+        let json = serde_json::to_value(WorkflowGraph::from(file)).unwrap();
+        assert_eq!(json["nodes"][0]["schedule"], "0 * * * *");
+        assert!(json["nodes"][1].get("schedule").is_none());
+    }
+
+    /// A legacy create body with no `schedule` key still converts, with the
+    /// field unset — nothing changes for existing callers.
+    #[test]
+    fn create_body_without_a_schedule_is_unchanged() {
+        let body: CreateWorkflowBody = serde_json::from_value(serde_json::json!({
+            "id": "wf",
+            "name": "WF",
+            "nodes": [ { "id": "start", "kind": "trigger", "name": "Start" } ],
+            "edges": []
+        }))
+        .unwrap();
+        let raw = RawWorkflow::try_from(body).expect("converts");
+        assert!(raw.nodes[0].schedule.is_none());
     }
 
     #[test]
