@@ -36,8 +36,15 @@ import { TaskDetailView } from "./TaskDetailView";
  * segment is ours to own — no app-shell change needed to route the detail.
  */
 function readTaskDetailId(): string | null {
-  const parts = window.location.hash.replace(/^#\/?/, "").split(/[/?]/);
-  return parts[0] === "tasks" && parts[1] ? decodeURIComponent(parts[1]) : null;
+  try {
+    const parts = window.location.hash.replace(/^#\/?/, "").split(/[/?]/);
+    return parts[0] === "tasks" && parts[1] ? decodeURIComponent(parts[1]) : null;
+  } catch {
+    // Malformed percent-encoding (e.g. `#/tasks/%`) throws URIError — fall back
+    // to the bare board instead of blowing up the render. Covers both the
+    // useState initializer and the hashchange handler, since both call here.
+    return null;
+  }
 }
 
 const PRIORITIES = ["low", "medium", "high"] as const;
