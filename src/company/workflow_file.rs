@@ -11,7 +11,8 @@
 //! [`CronExpr`](crate::runtime::cron::CronExpr) and driven at runtime by
 //! [`WorkflowScheduler`](crate::runtime::workflow_scheduler::WorkflowScheduler),
 //! so a saved schedule actually fires instead of sitting in prose. No other node
-//! kind may carry one.
+//! kind may carry one, and a graph may carry at most one scheduled trigger — a
+//! schedule says when the whole workflow runs, so two would double-run it.
 
 use std::path::{Path, PathBuf};
 
@@ -513,6 +514,10 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
     // case — it must NOT be caught by the `error`-label ⇔ `on_error = "route"`
     // coupling check in the edge pass.
     let mut switch_nodes = std::collections::HashSet::new();
+    // Ids of every `trigger` node carrying a `schedule`. More than one is
+    // rejected below: the graph is ONE workflow, so two schedules on it would
+    // double-run it on any minute both matched.
+    let mut scheduled_triggers: Vec<&str> = Vec::new();
     for (index, node) in raw.nodes.iter().enumerate() {
         let label = if node.id.trim().is_empty() {
             format!("node #{}", index + 1)
@@ -564,6 +569,11 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
                         problems.push(format!(
                             "{label} has a `schedule` that is not a valid cron — {err}. Times are UTC."
                         ));
+                    }
+                    // Counted even when the cron is malformed, so a graph with
+                    // two bad schedules reports both problems at once.
+                    if !node.id.trim().is_empty() {
+                        scheduled_triggers.push(node.id.as_str());
                     }
                 }
                 Some(kind) => problems.push(format!(
@@ -672,6 +682,22 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
 
     if trigger_count == 0 {
         problems.push("a workflow needs at least one `trigger` node to say what starts it.".into());
+    }
+
+    // At most ONE scheduled trigger. Several triggers are fine — a graph may be
+    // startable several ways — but a schedule says when the whole workflow runs,
+    // so two of them would run it twice on any minute both matched. Rejecting is
+    // better than picking one: silently honoring the first would drop a schedule
+    // the operator saved, with nothing anywhere to say so.
+    if scheduled_triggers.len() > 1 {
+        let names: Vec<String> = scheduled_triggers
+            .iter()
+            .map(|id| format!("`{id}`"))
+            .collect();
+        problems.push(format!(
+            "nodes {} each set a `schedule` — a workflow may carry at most one scheduled trigger, or it would run twice on the same minute.",
+            names.join(", ")
+        ));
     }
 
     // Edges: endpoints must reference existing nodes; no self-loops. An
@@ -1537,6 +1563,99 @@ mod tests {
         let out_of_range = src.replace("every hour", "0 99 * * *");
         let err = parse_workflow(&out_of_range).unwrap_err();
         assert!(err.to_string().contains("not a valid cron"), "{err}");
+    }
+
+    /// Two scheduled triggers would double-run the workflow, and honoring only
+    /// the first would silently drop a schedule the operator saved — so the
+    /// graph is rejected, naming both offenders.
+    #[test]
+    fn two_scheduled_triggers_are_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "nightly"
+            kind = "trigger"
+            name = "Nightly"
+            schedule = "0 2 * * *"
+            [[node]]
+            id = "hourly"
+            kind = "trigger"
+            name = "Hourly"
+            schedule = "0 * * * *"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("at most one scheduled trigger"),
+            "{message}"
+        );
+        assert!(message.contains("`nightly`"), "{message}");
+        assert!(message.contains("`hourly`"), "{message}");
+    }
+
+    /// The at-most-one rule counts *schedules*, not triggers: a graph may still
+    /// have several triggers, and one of them may be scheduled.
+    #[test]
+    fn multiple_triggers_are_still_allowed_when_at_most_one_is_scheduled() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "manual"
+            kind = "trigger"
+            name = "Manual"
+            [[node]]
+            id = "webhook"
+            kind = "trigger"
+            name = "Webhook"
+            [[node]]
+            id = "nightly"
+            kind = "trigger"
+            name = "Nightly"
+            schedule = "0 2 * * *"
+        "#;
+        let file = parse_workflow(src).expect("several triggers stay legal");
+        assert_eq!(file.nodes.len(), 3);
+        let scheduled: Vec<&str> = file
+            .nodes
+            .iter()
+            .filter(|n| n.schedule.is_some())
+            .map(|n| n.id.as_str())
+            .collect();
+        assert_eq!(scheduled, vec!["nightly"]);
+
+        // And with no schedules at all, unchanged from before this rule.
+        let bare = src.replace("schedule = \"0 2 * * *\"", "");
+        assert!(parse_workflow(&bare).is_ok());
+    }
+
+    /// Two *malformed* schedules report the bad crons AND the at-most-one
+    /// problem together, matching the module's report-everything-at-once
+    /// contract.
+    #[test]
+    fn two_bad_schedules_report_every_problem_at_once() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "a"
+            kind = "trigger"
+            name = "A"
+            schedule = "nightly"
+            [[node]]
+            id = "b"
+            kind = "trigger"
+            name = "B"
+            schedule = "hourly"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("not a valid cron"), "{message}");
+        assert!(
+            message.contains("at most one scheduled trigger"),
+            "{message}"
+        );
     }
 
     /// `config.schedule` would be silently ignored (the first-class field wins),

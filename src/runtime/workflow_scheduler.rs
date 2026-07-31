@@ -367,9 +367,10 @@ fn lock_in_flight(
 
 /// The cron a graph's trigger schedules itself on, if any.
 ///
-/// Validation allows `schedule` only on a `trigger` node, and a graph has at
-/// least one trigger; the first scheduled trigger wins so a multi-trigger graph
-/// still resolves to one schedule.
+/// Validation allows `schedule` only on a `trigger` node and permits at most one
+/// scheduled trigger per graph, so the node this finds is the only one there is
+/// — a graph with two schedules is rejected at parse rather than silently
+/// resolving to whichever came first.
 fn trigger_schedule(file: &WorkflowFile) -> Option<String> {
     file.nodes
         .iter()
