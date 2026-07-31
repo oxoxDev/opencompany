@@ -8,14 +8,31 @@
 //! [`chunks::shared_connection`]) holds that company's traces, task results, and
 //! context chunks. The engine "never makes a network call".
 //!
-//! ## Degraded (lexical/recency) recall — no embedding compute
+//! ## Two-tier recall — vector first, lexical fallback (188c2)
 //!
-//! This is issue #188 slice **188c1**: it lights up the persistent engine but
-//! ships in degraded mode. The engine's `MemoryConfig` is built directly with
-//! `embedding.strict = false`, so an inert embedder is tolerated and recall
-//! degrades to lexical/recency instead of semantic — with **zero** embedding
-//! compute injected. Injecting a real embedding provider (and thereby the
-//! summary-tree + hybrid-retrieval path) is slice 188c2.
+//! Issue #188 slice **188c1** lit up the persistent engine in degraded
+//! lexical/recency mode with **zero** embedding compute. Slice **188c2** adds
+//! the meaning tier: when a [`HostedEmbeddings`](crate::harness::embeddings)
+//! backend is injected (a data-dir build with a hosted credential), each stored
+//! chunk is embedded into a per-company
+//! [`VectorStore`](tinycortex::memory::store::vectors::VectorStore) (a SQLite
+//! `vectors.db` beside the KV database), and [`search_chunks`](EngineCortex) runs
+//! cosine recall **first**, then tops the result up with the existing lexical
+//! [`score_chunks`] scorer (excluding duplicate addresses) up to the caller's
+//! limit. When no backend is injected — or on any embedding/search outage — the
+//! engine falls back to the **pure lexical** path unchanged, so recall degrades
+//! gracefully and the store never fails on an embeddings outage. The KV tier
+//! stays the 1:1 addr↔body source of truth: vector hits are mapped back through
+//! it for their snippet and dangling ids are pruned.
+//!
+//! This slice deliberately wires **only** the `VectorStore` store+search path
+//! (dimension-agnostic, native 1024-dim). The retrieval-scorer `Embedder` /
+//! summary-tree seal (the hard-768 path) and a full-corpus reconcile are
+//! deferred to #198.
+//!
+//! The engine's `MemoryConfig` still sets `embedding.strict = false` — the
+//! crate's own summary-tree embedder stays inert; the meaning tier here is a
+//! separate, explicitly-injected `VectorStore` over the same workspace.
 //!
 //! ## Why chunks persist through the KV tier, not `ingest`/retrieval primitives
 //!
@@ -43,7 +60,7 @@
 //! backend already defines. Semantic recall over the summary tree arrives with
 //! embeddings in 188c2.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -53,6 +70,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tinycortex::memory::chunks::shared_connection;
 use tinycortex::memory::config::MemoryConfig;
 use tinycortex::memory::store::KvStore;
+use tinycortex::memory::store::vectors::embedding::EmbeddingBackend;
+use tinycortex::memory::store::vectors::{SearchResult, VectorStore};
 
 use crate::Result;
 use crate::error::OpenCompanyError;
@@ -75,6 +94,19 @@ const KEY_TASK_PREFIX: &str = "oc:task:";
 /// Key prefix for one context chunk per content address.
 const KEY_CHUNK_PREFIX: &str = "oc:chunk:";
 
+/// Max chunks embedded in a single boot's best-effort backfill, so a cold open
+/// of a large pre-embeddings corpus stays bounded (the rest is covered by live
+/// writes; a full reconcile is deferred to #198).
+const BACKFILL_LIMIT: usize = 256;
+/// Backfill sub-batch size, aligned with the hosted client's per-request cap.
+const BACKFILL_BATCH: usize = 64;
+
+/// The text embedded for a chunk: its label and body, so a semantic query can
+/// match either the topic label or the content.
+fn embed_text(label: &str, body: &str) -> String {
+    format!("{label}\n{body}")
+}
+
 /// A persisted context chunk: its label, body, and first-stored wall-clock.
 #[derive(Clone, Serialize, Deserialize)]
 struct StoredChunk {
@@ -87,20 +119,28 @@ struct StoredChunk {
 // Per-company engine handle
 // ---------------------------------------------------------------------------
 
-/// One company's opened engine: the KV tier over its per-workspace SQLite DB.
+/// One company's opened engine: the KV tier over its per-workspace SQLite DB,
+/// plus an optional [`VectorStore`] meaning tier when an embeddings backend is
+/// injected (188c2).
 struct CompanyEngine {
     kv: KvStore,
+    /// The per-company vector index (`<workspace>/vectors.db`), present only
+    /// when an [`EmbeddingBackend`] was injected. `None` ⇒ pure lexical recall.
+    vectors: Option<VectorStore>,
 }
 
 impl CompanyEngine {
     /// Opens (creating on first use) the engine for a company workspace.
     ///
-    /// Builds the crate's `MemoryConfig` directly (`strict = false` for degraded
-    /// recall), then rides a [`KvStore`] on the engine's shared per-workspace
-    /// SQLite connection — the exact handle-sharing the crate documents for
-    /// embedding hosts. The workspace directory is created if absent; nothing
-    /// here touches the network.
-    fn open(workspace: PathBuf) -> Result<Self> {
+    /// Builds the crate's `MemoryConfig` directly (`strict = false` — the crate's
+    /// own summary-tree embedder stays inert), then rides a [`KvStore`] on the
+    /// engine's shared per-workspace SQLite connection. When `embeddings` is
+    /// `Some`, a [`VectorStore`] is also opened at `<workspace>/vectors.db` for
+    /// the meaning tier; a dimension/signature drift against a pre-existing
+    /// index is recovered by clearing and rebuilding it (the backfill then
+    /// re-populates), and a hard failure degrades to lexical-only rather than
+    /// failing the open. The workspace directory is created if absent.
+    fn open(workspace: PathBuf, embeddings: Option<Arc<dyn EmbeddingBackend>>) -> Result<Self> {
         std::fs::create_dir_all(&workspace).map_err(|e| {
             OpenCompanyError::Store(format!(
                 "create engine workspace {}: {e}",
@@ -108,8 +148,9 @@ impl CompanyEngine {
             ))
         })?;
 
-        let mut config = MemoryConfig::new(workspace);
-        // Degraded-embedding mode: tolerate an inert embedder, no compute.
+        let mut config = MemoryConfig::new(workspace.clone());
+        // The crate's own summary-tree embedder stays inert; the 188c2 meaning
+        // tier is the separately-injected `VectorStore` below.
         config.embedding.strict = false;
         config
             .validate()
@@ -120,7 +161,65 @@ impl CompanyEngine {
         let kv = KvStore::from_shared_connection(conn)
             .map_err(|e| OpenCompanyError::Store(format!("open engine kv store: {e}")))?;
 
-        Ok(Self { kv })
+        let vectors = embeddings.and_then(|backend| open_vector_store(&workspace, backend));
+
+        Ok(Self { kv, vectors })
+    }
+
+    /// Best-effort, bounded one-time backfill of the meaning tier: when the
+    /// vector index for this company is **empty** but KV chunks exist (a pod that
+    /// ran 188c1 lexical-only, or a just-cleared index after a drift), embed up
+    /// to [`BACKFILL_LIMIT`] chunks so semantic recall covers the existing
+    /// corpus. Runs once per process after a fresh open. An embedding-outage
+    /// error leaves the affected chunks lexically findable — the engine never
+    /// fails on the backend. A partially-populated index is left to live writes;
+    /// a full-corpus sweep is deferred to #198.
+    async fn backfill_vectors(&self, company: &str) {
+        let Some(vectors) = &self.vectors else {
+            return;
+        };
+        // Trigger only on an empty index (no per-id existence probe in this cut).
+        match vectors.count(Some(company)) {
+            Ok(0) => {}
+            Ok(_) => return,
+            Err(e) => {
+                tracing::warn!(company, error = %e, "[tinycortex] vector count failed; skipping backfill");
+                return;
+            }
+        }
+        let chunks = match self.all_chunks() {
+            Ok(chunks) => chunks,
+            Err(e) => {
+                tracing::warn!(company, error = %e, "[tinycortex] listing chunks for backfill failed");
+                return;
+            }
+        };
+        if chunks.is_empty() {
+            return;
+        }
+        let pending: Vec<(String, String)> = chunks
+            .into_iter()
+            .take(BACKFILL_LIMIT)
+            .map(|(addr, chunk)| (addr, embed_text(&chunk.label, &chunk.body)))
+            .collect();
+        let mut embedded = 0usize;
+        for batch in pending.chunks(BACKFILL_BATCH) {
+            let entries: Vec<(&str, &str, serde_json::Value)> = batch
+                .iter()
+                .map(|(id, text)| (id.as_str(), text.as_str(), serde_json::json!({})))
+                .collect();
+            match vectors.insert_batch(company, &entries).await {
+                Ok(()) => embedded += entries.len(),
+                Err(e) => tracing::warn!(
+                    company,
+                    error = %e,
+                    "[tinycortex] backfill batch embed failed; chunks remain lexically findable"
+                ),
+            }
+        }
+        if embedded > 0 {
+            tracing::debug!(company, embedded, "[tinycortex] backfilled chunk vectors");
+        }
     }
 
     /// Reads and JSON-decodes the value at `key`, `None` when absent.
@@ -185,17 +284,34 @@ impl CompanyEngine {
 pub struct EngineCortex {
     memory_root: PathBuf,
     companies: StdMutex<HashMap<String, Arc<CompanyEngine>>>,
+    /// The embeddings backend injected into every company's [`VectorStore`], or
+    /// `None` for pure lexical recall (no-data-dir / no-credential / default
+    /// build). Shared across all per-company vector indices.
+    embeddings: Option<Arc<dyn EmbeddingBackend>>,
 }
 
 impl EngineCortex {
-    /// Builds an engine rooted at `memory_root` (typically `<data_dir>/memory`).
+    /// Builds a **lexical-only** engine rooted at `memory_root` (typically
+    /// `<data_dir>/memory`). Equivalent to [`with_embeddings`](Self::with_embeddings)
+    /// with `None`.
     ///
     /// Opening is lazy: the first call touching a company creates + migrates that
     /// company's workspace database.
     pub fn new(memory_root: impl Into<PathBuf>) -> Self {
+        Self::with_embeddings(memory_root, None)
+    }
+
+    /// Builds an engine rooted at `memory_root`, injecting `embeddings` as the
+    /// meaning tier for every company's [`VectorStore`] (188c2). `None` keeps the
+    /// pure lexical path.
+    pub fn with_embeddings(
+        memory_root: impl Into<PathBuf>,
+        embeddings: Option<Arc<dyn EmbeddingBackend>>,
+    ) -> Self {
         Self {
             memory_root: memory_root.into(),
             companies: StdMutex::new(HashMap::new()),
+            embeddings,
         }
     }
 
@@ -219,42 +335,89 @@ impl EngineCortex {
     }
 
     /// Returns the (lazily opened, cached) engine handle for `company`.
-    fn engine(&self, company: &str) -> Result<Arc<CompanyEngine>> {
-        let mut map = self.companies.lock().expect("engine cortex mutex poisoned");
-        if let Some(existing) = map.get(company) {
-            return Ok(existing.clone());
+    ///
+    /// The first touch opens + migrates the workspace under the cache lock (as
+    /// before), then — **outside** the lock, since embedding is async + does
+    /// I/O — runs a one-time best-effort vector backfill. Concurrent first
+    /// touches see the cached handle and skip the backfill, so it runs exactly
+    /// once per company per process.
+    async fn engine(&self, company: &str) -> Result<Arc<CompanyEngine>> {
+        let (engine, fresh) = {
+            let mut map = self.companies.lock().expect("engine cortex mutex poisoned");
+            if let Some(existing) = map.get(company) {
+                return Ok(existing.clone());
+            }
+            let workspace = self.memory_root.join(Self::workspace_name(company));
+            let engine = Arc::new(CompanyEngine::open(workspace, self.embeddings.clone())?);
+            map.insert(company.to_string(), engine.clone());
+            (engine, true)
+        };
+        if fresh {
+            engine.backfill_vectors(company).await;
         }
-        let workspace = self.memory_root.join(Self::workspace_name(company));
-        let engine = Arc::new(CompanyEngine::open(workspace)?);
-        map.insert(company.to_string(), engine.clone());
         Ok(engine)
+    }
+}
+
+/// Opens (or rebuilds) the per-company [`VectorStore`] at `<workspace>/vectors.db`,
+/// or `None` to degrade to lexical-only.
+///
+/// On a dimension/signature drift against an existing index, [`VectorStore::open`]
+/// fails closed; we clear the index files and rebuild once (the backfill then
+/// re-populates against the current backend), so a model change never wedges the
+/// engine. A second failure returns `None` — the engine keeps serving lexical
+/// recall rather than failing its whole open.
+fn open_vector_store(
+    workspace: &std::path::Path,
+    backend: Arc<dyn EmbeddingBackend>,
+) -> Option<VectorStore> {
+    let db = workspace.join("vectors.db");
+    match VectorStore::open(&db, backend.clone()) {
+        Ok(store) => Some(store),
+        Err(first) => {
+            tracing::warn!(
+                db = %db.display(),
+                error = %first,
+                "[tinycortex] vector store open failed (likely embedding-space drift); clearing + rebuilding"
+            );
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(workspace.join(format!("vectors.db{suffix}")));
+            }
+            match VectorStore::open(&db, backend) {
+                Ok(store) => Some(store),
+                Err(second) => {
+                    tracing::warn!(error = %second, "[tinycortex] vector store rebuild failed; lexical-only");
+                    None
+                }
+            }
+        }
     }
 }
 
 #[async_trait]
 impl CortexClient for EngineCortex {
     async fn append_trace(&self, company: &str, trace: CompressedTrace) -> Result<()> {
-        let engine = self.engine(company)?;
+        let engine = self.engine(company).await?;
         let mut traces: Vec<CompressedTrace> = engine.get_json(KEY_TRACES)?.unwrap_or_default();
         traces.push(trace);
         engine.put_json(KEY_TRACES, &traces)
     }
 
     async fn recent_traces(&self, company: &str, limit: usize) -> Result<Vec<CompressedTrace>> {
-        let engine = self.engine(company)?;
+        let engine = self.engine(company).await?;
         let traces: Vec<CompressedTrace> = engine.get_json(KEY_TRACES)?.unwrap_or_default();
         let start = traces.len().saturating_sub(limit);
         Ok(traces[start..].to_vec())
     }
 
     async fn put_task_result(&self, company: &str, result: TaskResult) -> Result<()> {
-        let engine = self.engine(company)?;
+        let engine = self.engine(company).await?;
         let key = format!("{KEY_TASK_PREFIX}{}", result.task_id);
         engine.put_json(&key, &result)
     }
 
     async fn archive_traces(&self, company: &str, policy: EvictionPolicy) -> Result<u64> {
-        let engine = self.engine(company)?;
+        let engine = self.engine(company).await?;
         let mut traces: Vec<CompressedTrace> = engine.get_json(KEY_TRACES)?.unwrap_or_default();
         let mut archive: Vec<CompressedTrace> = engine.get_json(KEY_ARCHIVE)?.unwrap_or_default();
 
@@ -287,7 +450,7 @@ impl CortexClient for EngineCortex {
     }
 
     async fn put_chunk(&self, company: &str, addr: &str, chunk: ContextChunk) -> Result<()> {
-        let engine = self.engine(company)?;
+        let engine = self.engine(company).await?;
         let key = format!("{KEY_CHUNK_PREFIX}{addr}");
         // Content-addressed: an identical body is stored once.
         if engine
@@ -298,6 +461,8 @@ impl CortexClient for EngineCortex {
         {
             return Ok(());
         }
+        // The text used for the meaning tier, captured before the fields move.
+        let text = embed_text(&chunk.label, &chunk.body);
         engine.put_json(
             &key,
             &StoredChunk {
@@ -305,11 +470,22 @@ impl CortexClient for EngineCortex {
                 body: chunk.body,
                 stored_at_millis: now_millis(),
             },
-        )
+        )?;
+        // Meaning tier: embed the newly-stored chunk. An embeddings outage must
+        // NOT fail the store — the KV write above already landed, so the chunk
+        // stays lexically findable and the next backfill can pick it up.
+        if let Some(vectors) = &engine.vectors
+            && let Err(e) = vectors
+                .insert(addr, company, &text, serde_json::json!({}))
+                .await
+        {
+            tracing::warn!(company, addr, error = %e, "[tinycortex] embedding chunk failed; stored lexically only");
+        }
+        Ok(())
     }
 
     async fn list_chunks(&self, company: &str, prefix: &str) -> Result<Vec<ChunkMeta>> {
-        let engine = self.engine(company)?;
+        let engine = self.engine(company).await?;
         Ok(engine
             .all_chunks()?
             .into_iter()
@@ -324,7 +500,7 @@ impl CortexClient for EngineCortex {
     }
 
     async fn peek_chunk(&self, company: &str, addr: &str) -> Result<Option<String>> {
-        let engine = self.engine(company)?;
+        let engine = self.engine(company).await?;
         let key = format!("{KEY_CHUNK_PREFIX}{addr}");
         Ok(engine.get_json::<StoredChunk>(&key)?.map(|c| c.body))
     }
@@ -335,15 +511,29 @@ impl CortexClient for EngineCortex {
         query: &str,
         limit: usize,
     ) -> Result<Vec<ChunkHit>> {
-        let engine = self.engine(company)?;
+        let engine = self.engine(company).await?;
         let chunks = engine.all_chunks()?;
+        // Meaning tier first: cosine recall, mapped back through the KV chunks
+        // for the snippet + dangling-id prune, then topped up with the lexical
+        // scorer. On no backend, or any embed/search outage, fall through to the
+        // pure lexical path unchanged.
+        if let Some(vectors) = &engine.vectors {
+            match vectors.search(company, query, limit).await {
+                Ok(results) => return Ok(merge_hits(results, &chunks, query, limit)),
+                Err(e) => tracing::warn!(
+                    company,
+                    error = %e,
+                    "[tinycortex] vector search failed; falling back to lexical"
+                ),
+            }
+        }
         let mut hits = score_chunks(&chunks, query);
         hits.truncate(limit);
         Ok(hits)
     }
 
     async fn hard_delete_trace(&self, company: &str, cycle_id: &str) -> Result<bool> {
-        let engine = self.engine(company)?;
+        let engine = self.engine(company).await?;
         let mut traces: Vec<CompressedTrace> = engine.get_json(KEY_TRACES)?.unwrap_or_default();
         let mut archive: Vec<CompressedTrace> = engine.get_json(KEY_ARCHIVE)?.unwrap_or_default();
         let before = traces.len() + archive.len();
@@ -358,19 +548,28 @@ impl CortexClient for EngineCortex {
     }
 
     async fn hard_delete_chunk(&self, company: &str, addr: &str) -> Result<bool> {
-        let engine = self.engine(company)?;
+        let engine = self.engine(company).await?;
         let key = format!("{KEY_CHUNK_PREFIX}{addr}");
-        engine
+        let deleted = engine
             .kv
             .delete_global(&key)
-            .map_err(|e| OpenCompanyError::Store(format!("kv delete {key}: {e}")))
+            .map_err(|e| OpenCompanyError::Store(format!("kv delete {key}: {e}")))?;
+        // Drop the vector row too, so a hard-deleted chunk can never resurface
+        // through semantic recall. Best-effort — a vector-delete hiccup must not
+        // fail the KV delete that already succeeded.
+        if let Some(vectors) = &engine.vectors
+            && let Err(e) = vectors.delete(company, addr)
+        {
+            tracing::warn!(company, addr, error = %e, "[tinycortex] deleting vector row failed");
+        }
+        Ok(deleted)
     }
 
     async fn redact(&self, company: &str, needle: &str, replacement: &str) -> Result<u64> {
         if needle.is_empty() {
             return Ok(0);
         }
-        let engine = self.engine(company)?;
+        let engine = self.engine(company).await?;
         let mut replaced = 0u64;
 
         let mut traces: Vec<CompressedTrace> = engine.get_json(KEY_TRACES)?.unwrap_or_default();
@@ -407,11 +606,102 @@ impl CortexClient for EngineCortex {
 pub fn engine(
     memory_root: impl Into<PathBuf>,
 ) -> (Arc<CortexMemoryStore>, Arc<CortexContextStore>) {
-    let client: Arc<dyn CortexClient> = Arc::new(EngineCortex::new(memory_root));
+    engine_with_embeddings(memory_root, None)
+}
+
+/// Like [`engine`], but injects `embeddings` as the meaning tier (188c2). `None`
+/// is byte-identical to [`engine`] (pure lexical recall). This is the shape
+/// [`open_tinycortex`](crate::store::select) uses when it can resolve a hosted
+/// embeddings backend from the environment.
+pub fn engine_with_embeddings(
+    memory_root: impl Into<PathBuf>,
+    embeddings: Option<Arc<dyn EmbeddingBackend>>,
+) -> (Arc<CortexMemoryStore>, Arc<CortexContextStore>) {
+    let client: Arc<dyn CortexClient> =
+        Arc::new(EngineCortex::with_embeddings(memory_root, embeddings));
     (
         Arc::new(CortexMemoryStore::new(client.clone())),
         Arc::new(CortexContextStore::new(client)),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Two-tier hit merge (vector recall + lexical top-up)
+// ---------------------------------------------------------------------------
+
+/// Merges a vector-store result set with the lexical scorer into the final
+/// [`ChunkHit`] list, capped at `limit`.
+///
+/// Vector hits come first (already sorted by descending cosine). Each is mapped
+/// back through the KV `chunks` for its snippet, and a vector row whose KV chunk
+/// no longer exists (a dangling id) is pruned. The list is then topped up with
+/// lexical hits, skipping any address the vector half already carried, so an
+/// address never appears twice. Cosine scores are clamped to the `[0, 1]`
+/// [`ChunkHit::score`] contract.
+fn merge_hits(
+    results: Vec<SearchResult>,
+    chunks: &[(String, StoredChunk)],
+    query: &str,
+    limit: usize,
+) -> Vec<ChunkHit> {
+    let mut hits: Vec<ChunkHit> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for result in results {
+        if hits.len() >= limit {
+            break;
+        }
+        // Prune dangling ids: a vector row with no live KV chunk is skipped.
+        let Some((_, chunk)) = chunks.iter().find(|(addr, _)| addr == &result.id) else {
+            continue;
+        };
+        if !seen.insert(result.id.clone()) {
+            continue;
+        }
+        hits.push(ChunkHit {
+            addr: ChunkAddr::new(result.id.clone()),
+            snippet: semantic_snippet(&chunk.body, query),
+            score: result.score.clamp(0.0, 1.0),
+        });
+    }
+    if hits.len() < limit {
+        for hit in score_chunks(chunks, query) {
+            if hits.len() >= limit {
+                break;
+            }
+            if seen.contains(hit.addr.as_ref()) {
+                continue;
+            }
+            hits.push(hit);
+        }
+    }
+    hits
+}
+
+/// A snippet for a semantic hit: anchored on the first matching query term when
+/// one is lexically present, else a char-boundary-safe leading window (a
+/// semantic match need not share any surface token with the query).
+fn semantic_snippet(body: &str, query: &str) -> String {
+    let body_lower = body.to_lowercase();
+    let anchor = query
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .filter(|t| !t.is_empty())
+        .filter_map(|t| body_lower.find(&t).map(|p| (p, t.len())))
+        .min_by_key(|(p, _)| *p);
+    match anchor {
+        Some((p, len)) => snippet_around(body, p, len),
+        None => leading_snippet(body),
+    }
+}
+
+/// A char-boundary-safe leading window of `body` (~48 chars), for a semantic hit
+/// with no lexical anchor.
+fn leading_snippet(body: &str) -> String {
+    let raw_end = 48.min(body.len());
+    let end = (raw_end..=body.len())
+        .find(|&i| body.is_char_boundary(i))
+        .unwrap_or(body.len());
+    body[..end].to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -788,5 +1078,303 @@ mod test {
         assert!(body.contains("[redacted]"));
         let trace = mem.recent_traces(&id, 1).await.unwrap();
         assert!(!trace[0].summary.contains("bob-9"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Meaning tier (188c2): VectorStore-backed semantic recall
+    // -----------------------------------------------------------------------
+
+    use std::collections::HashMap as StdHashMap;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    /// A deterministic, offline embedding backend for engine tests. Crafted
+    /// texts map to explicit vectors (so a test can force a semantic match with
+    /// different surface wording); every other text hashes to a distinct unit
+    /// vector on an axis `≥ 1`, keeping it near-orthogonal to the crafted axis 0.
+    /// `failing` errors on every embed, modelling an embeddings outage.
+    #[derive(Clone)]
+    struct FakeEmbedding {
+        dim: usize,
+        table: StdHashMap<String, Vec<f32>>,
+        failing: bool,
+    }
+
+    impl FakeEmbedding {
+        fn new(dim: usize) -> Self {
+            Self {
+                dim,
+                table: StdHashMap::new(),
+                failing: false,
+            }
+        }
+
+        fn failing(dim: usize) -> Self {
+            Self {
+                dim,
+                table: StdHashMap::new(),
+                failing: true,
+            }
+        }
+
+        /// Registers a crafted `text → vector` mapping.
+        fn with(mut self, text: &str, vector: Vec<f32>) -> Self {
+            self.table.insert(text.to_string(), vector);
+            self
+        }
+
+        fn vector_for(&self, text: &str) -> Vec<f32> {
+            if let Some(vector) = self.table.get(text) {
+                return vector.clone();
+            }
+            let mut v = vec![0.0_f32; self.dim];
+            let mut hasher = DefaultHasher::new();
+            text.hash(&mut hasher);
+            // Reserve axis 0 for crafted matches; unknowns land on axes ≥ 1.
+            let idx = 1 + (hasher.finish() as usize % (self.dim - 1));
+            v[idx] = 1.0;
+            v
+        }
+    }
+
+    #[async_trait]
+    impl EmbeddingBackend for FakeEmbedding {
+        fn name(&self) -> &str {
+            "fake"
+        }
+        fn model_id(&self) -> &str {
+            "fake"
+        }
+        fn dimensions(&self) -> usize {
+            self.dim
+        }
+        async fn embed(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            if self.failing {
+                anyhow::bail!("fake embedding outage");
+            }
+            Ok(texts.iter().map(|t| self.vector_for(t)).collect())
+        }
+    }
+
+    /// A crafted unit vector: `1.0` on `axis`, `0.0` elsewhere.
+    fn unit(axis: usize, dim: usize) -> Vec<f32> {
+        let mut v = vec![0.0_f32; dim];
+        v[axis] = 1.0;
+        v
+    }
+
+    /// A stored chunk gets a real vector row, and a semantic query with *no*
+    /// shared surface tokens still ranks the matching chunk first — proof the
+    /// meaning tier (not lexical overlap) drove the result.
+    #[tokio::test]
+    async fn semantic_hit_outranks_lexical_nonmatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(
+            FakeEmbedding::new(8)
+                .with(
+                    "notes/finance\nquarterly earnings climbed sharply",
+                    unit(0, 8),
+                )
+                .with("revenue growth", unit(0, 8))
+                .with("notes/weather\ntoday will be sunny and warm", unit(1, 8)),
+        );
+        let (_mem, ctx) = engine_with_embeddings(dir.path().join("memory"), Some(backend));
+        let id = company();
+
+        let finance = ctx
+            .put(
+                &id,
+                ContextChunk {
+                    label: "notes/finance".into(),
+                    body: "quarterly earnings climbed sharply".into(),
+                },
+            )
+            .await
+            .unwrap();
+        ctx.put(
+            &id,
+            ContextChunk {
+                label: "notes/weather".into(),
+                body: "today will be sunny and warm".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // "revenue growth" shares no surface token with the finance body, so a
+        // lexical scorer alone could never rank it first.
+        let hits = ctx.search(&id, "revenue growth", 5).await.unwrap();
+        assert!(!hits.is_empty(), "semantic recall found nothing");
+        assert_eq!(hits[0].addr, finance, "semantic match must rank first");
+    }
+
+    /// With no embeddings backend the engine is byte-identical to the 188c1
+    /// lexical path — a guard that `vectors = None` never changes degraded recall.
+    #[tokio::test]
+    async fn no_backend_stays_lexical() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_mem, ctx) = engine_with_embeddings(dir.path().join("memory"), None);
+        let id = company();
+        for (label, body) in [
+            ("doc/a", "quarterly revenue growth strategy"),
+            ("doc/b", "unrelated weather note"),
+        ] {
+            ctx.put(
+                &id,
+                ContextChunk {
+                    label: label.into(),
+                    body: body.into(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let hits = ctx.search(&id, "revenue growth", 5).await.unwrap();
+        assert_eq!(hits.len(), 1, "only the lexical overlap matches");
+        assert!(hits[0].snippet.contains("revenue"));
+    }
+
+    /// An embeddings outage mid-store must not fail the write, and the chunk
+    /// stays lexically findable (vector search also degrades to lexical).
+    #[tokio::test]
+    async fn embed_failure_keeps_chunk_lexically_findable() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeEmbedding::failing(8));
+        let (_mem, ctx) = engine_with_embeddings(dir.path().join("memory"), Some(backend));
+        let id = company();
+
+        // Store succeeds even though the embed call errors.
+        ctx.put(
+            &id,
+            ContextChunk {
+                label: "doc/a".into(),
+                body: "revenue growth strategy".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Query embed fails too → lexical fallback still finds it.
+        let hits = ctx.search(&id, "revenue growth", 5).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].snippet.contains("revenue"));
+    }
+
+    /// A hard-deleted chunk drops both its KV row and its vector row, so it can
+    /// never resurface through semantic recall.
+    #[tokio::test]
+    async fn hard_delete_removes_vector_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(
+            FakeEmbedding::new(8)
+                .with("doc/secret\ntop secret alpha initiative", unit(0, 8))
+                .with("alpha initiative", unit(0, 8)),
+        );
+        let (_mem, ctx) = engine_with_embeddings(dir.path().join("memory"), Some(backend));
+        let id = company();
+
+        let addr = ctx
+            .put(
+                &id,
+                ContextChunk {
+                    label: "doc/secret".into(),
+                    body: "top secret alpha initiative".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            ctx.search(&id, "alpha initiative", 5)
+                .await
+                .unwrap()
+                .iter()
+                .any(|h| h.addr == addr),
+            "chunk must be semantically recallable before deletion"
+        );
+
+        assert!(ctx.hard_delete_chunk(&id, &addr).await.unwrap());
+
+        let after = ctx.search(&id, "alpha initiative", 5).await.unwrap();
+        assert!(
+            after.is_empty(),
+            "deleted chunk must not resurface: {after:?}"
+        );
+    }
+
+    /// A chunk written in lexical-only mode (188c1) is embedded on the next open
+    /// with a backend present — the migration backfill — so semantic recall with
+    /// different wording then finds it.
+    #[tokio::test]
+    async fn backfill_embeds_preexisting_chunks_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("memory");
+        let id = company();
+
+        // 188c1-style: lexical-only engine writes a chunk, no vectors.
+        {
+            let (_mem, ctx) = engine_with_embeddings(root.clone(), None);
+            ctx.put(
+                &id,
+                ContextChunk {
+                    label: "doc/a".into(),
+                    body: "quarterly earnings climbed".into(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        // Reopen WITH a backend → first touch backfills the pre-existing chunk.
+        let backend = Arc::new(
+            FakeEmbedding::new(8)
+                .with("doc/a\nquarterly earnings climbed", unit(0, 8))
+                .with("revenue", unit(0, 8)),
+        );
+        let (_mem, ctx) = engine_with_embeddings(root, Some(backend));
+
+        // "revenue" is absent from the body, so only the backfilled vector can
+        // surface it.
+        let hits = ctx.search(&id, "revenue", 5).await.unwrap();
+        assert_eq!(hits.len(), 1, "backfill must make the old chunk semantic");
+    }
+
+    /// The two-tier merge never exceeds the limit and never repeats an address,
+    /// even when a chunk matches both the vector and lexical halves.
+    #[tokio::test]
+    async fn merge_respects_limit_without_duplicate_addrs() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(
+            FakeEmbedding::new(8)
+                .with("doc/a\nrevenue growth strategy", unit(0, 8))
+                .with("doc/b\nrevenue only", unit(1, 8))
+                .with("revenue growth", unit(0, 8)),
+        );
+        let (_mem, ctx) = engine_with_embeddings(dir.path().join("memory"), Some(backend));
+        let id = company();
+        ctx.put(
+            &id,
+            ContextChunk {
+                label: "doc/a".into(),
+                body: "revenue growth strategy".into(),
+            },
+        )
+        .await
+        .unwrap();
+        ctx.put(
+            &id,
+            ContextChunk {
+                label: "doc/b".into(),
+                body: "revenue only".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let hits = ctx.search(&id, "revenue growth", 5).await.unwrap();
+        let addrs: HashSet<ChunkAddr> = hits.iter().map(|h| h.addr.clone()).collect();
+        assert_eq!(addrs.len(), hits.len(), "no address may appear twice");
+
+        let one = ctx.search(&id, "revenue growth", 1).await.unwrap();
+        assert_eq!(one.len(), 1, "the limit is respected across the merge");
     }
 }
