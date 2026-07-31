@@ -7,6 +7,9 @@
 //! - [`CycleRunner`] runs the serial drain → load → think → gate → persist loop.
 //! - [`CompanyRegistry`] maps ids to running runtimes for both the single- and
 //!   multi-company cases.
+//! - [`CompanyScheduler`] drives the manifest's `[[schedule]]` crons;
+//!   [`WorkflowScheduler`] drives the crons authored on saved workflow graphs'
+//!   trigger nodes (issue #169). Both share the [`cron`] matcher and [`Clock`].
 //! - The [`journal`] backs at-most-once effects and the durable approval queue.
 
 pub mod builder;
@@ -34,6 +37,7 @@ pub mod registry;
 pub mod scheduler;
 pub mod tools;
 pub mod types;
+pub mod workflow_scheduler;
 
 pub use builder::{RuntimeBuilder, company_id_from_name};
 pub use channel::{OPERATOR_CHANNEL, OperatorChannel};
@@ -43,6 +47,7 @@ pub use registry::CompanyRegistry;
 pub use scheduler::{Clock, CompanyScheduler, FakeClock, SystemClock};
 pub use tools::StubToolProvider;
 pub use types::{ApprovalSummary, CompanyStatus, CycleReport};
+pub use workflow_scheduler::WorkflowScheduler;
 
 // The assembly struct lives under `company/` to match the `ports.md` sketch
 // (`src/company/runtime.rs`); re-export it here as the kernel's public surface.

@@ -30,7 +30,7 @@ use crate::ports::types::CompanyEvent;
 use crate::runtime::cron::{CivilTime, CronExpr};
 
 /// Milliseconds in one minute.
-const MINUTE_MS: u64 = 60_000;
+pub(crate) const MINUTE_MS: u64 = 60_000;
 
 /// A source of the current wall-clock time, in unix epoch milliseconds.
 ///
@@ -196,7 +196,10 @@ impl CompanyScheduler {
 
 /// Milliseconds from `now` to the next whole-minute boundary (always `>= 1` so
 /// the spawn loop never busy-spins on an exact boundary).
-fn millis_to_next_minute(now: u64) -> u64 {
+///
+/// Shared with [`WorkflowScheduler`](super::workflow_scheduler::WorkflowScheduler)
+/// so both minute-boundary loops wake on the same tick.
+pub(crate) fn millis_to_next_minute(now: u64) -> u64 {
     let into_minute = now % MINUTE_MS;
     MINUTE_MS - into_minute
 }
