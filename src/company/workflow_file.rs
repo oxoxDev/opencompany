@@ -374,6 +374,98 @@ pub fn list_source_workflows(source_dir: Option<&Path>) -> Vec<WorkflowFile> {
     files
 }
 
+/// Loads one workflow graph by id from the **union** of a company's two graph
+/// sources: the version-controlled seed file (`source_dir/workflows/<id>.toml`)
+/// and the record's runtime-authored [`OverlayWorkflow`] bodies.
+///
+/// This is the single read path for "give me graph `<id>`" — the REST
+/// `GET …/workflows/{wid}` and run routes, the GraphQL resolver, the
+/// orchestrator's `run_workflow` tool, and the `sub_workflow` resolver all go
+/// through it, so they can never disagree about which graphs exist.
+///
+/// **The seed file wins on an id collision.** An overlay body with the same id
+/// as a committed file is shadowed, not destroyed — it stays on the record and
+/// resurfaces if the file goes away. This matches the manifest-first convention
+/// [`CompanyRecord::effective_desk_members`](crate::ports::types::CompanyRecord::effective_desk_members)
+/// already uses: the version-controlled definition is authoritative.
+///
+/// `Ok(None)` means neither source has that id — the caller's clean 404. An
+/// `Err` means the body that *was* found is malformed (the same error a
+/// hand-authored file would give).
+pub fn load_workflow_union(
+    source_dir: Option<&Path>,
+    overlays: &[crate::ports::types::OverlayWorkflow],
+    id: &str,
+) -> Result<Option<WorkflowFile>> {
+    if let Some(dir) = source_dir {
+        let path = dir.join("workflows").join(format!("{id}.toml"));
+        // Only load ids that exist on disk, so a missing file falls through to
+        // the overlay rather than becoming a `DataRead` error.
+        if path.is_file() {
+            let ids = [id.to_string()];
+            return load_company_workflows(dir, &ids).map(|mut files| files.pop());
+        }
+    }
+
+    let Some(overlay) = overlays.iter().find(|w| w.id == id) else {
+        return Ok(None);
+    };
+    // Re-label parse/validation errors with the id, matching how the on-disk
+    // loader re-labels them with the real path.
+    let labelled = PathBuf::from(format!("{id}.toml"));
+    match parse_workflow(&overlay.toml) {
+        Ok(workflow) => Ok(Some(workflow)),
+        Err(OpenCompanyError::DataInvalid { problems, .. }) => Err(OpenCompanyError::DataInvalid {
+            path: labelled,
+            problems,
+        }),
+        Err(OpenCompanyError::DataParse { message, .. }) => Err(OpenCompanyError::DataParse {
+            path: labelled,
+            message,
+        }),
+        Err(other) => Err(other),
+    }
+}
+
+/// Every workflow graph a company has, from the **union** of its seed
+/// `workflows/*.toml` files and its runtime-authored
+/// [`OverlayWorkflow`](crate::ports::types::OverlayWorkflow) bodies.
+///
+/// The seed scan comes first (in stable id order, via
+/// [`list_source_workflows`]), then overlay graphs the scan did not already
+/// yield, in stable id order — so a seed file **wins** over an overlay of the
+/// same id, the same precedence [`load_workflow_union`] applies. A malformed
+/// overlay body skips only itself (logged), the same tolerance the seed scan
+/// has, so one bad graph never hides the rest.
+pub fn list_workflows_union(
+    source_dir: Option<&Path>,
+    overlays: &[crate::ports::types::OverlayWorkflow],
+) -> Vec<WorkflowFile> {
+    let mut files = list_source_workflows(source_dir);
+    let mut seen: std::collections::HashSet<String> = files.iter().map(|f| f.id.clone()).collect();
+
+    let mut extra: Vec<&crate::ports::types::OverlayWorkflow> = overlays
+        .iter()
+        .filter(|overlay| !seen.contains(&overlay.id))
+        .collect();
+    extra.sort_by(|a, b| a.id.cmp(&b.id));
+
+    for overlay in extra {
+        // Two overlay entries with the same id can only happen on a corrupted
+        // record; keep the first and skip the rest rather than double-listing.
+        if !seen.insert(overlay.id.clone()) {
+            continue;
+        }
+        match parse_workflow(&overlay.toml) {
+            Ok(file) => files.push(file),
+            Err(err) => {
+                tracing::warn!(workflow = %overlay.id, error = %err, "skipping malformed saved workflow")
+            }
+        }
+    }
+    files
+}
+
 /// Collects every validation problem in prosumer language. Empty means valid.
 fn validate(raw: &RawWorkflow) -> Vec<String> {
     let mut problems = Vec::new();
@@ -1276,5 +1368,157 @@ mod tests {
         assert!(start.on_error.is_none());
         assert!(start.retry.is_none());
         assert!(start.requires_approval.is_none());
+    }
+
+    // --- seed ∪ overlay union (issue #168) ----------------------------------
+
+    use crate::ports::types::OverlayWorkflow;
+
+    /// A minimal valid graph body with the given id and display name.
+    fn body(id: &str, name: &str) -> String {
+        format!(
+            r#"
+id = "{id}"
+name = "{name}"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "done"
+"#
+        )
+    }
+
+    fn overlay(id: &str, name: &str) -> OverlayWorkflow {
+        OverlayWorkflow {
+            id: id.to_string(),
+            toml: body(id, name),
+        }
+    }
+
+    /// Writes a seed graph to `<dir>/workflows/<id>.toml`.
+    fn seed(dir: &Path, id: &str, name: &str) {
+        let workflows = dir.join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(workflows.join(format!("{id}.toml")), body(id, name)).unwrap();
+    }
+
+    /// The hosted shape: no source directory at all, so the overlay is the only
+    /// source. This is the read half of the #168 fix.
+    #[test]
+    fn load_union_falls_back_to_the_overlay_with_no_source_dir() {
+        let overlays = vec![overlay("hosted", "Hosted flow")];
+        let file = load_workflow_union(None, &overlays, "hosted")
+            .expect("loads")
+            .expect("present");
+        assert_eq!(file.id, "hosted");
+        assert_eq!(file.name, "Hosted flow");
+        assert_eq!(file.nodes.len(), 2);
+    }
+
+    /// A source directory that simply has no file for the id also falls through.
+    #[test]
+    fn load_union_falls_back_when_the_seed_file_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        seed(dir.path(), "other", "Other");
+        let overlays = vec![overlay("mine", "Mine")];
+        let file = load_workflow_union(Some(dir.path()), &overlays, "mine")
+            .expect("loads")
+            .expect("present");
+        assert_eq!(file.name, "Mine");
+    }
+
+    /// Documented precedence: the committed seed file wins over an overlay body
+    /// with the same id. The overlay is shadowed, not destroyed.
+    #[test]
+    fn load_union_prefers_the_seed_file_on_an_id_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        seed(dir.path(), "dup", "From seed");
+        let overlays = vec![overlay("dup", "From overlay")];
+        let file = load_workflow_union(Some(dir.path()), &overlays, "dup")
+            .expect("loads")
+            .expect("present");
+        assert_eq!(file.name, "From seed");
+    }
+
+    /// An id neither source has is `Ok(None)` — the caller's clean 404, not an
+    /// error.
+    #[test]
+    fn load_union_of_an_unknown_id_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        seed(dir.path(), "known", "Known");
+        assert!(
+            load_workflow_union(Some(dir.path()), &[], "ghost")
+                .expect("no error")
+                .is_none()
+        );
+        assert!(
+            load_workflow_union(None, &[], "ghost")
+                .expect("no error")
+                .is_none()
+        );
+    }
+
+    /// A malformed overlay body surfaces as an error labelled with its id — the
+    /// same shape a malformed on-disk file gets.
+    #[test]
+    fn load_union_of_a_malformed_overlay_is_an_error() {
+        let overlays = vec![OverlayWorkflow {
+            id: "broken".to_string(),
+            toml: "id = \"broken\"\nname = \"Broken\"\n".to_string(),
+        }];
+        let err = load_workflow_union(None, &overlays, "broken").unwrap_err();
+        assert!(err.to_string().contains("trigger"), "{err}");
+        assert!(err.to_string().contains("broken.toml"), "{err}");
+    }
+
+    /// The list union dedupes by id with the seed winning, and keeps a stable
+    /// order (seed scan first, then overlays by id).
+    #[test]
+    fn list_union_dedupes_with_source_winning() {
+        let dir = tempfile::tempdir().unwrap();
+        seed(dir.path(), "dup", "From seed");
+        seed(dir.path(), "aaa", "Seed A");
+        let overlays = vec![
+            overlay("zzz", "Overlay Z"),
+            overlay("dup", "From overlay"),
+            overlay("mmm", "Overlay M"),
+        ];
+        let files = list_workflows_union(Some(dir.path()), &overlays);
+        let ids: Vec<&str> = files.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids, vec!["aaa", "dup", "mmm", "zzz"]);
+        let dup = files.iter().find(|f| f.id == "dup").unwrap();
+        assert_eq!(dup.name, "From seed", "the seed file must win");
+    }
+
+    /// With no source directory, the list is exactly the overlay set.
+    #[test]
+    fn list_union_with_no_source_dir_is_the_overlay_set() {
+        let overlays = vec![overlay("b", "B"), overlay("a", "A")];
+        let files = list_workflows_union(None, &overlays);
+        let ids: Vec<&str> = files.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    /// One malformed overlay skips only itself — the same tolerance the seed
+    /// scan has, so a single bad graph never empties the picker.
+    #[test]
+    fn list_union_skips_a_malformed_overlay() {
+        let overlays = vec![
+            overlay("good", "Good"),
+            OverlayWorkflow {
+                id: "bad".to_string(),
+                toml: "id = \"bad\"\nname =".to_string(),
+            },
+        ];
+        let files = list_workflows_union(None, &overlays);
+        let ids: Vec<&str> = files.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids, vec!["good"]);
     }
 }
