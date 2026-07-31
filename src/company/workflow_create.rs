@@ -1,54 +1,64 @@
 //! Feature-free core for authoring a new workflow graph (issue #112).
 //!
 //! [`create_company_workflow`] is the single validated-persist sequence for
-//! creating a `workflows/<id>.toml`, lifted out of the REST handler so **both**
-//! the console's `POST …/workflows` route and the orchestrator's
-//! `create_workflow` tool run exactly the same checks and land the exact same
-//! artifact — no create-vs-run drift, one place to reason about safety.
+//! creating a workflow graph, shared by **both** the console's
+//! `POST …/workflows` route and the orchestrator's `create_workflow` tool so
+//! they run exactly the same checks and land the exact same artifact — no
+//! create-vs-run drift, one place to reason about safety.
+//!
+//! The graph body is persisted **on the company record** as an
+//! [`OverlayWorkflow`], never written into the company source tree. The source
+//! tree is the version-controlled seed and, in hosted mode, a read-only crate
+//! mount — writing there failed every hosted tenant with `EROFS` (issue #168).
+//! Readers union the two sources via
+//! [`load_workflow_union`](crate::company::load_workflow_union), with the seed
+//! file winning on an id collision.
 //!
 //! The sequence, in order, each step an actionable error before anything is
-//! written:
+//! persisted:
 //!
-//! 1. the id is a safe filename (no slashes / `..`) and within length caps;
+//! 1. the id is a safe filename stem (no slashes / `..`) and within length caps
+//!    — it is still an id a seed file could carry, so the two sources stay
+//!    interchangeable;
 //! 2. the graph is within the node/edge size caps (a runaway graph can't be
 //!    persisted);
 //! 3. it names exactly one `trigger` (a freshly authored graph must say what
 //!    starts it — stricter than [`parse_workflow`], which allows many);
 //! 4. every `agent` node names a real roster teammate (manifest ∪ overlay);
-//! 5. its display name is unique (case-insensitive) against the company's
-//!    existing on-disk + manifest-enabled workflows;
-//! 6. the rendered TOML re-parses through [`parse_workflow`] (the same
-//!    structural validation a hand-authored file passes) and is within the
-//!    byte cap;
-//! 7. the file is written atomically (`create_new(true)` → a duplicate id is a
-//!    [`Conflict`](OpenCompanyError::Conflict), closing the TOCTOU gap);
-//! 8. the id is recorded as enabled on the operator's live record (the
-//!    version-controlled manifest is never rewritten — the team-overlay
-//!    convention); a store-save failure rolls the file back so the id isn't
-//!    orphaned;
+//! 5. its id is unique against the company's seed ids ∪ overlay ids ∪
+//!    manifest-enabled ids (a [`Conflict`](OpenCompanyError::Conflict));
+//! 6. its display name is unique (case-insensitive) against the company's
+//!    existing seed + overlay + manifest-enabled workflows;
+//! 7. the rendered TOML re-parses through [`parse_workflow`] (the same
+//!    structural validation a hand-authored file passes) and is within the byte
+//!    cap;
+//! 8. the body **and** the enabled id are pushed onto the record and persisted
+//!    in **one** [`save`](CompanyStore::save) — a single atomic write, so there
+//!    is no half-created state to roll back;
 //! 9. a best-effort [`WorkflowCreated`](CompanyEvent::WorkflowCreated) audit
 //!    event is journaled — never rolling the create back if the journal fails.
 //!
 //! Steps 4–8 run under the per-company [`company_write_lock`] so a concurrent
 //! `create_workflow` (tool) and `POST …/workflows` (REST) can never clobber
 //! each other's `overlay`/`enabled` write, the same primitive `add_agent` uses.
+//! That lock is what makes the id-uniqueness check of step 5 atomic now that
+//! the filesystem's `create_new(true)` no longer serializes the two surfaces.
 //!
 //! Compiled in the default build (no harness imports) so the REST route reaches
 //! it without any feature gate.
 
 use std::collections::HashSet;
-use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
 use crate::company::{
-    RawWorkflow, WorkflowFile, load_company_workflows, parse_workflow, render_workflow,
+    RawWorkflow, WorkflowFile, list_workflows_union, parse_workflow, render_workflow,
 };
 use crate::error::{OpenCompanyError, Result};
 use crate::ports::CompanyStore;
 use crate::ports::events::EventLog;
 use crate::ports::store::company_write_lock;
-use crate::ports::types::{CompanyEvent, CompanyId};
+use crate::ports::types::{CompanyEvent, CompanyId, OverlayWorkflow};
 use crate::server::ops::language;
 
 /// Max nodes a freshly authored graph may declare. A larger graph is refused
@@ -65,21 +75,24 @@ pub(crate) const MAX_WORKFLOW_ID_LEN: usize = 64;
 pub(crate) const MAX_WORKFLOW_NAME_LEN: usize = 200;
 
 /// Authors and persists a new workflow graph for `company`, returning the
-/// parsed [`WorkflowFile`] exactly as [`load_company_workflows`] would hand it
+/// parsed [`WorkflowFile`] exactly as
+/// [`load_workflow_union`](crate::company::load_workflow_union) would hand it
 /// to the runner (so what a caller reads back and what runs are identical).
 ///
-/// `source_dir` is the company source directory (`companies/<name>`) whose
-/// `workflows/` subtree the graph lands in — the caller supplies it (both
-/// surfaces refuse a deployment with no source directory before calling here,
-/// with [`language::WORKFLOW_NEEDS_SOURCE_DIR`]). `events` is the company event
-/// log for the best-effort audit journal; pass `None` to skip journaling.
+/// The body is persisted on the company record, so this works on a deployment
+/// with **no** source directory at all — the hosted case that used to be
+/// refused outright and then failed with `EROFS` anyway (issue #168).
+/// `source_dir` is the company source directory (`companies/<name>`) when one
+/// exists, read-only here: its `workflows/` subtree contributes the seed ids and
+/// names the uniqueness checks guard against. `events` is the company event log
+/// for the best-effort audit journal; pass `None` to skip journaling.
 ///
 /// Errors map to the same HTTP statuses the REST route always returned:
 /// [`InvalidRequest`](OpenCompanyError::InvalidRequest) → 400,
 /// [`Conflict`](OpenCompanyError::Conflict) → 409.
 pub(crate) async fn create_company_workflow(
     company: &CompanyId,
-    source_dir: &Path,
+    source_dir: Option<&Path>,
     store: &Arc<dyn CompanyStore>,
     events: Option<&Arc<dyn EventLog>>,
     draft: RawWorkflow,
@@ -125,9 +138,9 @@ pub(crate) async fn create_company_workflow(
     }
 
     // --- Serialized write section -------------------------------------------
-    // Load record → roster check → name uniqueness → file write → save record
-    // all under the per-company write lock, so a concurrent create/add_agent
-    // can never clobber the record's `enabled`/`overlay` write.
+    // Load record → roster check → id/name uniqueness → save record all under
+    // the per-company write lock, so a concurrent create/add_agent can never
+    // clobber the record's `enabled`/`overlay` write.
     let write_lock = company_write_lock(company);
     let _lock = write_lock.lock().await;
 
@@ -167,11 +180,41 @@ pub(crate) async fn create_company_workflow(
         }
     }
 
+    // Id uniqueness against every id this company already answers for: the seed
+    // files, the record's overlay bodies, and the manifest-enabled ids. The
+    // write lock held above is what makes this atomic — it replaces the
+    // filesystem `create_new(true)` that used to serialize the two surfaces.
+    // The seed side is checked by path rather than by scanning: a *malformed*
+    // seed file still owns its id (it would shadow the overlay body on read),
+    // and a scan would silently skip it.
+    let seed_file_exists = source_dir.is_some_and(|dir| {
+        dir.join("workflows")
+            .join(format!("{}.toml", draft.id))
+            .is_file()
+    });
+    let id_taken = seed_file_exists
+        || record.overlay_workflows.iter().any(|w| w.id == draft.id)
+        || record
+            .manifest
+            .workflows
+            .enabled
+            .iter()
+            .any(|id| id == &draft.id);
+    if id_taken {
+        return Err(OpenCompanyError::Conflict(format!(
+            "A workflow with id `{}` already exists. Pick a different id.",
+            draft.id
+        )));
+    }
+
     // Case-insensitive display-name uniqueness against the company's existing
-    // workflows (on-disk ∪ manifest-enabled). Id uniqueness stays atomic via
-    // `create_new(true)` below — this only guards two *differently-id'd*
-    // workflows sharing one indistinguishable name in the picker.
-    let existing_names = existing_workflow_names(source_dir, &record.manifest.workflows.enabled);
+    // workflows (seed ∪ overlay ∪ manifest-enabled), so two differently-id'd
+    // workflows can't share one indistinguishable name in the picker.
+    let existing_names = existing_workflow_names(
+        source_dir,
+        &record.overlay_workflows,
+        &record.manifest.workflows.enabled,
+    );
     if existing_names.contains(&draft.name.trim().to_ascii_lowercase()) {
         return Err(OpenCompanyError::Conflict(format!(
             "A workflow named `{}` already exists. Pick a different name.",
@@ -198,60 +241,25 @@ pub(crate) async fn create_company_workflow(
         other => other,
     })?;
 
-    let workflows_dir = source_dir.join("workflows");
-    let path = workflows_dir.join(format!("{}.toml", file.id));
-    std::fs::create_dir_all(&workflows_dir).map_err(|source| OpenCompanyError::StoreIo {
-        path: workflows_dir.clone(),
-        source,
-    })?;
-
-    // Write atomically: `create_new(true)` fails if the path already exists,
-    // closing the TOCTOU gap between a separate existence check and the write —
-    // a duplicate id is a clean `Conflict` (409). Clean the empty file up on a
-    // write failure so the id isn't permanently blocked.
-    let mut wf_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::AlreadyExists => OpenCompanyError::Conflict(format!(
-                "A workflow with id `{}` already exists. Pick a different id.",
-                file.id
-            )),
-            _ => OpenCompanyError::StoreIo {
-                path: path.clone(),
-                source: e,
-            },
-        })?;
-    wf_file.write_all(toml_src.as_bytes()).map_err(|source| {
-        let _ = std::fs::remove_file(&path);
-        OpenCompanyError::StoreIo {
-            path: path.clone(),
-            source,
-        }
-    })?;
-    drop(wf_file);
-
-    // Record the id as enabled on the live record — mirrors the team overlay:
-    // the version-controlled `company.toml` on disk is never rewritten. Save
-    // **after** the file lands; on a save failure remove the file we wrote so a
-    // retry can succeed without admin intervention.
-    let save_result = if record
+    // Persist the graph body and the enabled id in ONE save. Both live on the
+    // record, so there is no file-then-record window to roll back: the save
+    // either lands both or neither. The version-controlled `company.toml` on
+    // disk is never rewritten — the same team-overlay convention `add_agent`
+    // follows.
+    record.overlay_workflows.push(OverlayWorkflow {
+        id: file.id.clone(),
+        toml: toml_src,
+    });
+    if !record
         .manifest
         .workflows
         .enabled
         .iter()
         .any(|e| e == &file.id)
     {
-        Ok(())
-    } else {
         record.manifest.workflows.enabled.push(file.id.clone());
-        store.save(&record).await
-    };
-    if let Err(e) = save_result {
-        let _ = std::fs::remove_file(&path);
-        return Err(e);
     }
+    store.save(&record).await?;
 
     // Drop the write lock before journaling: the audit event is best-effort and
     // never gates the create, so it needn't hold the serialization lock.
@@ -282,47 +290,35 @@ pub(crate) async fn create_company_workflow(
     Ok(file)
 }
 
-/// The set of existing workflow display names (trimmed, lowercased) for
-/// `source_dir`'s company: every successfully-loaded on-disk `workflows/*.toml`
-/// name, unioned with the id-as-name fallback for each manifest-`enabled` id
-/// that has no loadable file — mirroring how `list_workflows` names the same
-/// set. A malformed on-disk file contributes no name (it's skipped, same as the
-/// picker), so it can't false-positive a conflict.
-fn existing_workflow_names(source_dir: &Path, enabled: &[String]) -> HashSet<String> {
+/// The set of existing workflow display names (trimmed, lowercased) for a
+/// company: every graph the union read path can serve — the seed
+/// `workflows/*.toml` files and the record's overlay bodies — plus the
+/// id-as-name fallback for each manifest-`enabled` id that has neither, exactly
+/// how `list_workflows` names the same set. A malformed graph contributes no
+/// name (it's skipped, same as the picker), so it can't false-positive a
+/// conflict; an absent or unreadable source tree simply degrades to overlay ∪
+/// enabled.
+fn existing_workflow_names(
+    source_dir: Option<&Path>,
+    overlays: &[OverlayWorkflow],
+    enabled: &[String],
+) -> HashSet<String> {
     let mut names = HashSet::new();
     let mut seen_ids = HashSet::new();
 
-    if let Ok(entries) = std::fs::read_dir(source_dir.join("workflows")) {
-        let ids: Vec<String> = entries
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
-            .filter_map(|path| {
-                path.file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .map(str::to_string)
-            })
-            .collect();
-        for id in ids {
-            match load_company_workflows(source_dir, std::slice::from_ref(&id)) {
-                Ok(mut files) => {
-                    if let Some(file) = files.pop() {
-                        names.insert(file.name.trim().to_ascii_lowercase());
-                        seen_ids.insert(file.id);
-                    }
-                }
-                // A malformed file skips only its own name (same tolerance the
-                // picker has); still mark the id seen so the enabled-fallback
-                // below doesn't re-add it as an id-named entry.
-                Err(_) => {
-                    seen_ids.insert(id);
-                }
-            }
-        }
+    for file in list_workflows_union(source_dir, overlays) {
+        names.insert(file.name.trim().to_ascii_lowercase());
+        seen_ids.insert(file.id);
+    }
+    // A malformed graph is skipped by the union scan above but still owns its
+    // id, so mark those seen too — otherwise the enabled-fallback below would
+    // re-add them as id-named entries.
+    for overlay in overlays {
+        seen_ids.insert(overlay.id.clone());
     }
 
-    // Manifest-enabled ids with no loadable on-disk file fall back to the id as
-    // their display name (what `list_workflows` shows), so a new workflow can't
+    // Manifest-enabled ids with no loadable graph fall back to the id as their
+    // display name (what `list_workflows` shows), so a new workflow can't
     // collide with that fallback name either.
     for id in enabled {
         if !seen_ids.contains(id) {
@@ -346,7 +342,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
 
-    use crate::company::{CompanyManifest, RawEdge, RawNode};
+    use crate::company::{CompanyManifest, RawEdge, RawNode, load_workflow_union};
     use crate::ports::types::{CompanyRecord, CompanySummary, EventSeq, LedgerEntry, StoredEvent};
     use async_trait::async_trait;
     use futures::stream::{self, BoxStream};
@@ -425,6 +421,23 @@ mod tests {
 
     // --- fixtures ------------------------------------------------------------
 
+    /// A committed seed graph, id `seeded` / name `Seeded flow`.
+    const SEED_TOML: &str = r#"
+id = "seeded"
+name = "Seeded flow"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "done"
+"#;
+
     /// A manifest with an `assistant` roster agent so `agent`-node graphs pass
     /// the roster check.
     fn manifest_with_assistant() -> CompanyManifest {
@@ -444,6 +457,7 @@ mod tests {
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
             template_provenance: None,
         }
     }
@@ -523,7 +537,7 @@ mod tests {
 
         let file = create_company_workflow(
             &company,
-            dir.path(),
+            Some(dir.path()),
             &store,
             Some(&log_dyn),
             valid_draft("greeter", "Greeter"),
@@ -534,19 +548,26 @@ mod tests {
         assert_eq!(file.id, "greeter");
         assert_eq!(file.nodes.len(), 3);
 
-        // File landed and re-loads to exactly what we returned (contract).
-        let reloaded = load_company_workflows(dir.path(), std::slice::from_ref(&file.id))
+        // The body landed on the RECORD, not in the (read-only in hosted mode)
+        // source tree — the whole point of #168.
+        let record = store.load(&company).await.unwrap().unwrap();
+        assert_eq!(record.overlay_workflows.len(), 1);
+        assert_eq!(record.overlay_workflows[0].id, "greeter");
+        assert!(
+            !dir.path().join("workflows").exists(),
+            "creation must not write into the company source tree"
+        );
+
+        // The persisted body re-loads to exactly what we returned (contract).
+        let reloaded = load_workflow_union(Some(dir.path()), &record.overlay_workflows, &file.id)
             .expect("reloads")
-            .into_iter()
-            .next()
             .expect("one file");
         assert_eq!(
             reloaded, file,
-            "returned WorkflowFile must equal the on-disk load"
+            "returned WorkflowFile must equal what the union read path serves"
         );
 
         // Enabled on the record.
-        let record = store.load(&company).await.unwrap().unwrap();
         assert!(
             record
                 .manifest
@@ -574,6 +595,7 @@ mod tests {
 
     // --- guardrail failures --------------------------------------------------
 
+    /// A second create with the same id collides against the record's overlay.
     #[tokio::test]
     async fn duplicate_id_is_conflict() {
         let dir = tempfile::tempdir().unwrap();
@@ -585,7 +607,7 @@ mod tests {
 
         create_company_workflow(
             &company,
-            dir.path(),
+            Some(dir.path()),
             &store,
             None,
             valid_draft("dup", "First"),
@@ -594,7 +616,7 @@ mod tests {
         .expect("first create");
         let err = create_company_workflow(
             &company,
-            dir.path(),
+            Some(dir.path()),
             &store,
             None,
             valid_draft("dup", "Second name"),
@@ -615,7 +637,7 @@ mod tests {
 
         create_company_workflow(
             &company,
-            dir.path(),
+            Some(dir.path()),
             &store,
             None,
             valid_draft("one", "Greeter"),
@@ -624,7 +646,7 @@ mod tests {
         .expect("first");
         let err = create_company_workflow(
             &company,
-            dir.path(),
+            Some(dir.path()),
             &store,
             None,
             valid_draft("two", "  GREETER  "),
@@ -645,7 +667,7 @@ mod tests {
         let mut draft = valid_draft("wf", "WF");
         draft.nodes[1].agent = Some("ghost".to_string());
 
-        let err = create_company_workflow(&company, dir.path(), &store, None, draft)
+        let err = create_company_workflow(&company, Some(dir.path()), &store, None, draft)
             .await
             .expect_err("unknown teammate");
         assert!(
@@ -666,7 +688,7 @@ mod tests {
         let mut draft = valid_draft("wf", "WF");
         draft.nodes[1].agent = None;
 
-        let err = create_company_workflow(&company, dir.path(), &store, None, draft)
+        let err = create_company_workflow(&company, Some(dir.path()), &store, None, draft)
             .await
             .expect_err("agent node with no teammate");
         assert!(
@@ -687,7 +709,7 @@ mod tests {
         // Zero triggers.
         let mut zero = valid_draft("z", "Z");
         zero.nodes[0].kind = "output".to_string();
-        let err = create_company_workflow(&company, dir.path(), &store, None, zero)
+        let err = create_company_workflow(&company, Some(dir.path()), &store, None, zero)
             .await
             .expect_err("no trigger");
         assert!(err.to_string().contains("exactly one `trigger`"), "{err}");
@@ -695,7 +717,7 @@ mod tests {
         // Two triggers.
         let mut two = valid_draft("t", "T");
         two.nodes[2].kind = "trigger".to_string();
-        let err = create_company_workflow(&company, dir.path(), &store, None, two)
+        let err = create_company_workflow(&company, Some(dir.path()), &store, None, two)
             .await
             .expect_err("two triggers");
         assert!(err.to_string().contains("exactly one `trigger`"), "{err}");
@@ -711,7 +733,7 @@ mod tests {
         )));
         let err = create_company_workflow(
             &company,
-            dir.path(),
+            Some(dir.path()),
             &store,
             None,
             valid_draft("../secrets", "Escape"),
@@ -747,7 +769,7 @@ mod tests {
             });
         }
         assert!(draft.nodes.len() > MAX_WORKFLOW_NODES);
-        let err = create_company_workflow(&company, dir.path(), &store, None, draft)
+        let err = create_company_workflow(&company, Some(dir.path()), &store, None, draft)
             .await
             .expect_err("too many nodes");
         assert!(err.to_string().contains("at most"), "{err}");
@@ -764,14 +786,17 @@ mod tests {
         // Stay within the node cap but blow the byte cap with a huge summary.
         let mut draft = valid_draft("fat", "Fat");
         draft.nodes[0].summary = Some("x".repeat(MAX_WORKFLOW_TOML_BYTES + 10));
-        let err = create_company_workflow(&company, dir.path(), &store, None, draft)
+        let err = create_company_workflow(&company, Some(dir.path()), &store, None, draft)
             .await
             .expect_err("too many bytes");
         assert!(err.to_string().contains("byte"), "{err}");
     }
 
+    /// The body and the enabled id land in ONE save, so a failing save leaves
+    /// the record exactly as it was — no orphaned body, no orphaned enabled id,
+    /// nothing to roll back. (Before #168 this needed a file-removal dance.)
     #[tokio::test]
-    async fn store_save_failure_rolls_the_file_back() {
+    async fn store_save_failure_leaves_the_record_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let company = CompanyId::new("acme");
         let store = store_of(MemStore::failing(record(
@@ -781,7 +806,7 @@ mod tests {
 
         let err = create_company_workflow(
             &company,
-            dir.path(),
+            Some(dir.path()),
             &store,
             None,
             valid_draft("rollback", "Rollback"),
@@ -793,9 +818,151 @@ mod tests {
             "{err:?}"
         );
 
-        // The file must have been removed so a retry can succeed.
-        let path = dir.path().join("workflows").join("rollback.toml");
-        assert!(!path.exists(), "the orphaned file must be cleaned up");
+        let record = store.load(&company).await.unwrap().unwrap();
+        assert!(record.overlay_workflows.is_empty(), "no orphaned body");
+        assert!(
+            record.manifest.workflows.enabled.is_empty(),
+            "no orphaned enabled id"
+        );
+        assert!(
+            !dir.path().join("workflows").join("rollback.toml").exists(),
+            "nothing was written to the source tree"
+        );
+    }
+
+    // --- #168: no source directory at all (the hosted case) ------------------
+
+    /// The direct #168 regression at the core level: a hosted tenant has no
+    /// source directory (its crate mount is read-only), and creation must still
+    /// succeed by persisting the body on the record.
+    #[tokio::test]
+    async fn creates_with_no_source_dir() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+
+        let file = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            valid_draft("hosted", "Hosted"),
+        )
+        .await
+        .expect("creates with no source dir");
+        assert_eq!(file.id, "hosted");
+
+        let record = store.load(&company).await.unwrap().unwrap();
+        assert_eq!(record.overlay_workflows.len(), 1);
+        assert_eq!(record.overlay_workflows[0].id, "hosted");
+        assert!(
+            record
+                .manifest
+                .workflows
+                .enabled
+                .contains(&"hosted".to_string())
+        );
+        // And it reads back as a full graph through the union path.
+        let loaded = load_workflow_union(None, &record.overlay_workflows, "hosted")
+            .expect("loads")
+            .expect("present");
+        assert_eq!(loaded, file);
+    }
+
+    /// An id already taken by a *seed* file is a 409 even though the new body
+    /// would live somewhere else entirely — the seed would shadow it on read.
+    #[tokio::test]
+    async fn id_colliding_with_a_seed_file_is_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflows = dir.path().join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(workflows.join("seeded.toml"), SEED_TOML).unwrap();
+
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let err = create_company_workflow(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            valid_draft("seeded", "Different name"),
+        )
+        .await
+        .expect_err("id is taken by a seed file");
+        assert!(matches!(err, OpenCompanyError::Conflict(_)), "{err:?}");
+        assert!(err.to_string().contains("seeded"), "{err}");
+    }
+
+    /// A *name* already used by a seed file collides too — the picker would show
+    /// two indistinguishable entries.
+    #[tokio::test]
+    async fn name_colliding_with_a_seed_file_is_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflows = dir.path().join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(workflows.join("seeded.toml"), SEED_TOML).unwrap();
+
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let err = create_company_workflow(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            valid_draft("other", "  seeded FLOW  "),
+        )
+        .await
+        .expect_err("name collides with the seed file's name");
+        assert!(matches!(err, OpenCompanyError::Conflict(_)), "{err:?}");
+    }
+
+    /// With no source tree at all, the name guard still works — it degrades to
+    /// overlay ∪ enabled rather than erroring or silently allowing duplicates.
+    #[tokio::test]
+    async fn name_guard_works_without_a_source_tree() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+
+        create_company_workflow(&company, None, &store, None, valid_draft("one", "Greeter"))
+            .await
+            .expect("first");
+        let err =
+            create_company_workflow(&company, None, &store, None, valid_draft("two", "GREETER"))
+                .await
+                .expect_err("name collides with the overlay body");
+        assert!(matches!(err, OpenCompanyError::Conflict(_)), "{err:?}");
+    }
+
+    /// A manifest-`enabled` id with no body in either source is shown by the
+    /// picker under its id, so a new workflow can't take that name either.
+    #[tokio::test]
+    async fn name_collides_with_a_bodiless_enabled_id() {
+        let company = CompanyId::new("acme");
+        let mut rec = record(&company, manifest_with_assistant());
+        rec.manifest.workflows.enabled.push("legacy".to_string());
+        let store = store_of(MemStore::seeded(rec));
+
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            valid_draft("new", "  LEGACY  "),
+        )
+        .await
+        .expect_err("name collides with the enabled-id fallback name");
+        assert!(matches!(err, OpenCompanyError::Conflict(_)), "{err:?}");
     }
 
     #[tokio::test]
@@ -803,10 +970,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let company = CompanyId::new("ghost");
         let store: Arc<dyn CompanyStore> = Arc::new(MemStore::default());
-        let err =
-            create_company_workflow(&company, dir.path(), &store, None, valid_draft("wf", "WF"))
-                .await
-                .expect_err("no record");
+        let err = create_company_workflow(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            valid_draft("wf", "WF"),
+        )
+        .await
+        .expect_err("no record");
         assert!(
             matches!(err, OpenCompanyError::CompanyNotFound(_)),
             "{err:?}"
