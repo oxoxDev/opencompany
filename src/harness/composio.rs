@@ -925,9 +925,11 @@ mod tests {
         use crate::ports::types::{CompanyId, SecretValue};
         use crate::store::FsSecretStore;
 
-        let dir =
-            std::env::temp_dir().join(format!("oc-composio-res-{}", crate::ports::generate_id()));
-        let secrets = FsSecretStore::new(&dir);
+        let dir = tempfile::Builder::new()
+            .prefix("oc-composio-res-")
+            .tempdir()
+            .expect("tempdir");
+        let secrets = FsSecretStore::new(dir.path());
         let company = CompanyId::new("acme");
         let source = || Arc::new(TinyhumansTokenSource::static_key("platform-identity"));
 
@@ -1017,7 +1019,6 @@ mod tests {
         assert_eq!(staged.backend_url, "https://staging-api.tinyhumans.ai");
 
         unsafe { std::env::remove_var("TINYHUMANS_API_KEY") };
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The bearer a config would present right now.
@@ -1039,10 +1040,11 @@ mod tests {
     /// changed *stored* token must still move it.
     #[tokio::test]
     async fn fingerprint_is_stable_across_a_projected_rotation() {
-        let dir =
-            std::env::temp_dir().join(format!("oc-composio-fp-{}", crate::ports::generate_id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("token");
+        let dir = tempfile::Builder::new()
+            .prefix("oc-composio-fp-")
+            .tempdir()
+            .expect("tempdir");
+        let path = dir.path().join("token");
         std::fs::write(&path, "token-before").unwrap();
 
         let projected = config_with(Credential::from_source(Arc::new(
@@ -1069,11 +1071,9 @@ mod tests {
 
         // A different projected path is a different identity.
         let other = config_with(Credential::from_source(Arc::new(
-            TinyhumansTokenSource::projected_file(dir.join("other")),
+            TinyhumansTokenSource::projected_file(dir.path().join("other")),
         )));
         assert_ne!(TenantComposio::fingerprint(&other), before);
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1396,10 +1396,11 @@ mod isolation_tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let dir =
-            std::env::temp_dir().join(format!("oc-composio-rot-{}", crate::ports::generate_id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("token");
+        let dir = tempfile::Builder::new()
+            .prefix("oc-composio-rot-")
+            .tempdir()
+            .expect("tempdir");
+        let path = dir.path().join("token");
         std::fs::write(&path, "projected-secret-before").unwrap();
 
         // ONE config, built once — exactly what a roster holds across turns.
@@ -1436,8 +1437,6 @@ mod isolation_tests {
             ],
             "each call must carry the token the file held at that moment: {seen:?}"
         );
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A mock backend that echoes the caller's bearer inside an error body; the

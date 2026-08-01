@@ -1006,9 +1006,11 @@ mod tests {
     /// harness must still resolve a managed brain, reading the file per request.
     #[tokio::test]
     async fn env_config_resolves_a_projected_token_file() {
-        let dir = std::env::temp_dir().join(format!("oc-prov-{}", crate::ports::generate_id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("token");
+        let dir = tempfile::Builder::new()
+            .prefix("oc-prov-")
+            .tempdir()
+            .expect("tempdir");
+        let path = dir.path().join("token");
         std::fs::write(&path, "projected-token").unwrap();
 
         let env = MapEnv::new([(
@@ -1035,8 +1037,6 @@ mod tests {
         ]);
         let (cfg, _) = harness_inference_from_env(&both).expect("configured");
         assert_eq!(bearer_of(&cfg).await.as_deref(), Some("projected-token"));
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ---- media backend (issue #109) ---------------------------------------
@@ -1360,9 +1360,11 @@ mod tests {
     #[tokio::test]
     async fn hosted_provider_resolves_the_bearer_per_request() {
         let (url, seen) = spawn_auth_recorder().await;
-        let dir = std::env::temp_dir().join(format!("oc-prov-rot-{}", crate::ports::generate_id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("token");
+        let dir = tempfile::Builder::new()
+            .prefix("oc-prov-rot-")
+            .tempdir()
+            .expect("tempdir");
+        let path = dir.path().join("token");
         // No `exp` to read ⇒ never cached ⇒ every request re-reads the file.
         std::fs::write(&path, "token-before-rotation").unwrap();
 
@@ -1387,8 +1389,6 @@ mod tests {
             ],
             "the bearer must be resolved per request, not captured at build time"
         );
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// With no credential at all the header is omitted rather than sent empty.
@@ -1452,9 +1452,11 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
 
-        let dir = std::env::temp_dir().join(format!("oc-prov-401-{}", crate::ports::generate_id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("token");
+        let dir = tempfile::Builder::new()
+            .prefix("oc-prov-401-")
+            .tempdir()
+            .expect("tempdir");
+        let path = dir.path().join("token");
         // A long-lived `exp` ⇒ the window would normally hold this read for the
         // full cap, so only invalidation can explain the second value going out.
         let long_lived = jwt_with_exp(60 * 60 * 24 * 365 * 100);
@@ -1482,8 +1484,6 @@ mod tests {
             headers[1].starts_with("Bearer rotated-"),
             "a 401 must send the next turn back to the file: {headers:?}"
         );
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// An unreadable projected file fails the turn with a model error that names

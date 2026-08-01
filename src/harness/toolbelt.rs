@@ -724,10 +724,15 @@ mod tests {
 
     #[tokio::test]
     async fn apply_patch_denied_outside_workspace() {
-        let ws = std::env::temp_dir().join("oc-toolbelt-escape");
-        let _ = tokio::fs::remove_dir_all(&ws).await;
-        tokio::fs::create_dir_all(&ws).await.unwrap();
-        let security = test_security(&ws, PolicyMode::Full);
+        // A private workspace root, not a fixed `/tmp` name: the old fixed name
+        // made two concurrent runs of this test tear down each other's
+        // directory between the create and the assertion.
+        let ws_dir = tempfile::Builder::new()
+            .prefix("oc-toolbelt-escape-")
+            .tempdir()
+            .expect("tempdir");
+        let ws = ws_dir.path();
+        let security = test_security(ws, PolicyMode::Full);
         let tool = ApplyPatchTool::new(security);
         // A path escaping the workspace root must be refused by the policy.
         let result = tool
@@ -743,7 +748,6 @@ mod tests {
             "workspace escape must be denied: {}",
             result.output()
         );
-        let _ = tokio::fs::remove_dir_all(&ws).await;
     }
 
     #[test]
