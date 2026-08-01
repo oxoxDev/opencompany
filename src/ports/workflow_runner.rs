@@ -64,7 +64,7 @@ pub enum DeliveryStatus {
 /// On an on-demand run these rows ride the run response into the console's
 /// run-result panel, so an operator can tell a delivered report from an
 /// undelivered one without reading a log. A scheduled run is not persisted, so
-/// its rows reach only the scheduler's log until issue #242 lands.
+/// its rows reach only the scheduler's log until issue #228 lands.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeliveryReport {

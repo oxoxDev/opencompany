@@ -62,8 +62,8 @@
 //! run those rows ride the run response into the console's run-result panel, so
 //! an operator can tell a delivered report from an undelivered one without
 //! reading a log. A **scheduled** run is not persisted, so its rows reach only
-//! the scheduler's log until issue #242 gives a run a durable record. There is
-//! one attempt per recipient and no retry: a workflow run is not a mail queue.
+//! the scheduler's log until issue #228 surfaces them. There is one attempt per
+//! recipient and no retry: a workflow run is not a mail queue.
 //!
 //! An output node the run never reached (an untaken branch, or a path that
 //! paused for approval) gets no attempt and no row — an absent row means "not

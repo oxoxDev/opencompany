@@ -70,8 +70,8 @@ A **scheduled** run is not persisted, so its delivery outcomes are not surfaced
 yet. The scheduler logs each undelivered report and drops the run value — see
 `src/runtime/workflow_scheduler.rs`. That makes a failed scheduled delivery
 diagnosable in the host's stdout, which is not the same as operator-visible.
-Giving a run a durable record to read those rows back from is issue #242
-(first-class `Run` records); #228 tracks this specific gap.
+Surfacing those outcomes is issue #228; the durable record it needs is issue
+#242's first-class `Run`.
 
 Authoring a destination and reading the result back:
 
