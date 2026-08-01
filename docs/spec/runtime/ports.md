@@ -104,8 +104,23 @@ two sources — `load_workflow_union` / `list_workflows_union` in
 `src/company/workflow_file.rs` — with the committed seed file winning on an id
 collision, matching the manifest-first convention the desk resolvers use. The
 workflow scheduler (issue #169) reads through the same union, which is what
-makes a schedule on a console-created workflow survive a restart: the overlay
-bodies persist here, while the record's manifest is re-seeded on a boot rebuild.
+makes a schedule on a console-created workflow survive a restart.
+
+**A boot rebuild is not a plain re-seed** (issue #208). `RuntimeBuilder::build`
+persists the freshly-parsed seed manifest with exactly one field merged:
+`[workflows].enabled` becomes the seed's ids plus every surviving
+`overlay_workflows` id not already among them. `create_workflow` writes the graph
+body and the enabled id in one save, so overlay presence *is* the enablement
+invariant — deriving from the bodies carries a runtime enablement forward and
+re-heals records an earlier rebuild wiped, with no migration. Ids dropped from
+the seed, and enabled ids with no surviving body, do not survive.
+
+Every other manifest field is **seed-authoritative**; for `[tools]` and
+`[policy]` that is a security property, not a convention — a record-wins merge
+would let a runtime grant or a relaxed approval mode outlive the operator
+revoking it in version control. Runtime additions that must persist get their own
+overlay field instead (`overlay_agents`, `overlay_desks`, the `SecretStore` for
+console MCP credentials).
 
 ```rust
 // src/ports/store.rs

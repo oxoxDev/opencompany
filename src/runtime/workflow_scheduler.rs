@@ -159,13 +159,18 @@ impl WorkflowScheduler {
     ///
     /// **Why the manifest's `[workflows].enabled` list is not a filter here.**
     /// A trigger `schedule` is itself the operator's explicit "run this on a
-    /// cron" statement, and the enabled list does not survive a restart today
-    /// (a boot rebuild overwrites the persisted record's manifest from the seed
-    /// `company.toml` — issue #208). Filtering on it would mean every scheduled
-    /// workflow silently stopped firing after a restart, which is the exact
-    /// failure this feature exists to prevent. The overlay graph bodies the
-    /// union reads *do* survive a rebuild, so enumeration through them is
-    /// restart-durable.
+    /// cron" statement — a graph that declares one has already said it wants to
+    /// fire, so re-asking the enabled list adds a second switch for the same
+    /// decision and a way to half-configure it. Enumeration therefore runs over
+    /// the union of seed files and overlay graph bodies, both of which survive a
+    /// rebuild.
+    ///
+    /// (An earlier version of this doc rested the argument partly on the enabled
+    /// list not surviving a restart. That was true — a boot rebuild re-seeded the
+    /// record's manifest from `company.toml` — but issue #208 fixed it: the
+    /// rebuild now merges runtime-enabled ids forward. Gating the scheduler on
+    /// `enabled` is a live design option again; it is deliberately not taken
+    /// here, on the argument above.)
     pub async fn tick(&mut self) -> usize {
         let now = self.clock.now_millis();
         let minute = now / MINUTE_MS;
