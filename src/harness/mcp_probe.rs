@@ -443,7 +443,7 @@ mod tests {
     use crate::company::mcp::{AuthMaterial, McpServerDecl, McpSource};
 
     fn anyhow_str(msg: &str) -> anyhow::Error {
-        anyhow::anyhow!("{}", msg.to_string())
+        anyhow::anyhow!("{msg}")
     }
 
     fn oauth_decl(name: &str, endpoint: &str, access_token: &str) -> McpServerDecl {
