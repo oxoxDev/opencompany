@@ -72,7 +72,7 @@
 //! [`ApprovalGate::evaluate`](crate::ports::ApprovalGate): under `full` policy
 //! mode that returns `Allow` for a `Send` effect, which would auto-send cold
 //! workflow mail on most companies and turn the established-thread gate into a
-//! suggestion. See [`park_cold_recipient`].
+//! suggestion. See `park_cold_recipient` below.
 //!
 //! # Failure is reported, never fatal
 //!
@@ -157,8 +157,9 @@ pub struct WorkflowDeliveryDeps {
 /// cheaper than remembering not to build it.
 #[derive(Clone)]
 pub struct DeliveryParking {
-    /// Where the effect is parked, yielding the [`ApprovalId`] the operator
-    /// later resolves.
+    /// Where the effect is parked, yielding the
+    /// [`ApprovalId`](crate::ports::types::ApprovalId) the operator later
+    /// resolves.
     pub approvals: Arc<dyn ApprovalGate>,
     /// The durable record of the park. This is what `/approvals` lists and what
     /// boot replay rehydrates, so it is what makes the card survive a restart.
