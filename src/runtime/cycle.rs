@@ -48,9 +48,14 @@ use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
 const HISTORY_LIMIT: usize = 32;
 
 /// The `Effect::kind` for an outbound email send. Shared between where the
-/// effect is built (`CycleHostImpl::send_email`) and where it is executed
-/// (`perform_effect`) so the two can't drift apart.
-const EMAIL_SEND_KIND: &str = "email.send";
+/// effect is built (`CycleHostImpl::send_email`, and the workflow delivery path
+/// in [`crate::workflows::delivery`]) and where it is executed
+/// (`perform_effect`) so they can't drift apart.
+///
+/// `pub(crate)` because delivery parks an effect this same executor has to
+/// recognise on approval: a duplicated `"email.send"` literal over there would
+/// park cards that silently do nothing when approved.
+pub(crate) const EMAIL_SEND_KIND: &str = "email.send";
 
 /// Drives cycles for one [`CompanyRuntime`].
 pub struct CycleRunner<'a> {

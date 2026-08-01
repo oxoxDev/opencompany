@@ -42,17 +42,37 @@
 //!   2. the recipient must be an **established thread** — the company's inbox
 //!      must already hold inbound mail from that address. This is the rule
 //!      ported verbatim from the agent send path
-//!      ([`crate::runtime::cycle`]); a cold recipient is **skipped and
-//!      reported**, never sent to.
+//!      ([`crate::runtime::cycle`]); a cold recipient is **parked for operator
+//!      approval**, never sent to on the workflow's own authority.
 //! * **`channel`** — the target must match a [`ChannelAdapter`] the deployment
 //!   already wired. A graph cannot conjure a channel; it can only address one an
 //!   operator installed. Constrained by construction, like `owner`.
 //!
-//! A cold `email` recipient is a real product gap, not a design end-state: the
-//! agent path parks such a send for operator approval, but the engine's approval
-//! pause has no resume path today, so gating delivery on it would dead-end the
-//! report instead of delaying it. Skipping loudly is the honest behaviour until
-//! a resume path exists.
+//! # A cold recipient is delayed, not dropped (issue #227)
+//!
+//! A cold `email` recipient used to end the report's life: a `skipped` row and
+//! nothing else, while a teammate emailing the same new contact got an approval
+//! card. Delivery now parks the send the same way the agent path does, so the
+//! two paths refuse identically and both refusals are recoverable.
+//!
+//! **This does not resume the run, and does not need to.** Delivery is
+//! post-engine by design: by the time a destination is refused,
+//! `tinyflows::engine::run` has already returned and the run is complete —
+//! there is nothing to resume. What is parked is the *send*, not the run, and
+//! approving it executes through the same
+//! [`perform_effect`](crate::runtime::cycle) path that mails an agent's
+//! approved `email.send` from an HTTP handler outside any live cycle.
+//!
+//! One consequence to be honest about: a workflow run is not persisted, so a
+//! `pending` row is a **snapshot** taken at delivery time and can never later
+//! flip to `sent`. The approvals queue is the live source of truth — it is
+//! journal-backed and survives a restart; the row only points at it.
+//!
+//! The park is **direct**, never routed through
+//! [`ApprovalGate::evaluate`](crate::ports::ApprovalGate): under `full` policy
+//! mode that returns `Allow` for a `Send` effect, which would auto-send cold
+//! workflow mail on most companies and turn the established-thread gate into a
+//! suggestion. See [`park_cold_recipient`].
 //!
 //! # Failure is reported, never fatal
 //!
@@ -76,11 +96,13 @@ use serde_json::Value;
 use crate::company::WorkflowFile;
 use crate::company::runtime::CompanyMail;
 use crate::company::{WorkflowDestinationDef, WorkflowNodeKind};
-use crate::ports::types::{CompanyId, CompanyRecord, OutboundMessage};
+use crate::ports::types::{CompanyId, CompanyRecord, Effect, EffectGroup, OutboundMessage};
 use crate::ports::{
-    ChannelAdapter, DeliveryReport, DeliveryStatus, EmailRecord, InboxStore, UserRole, UserStatus,
-    UserStore, generate_id, now_millis,
+    ApprovalGate, ChannelAdapter, DeliveryReport, DeliveryStatus, EmailRecord, InboxStore,
+    UserRole, UserStatus, UserStore, generate_id, now_millis,
 };
+use crate::runtime::cycle::EMAIL_SEND_KIND;
+use crate::runtime::journal::RuntimeJournal;
 use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
 use crate::server::ops::smtp::local_part;
 
@@ -118,6 +140,29 @@ pub struct WorkflowDeliveryDeps {
     pub users: Arc<dyn UserStore>,
     /// Every wired channel adapter, including the always-present `operator`.
     pub channels: Vec<Arc<dyn ChannelAdapter>>,
+    /// What a cold `email` recipient is parked on (issue #227). `None` fails
+    /// closed to the pre-#227 behaviour: the report is `skipped`, never a
+    /// `pending` row no queue is backing.
+    pub parking: Option<DeliveryParking>,
+}
+
+/// The approval queue's two halves, bundled so a delivery can only ever hold
+/// **both or neither**.
+///
+/// Deliberately one field rather than two `Option`s. Parking on the gate
+/// without journaling would produce an approval that is invisible to
+/// `/approvals` (which reads the journal, not the gate) and gone on the next
+/// restart — a card the operator can neither see nor approve, backing a
+/// `pending` row that promises one exists. Making that state unrepresentable is
+/// cheaper than remembering not to build it.
+#[derive(Clone)]
+pub struct DeliveryParking {
+    /// Where the effect is parked, yielding the [`ApprovalId`] the operator
+    /// later resolves.
+    pub approvals: Arc<dyn ApprovalGate>,
+    /// The durable record of the park. This is what `/approvals` lists and what
+    /// boot replay rehydrates, so it is what makes the card survive a restart.
+    pub journal: Arc<RuntimeJournal>,
 }
 
 impl std::fmt::Debug for WorkflowDeliveryDeps {
@@ -126,6 +171,7 @@ impl std::fmt::Debug for WorkflowDeliveryDeps {
         // whose derived `Debug` prints the password (see `mailer::test`).
         f.debug_struct("WorkflowDeliveryDeps")
             .field("mail", &self.mail.is_some())
+            .field("parking", &self.parking.is_some())
             .field(
                 "channels",
                 &self
@@ -339,18 +385,10 @@ async fn deliver_one(
             )
             .await
             {
-                tracing::warn!(
-                    company = %record.id,
-                    node = %node_id,
-                    "workflow delivery: skipped an email destination — the recipient is not an established thread"
+                reports.push(
+                    park_cold_recipient(delivery, record, node_id, target, subject, text, row)
+                        .await,
                 );
-                reports.push(row(
-                    Some(target.to_string()),
-                    DeliveryStatus::Skipped,
-                    "this recipient has never written to the company, so a workflow may not open \
-                     the conversation — send once from the inbox first"
-                        .to_string(),
-                ));
                 return;
             }
             reports.push(
@@ -392,6 +430,134 @@ async fn deliver_one(
             format!("`{other}` is not a destination kind this runtime knows how to deliver to"),
         )),
     }
+}
+
+/// Parks a cold `email` recipient's report for operator approval, returning the
+/// row that says so (issue #227).
+///
+/// # Why this parks DIRECTLY instead of asking the gate
+///
+/// The obvious shape — evaluate the effect, then act on the decision — is
+/// wrong here, and dangerously so.
+/// [`ManifestApprovalGate::evaluate`](crate::policy::ManifestApprovalGate)
+/// returns `Allow` for a `Send` effect under `full` policy mode, and
+/// `email.send` is not in the always-approve list. Routing through it would
+/// therefore **auto-send** this mail on every full-mode company — which is most
+/// of them — quietly converting the established-thread rule from a gate into a
+/// suggestion. The refusal is already decided by the time we get here; the only
+/// question is whether the report is dropped or recoverable. So this takes the
+/// same already-decided path [`CycleHost::park_effect`](crate::ports::brain::CycleHost)
+/// does on the agent side: park, journal, done.
+///
+/// **The invariant: a cold recipient never auto-sends.** With no parking wired
+/// the report degrades to the pre-#227 `skipped` row; if parking itself errors
+/// it degrades to `skipped` too. Nothing about a cold recipient reaches a
+/// transport without a human verdict.
+async fn park_cold_recipient(
+    delivery: &WorkflowDeliveryDeps,
+    record: &CompanyRecord,
+    node_id: &str,
+    target: &str,
+    subject: &str,
+    text: &str,
+    row: impl Fn(Option<String>, DeliveryStatus, String) -> DeliveryReport,
+) -> DeliveryReport {
+    let Some(parking) = &delivery.parking else {
+        // Fail closed to the pre-#227 behaviour. A `pending` row on a runtime
+        // with no approvals queue would point the operator at a card that does
+        // not exist.
+        tracing::warn!(
+            company = %record.id,
+            node = %node_id,
+            "workflow delivery: skipped an email destination — the recipient is not an established \
+             thread and this runtime has no approvals queue to park it on"
+        );
+        return row(
+            Some(target.to_string()),
+            DeliveryStatus::Skipped,
+            "this recipient has never written to the company, so a workflow may not open the \
+             conversation — send once from the inbox first"
+                .to_string(),
+        );
+    };
+
+    // The same effect shape the agent path builds in `CycleHostImpl::send_email`
+    // — same kind, same group, same counterparty flags, same payload keys — so
+    // the operator sees one kind of card and `perform_effect` executes it on
+    // approval through the code that already ships.
+    let effect = Effect {
+        kind: EMAIL_SEND_KIND.into(),
+        group: EffectGroup::Send,
+        amount_usd: None,
+        established_thread: false,
+        first_time_counterparty: true,
+        payload: serde_json::json!({
+            "to": target,
+            "subject": subject,
+            // Already truncated by `report_text`.
+            "body": text,
+        }),
+    };
+
+    match park_effect(parking, &record.id, effect).await {
+        Ok(()) => {
+            tracing::info!(
+                company = %record.id,
+                node = %node_id,
+                "workflow delivery: parked an email destination for operator approval — the \
+                 recipient is not an established thread"
+            );
+            row(
+                Some(target.to_string()),
+                DeliveryStatus::Pending,
+                "this recipient has never written to the company, so a workflow may not open the \
+                 conversation on its own — the report is waiting for you in Approvals, and \
+                 approving it sends the mail"
+                    .to_string(),
+            )
+        }
+        Err(err) => {
+            // The queue is the only thing that failed; the refusal itself still
+            // holds. Report the pre-#227 outcome and say why it was not parked.
+            //
+            // `err` is deliberately the only thing interpolated: this line goes
+            // to host stdout, which on a hosted tenant is us and not the
+            // operator, so the recipient's address must not ride it (issue
+            // #248). The row the operator reads names the target; the log does
+            // not.
+            tracing::warn!(
+                company = %record.id,
+                node = %node_id,
+                error = %err,
+                "workflow delivery: could not park a cold email destination for approval; the \
+                 report was NOT sent"
+            );
+            row(
+                Some(target.to_string()),
+                DeliveryStatus::Skipped,
+                "this recipient has never written to the company, and this report could not be \
+                 queued for your approval either — send once from the inbox first"
+                    .to_string(),
+            )
+        }
+    }
+}
+
+/// Parks `effect` on the gate and journals it, in that order.
+///
+/// Both halves or neither: a park the journal never recorded is invisible to
+/// `/approvals` and gone on the next restart, so a journal write failure has to
+/// surface as a failure to park rather than as a card nobody can find.
+async fn park_effect(
+    parking: &DeliveryParking,
+    company: &CompanyId,
+    effect: Effect,
+) -> Result<(), crate::error::OpenCompanyError> {
+    let approval_id = parking.approvals.park(company, effect.clone()).await?;
+    parking
+        .journal
+        .record_parked(&approval_id, &effect, now_millis())
+        .await
 }
 
 /// The active admins' email addresses, in store order. An unreadable user store
@@ -760,6 +926,7 @@ allow = [{allow}]
                     inbox: inbox.clone(),
                     users: users.clone(),
                     channels,
+                    parking: None,
                 },
                 mail,
                 channel,

@@ -431,6 +431,8 @@ to = "done"
             inbox: Arc::new(crate::store::FsInboxStore::new(dir.path())),
             users: Arc::new(FsOps::new(dir.path())),
             channels: vec![Arc::new(channel.clone())],
+            // This case delivers to a channel, which never parks.
+            parking: None,
         });
 
         let file = parse_workflow(REPORT_TO_OPERATOR).expect("parses");

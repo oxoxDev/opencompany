@@ -1121,6 +1121,17 @@ impl RuntimeBuilder {
                                     inbox: inbox.clone(),
                                     users: ops.users.clone(),
                                     channels: channels.clone(),
+                                    // Issue #227: the same gate and journal the
+                                    // runtime gets below — one approvals queue,
+                                    // so a report parked by a workflow lands in
+                                    // the operator's list beside one parked by
+                                    // an agent, and rehydrates on restart with
+                                    // its original id. Both halves or neither,
+                                    // by construction.
+                                    parking: Some(crate::workflows::DeliveryParking {
+                                        approvals: gate.clone(),
+                                        journal: journal.clone(),
+                                    }),
                                 }),
                             };
                             let record = CompanyRecord {
