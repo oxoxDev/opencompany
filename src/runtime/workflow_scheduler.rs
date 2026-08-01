@@ -1025,8 +1025,12 @@ to = "done"
             .lines()
             .find(|l| l.contains(company) && l.contains("scheduled run finished"))
             .unwrap_or_else(|| panic!("no summary line for {company}: {logs}"));
+        // Every count, including the zeroes: asserting only the non-zero ones
+        // lets a regression that stops emitting `denied` or `failed` pass.
         assert!(summary.contains("sent=1"), "{summary}");
         assert!(summary.contains("skipped=1"), "{summary}");
+        assert!(summary.contains("denied=0"), "{summary}");
+        assert!(summary.contains("failed=0"), "{summary}");
         assert!(summary.contains("undelivered=1"), "{summary}");
 
         cleanup(&home).await;
@@ -1077,6 +1081,7 @@ to = "done"
             .expect("a summary line");
         assert!(summary.contains("sent=1"), "{summary}");
         assert!(summary.contains("skipped=0"), "{summary}");
+        assert!(summary.contains("denied=0"), "{summary}");
         assert!(summary.contains("failed=0"), "{summary}");
         assert!(summary.contains("undelivered=0"), "{summary}");
 
