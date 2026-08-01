@@ -438,11 +438,11 @@ use crate::company::CompanyManifest;
 use crate::ports::types::{Actor, ActorKind, Verdict};
 use crate::runtime::RuntimeBuilder;
 
-fn tmp_home() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "opencompany-sidecar-{}",
-        crate::ports::generate_id()
-    ))
+fn tmp_home() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("opencompany-sidecar-")
+        .tempdir()
+        .expect("tempdir")
 }
 
 fn manifest(policy_mode: &str) -> CompanyManifest {
@@ -487,7 +487,8 @@ fn sidecar_brain_for(
 
 #[tokio::test]
 async fn e2e_inference_then_gated_send_dm_drives_a_channel_response() {
-    let home = tmp_home();
+    let home_dir = tmp_home();
+    let home = home_dir.path().to_path_buf();
     let transport = Arc::new(MockSidecarTransport::new());
     transport.script_cycle(
         runtime_cid(),
@@ -534,13 +535,12 @@ async fn e2e_inference_then_gated_send_dm_drives_a_channel_response() {
     // A compressed trace was persisted to the fs-backed MemoryStore.
     let traces = rt.memory.recent_traces(rt.id(), 10).await.unwrap();
     assert!(!traces.is_empty());
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn e2e_supervised_effect_parks_through_the_real_gate() {
-    let home = tmp_home();
+    let home_dir = tmp_home();
+    let home = home_dir.path().to_path_buf();
     let transport = Arc::new(MockSidecarTransport::new());
     transport.script_cycle(
         runtime_cid(),
@@ -587,6 +587,4 @@ async fn e2e_supervised_effect_parks_through_the_real_gate() {
     .await
     .unwrap();
     assert!(rt.pending_approvals().is_empty());
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }

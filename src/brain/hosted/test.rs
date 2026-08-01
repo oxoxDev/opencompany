@@ -466,11 +466,11 @@ use crate::company::CompanyManifest;
 use crate::ports::types::{Actor, ActorKind};
 use crate::runtime::RuntimeBuilder;
 
-fn tmp_home() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "opencompany-hosted-{}",
-        crate::ports::generate_id()
-    ))
+fn tmp_home() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("opencompany-hosted-")
+        .tempdir()
+        .expect("tempdir")
 }
 
 fn manifest(policy_mode: &str) -> CompanyManifest {
@@ -500,7 +500,8 @@ fn runtime_cid() -> String {
 
 #[tokio::test]
 async fn e2e_operator_message_drives_tool_call_and_gated_send_dm() {
-    let home = tmp_home();
+    let home_dir = tmp_home();
+    let home = home_dir.path().to_path_buf();
     let transport = Arc::new(MockTransport::new());
     transport.script_cycle(
         runtime_cid(),
@@ -546,13 +547,12 @@ async fn e2e_operator_message_drives_tool_call_and_gated_send_dm() {
     // A compressed trace was persisted to the fs-backed MemoryStore.
     let traces = rt.memory.recent_traces(rt.id(), 10).await.unwrap();
     assert!(!traces.is_empty());
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn e2e_supervised_effect_parks_and_acks_not_ok() {
-    let home = tmp_home();
+    let home_dir = tmp_home();
+    let home = home_dir.path().to_path_buf();
     let transport = Arc::new(MockTransport::new());
     transport.script_cycle(
         runtime_cid(),
@@ -607,15 +607,14 @@ async fn e2e_supervised_effect_parks_and_acks_not_ok() {
     .await
     .unwrap();
     assert!(rt.pending_approvals().is_empty());
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// Issue #174 end to end: a real runtime on the hosted brain records the tokens
 /// and cost the wire reported, so the console's Usage view stops reading zero.
 #[tokio::test]
 async fn e2e_reported_usage_lands_on_the_usage_meter() {
-    let home = tmp_home();
+    let home_dir = tmp_home();
+    let home = home_dir.path().to_path_buf();
     let transport = Arc::new(MockTransport::new());
     // `cid()` and `runtime_cid()` are the same deterministic id: company `acme`,
     // first event at seq 0.
@@ -663,8 +662,6 @@ async fn e2e_reported_usage_lands_on_the_usage_meter() {
             .iter()
             .any(|e| e.kind == crate::metering::INFERENCE_SPEND_KIND && e.amount_usd == 0.042)
     );
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -711,7 +708,8 @@ fn desk_manifest() -> CompanyManifest {
 /// orchestrator can actually delegate.
 #[tokio::test]
 async fn e2e_hosted_catalog_advertises_delegation_tools() {
-    let home = tmp_home();
+    let home_dir = tmp_home();
+    let home = home_dir.path().to_path_buf();
     let transport = Arc::new(MockTransport::new());
     let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
         .with_brain_mode(BrainMode::Hosted)
@@ -741,15 +739,14 @@ async fn e2e_hosted_catalog_advertises_delegation_tools() {
         names.contains(&"delegate_to_desk"),
         "delegate_to_desk advertised: {names:?}"
     );
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// Medulla emitting a `spawn_task` tool-call on the hosted path opens a durable
 /// board card device-side and answers ok — no local cognition needed.
 #[tokio::test]
 async fn e2e_spawn_task_tool_call_opens_a_board_card() {
-    let home = tmp_home();
+    let home_dir = tmp_home();
+    let home = home_dir.path().to_path_buf();
     let transport = Arc::new(MockTransport::new());
     transport.script_cycle(
         runtime_cid(),
@@ -787,8 +784,6 @@ async fn e2e_spawn_task_tool_call_opens_a_board_card() {
     assert_eq!(cards[0].title, "Ship the invoice flow");
     assert_eq!(cards[0].assignee, "eng");
     assert_eq!(cards[0].column, "backlog");
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// Medulla emitting a `delegate_to_desk` tool-call resolves the desk and records
@@ -796,7 +791,8 @@ async fn e2e_spawn_task_tool_call_opens_a_board_card() {
 /// is asked directly). An unknown desk is a clean tool error, not a lost card.
 #[tokio::test]
 async fn e2e_delegate_to_desk_tool_call_writes_a_handoff_card() {
-    let home = tmp_home();
+    let home_dir = tmp_home();
+    let home = home_dir.path().to_path_buf();
     let transport = Arc::new(MockTransport::new());
     transport.script_cycle(
         runtime_cid(),
@@ -851,15 +847,14 @@ async fn e2e_delegate_to_desk_tool_call_writes_a_handoff_card() {
         note.contains("build the invoice importer"),
         "note carries the instruction"
     );
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// The same company with no usage frame on the wire: an honest zero, and no
 /// fabricated sample.
 #[tokio::test]
 async fn e2e_a_cycle_without_usage_frames_meters_nothing() {
-    let home = tmp_home();
+    let home_dir = tmp_home();
+    let home = home_dir.path().to_path_buf();
     let transport = Arc::new(MockTransport::new());
     transport.script_cycle(
         runtime_cid(),
@@ -883,5 +878,4 @@ async fn e2e_a_cycle_without_usage_frames_meters_nothing() {
     .unwrap();
 
     assert!(rt.usage().query(rt.id(), 0).await.unwrap().is_empty());
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
