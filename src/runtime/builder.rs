@@ -794,6 +794,31 @@ impl RuntimeBuilder {
             }
         };
 
+        // Boot replay: load the journal and rehydrate parked approvals into the
+        // gate so approvals survive a restart with their original ids.
+        //
+        // **Constructed here, above the brain, on purpose (issue #227).** These
+        // two used to be built after the brain, just before `CompanyRuntime::new`
+        // — which put them out of reach of the `HarnessDeps` built inside the
+        // brain arm, and that is precisely why workflow delivery could not park
+        // a cold email recipient the way the agent path does. The block depends
+        // on nothing but `home`, `id`, `self.approvals` and
+        // `self.manifest.policy`, none of which the code it used to sit below
+        // produces or mutates, so hoisting it is a pure move. The same two
+        // `Arc`s go to the delivery deps and to the runtime — one gate, one
+        // journal, one approvals queue.
+        let journal = Arc::new(RuntimeJournal::new(
+            Bundle::new(home.clone(), &id).journal_jsonl(),
+        ));
+        journal.load().await?;
+
+        let gate = self
+            .approvals
+            .unwrap_or_else(|| Arc::new(ManifestApprovalGate::new(self.manifest.policy.clone())));
+        for pending in journal.pending() {
+            gate.rehydrate(pending.id, pending.effect, pending.at_millis);
+        }
+
         // Brain selection, in precedence order:
         //   1. an explicit brain (test injection) always wins;
         //   2. under the `openhuman` feature, an attached harness pool + a
@@ -1224,20 +1249,6 @@ impl RuntimeBuilder {
                 template_provenance,
             })
             .await?;
-
-        // Boot replay: load the journal and rehydrate parked approvals into the
-        // gate so approvals survive a restart with their original ids.
-        let journal = Arc::new(RuntimeJournal::new(
-            Bundle::new(home.clone(), &id).journal_jsonl(),
-        ));
-        journal.load().await?;
-
-        let gate = self
-            .approvals
-            .unwrap_or_else(|| Arc::new(ManifestApprovalGate::new(self.manifest.policy.clone())));
-        for pending in journal.pending() {
-            gate.rehydrate(pending.id, pending.effect, pending.at_millis);
-        }
 
         // Economy: an injected economy wins; otherwise the `tinyplace` feature
         // auto-wires one for a discoverable company with a handle. Going-public
