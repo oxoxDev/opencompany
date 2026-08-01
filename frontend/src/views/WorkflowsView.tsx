@@ -157,14 +157,35 @@ export function WorkflowsView({
     };
   }, [client, company, selectedId]);
 
-  // Load the company's run history. Re-runs when the company changes, after a
-  // manual run, and on every `workflow_run_finished` the shell forwards — so a
-  // scheduled run that fires with this tab open lands here on its own.
+  // Load the SELECTED workflow's run history. Re-runs when the selection or
+  // company changes, after a manual run, and on every `workflow_run_finished`
+  // the shell forwards — so a scheduled run that fires with this tab open lands
+  // here on its own.
+  //
+  // The `workflow` filter is not an optimization, it is the correctness of this
+  // read. The host applies `?workflow=` BEFORE the `limit` cut precisely so a
+  // rarely-run workflow still returns its own most recent runs. Fetching the
+  // company-wide page and filtering client-side would undo that: once other
+  // workflows produce `limit` more-recent runs, this workflow's history falls
+  // out of the page and the panel would claim it "hasn't finished a run yet"
+  // while the run sits journaled on the host — which is issue #228's own
+  // symptom, reappearing in the console.
   useEffect(() => {
+    // No selection yet (first render, or a company with no workflows): there is
+    // no history to ask for, and asking unfiltered is the bug described above.
+    // `historySupported` is deliberately left alone — nothing was learned about
+    // whether the host serves this route.
+    if (!selectedId) {
+      setRuns([]);
+      return;
+    }
     let live = true;
     (async () => {
       try {
-        const rows = await listWorkflowRuns(client, company, { limit: 50 });
+        const rows = await listWorkflowRuns(client, company, {
+          workflow: selectedId,
+          limit: 50,
+        });
         if (!live) return;
         setRuns(rows);
         setHistorySupported(true);
@@ -179,7 +200,7 @@ export function WorkflowsView({
     return () => {
       live = false;
     };
-  }, [client, company, runsTick, runEventTick]);
+  }, [client, company, selectedId, runsTick, runEventTick]);
 
   const run = useCallback(async () => {
     if (!selectedId) return;
@@ -239,12 +260,10 @@ export function WorkflowsView({
     setSelectedNodeId(node.id);
   }, []);
 
-  // The selected workflow's runs, newest first (the host already orders them).
-  const selectedRuns = useMemo(
-    () => (selectedId ? runs.filter((r) => r.workflowId === selectedId) : []),
-    [runs, selectedId],
-  );
-  const lastRun = selectedRuns[0] ?? null;
+  // `runs` already holds only the selected workflow's runs, newest first — the
+  // host filters and orders them. Re-filtering here would be a second source of
+  // truth that can only ever disagree with the first.
+  const lastRun = runs[0] ?? null;
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
@@ -306,12 +325,13 @@ export function WorkflowsView({
               variant="outline"
               onClick={() => setHistoryOpen((open) => !open)}
               aria-pressed={historyOpen}
+              data-testid="workflow-history-toggle"
             >
               <History className="mr-1.5 size-4" />
               History
-              {selectedRuns.length > 0 && (
+              {runs.length > 0 && (
                 <Badge variant="secondary" className="ml-1.5 h-4 px-1.5 text-[10px] font-normal">
-                  {selectedRuns.length}
+                  {runs.length}
                 </Badge>
               )}
             </Button>
@@ -382,7 +402,7 @@ export function WorkflowsView({
 
       {historyOpen && historySupported && (
         <RunHistoryPanel
-          runs={selectedRuns}
+          runs={runs}
           workflowName={selected?.name ?? selectedId ?? ""}
           onClose={() => setHistoryOpen(false)}
         />
@@ -637,6 +657,7 @@ function LastRunChip({ run }: { run: WorkflowRunOutcome }) {
     <Badge
       variant="outline"
       className="h-5 gap-1.5 px-2 text-[10px] font-normal"
+      data-testid="workflow-last-run-chip"
       title={
         run.error
           ? `Last run failed: ${run.error}`
@@ -676,7 +697,7 @@ function RunHistoryPanel({
   onClose: () => void;
 }) {
   return (
-    <div className="border-t bg-card/60">
+    <div className="border-t bg-card/60" data-testid="workflow-run-history">
       <div className="flex items-center justify-between px-4 py-2">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">Run history</span>
@@ -711,7 +732,7 @@ function RunHistoryPanel({
 function RunHistoryRow({ run }: { run: WorkflowRunOutcome }) {
   const tone = runTone(run);
   return (
-    <div className="rounded-lg border bg-background/40 p-2">
+    <div className="rounded-lg border bg-background/40 p-2" data-testid="workflow-run-row">
       <div className="mb-1 flex flex-wrap items-center gap-2">
         <span className={`size-1.5 rounded-full ${tone.dot}`} />
         <Badge variant="outline" className="h-4 px-1.5 text-[10px] font-normal">
