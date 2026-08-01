@@ -464,6 +464,31 @@ fn summarize_event(event: &CompanyEvent) -> String {
         CompanyEvent::DeskTaskCompleted {
             task_id, column, ..
         } => format!("task completed ({column}): {task_id}"),
+        // A finished workflow run (#228). Counts only — never a delivery row's
+        // `target` (a recipient's email address) or its `detail`, which can
+        // quote one. This string is a non-sensitive one-liner for the insight
+        // surface; the operator reads the full rows in the console.
+        CompanyEvent::WorkflowRunFinished {
+            workflow_id,
+            scheduled,
+            deliveries,
+            error,
+            ..
+        } => {
+            let how = if *scheduled { "scheduled" } else { "manual" };
+            match error {
+                Some(_) => format!("{how} workflow run failed: {workflow_id}"),
+                None => {
+                    let undelivered = deliveries
+                        .iter()
+                        .filter(|d| !matches!(d.status, crate::ports::DeliveryStatus::Sent))
+                        .count();
+                    format!(
+                        "{how} workflow run finished: {workflow_id} ({undelivered} not delivered)"
+                    )
+                }
+            }
+        }
     }
 }
 
