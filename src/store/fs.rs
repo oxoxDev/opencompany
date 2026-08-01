@@ -810,8 +810,11 @@ mod test {
     use crate::store::conformance;
     use futures::StreamExt;
 
-    fn tmp_root() -> PathBuf {
-        std::env::temp_dir().join(format!("opencompany-test-{}", generate_id()))
+    fn tmp_root() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("opencompany-test-")
+            .tempdir()
+            .expect("tempdir")
     }
 
     #[tokio::test]
@@ -821,7 +824,8 @@ mod test {
         // `read_jsonl` reports as a "trailing characters" parse error). The
         // single-write `append_line` makes each record one atomic O_APPEND
         // write, so this holds deterministically.
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         tokio::fs::create_dir_all(&root).await.unwrap();
         let path = root.join("log.jsonl");
 
@@ -844,8 +848,6 @@ mod test {
         let mut seen: Vec<u64> = rows.iter().map(|r| r["i"].as_u64().unwrap()).collect();
         seen.sort_unstable();
         assert_eq!(seen, (0..N).collect::<Vec<_>>(), "all records intact");
-
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     // The fs backend runs the identical port-conformance suite the sqlite
@@ -853,7 +855,8 @@ mod test {
     // stores start empty.
     #[tokio::test]
     async fn conformance_isolation_by_company() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_isolation_by_company(
             Arc::new(FsCompanyStore::new(&root)),
             Arc::new(FsEventLog::new(&root)),
@@ -861,39 +864,38 @@ mod test {
             Arc::new(FsContextStore::new(&root)),
         )
         .await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn conformance_append_only_event_and_ledger() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_append_only_event_and_ledger(
             Arc::new(FsCompanyStore::new(&root)),
             Arc::new(FsEventLog::new(&root)),
         )
         .await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn conformance_monotonic_event_seq() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_monotonic_event_seq(Arc::new(FsEventLog::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn conformance_inbox_store() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_inbox_store(Arc::new(FsInboxStore::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn conformance_context_chunk_stamps() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_context_chunk_stamps(Arc::new(FsContextStore::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     /// The fs backend's migration path: index lines written before
@@ -912,7 +914,8 @@ mod test {
 
     #[tokio::test]
     async fn conformance_export_totality() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_export_totality(
             Arc::new(FsCompanyStore::new(&root)),
             Arc::new(FsEventLog::new(&root)),
@@ -920,7 +923,6 @@ mod test {
             Arc::new(FsContextStore::new(&root)),
         )
         .await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     fn sample_manifest() -> crate::company::CompanyManifest {
@@ -941,7 +943,8 @@ mod test {
 
     #[tokio::test]
     async fn company_store_saves_and_loads() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         let store = FsCompanyStore::new(&root);
         let id = CompanyId::new("acme");
         let record = CompanyRecord {
@@ -974,12 +977,12 @@ mod test {
                 .unwrap()
                 .is_none()
         );
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn append_ledger_grows_without_rewrite() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         let store = FsCompanyStore::new(&root);
         let id = CompanyId::new("acme");
         store
@@ -1015,12 +1018,12 @@ mod test {
         let loaded = store.load(&id).await.unwrap().unwrap();
         assert_eq!(loaded.ledger.len(), 3);
         assert_eq!(loaded.ledger[2].memo, "entry 2");
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn event_log_assigns_monotonic_seqs_and_resumes() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         let log = FsEventLog::new(&root);
         let id = CompanyId::new("acme");
 
@@ -1054,12 +1057,12 @@ mod test {
         let from_one = log.read_from(&id, EventSeq::new(1), 10).await.unwrap();
         assert_eq!(from_one.len(), 1);
         assert_eq!(from_one[0].seq, EventSeq::new(1));
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn event_log_subscribe_delivers_new_event() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         let log = FsEventLog::new(&root);
         let id = CompanyId::new("acme");
         let mut stream = log.subscribe(&id);
@@ -1083,12 +1086,12 @@ mod test {
                 chat: None
             }
         );
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn memory_store_traces_tail_and_evict() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         let mem = FsMemoryStore::new(&root);
         let id = CompanyId::new("acme");
         for i in 0..5 {
@@ -1106,12 +1109,12 @@ mod test {
             .unwrap();
         assert_eq!(removed, 4);
         assert_eq!(mem.recent_traces(&id, 10).await.unwrap().len(), 1);
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn context_store_put_peek_search() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         let ctx = FsContextStore::new(&root);
         let id = CompanyId::new("acme");
         let addr = ctx
@@ -1137,12 +1140,12 @@ mod test {
         let hits = ctx.search(&id, "brown", 5).await.unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].snippet.contains("brown"));
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn secret_store_isolates_companies() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         let secrets = FsSecretStore::new(&root);
         let a = CompanyId::new("company-a");
         let b = CompanyId::new("company-b");
@@ -1157,6 +1160,5 @@ mod test {
         );
         // Company B cannot see company A's secret.
         assert_eq!(secrets.get(&b, "github_token").await.unwrap(), None);
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 }

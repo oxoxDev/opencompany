@@ -951,77 +951,81 @@ mod test {
     use crate::store::conformance;
     use std::sync::Arc;
 
-    fn tmp_root() -> PathBuf {
-        std::env::temp_dir().join(format!("opencompany-fsops-{}", crate::ports::generate_id()))
+    fn tmp_root() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("opencompany-fsops-")
+            .tempdir()
+            .expect("tempdir")
     }
 
     #[tokio::test]
     async fn conformance_task_store() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_task_store(Arc::new(FsOps::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn conformance_user_store() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_user_store(Arc::new(FsOps::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn conformance_session_store() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_session_store(Arc::new(FsOps::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn conformance_login_code_store() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_login_code_store(Arc::new(FsOps::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn conformance_fact_store() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_fact_store(Arc::new(FsOps::new(&root))).await;
         conformance::assert_artifact_store(Arc::new(FsOps::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn conformance_usage_meter() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_usage_meter(Arc::new(FsOps::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn conformance_usage_retention() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_usage_retention(Arc::new(FsOps::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn conformance_skill_state_store() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_skill_state_store(Arc::new(FsOps::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn conformance_workspace_store() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_workspace_store(Arc::new(FsOps::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn workspace_files_land_on_disk_under_folders() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         let ops = FsOps::new(&root);
         let company = CompanyId::new("acme");
         let now = now_millis();
@@ -1067,6 +1071,5 @@ mod test {
         assert!(!tokio::fs::try_exists(&disk).await.unwrap());
 
         let _ = (FactKind::Fact, SkillSource::Company, SampleKind::Inference);
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 }
