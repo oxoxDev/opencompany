@@ -95,6 +95,11 @@ struct State {
 
 /// A per-company append-only journal backing at-most-once effects and the
 /// durable approval queue.
+///
+/// Exactly one process may write a given journal file. [`append`](Self::append)
+/// emits the record and its newline as two separate writes under an in-process
+/// lock, so a second writer on the same path can interleave between them and
+/// leave two records on one line, which then fails to parse on replay.
 pub struct RuntimeJournal {
     path: PathBuf,
     state: StdMutex<State>,
@@ -319,16 +324,24 @@ mod test {
         }
     }
 
-    fn tmp_path() -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "opencompany-journal-{}.jsonl",
-            crate::ports::generate_id()
-        ))
+    /// A private directory for one test's journal file.
+    ///
+    /// The name comes from the OS, not from [`crate::ports::generate_id`] —
+    /// minted ids are unique only within a process, so two test processes
+    /// sharing `/tmp` could otherwise land on the same journal path and
+    /// interleave their appends into an unparseable line. Dropping the
+    /// returned handle removes the directory, including after a failed assert.
+    fn tmp_dir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("opencompany-journal-")
+            .tempdir()
+            .expect("tempdir")
     }
 
     #[tokio::test]
     async fn effect_key_commits_once_and_survives_reload() {
-        let path = tmp_path();
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
         let journal = RuntimeJournal::new(&path);
 
         assert!(!journal.is_executed("cyc:0"));
@@ -344,12 +357,12 @@ mod test {
 
         let raw = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(raw.lines().filter(|l| !l.trim().is_empty()).count(), 1);
-        tokio::fs::remove_file(&path).await.ok();
     }
 
     #[tokio::test]
     async fn parked_approvals_rehydrate_and_resolve() {
-        let path = tmp_path();
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
         let journal = RuntimeJournal::new(&path);
         let id = ApprovalId::new("appr-1");
         journal
@@ -371,12 +384,12 @@ mod test {
         let after = RuntimeJournal::new(&path);
         after.load().await.unwrap();
         assert!(after.pending().is_empty());
-        tokio::fs::remove_file(&path).await.ok();
     }
 
     #[tokio::test]
     async fn expired_record_removes_parked_and_survives_reload() {
-        let path = tmp_path();
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
         let journal = RuntimeJournal::new(&path);
         let id = ApprovalId::new("appr-exp");
         journal
@@ -395,12 +408,12 @@ mod test {
 
         let raw = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(raw.contains("ApprovalExpired"));
-        tokio::fs::remove_file(&path).await.ok();
     }
 
     #[tokio::test]
     async fn amended_record_is_audit_only_and_round_trips() {
-        let path = tmp_path();
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
         let journal = RuntimeJournal::new(&path);
         let id = ApprovalId::new("appr-amend");
         journal
@@ -427,7 +440,6 @@ mod test {
         let raw = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(raw.contains("ApprovalAmended"));
         assert!(raw.contains("\"edited\":true"));
-        tokio::fs::remove_file(&path).await.ok();
     }
 
     #[test]
