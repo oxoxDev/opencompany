@@ -1279,8 +1279,11 @@ mod test {
     use crate::store::FsCompanyStore;
     use crate::{AppConfig, AppState};
 
-    fn home() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("opencompany-http-{}", crate::ports::generate_id()))
+    fn home() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("opencompany-http-")
+            .tempdir()
+            .expect("tempdir")
     }
 
     fn manifest() -> CompanyManifest {
@@ -1325,7 +1328,8 @@ mod test {
 
     #[tokio::test]
     async fn chat_returns_echoed_response() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
@@ -1347,7 +1351,6 @@ mod test {
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["responses"][0]["text"], "You said: hi");
         assert_eq!(value["responses"][0]["channel"], "operator");
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// An actionable operator chat opens exactly one `backlog` task card on the
@@ -1356,7 +1359,8 @@ mod test {
     /// the handler-level wiring, not model behaviour.
     #[tokio::test]
     async fn actionable_chat_opens_a_backlog_task_card() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let id = CompanyId::new("acme");
         let runtime = state.registry().get(&id).unwrap();
@@ -1393,8 +1397,6 @@ mod test {
         assert_eq!(r.status(), StatusCode::OK);
         let tasks = runtime.tasks().list(&id).await.unwrap();
         assert_eq!(tasks.len(), 1, "a greeting must not open a card");
-
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// End-to-end proof of the WS4 wire: with a [`HarnessBrain`] as the runtime's
@@ -1410,7 +1412,8 @@ mod test {
         use crate::ports::CompanyStore;
         use crate::store::{FsContextStore, FsOps};
 
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let id = CompanyId::new("acme");
         let manifest: CompanyManifest = toml::from_str(
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
@@ -1505,7 +1508,6 @@ mod test {
         );
         assert_ne!(text, "You said: hi", "still routing through the echo brain");
         assert_eq!(value["responses"][0]["channel"], "operator");
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// A manifest with two agents and one desk (`studio`, led by `ceo`), used by
@@ -1572,7 +1574,8 @@ mod test {
     /// both an effective member and a removable overlay member.
     #[tokio::test]
     async fn add_desk_member_persists_and_shows_in_list() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
@@ -1598,14 +1601,14 @@ mod test {
         assert_eq!(desks[0]["members"][0], "ceo");
         assert_eq!(desks[0]["members"][1], "eng");
         assert_eq!(desks[0]["overlayMembers"][0], "eng");
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Removing an overlay member drops it from the merged view; a manifest
     /// member cannot be removed (409), and an unknown overlay member is a 404.
     #[tokio::test]
     async fn remove_desk_member_drops_overlay_and_guards_manifest() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
@@ -1672,7 +1675,6 @@ mod test {
             .await
             .unwrap();
         assert_eq!(gone.status(), StatusCode::NOT_FOUND);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Creating a desk persists it as an overlay and surfaces it in `list_desks`
@@ -1680,7 +1682,8 @@ mod test {
     /// first. The manifest is never rewritten.
     #[tokio::test]
     async fn create_desk_persists_and_appears_in_list() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
@@ -1717,14 +1720,14 @@ mod test {
         assert_eq!(arr[0]["id"], "studio"); // manifest desk first
         assert_eq!(arr[1]["id"], "growth_desk");
         assert_eq!(arr[1]["overlayCreated"], true);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Create-desk validation: an empty name is 400, an id colliding with a
     /// manifest desk is 409, and an unknown member is 400.
     #[tokio::test]
     async fn create_desk_validates_name_id_and_members() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
@@ -1753,14 +1756,14 @@ mod test {
                 .unwrap();
             assert_eq!(response.status(), want, "body {body}");
         }
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Deleting an operator-created desk drops it (and any of its overlay
     /// members); a manifest desk cannot be deleted (409); an unknown id is 404.
     #[tokio::test]
     async fn delete_desk_removes_overlay_and_guards_manifest() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
@@ -1827,14 +1830,14 @@ mod test {
             .await
             .unwrap();
         assert_eq!(gone.status(), StatusCode::NOT_FOUND);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Add-member validation: an unknown desk is 404, an unknown teammate is
     /// 400, and a teammate already on the desk is 409.
     #[tokio::test]
     async fn add_desk_member_validates_desk_agent_and_duplicates() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
@@ -1873,7 +1876,6 @@ mod test {
                 .unwrap();
             assert_eq!(response.status(), want, "{uri} {body}");
         }
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Seeds `eng` as an overlay member of `studio` so a desk has two members to
@@ -1920,7 +1922,8 @@ mod test {
     /// as the new `members` order (the hierarchy), and an empty body resets it.
     #[tokio::test]
     async fn set_desk_order_reorders_and_resets() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
@@ -1950,7 +1953,6 @@ mod test {
         let desks = get_desks(&app, &cookie).await;
         assert_eq!(desks[0]["members"][0], "ceo");
         assert_eq!(desks[0]["members"][1], "eng");
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// An operator-created (overlay) desk can be reordered too — the set-order
@@ -1958,7 +1960,8 @@ mod test {
     /// not just manifest group chats. A manifest-only check used to 404 here (#133).
     #[tokio::test]
     async fn set_desk_order_reorders_an_overlay_created_desk() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
@@ -2001,14 +2004,14 @@ mod test {
             .expect("overlay desk present");
         assert_eq!(growth["members"][0], "eng");
         assert_eq!(growth["members"][1], "ceo");
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Set-order validation: an unknown desk is 404, an unknown member id is 400,
     /// and a duplicate id is 400.
     #[tokio::test]
     async fn set_desk_order_validates_desk_members_and_duplicates() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
@@ -2041,14 +2044,14 @@ mod test {
             .await,
             StatusCode::BAD_REQUEST
         );
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Removing an overlay member prunes it from the desk's order overlay, so the
     /// remaining members keep the operator's relative order without a stale id.
     #[tokio::test]
     async fn remove_desk_member_prunes_the_order_entry() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
@@ -2084,14 +2087,14 @@ mod test {
         let desks = get_desks(&app, &cookie).await;
         assert_eq!(desks[0]["members"].as_array().unwrap().len(), 1);
         assert_eq!(desks[0]["members"][0], "ceo");
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn desks_route_returns_the_company_desks() {
         // The default test manifest defines no group chats, so the route answers
         // 200 with an empty list (the console then falls back to its defaults).
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
@@ -2109,7 +2112,6 @@ mod test {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value.as_array().unwrap().len(), 0);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Issue #65: the console's default thread addresses sends with
@@ -2119,7 +2121,8 @@ mod test {
     /// the REST route with no `?desk=` selector (the console's default read).
     #[tokio::test]
     async fn chat_history_route_reunifies_general_and_main_transcripts() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
 
@@ -2179,7 +2182,6 @@ mod test {
             texts.contains(&"reply under main"),
             "missing main-id reply: {texts:?}"
         );
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Regression: a reply's tool-call timeline must survive a history reload —
@@ -2188,7 +2190,8 @@ mod test {
     /// `AgentReply` and projected back through the DTO.
     #[tokio::test]
     async fn chat_history_route_rehydrates_reply_steps() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
 
@@ -2239,7 +2242,6 @@ mod test {
         );
         assert_eq!(reply["steps"][0]["status"], "ok");
         assert_eq!(reply["steps"][0]["elapsedMs"], 9);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// A desk id with no `?desk=` selector defaults to the operator/General
@@ -2247,7 +2249,8 @@ mod test {
     /// nor the General desk reads back empty rather than erroring.
     #[tokio::test]
     async fn chat_history_route_unknown_desk_is_empty_not_an_error() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
@@ -2265,12 +2268,12 @@ mod test {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value.as_array().unwrap().len(), 0);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn chat_by_id_matches_registered_company() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
@@ -2287,12 +2290,12 @@ mod test {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn unknown_company_is_404() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
@@ -2313,12 +2316,12 @@ mod test {
         // unauthenticated caller would let anyone enumerate which companies a
         // host runs. A user of `ghost` gets a real 404.
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn paused_company_chat_is_409() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "paused").await;
         let app = router(state);
 
@@ -2335,12 +2338,12 @@ mod test {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn list_and_status_routes_report_the_company() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
@@ -2375,12 +2378,12 @@ mod test {
         let bytes = to_bytes(status.into_body(), usize::MAX).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["id"], "acme");
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn approvals_list_is_empty_before_any_park() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
@@ -2398,12 +2401,12 @@ mod test {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value.as_array().unwrap().len(), 0);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn amended_approve_resolves_and_returns_responses() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
@@ -2428,12 +2431,12 @@ mod test {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(value["responses"].is_array());
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn deny_with_amended_payload_is_400() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
@@ -2455,7 +2458,6 @@ mod test {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["code"], "invalid_request");
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
@@ -2463,7 +2465,8 @@ mod test {
         // Replaces `operator_token_guards_routes`. That token could never be
         // set, so the test only ever proved the guard worked in a state no
         // deployment could reach; every real host served this route to anyone.
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = build_state(&home, "running", AppConfig::default()).await;
 
         // No credential at all: closed.
@@ -2506,7 +2509,6 @@ mod test {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     // ---- issue #66: the operator attention SSE feed ----
@@ -2781,7 +2783,8 @@ mod test {
 
     #[tokio::test]
     async fn events_route_streams_text_event_stream() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
@@ -2805,12 +2808,12 @@ mod test {
                 .and_then(|v| v.to_str().ok()),
             Some("text/event-stream")
         );
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn events_route_requires_a_session() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
@@ -2824,6 +2827,5 @@ mod test {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 }

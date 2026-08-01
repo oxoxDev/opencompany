@@ -15,8 +15,11 @@ use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
 
-pub(crate) fn home() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("opencompany-gql-{}", crate::ports::generate_id()))
+pub(crate) fn home() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("opencompany-gql-")
+        .tempdir()
+        .expect("tempdir")
 }
 
 pub(crate) fn manifest() -> CompanyManifest {
@@ -74,7 +77,8 @@ pub(crate) async fn query(app: axum::Router, body: &str) -> serde_json::Value {
 
 #[tokio::test]
 async fn companies_query_lists_the_company() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let app = router(state_with_company(&home).await);
     let value = query(
         app,
@@ -84,12 +88,12 @@ async fn companies_query_lists_the_company() {
     assert_eq!(value["data"]["companies"][0]["id"], "acme");
     assert_eq!(value["data"]["companies"][0]["name"], "Acme");
     assert_eq!(value["data"]["companies"][0]["lifecycle"], "running");
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn company_query_by_id_resolves() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let app = router(state_with_company(&home).await);
     let value = query(
         app,
@@ -97,30 +101,30 @@ async fn company_query_by_id_resolves() {
     )
     .await;
     assert_eq!(value["data"]["company"]["id"], "acme");
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn company_query_without_id_resolves_the_sole_company() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let app = router(state_with_company(&home).await);
     let value = query(app, r#"{"query":"{ company { id } }"}"#).await;
     assert_eq!(value["data"]["company"]["id"], "acme");
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn unknown_company_query_is_null() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let app = router(state_with_company(&home).await);
     let value = query(app, r#"{"query":"{ company(id: \"ghost\") { id } }"}"#).await;
     assert!(value["data"]["company"].is_null());
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn approvals_field_is_empty_before_any_park() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let app = router(state_with_company(&home).await);
     let value = query(
         app,
@@ -134,7 +138,6 @@ async fn approvals_field_is_empty_before_any_park() {
             .len(),
         0
     );
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -198,7 +201,8 @@ async fn state_with_rich_company(home: &std::path::Path) -> AppState {
 
 #[tokio::test]
 async fn team_lists_manifest_teammates() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let app = router(state_with_rich_company(&home).await);
     let value = query(
         app,
@@ -210,12 +214,12 @@ async fn team_lists_manifest_teammates() {
     assert_eq!(team[0]["id"], "maya");
     assert_eq!(team[0]["role"], "Marketing Lead");
     assert!(team[0]["name"].is_null());
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn chats_list_the_manifest_desks() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let app = router(state_with_rich_company(&home).await);
     let value = query(
         app,
@@ -226,7 +230,6 @@ async fn chats_list_the_manifest_desks() {
     assert_eq!(chats.len(), 1);
     assert_eq!(chats[0]["id"], "general");
     assert_eq!(chats[0]["members"][0], "maya");
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// Issue #65: `AgentReply`s answering the console's default thread are
@@ -236,7 +239,8 @@ async fn chats_list_the_manifest_desks() {
 /// transcript is never split by which id a given turn happened to use.
 #[tokio::test]
 async fn chat_history_finds_agent_replies_under_general_and_main() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_rich_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
     runtime
@@ -285,12 +289,12 @@ async fn chat_history_finds_agent_replies_under_general_and_main() {
         texts.contains(&"console default-thread id"),
         "missing: {texts:?}"
     );
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn connections_reflect_manifest_intent_disconnected() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let app = router(state_with_rich_company(&home).await);
     let value = query(
         app,
@@ -302,13 +306,13 @@ async fn connections_reflect_manifest_intent_disconnected() {
     assert_eq!(conns[0]["provider"], "slack");
     assert_eq!(conns[0]["connected"], false);
     assert_eq!(conns[0]["reason"], "Post updates.");
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn tasks_page_reflects_upserts_and_column_filter() {
     use crate::ports::tasks::TaskRecord;
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_rich_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
     runtime
@@ -345,13 +349,13 @@ async fn tasks_page_reflects_upserts_and_column_filter() {
     )
     .await;
     assert_eq!(none["data"]["company"]["tasks"]["total"], 0);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn memory_page_reflects_upserts() {
     use crate::ports::facts::{FactKind, FactRecord};
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_rich_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
     runtime
@@ -386,12 +390,12 @@ async fn memory_page_reflects_upserts() {
             .unwrap()
             .starts_with("2023-")
     );
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn empty_surfaces_resolve_to_empty_lists() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let app = router(state_with_rich_company(&home).await);
     let value = query(
         app,
@@ -403,12 +407,12 @@ async fn empty_surfaces_resolve_to_empty_lists() {
     assert_eq!(company["inboxes"].as_array().unwrap().len(), 0);
     assert_eq!(company["skills"].as_array().unwrap().len(), 0);
     assert_eq!(company["workflows"].as_array().unwrap().len(), 0);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn smtp_status_is_unconfigured_without_credentials() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let app = router(state_with_rich_company(&home).await);
     let value = query(
         app,
@@ -418,12 +422,12 @@ async fn smtp_status_is_unconfigured_without_credentials() {
     assert_eq!(value["data"]["company"]["smtp"]["configured"], false);
     assert_eq!(value["data"]["company"]["smtp"]["host"], "");
     assert!(value["data"]["company"]["domain"].is_null());
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn usage_is_empty_without_samples() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let app = router(state_with_rich_company(&home).await);
     let value = query(
         app,
@@ -435,13 +439,13 @@ async fn usage_is_empty_without_samples() {
     assert_eq!(usage["totals"]["connections"], 0);
     // D7 still yields a zero-filled 7-day series.
     assert_eq!(usage["series"].as_array().unwrap().len(), 7);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn usage_reflects_recorded_samples() {
     use crate::ports::usage::{SampleKind, UsageSample};
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_rich_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
     let now = super::now_millis();
@@ -473,13 +477,13 @@ async fn usage_reflects_recorded_samples() {
     assert_eq!(usage["totals"]["tokens"], 140.0);
     assert_eq!(usage["totals"]["costUsd"], 0.5);
     assert_eq!(usage["byAgent"][0]["tokens"], 140.0);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn finances_fold_the_ledger() {
     use crate::ports::types::LedgerEntry;
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_rich_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
     let now = super::now_millis();
@@ -520,7 +524,6 @@ async fn finances_fold_the_ledger() {
     assert_eq!(fin["revenueUsd"], 10.0);
     assert_eq!(fin["netUsd"], 8.0);
     assert_eq!(fin["transactions"].as_array().unwrap().len(), 2);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// On the serve path a company has an on-disk source dir; `Company.skills`,
@@ -528,7 +531,8 @@ async fn finances_fold_the_ledger() {
 /// from it (and the repo-level `skills/` root) rather than the empty bundle.
 #[tokio::test]
 async fn skills_and_workflows_resolve_from_source_dir() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let id = CompanyId::new("acme");
 
     // A company source directory with a committed skill and workflow.
@@ -613,8 +617,6 @@ async fn skills_and_workflows_resolve_from_source_dir() {
     // skillRegistry reads the repo-level shared library.
     let registry = value["data"]["skillRegistry"].as_array().unwrap();
     assert!(registry.iter().any(|s| s["id"] == "web-research"));
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// Issue #168: a hosted tenant has no source directory, so its workflows live
@@ -623,7 +625,8 @@ async fn skills_and_workflows_resolve_from_source_dir() {
 /// must return the full graph.
 #[tokio::test]
 async fn workflows_resolve_from_the_record_overlay_with_no_source_dir() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let id = CompanyId::new("acme");
 
     let manifest: CompanyManifest = toml::from_str(
@@ -682,8 +685,6 @@ async fn workflows_resolve_from_the_record_overlay_with_no_source_dir() {
     assert_eq!(company["workflow"]["name"], "Hosted Flow");
     assert_eq!(company["workflow"]["nodes"].as_array().unwrap().len(), 2);
     assert_eq!(company["workflow"]["edges"].as_array().unwrap().len(), 1);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// Issue #168: a runtime-authored workflow with an **empty** manifest
@@ -696,7 +697,8 @@ async fn workflows_resolve_from_the_record_overlay_with_no_source_dir() {
 /// Also pins REST/GraphQL agreement: both surfaces must report the same id set.
 #[tokio::test]
 async fn workflows_summary_lists_an_overlay_workflow_with_no_enabled_entry() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let id = CompanyId::new("acme");
 
     // Nothing enabled in the manifest — the graph body is the only evidence.
@@ -781,8 +783,6 @@ async fn workflows_summary_lists_an_overlay_workflow_with_no_enabled_entry() {
         .map(|row| row["id"].as_str().unwrap())
         .collect();
     assert_eq!(rest_ids, gql_ids, "REST and GraphQL disagree on the id set");
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// The committed SDL snapshot freezes the read contract. Regenerate with
