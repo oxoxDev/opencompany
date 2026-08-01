@@ -181,6 +181,12 @@ impl TenantComposio {
 /// Whether a toolkit is admitted by an allowlist. An **empty** allowlist defers
 /// to the backend's server-enforced allowlist (open mode) and admits every
 /// toolkit; a non-empty allowlist admits only its members (case-insensitive).
+///
+/// Every call site is inside the `composio`-gated [`live`] module, so this is
+/// genuinely dead in an `openhuman`-without-`composio` build and is gated to
+/// match. A blanket `#[allow(dead_code)]` would say the same thing to the
+/// compiler while also hiding the day a real call site disappears.
+#[cfg(feature = "composio")]
 fn toolkit_allowed(allowlist: &[String], toolkit: &str) -> bool {
     allowlist.is_empty()
         || allowlist
@@ -190,6 +196,10 @@ fn toolkit_allowed(allowlist: &[String], toolkit: &str) -> bool {
 
 /// The toolkit a Composio action slug belongs to: the segment before the first
 /// `_`, lowercased (`GMAIL_SEND_EMAIL` → `gmail`). Empty slug → empty string.
+///
+/// Gated for the same reason as [`toolkit_allowed`]: both call sites live in
+/// the `composio`-gated [`live`] module.
+#[cfg(feature = "composio")]
 fn slug_toolkit(slug: &str) -> String {
     slug.split('_').next().unwrap_or("").to_ascii_lowercase()
 }
@@ -863,6 +873,10 @@ mod live {
 mod tests {
     use super::*;
 
+    // The three helper tests below follow their subjects behind the `composio`
+    // feature: `toolkit_allowed` / `slug_toolkit` do not exist in an
+    // `openhuman`-without-`composio` build.
+    #[cfg(feature = "composio")]
     #[test]
     fn toolkit_allowed_empty_defers_to_backend() {
         // Empty allowlist = open mode: every toolkit admitted.
@@ -870,6 +884,7 @@ mod tests {
         assert!(toolkit_allowed(&[], "anything"));
     }
 
+    #[cfg(feature = "composio")]
     #[test]
     fn toolkit_allowed_non_empty_narrows_case_insensitively() {
         let allow = vec!["gmail".to_string(), "github".to_string()];
@@ -879,6 +894,7 @@ mod tests {
         assert!(!toolkit_allowed(&allow, "slack"));
     }
 
+    #[cfg(feature = "composio")]
     #[test]
     fn slug_toolkit_extracts_lowercased_prefix() {
         assert_eq!(slug_toolkit("GMAIL_SEND_EMAIL"), "gmail");
