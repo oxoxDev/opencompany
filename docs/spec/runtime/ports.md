@@ -342,11 +342,6 @@ column: the console's `+` button lives there alone and `POST …/tasks` defaults
 to it (issue #206), so an operator cannot create a card straight into
 `in_progress` or a terminal column.
 
-`assignee` is **linked, not merely read**: when a card enters `in_progress` the
-dispatch resolves it (desk → roster teammate, manifest or overlay →
-orchestrator) and writes the resolved agent back onto the card before the turn
-runs, so the board always names whoever is actually working it.
-
 ### ArtifactStore
 
 Versioned task outputs and the human-edit diff (`src/ports/artifacts.rs`,

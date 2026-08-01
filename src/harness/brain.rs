@@ -108,40 +108,6 @@ impl HarnessBrain {
 
         let responder = self.task_responder(&card.assignee);
 
-        // Issue #206: **link** the working agent to the card, not just route to
-        // it. Before this, a card with a blank or unrecognized assignee
-        // dispatched to the orchestrator and kept its old value, so the board
-        // showed `assignee=""` (or "Shane") while the timeline read "reply from
-        // ceo" — the one question the card exists to answer, unanswerable.
-        //
-        // Written **before** the turn rather than folded into the persist at
-        // the tail of this function, because a dispatch is a live agent call:
-        // the board must name who is working the card *while* they work it, not
-        // once they finish. `card.assignee` is mutated either way, so the tail
-        // persist is the backstop if this early write fails — which is why it
-        // is best-effort. It also cannot recurse: this is the raw `TaskStore`,
-        // not `CompanyRuntime::upsert_task`, so it does not touch the
-        // in_progress dispatch edge (and the card is already in `in_progress`
-        // here regardless).
-        if card.assignee != responder {
-            let previous = std::mem::replace(&mut card.assignee, responder.clone());
-            card.updated_at_millis = now_millis();
-            tracing::debug!(
-                task_id = %card.id,
-                previous = %previous,
-                assignee = %responder,
-                "linking the working agent to the card"
-            );
-            if let Err(err) = tasks.upsert(&self.record.id, &card).await {
-                tracing::warn!(
-                    task_id = %card.id,
-                    error = %err,
-                    "could not link the assignee before dispatch; \
-                     it lands with the run's own write"
-                );
-            }
-        }
-
         // Register the run so an operator can steer it mid-flight. The guard's
         // RAII `Drop` deregisters on every exit path (success, error, redirect
         // exhaustion), so a crashed turn never leaves a ghost row in the strip.
@@ -458,39 +424,14 @@ impl HarnessBrain {
         Ok(())
     }
 
-    /// Resolves which roster agent runs a task from its `assignee`.
-    ///
-    /// Resolution mirrors [`Self::responder_for`], the chat path, because a
-    /// card's `assignee` is the same kind of label an operator types into a
-    /// chat address — "a plain desk/teammate label" (`server::ops::tasks`):
-    ///
-    /// 1. a **desk** is worked by that desk's lead;
-    /// 2. a **roster teammate** — manifest agent *or* operator-added overlay
-    ///    teammate, via [`CompanyRecord::is_roster_agent`] — works it directly;
-    /// 3. anything else (blank, or a name like "Shane" that is on no roster)
-    ///    falls back to the orchestrator.
-    ///
-    /// Issue #206 widened steps 1–2. The old lookup matched
-    /// `manifest.agents` alone, so a desk id or an operator-added teammate
-    /// silently fell through to step 3 — and now that [`Self::run_task`] writes
-    /// the resolution back onto the card, resolving too narrowly would not just
-    /// route the turn elsewhere, it would *overwrite* a perfectly valid
-    /// assignee with the orchestrator's id. The write-back and the resolution
-    /// have to be correct together.
+    /// Resolves which roster agent runs a task: its `assignee` when that names a
+    /// roster member, else the brain's default responder.
     fn task_responder(&self, assignee: &str) -> String {
-        let assignee = assignee.trim();
-        if assignee.is_empty() {
-            return self.responder.clone();
+        if !assignee.is_empty() && self.record.manifest.agents.iter().any(|a| a.id == assignee) {
+            assignee.to_string()
+        } else {
+            self.responder.clone()
         }
-        // Desks first, so a desk whose id happens to match an agent id keeps
-        // routing as a desk — the same precedence `responder_for` uses.
-        if let Some(lead) = self.desk_lead(assignee) {
-            return lead;
-        }
-        if self.record.is_roster_agent(assignee) {
-            return assignee.to_string();
-        }
-        self.responder.clone()
     }
 
     /// Resolves which agent answers an operator message.
@@ -1199,126 +1140,6 @@ description = "Builds it."
             origin_chat_id: None,
             parent_task_id: None,
         }
-    }
-
-    // ── Issue #206: the working agent is resolved AND linked ─────────────
-
-    /// `task_responder` resolves a card's `assignee` the way the chat path
-    /// resolves an address: desk → roster teammate (manifest **or** overlay) →
-    /// orchestrator. The overlay and desk arms are what #206 widened; before
-    /// it, only a manifest agent matched, so an operator-added teammate or a
-    /// desk id fell through to the orchestrator.
-    #[test]
-    fn task_responder_resolves_desks_and_the_full_roster() {
-        use crate::ports::types::{OverlayAgent, OverlayDesk};
-
-        let dir = tempfile::tempdir().unwrap();
-        let (mut brain, _tasks) = brain_with_tasks(dir.path());
-        brain.record.overlay_agents.push(OverlayAgent {
-            id: "nova".into(),
-            name: "Nova".into(),
-            role: "Growth".into(),
-            description: None,
-        });
-        brain.record.overlay_desks.push(OverlayDesk {
-            id: "strategy".into(),
-            name: "Strategy desk".into(),
-            description: None,
-            // First member is the desk's lead.
-            members: vec!["engineer".into()],
-        });
-
-        // A manifest agent works its own card.
-        assert_eq!(brain.task_responder("engineer"), "engineer");
-        // So does an operator-added overlay teammate.
-        assert_eq!(brain.task_responder("nova"), "nova");
-        // A desk is worked by its lead.
-        assert_eq!(brain.task_responder("strategy"), "engineer");
-        // Blank, whitespace, and a name on no roster all reach the orchestrator.
-        assert_eq!(brain.task_responder(""), "ceo");
-        assert_eq!(brain.task_responder("   "), "ceo");
-        assert_eq!(brain.task_responder("Shane"), "ceo");
-    }
-
-    /// The #206 regression: a card dispatched with **no** assignee ran on the
-    /// orchestrator but kept `assignee=""`, so the board never showed who was
-    /// working it while the timeline read "reply from ceo".
-    #[tokio::test]
-    async fn dispatch_links_the_resolved_agent_to_a_blank_assignee() {
-        let dir = tempfile::tempdir().unwrap();
-        let (brain, tasks) = brain_with_tasks(dir.path());
-        tasks
-            .upsert(&CompanyId::new("acme"), &card("t-blank", ""))
-            .await
-            .unwrap();
-
-        brain
-            .run_cycle(
-                request(vec![CompanyEvent::TaskDispatched {
-                    task_id: "t-blank".into(),
-                }]),
-                &NoopHost,
-            )
-            .await
-            .expect("cycle runs");
-
-        let linked = only_card(&tasks).await;
-        assert_eq!(
-            linked.assignee, "ceo",
-            "the agent that ran the card must be linked to it"
-        );
-        // And it is the same agent the note credits — one answer, not two.
-        assert!(linked.note.expect("note").contains("[ceo]"));
-    }
-
-    /// An assignee on no roster ("Shane") silently dispatched to the
-    /// orchestrator while the card kept the unusable name. The card must end up
-    /// naming whoever actually worked it.
-    #[tokio::test]
-    async fn dispatch_relinks_an_assignee_that_is_on_no_roster() {
-        let dir = tempfile::tempdir().unwrap();
-        let (brain, tasks) = brain_with_tasks(dir.path());
-        tasks
-            .upsert(&CompanyId::new("acme"), &card("t-shane", "Shane"))
-            .await
-            .unwrap();
-
-        brain
-            .run_cycle(
-                request(vec![CompanyEvent::TaskDispatched {
-                    task_id: "t-shane".into(),
-                }]),
-                &NoopHost,
-            )
-            .await
-            .expect("cycle runs");
-
-        assert_eq!(only_card(&tasks).await.assignee, "ceo");
-    }
-
-    /// The other half of the contract: a card whose assignee IS a valid roster
-    /// agent keeps it. The write-back must never overwrite a good assignee —
-    /// which is exactly why the resolution had to widen alongside it.
-    #[tokio::test]
-    async fn dispatch_leaves_a_valid_assignee_alone() {
-        let dir = tempfile::tempdir().unwrap();
-        let (brain, tasks) = brain_with_tasks(dir.path());
-        tasks
-            .upsert(&CompanyId::new("acme"), &card("t-eng", "engineer"))
-            .await
-            .unwrap();
-
-        brain
-            .run_cycle(
-                request(vec![CompanyEvent::TaskDispatched {
-                    task_id: "t-eng".into(),
-                }]),
-                &NoopHost,
-            )
-            .await
-            .expect("cycle runs");
-
-        assert_eq!(only_card(&tasks).await.assignee, "engineer");
     }
 
     // ── Issue #151 §3.2: a finished card answers where it was asked ──────
