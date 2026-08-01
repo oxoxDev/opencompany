@@ -36,7 +36,9 @@ use crate::openhuman::{OpenHumanChannelAdapter, OpenHumanToolProvider};
 use crate::policy::ManifestApprovalGate;
 #[cfg(feature = "openhuman")]
 use crate::ports::WorkflowRunner;
-use crate::ports::types::{CompanyId, CompanyRecord, SecretValue, TemplateProvenance};
+use crate::ports::types::{
+    CompanyId, CompanyRecord, OverlayWorkflow, SecretValue, TemplateProvenance,
+};
 use crate::ports::{
     AgentEconomy, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore, EventLog,
     FactStore, InboxStore, LoginCodeStore, MemoryStore, SecretStore, SessionStore, SkillStateStore,
@@ -137,6 +139,51 @@ fn dedup(grants: Vec<String>) -> Vec<String> {
         .into_iter()
         .filter(|grant| seen.insert(grant.clone()))
         .collect()
+}
+
+/// Issue #208: the rebuilt record's `[workflows].enabled` list — the seed
+/// manifest's ids first, in seed order, then every runtime-authored overlay
+/// workflow id not already among them, in overlay order.
+///
+/// **Why the persisted record's own `enabled` list is deliberately not an
+/// input.** `create_company_workflow` (the shared core behind the console's
+/// `POST …/workflows` route and the orchestrator's `create_workflow` tool)
+/// writes the graph body into `overlay_workflows` and pushes the id onto
+/// `[workflows].enabled` in **one** store save, so overlay presence *is* the
+/// runtime-enablement invariant — the overlay body is the durable half of a
+/// write that always carried both. Deriving from the bodies rather than from
+/// the old `enabled` list buys two things the old list cannot:
+///
+/// * **self-healing.** Every record written during the bug era has a surviving
+///   overlay body whose enabled id a past restart already wiped. Deriving from
+///   bodies re-enables those on the next boot with no migration.
+/// * **no zombies.** An `enabled` id whose body no longer exists (a seed entry
+///   the operator deleted from `company.toml`, or a graph removed at runtime)
+///   is dropped instead of being carried forward forever with nothing to run.
+///
+/// Seed-removed ids are dropped on purpose: the version-controlled
+/// `company.toml` stays authoritative for seed-authored entries, so deleting one
+/// there takes effect on the next boot exactly as an operator expects.
+///
+/// This is the **only** manifest field a rebuild merges. Every other field is
+/// seed-authoritative, and for two of them that is a security property rather
+/// than a convention: `[tools]` and `[policy]` must be seed-wins, because a
+/// record-wins merge would let a runtime write **outlive a seed rollback** —
+/// privilege persisting after the operator revoked it in version control.
+fn merge_enabled_workflows(seed_enabled: &[String], overlays: &[OverlayWorkflow]) -> Vec<String> {
+    let mut merged: Vec<String> = Vec::with_capacity(seed_enabled.len() + overlays.len());
+    let mut seen = std::collections::HashSet::new();
+    for id in seed_enabled {
+        if seen.insert(id.clone()) {
+            merged.push(id.clone());
+        }
+    }
+    for overlay in overlays {
+        if seen.insert(overlay.id.clone()) {
+            merged.push(overlay.id.clone());
+        }
+    }
+    merged
 }
 
 /// Builds one company's [`CompanyRuntime`] over a filesystem home.
@@ -1736,6 +1783,54 @@ mod test {
 
     fn parse(toml_src: &str) -> CompanyManifest {
         toml::from_str(toml_src).expect("valid manifest")
+    }
+
+    /// A bodiless overlay stub — `merge_enabled_workflows` only reads the id.
+    fn overlay(id: &str) -> OverlayWorkflow {
+        OverlayWorkflow {
+            id: id.to_string(),
+            toml: String::new(),
+        }
+    }
+
+    #[test]
+    fn merge_enabled_appends_overlay_only_ids() {
+        let merged = merge_enabled_workflows(
+            &["seed_one".to_string()],
+            &[overlay("console_made"), overlay("also_console")],
+        );
+        assert_eq!(merged, vec!["seed_one", "console_made", "also_console"]);
+    }
+
+    #[test]
+    fn merge_enabled_dedupes_at_the_seed_position() {
+        // `shared` is in both lists: it keeps its seed slot (first), and the
+        // overlay does not append a second copy at the end.
+        let merged = merge_enabled_workflows(
+            &["shared".to_string(), "seed_only".to_string()],
+            &[overlay("shared"), overlay("overlay_only")],
+        );
+        assert_eq!(merged, vec!["shared", "seed_only", "overlay_only"]);
+    }
+
+    #[test]
+    fn merge_enabled_first_boot_leaves_seed_unchanged() {
+        let seed = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(merge_enabled_workflows(&seed, &[]), seed);
+    }
+
+    #[test]
+    fn merge_enabled_preserves_order_and_dedupes_within_each_list() {
+        let merged = merge_enabled_workflows(
+            &["b".to_string(), "a".to_string(), "b".to_string()],
+            &[overlay("z"), overlay("a"), overlay("z")],
+        );
+        assert_eq!(merged, vec!["b", "a", "z"]);
+    }
+
+    #[test]
+    fn merge_enabled_of_nothing_is_empty() {
+        assert!(merge_enabled_workflows(&[], &[]).is_empty());
     }
 
     #[test]
