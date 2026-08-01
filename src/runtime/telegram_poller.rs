@@ -295,14 +295,16 @@ mod tests {
 
     use crate::company::CompanyManifest;
     use crate::company::telegram::RecordingTelegramApi;
-    use crate::ports::generate_id;
     use crate::ports::types::SecretValue;
     use crate::runtime::RuntimeBuilder;
 
     const TOKEN: &str = "7654321:AAExampleBotTokenNeverLeaks";
 
-    fn tmp_home() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("opencompany-tgpoll-{}", generate_id()))
+    fn tmp_home() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("opencompany-tgpoll-")
+            .tempdir()
+            .expect("tempdir")
     }
 
     fn manifest() -> CompanyManifest {
@@ -356,7 +358,8 @@ mod tests {
     /// public URL, no `setWebhook` — is enough to receive a DM and answer it.
     #[tokio::test]
     async fn polls_updates_and_replies_without_any_webhook() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let runtime = company(&home).await;
         store_token(&runtime, TOKEN).await;
 
@@ -377,8 +380,6 @@ mod tests {
         // A second tick carries the ack forward even with nothing to fetch.
         assert_eq!(poller.tick().await.unwrap(), PollOutcome::Polled(0));
         assert_eq!(api.poll_offsets(), vec![None, Some(42)]);
-
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Issue #203's broken state: a webhook is registered against a URL Telegram
@@ -386,7 +387,8 @@ mod tests {
     /// poller must clear it and take over rather than 409-loop.
     #[tokio::test]
     async fn clears_an_unreachable_webhook_and_takes_over_inbound() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let runtime = company(&home).await;
         store_token(&runtime, TOKEN).await;
 
@@ -399,8 +401,6 @@ mod tests {
         assert_eq!(poller.tick().await.unwrap(), PollOutcome::Polled(1));
         assert_eq!(api.delete_webhook_calls(), 1, "stale webhook was cleared");
         assert_eq!(api.sent().len(), 1, "the parked DM got answered");
-
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// On a host Telegram *can* reach, a registered webhook is a deliberate
@@ -408,7 +408,8 @@ mod tests {
     /// updates — and must re-check, so unregistering resumes polling.
     #[tokio::test]
     async fn stands_by_for_a_webhook_on_a_publicly_reachable_host() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let runtime = company(&home).await;
         store_token(&runtime, TOKEN).await;
 
@@ -426,15 +427,14 @@ mod tests {
         api.delete_webhook(TOKEN).await.unwrap();
         assert_eq!(poller.tick().await.unwrap(), PollOutcome::Polled(1));
         assert_eq!(api.sent().len(), 1);
-
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// No token stored is idle, not an error — and a token pasted later is
     /// picked up on the very next tick, with no restart.
     #[tokio::test]
     async fn idles_without_a_token_then_picks_one_up_live() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let runtime = company(&home).await;
 
         let api = Arc::new(RecordingTelegramApi::new());
@@ -452,15 +452,14 @@ mod tests {
         store_token(&runtime, "").await;
         assert_eq!(poller.tick().await.unwrap(), PollOutcome::Idle);
         assert_eq!(poller.offset, None);
-
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Scale-to-zero: a paused company polls nothing. Updates wait on
     /// Telegram's side and arrive on the first tick after wake.
     #[tokio::test]
     async fn skips_while_the_company_is_not_running() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let runtime = company(&home).await;
         store_token(&runtime, TOKEN).await;
         let mut record = runtime.store.load(runtime.id()).await.unwrap().unwrap();
@@ -473,15 +472,14 @@ mod tests {
 
         assert_eq!(poller.tick().await.unwrap(), PollOutcome::Idle);
         assert!(api.poll_offsets().is_empty());
-
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// A poll failure must never echo the bot token, and must re-arm the
     /// handshake so a mid-flight webhook registration is noticed.
     #[tokio::test]
     async fn poll_errors_are_scrubbed_and_rearm_the_handshake() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let runtime = company(&home).await;
         store_token(&runtime, TOKEN).await;
 
@@ -499,15 +497,14 @@ mod tests {
 
         // Re-handshaking resolves it: the webhook owns inbound, so stand by.
         assert_eq!(poller.tick().await.unwrap(), PollOutcome::Idle);
-
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Changing the bot token discards the previous bot's offset — update ids
     /// are per-bot, so carrying one over would ack the wrong updates.
     #[tokio::test]
     async fn a_new_token_resets_the_offset() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let runtime = company(&home).await;
         store_token(&runtime, TOKEN).await;
 
@@ -524,7 +521,5 @@ mod tests {
             vec![None, None],
             "the second bot is asked cold, not at the first bot's offset"
         );
-
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 }

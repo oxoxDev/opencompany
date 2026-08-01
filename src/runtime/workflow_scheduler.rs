@@ -599,11 +599,11 @@ mod test {
         String::from_utf8_lossy(&sink.lock().unwrap()).to_string()
     }
 
-    fn tmp_home() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "opencompany-wfsched-{}",
-            crate::ports::generate_id()
-        ))
+    fn tmp_home() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("opencompany-wfsched-")
+            .tempdir()
+            .expect("tempdir")
     }
 
     fn manifest() -> CompanyManifest {
@@ -826,17 +826,14 @@ to = "done"
         wait_for(|| !scheduler.is_running_any()).await;
     }
 
-    async fn cleanup(home: &std::path::Path) {
-        tokio::fs::remove_dir_all(home).await.ok();
-    }
-
     /// The headline: a workflow that exists ONLY as a record overlay (no source
     /// file — the console-created shape #168 introduced) is picked up and fired
     /// on a matching minute, once. It does not re-fire in the same minute, stays
     /// silent on a non-matching minute, and fires again on the next match.
     #[tokio::test]
     async fn fires_an_overlay_only_workflow_once_per_matching_minute() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let (runner, started, _completed) = RecordingRunner::new();
         let registry = company_with_overlays(
             &home,
@@ -871,15 +868,14 @@ to = "done"
         clock.set(millis_at(2026, 7, 20, 9, 0));
         assert_eq!(scheduler.tick().await, 1);
         wait_for(|| started.lock().unwrap().len() == 2).await;
-
-        cleanup(&home).await;
     }
 
     /// The seeded input tells the run — and every agent turn inside it — that a
     /// schedule started it. `request` is the key `run_request_text` reads.
     #[tokio::test]
     async fn the_seeded_input_marks_the_run_as_scheduled() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let (runner, started, _completed) = RecordingRunner::new();
         let registry = company_with_overlays(
             &home,
@@ -906,8 +902,6 @@ to = "done"
         assert!(request.contains("Scheduled run"), "{request}");
         assert!(request.contains("* * * * *"), "{request}");
         assert!(!request.trim().is_empty());
-
-        cleanup(&home).await;
     }
 
     // --- report delivery on a scheduled run (issue #170) ---------------------
@@ -957,7 +951,8 @@ to = "done"
     #[tokio::test]
     async fn a_scheduled_run_reports_an_undelivered_report() {
         let sink = captured_logs();
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         // A company id unique to this test: the capture buffer is shared with
         // every other test in the binary, so this is what makes the assertions
         // about *this* run rather than about whatever else logged.
@@ -1032,8 +1027,6 @@ to = "done"
         assert!(summary.contains("denied=0"), "{summary}");
         assert!(summary.contains("failed=0"), "{summary}");
         assert!(summary.contains("undelivered=1"), "{summary}");
-
-        cleanup(&home).await;
     }
 
     /// A scheduled run that delivered everything says so without crying wolf:
@@ -1041,7 +1034,8 @@ to = "done"
     #[tokio::test]
     async fn a_clean_scheduled_run_logs_no_delivery_warning() {
         let sink = captured_logs();
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let company = "clean-delivery-co";
         let (runner, completed) = RecordingRunner::with_deliveries(vec![report(
             "owner_summary",
@@ -1084,15 +1078,14 @@ to = "done"
         assert!(summary.contains("denied=0"), "{summary}");
         assert!(summary.contains("failed=0"), "{summary}");
         assert!(summary.contains("undelivered=0"), "{summary}");
-
-        cleanup(&home).await;
     }
 
     /// A workflow with no schedule is never fired by the scheduler — it stays
     /// manual-run only.
     #[tokio::test]
     async fn an_unscheduled_workflow_never_fires() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let (runner, started, _completed) = RecordingRunner::new();
         let registry = company_with_overlays(
             &home,
@@ -1107,15 +1100,14 @@ to = "done"
 
         assert_eq!(scheduler.tick().await, 0);
         assert!(started.lock().unwrap().is_empty());
-
-        cleanup(&home).await;
     }
 
     /// A paused company fires nothing — the same `ensure_running` guard the
     /// manifest cron scheduler uses, so schedules resume on unpause.
     #[tokio::test]
     async fn a_paused_company_is_skipped() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let (runner, started, _completed) = RecordingRunner::new();
         let registry = company_with_overlays(
             &home,
@@ -1130,8 +1122,6 @@ to = "done"
 
         assert_eq!(scheduler.tick().await, 0);
         assert!(started.lock().unwrap().is_empty());
-
-        cleanup(&home).await;
     }
 
     /// No runner wired (the default build) is a clean no-op, not an error — the
@@ -1141,7 +1131,8 @@ to = "done"
     /// signal it is raising.
     #[tokio::test]
     async fn no_runner_wired_is_a_noop_and_warns_once() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let registry = company_with_overlays(
             &home,
             "acme",
@@ -1165,15 +1156,14 @@ to = "done"
             scheduler.unwired_warnings, 1,
             "the warning must not repeat every tick"
         );
-
-        cleanup(&home).await;
     }
 
     /// A company with no runner AND no scheduled workflows is not
     /// misconfigured — it simply has nothing to run, so it stays silent.
     #[tokio::test]
     async fn no_runner_and_no_schedules_does_not_warn() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let registry = company_with_overlays(
             &home,
             "acme",
@@ -1190,8 +1180,6 @@ to = "done"
             scheduler.unwired_warnings, 0,
             "a company with nothing scheduled deserves silence"
         );
-
-        cleanup(&home).await;
     }
 
     /// The latch is re-armed when the situation changes: a schedule saved onto a
@@ -1199,7 +1187,8 @@ to = "done"
     /// that company unwired (with nothing scheduled) and said nothing.
     #[tokio::test]
     async fn a_schedule_added_later_still_warns() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let company = CompanyId::new("acme");
         let registry = company_with_overlays(
             &home,
@@ -1228,15 +1217,14 @@ to = "done"
             scheduler.unwired_warnings, 1,
             "a schedule saved onto an unwired company must be reported"
         );
-
-        cleanup(&home).await;
     }
 
     /// A malformed graph body skips only itself: the healthy scheduled workflow
     /// beside it still fires.
     #[tokio::test]
     async fn a_malformed_graph_skips_only_itself() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let (runner, started, _completed) = RecordingRunner::new();
         let registry = company_with_overlays(
             &home,
@@ -1258,15 +1246,14 @@ to = "done"
         assert_eq!(scheduler.tick().await, 1);
         wait_for(|| started.lock().unwrap().len() == 1).await;
         assert_eq!(started.lock().unwrap()[0].workflow, "healthy");
-
-        cleanup(&home).await;
     }
 
     /// A scheduled run still executing suppresses the next fire; once it
     /// completes, the workflow becomes schedulable again.
     #[tokio::test]
     async fn an_in_flight_run_suppresses_the_next_fire() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let gate = Arc::new(Semaphore::new(0));
         let (runner, started, completed) = RecordingRunner::gated(gate.clone());
         let registry = company_with_overlays(
@@ -1304,8 +1291,6 @@ to = "done"
             "the workflow must be schedulable once its run completed"
         );
         wait_for(|| started.lock().unwrap().len() == 2).await;
-
-        cleanup(&home).await;
     }
 
     /// A company removed from the registry (archived) is swept out of the
@@ -1314,7 +1299,8 @@ to = "done"
     /// its entry would be orphaned for the life of the process.
     #[tokio::test]
     async fn a_removed_company_is_swept_from_the_warning_latch() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let company = CompanyId::new("acme");
         let registry = company_with_overlays(
             &home,
@@ -1340,8 +1326,6 @@ to = "done"
             scheduler.warned_unwired.is_empty(),
             "a company that no longer exists must not be held in the latch"
         );
-
-        cleanup(&home).await;
     }
 
     /// The dedupe map keeps only the current minute. Anything older can never
@@ -1349,7 +1333,8 @@ to = "done"
     /// (company, workflow) ever fired, including deleted ones.
     #[tokio::test]
     async fn the_dedupe_map_does_not_grow_without_bound() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let (runner, started, _completed) = RecordingRunner::new();
         let registry = company_with_overlays(
             &home,
@@ -1380,8 +1365,6 @@ to = "done"
             assert_eq!(scheduler.last_fired.len(), 1, "minute {minute}");
         }
         wait_for(|| started.lock().unwrap().len() == 10).await;
-
-        cleanup(&home).await;
     }
 
     /// A runner that panics must not strand the in-flight claim. Releasing the
@@ -1407,7 +1390,8 @@ to = "done"
             }
         }
 
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let calls = Arc::new(AtomicUsize::new(0));
         let runner = Arc::new(PanickingRunner {
             calls: calls.clone(),
@@ -1438,15 +1422,14 @@ to = "done"
             "a panicking run must not retire the schedule"
         );
         wait_for(|| calls.load(Ordering::SeqCst) == 2).await;
-
-        cleanup(&home).await;
     }
 
     /// A workflow committed as a seed file (not an overlay) is scheduled too, so
     /// the union really is the read path.
     #[tokio::test]
     async fn a_seed_file_workflow_is_scheduled() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let source = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(source.path().join("workflows")).unwrap();
         std::fs::write(
@@ -1472,8 +1455,6 @@ to = "done"
         assert_eq!(scheduler.tick().await, 1);
         wait_for(|| started.lock().unwrap().len() == 1).await;
         assert_eq!(started.lock().unwrap()[0].workflow, "seeded");
-
-        cleanup(&home).await;
     }
 
     /// The helper reads the first scheduled trigger and ignores everything else.

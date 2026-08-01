@@ -126,8 +126,11 @@ mod tests {
     use crate::server::ops::mailer::{FetchedEmail, InboundEmail, RecordingMailReceiver};
     use crate::store::FsInboxStore;
 
-    fn tmp_home() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("opencompany-mailpoll-{}", generate_id()))
+    fn tmp_home() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("opencompany-mailpoll-")
+            .tempdir()
+            .expect("tempdir")
     }
 
     fn manifest() -> CompanyManifest {
@@ -147,7 +150,8 @@ mod tests {
 
     #[tokio::test]
     async fn tick_files_and_notifies_each_message() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let runtime = Arc::new(
             RuntimeBuilder::fs_defaults(home.clone(), manifest())
                 .await
@@ -203,7 +207,6 @@ mod tests {
         );
         // Both durably filed, so both UIDs — and only those UIDs — are acked.
         assert_eq!(rx.marked(), vec![10, 11]);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// A wrapper [`InboxStore`] delegating to a real `FsInboxStore`, except
@@ -258,7 +261,8 @@ mod tests {
 
     #[tokio::test]
     async fn tick_continues_past_one_filing_failure_and_only_marks_seen_the_filed_uid() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let inbox = Arc::new(NthAppendFailsInbox {
             inner: FsInboxStore::new(home.clone()),
             fail_on_call: 2,
@@ -333,12 +337,12 @@ mod tests {
         // Only the successfully-filed UIDs are acked — 21 must never appear,
         // or it would be lost forever (marked seen without ever being filed).
         assert_eq!(rx.marked(), vec![20, 22]);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn tick_skips_while_not_running() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let runtime = Arc::new(
             RuntimeBuilder::fs_defaults(home.clone(), manifest())
                 .await
@@ -378,6 +382,5 @@ mod tests {
         let n = poller.tick().await.unwrap();
         assert_eq!(n, 0);
         assert_eq!(rx.calls(), 0);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 }

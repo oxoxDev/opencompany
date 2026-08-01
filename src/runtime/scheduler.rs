@@ -230,8 +230,11 @@ mod test {
     use crate::runtime::RuntimeBuilder;
     use crate::runtime::cron::CivilTime;
 
-    fn tmp_home() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("opencompany-sched-{}", crate::ports::generate_id()))
+    fn tmp_home() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("opencompany-sched-")
+            .tempdir()
+            .expect("tempdir")
     }
 
     fn manifest(policy_mode: &str) -> CompanyManifest {
@@ -320,7 +323,8 @@ mod test {
 
     #[tokio::test]
     async fn fires_once_per_matching_minute_and_dedupes() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let manifest = scheduled_manifest();
         let schedules = manifest.schedules.clone();
         let rt = Arc::new(
@@ -367,12 +371,12 @@ mod test {
             .await
             .unwrap();
         assert_eq!(events.len(), 2);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn non_matching_minute_never_fires() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let manifest = scheduled_manifest();
         let schedules = manifest.schedules.clone();
         let rt = Arc::new(
@@ -386,12 +390,12 @@ mod test {
         let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 14, 9, 0)));
         let mut scheduler = CompanyScheduler::new(rt.clone(), &schedules, clock).unwrap();
         assert_eq!(scheduler.tick().await.unwrap(), 0);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn empty_schedule_set_is_a_noop() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let rt = Arc::new(
             RuntimeBuilder::fs_defaults(home.clone(), manifest("full"))
                 .await
@@ -401,12 +405,12 @@ mod test {
         let mut scheduler = CompanyScheduler::new(rt, &[], clock).unwrap();
         assert!(scheduler.is_empty());
         assert_eq!(scheduler.tick().await.unwrap(), 0);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn tick_maintenance_expires_parked_approval() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         // A brain that parks a Sign effect so there is something to expire.
         struct ParkBrain;
         #[async_trait]
@@ -461,7 +465,6 @@ mod test {
         let expired = scheduler.tick_maintenance().await.unwrap();
         assert_eq!(expired.len(), 1);
         assert!(rt.pending_approvals().is_empty());
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     fn scheduled_manifest_supervised() -> CompanyManifest {
@@ -525,7 +528,8 @@ mod test {
     /// The 5s bound only caps how long the failing case takes to report.
     #[tokio::test]
     async fn shutdown_during_a_tick_stops_the_loop() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let manifest = scheduled_manifest();
         let schedules = manifest.schedules.clone();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
@@ -558,8 +562,6 @@ mod test {
             .await
             .expect("scheduler kept running after a shutdown delivered mid-tick")
             .expect("scheduler task panicked");
-
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
@@ -569,7 +571,8 @@ mod test {
             cron: "not a cron".into(),
             prompt: "x".into(),
         }];
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let rt = Arc::new(
             RuntimeBuilder::fs_defaults(home.clone(), manifest("full"))
                 .await
@@ -577,7 +580,6 @@ mod test {
         );
         let clock = Arc::new(FakeClock::new(0));
         assert!(CompanyScheduler::new(rt, &bad, clock).is_err());
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[test]

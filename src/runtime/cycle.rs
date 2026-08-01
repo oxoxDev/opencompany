@@ -890,8 +890,11 @@ mod test {
     use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
     use crate::store::paths::Bundle;
 
-    fn tmp_home() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("opencompany-cycle-{}", crate::ports::generate_id()))
+    fn tmp_home() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("opencompany-cycle-")
+            .tempdir()
+            .expect("tempdir")
     }
 
     fn manifest(policy_mode: &str) -> CompanyManifest {
@@ -1018,7 +1021,8 @@ mod test {
     /// still receiving the orchestrator's.
     #[tokio::test]
     async fn a_reply_addressed_by_agent_id_reaches_the_operator_channel() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let operator_channel = OperatorChannel::new();
         let channels: Vec<Arc<dyn ChannelAdapter>> = vec![Arc::new(operator_channel.clone())];
         let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
@@ -1052,7 +1056,8 @@ mod test {
 
     #[tokio::test]
     async fn end_to_end_operator_message_echoes_and_persists() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let rt = RuntimeBuilder::fs_defaults(home.clone(), manifest("full"))
             .await
             .unwrap();
@@ -1090,12 +1095,12 @@ mod test {
         // (c) a compressed trace was persisted.
         let traces = rt.memory.recent_traces(rt.id(), 10).await.unwrap();
         assert!(!traces.is_empty());
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn effect_executes_at_most_once_across_reload() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let rt = RuntimeBuilder::fs_defaults(home.clone(), manifest("full"))
             .await
             .unwrap();
@@ -1125,12 +1130,12 @@ mod test {
         execute_effect_once(&rt2, "k1", &effect).await.unwrap();
         let record = rt2.store.load(rt2.id()).await.unwrap().unwrap();
         assert_eq!(record.ledger.len(), 1);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn supervised_effect_parks_then_resolves() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let sign_effect = Effect {
             kind: "filing.submit".into(),
             group: EffectGroup::Sign,
@@ -1168,7 +1173,6 @@ mod test {
             .unwrap();
         assert!(follow_up.parked.is_empty());
         assert!(rt.pending_approvals().is_empty());
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Issue #172: an already-decided approval request parks and reaches the
@@ -1181,7 +1185,8 @@ mod test {
     /// to disappear before ever reaching the Approvals page.
     #[tokio::test]
     async fn a_decided_request_parks_without_being_re_evaluated() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let tool_effect = Effect {
             kind: "composio_execute".into(),
             group: EffectGroup::Other,
@@ -1229,13 +1234,12 @@ mod test {
             .await
             .unwrap();
         assert_eq!(rt2.pending_approvals().len(), 1);
-
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn approval_survives_runtime_restart() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let sign_effect = Effect {
             kind: "filing.submit".into(),
             group: EffectGroup::Sign,
@@ -1277,12 +1281,12 @@ mod test {
             .await
             .unwrap();
         assert!(rt2.pending_approvals().is_empty());
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn amend_then_approve_executes_edited_effect() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         // A parked Sign effect whose payload the operator will overwrite so the
         // executed effect routes an amended message to the operator channel.
         let sign_effect = Effect {
@@ -1343,12 +1347,12 @@ mod test {
         assert!(raw.contains("ApprovalParked"));
         assert!(raw.contains("ApprovalAmended"));
         assert!(raw.contains("AMENDED"));
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn sweep_expires_parked_approval_to_deny() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let sign_effect = Effect {
             kind: "filing.submit".into(),
             group: EffectGroup::Sign,
@@ -1390,7 +1394,6 @@ mod test {
             .await
             .unwrap();
         assert!(raw.contains("ApprovalExpired"));
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     // ── Issue #174: the generic cycle seam meters inference usage ────────────
@@ -1449,7 +1452,8 @@ mod test {
     /// and the cycle loop dropped it, so the Usage view read zero forever.
     #[tokio::test]
     async fn reported_cycle_usage_reaches_the_usage_meter() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
             .with_brain(Arc::new(MeteredBrain::per_cycle(reported_usage(0.031))))
             .build()
@@ -1484,15 +1488,14 @@ mod test {
             .collect();
         assert_eq!(spend.len(), 1);
         assert_eq!(spend[0].amount_usd, 0.031);
-
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Tokens without USD (the managed passthrough bills backend-side) still
     /// count on the Usage surface, but must not post a `$0.00` spend line.
     #[tokio::test]
     async fn token_only_usage_meters_without_a_ledger_entry() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
             .with_brain(Arc::new(MeteredBrain::per_cycle(reported_usage(0.0))))
             .build()
@@ -1509,14 +1512,14 @@ mod test {
                 .iter()
                 .any(|e| e.kind == crate::metering::INFERENCE_SPEND_KIND)
         );
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// A cycle that spent nothing writes nothing — an idle cycle or the offline
     /// echo brain must not mint an empty sample.
     #[tokio::test]
     async fn a_zero_usage_cycle_writes_no_sample() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
             .with_brain(Arc::new(MeteredBrain::per_cycle(TokenUsage::default())))
             .build()
@@ -1526,7 +1529,6 @@ mod test {
         rt.run_cycle(Vec::new()).await.unwrap();
 
         assert!(rt.usage().query(rt.id(), 0).await.unwrap().is_empty());
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// The openhuman harness meters every turn itself, so the cycle seam must
@@ -1534,7 +1536,8 @@ mod test {
     /// than charged a second time.
     #[tokio::test]
     async fn a_self_metering_brain_is_not_metered_twice() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
             .with_brain(Arc::new(MeteredBrain {
                 usage: reported_usage(9.99),
@@ -1554,7 +1557,6 @@ mod test {
                 .iter()
                 .any(|e| e.kind == crate::metering::INFERENCE_SPEND_KIND)
         );
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// `UsageMetering::None` means "no model runs on this path", so the cycle
@@ -1563,7 +1565,8 @@ mod test {
     /// would post a `provider: "none"` row into `byProvider`.
     #[tokio::test]
     async fn a_brain_that_runs_no_model_is_not_metered() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
             .with_brain(Arc::new(MeteredBrain {
                 usage: reported_usage(4.2),
@@ -1583,14 +1586,14 @@ mod test {
                 .iter()
                 .any(|e| e.kind == crate::metering::INFERENCE_SPEND_KIND)
         );
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Every cycle meters independently, so a multi-turn conversation
     /// accumulates rather than overwriting.
     #[tokio::test]
     async fn each_cycle_meters_its_own_usage() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
             .with_brain(Arc::new(MeteredBrain::per_cycle(reported_usage(0.01))))
             .build()
@@ -1605,7 +1608,6 @@ mod test {
         assert_eq!(samples.len(), 3);
         let total: u64 = samples.iter().map(|s| s.input_tokens).sum();
         assert_eq!(total, 3_600);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// A brain that tracks the peak number of concurrently-active cycles.
@@ -1632,7 +1634,8 @@ mod test {
 
     #[tokio::test]
     async fn cycles_are_serial_per_company() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let peak = Arc::new(AtomicUsize::new(0));
         let brain = Arc::new(ConcurrencyBrain {
             active: Arc::new(AtomicUsize::new(0)),
@@ -1659,12 +1662,12 @@ mod test {
 
         // The serial lock kept the two cycles from overlapping.
         assert_eq!(peak.load(Ordering::SeqCst), 1);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn distinct_companies_run_concurrently() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let one = RuntimeBuilder::new(home.clone(), manifest("full"))
             .with_id(CompanyId::new("one"))
             .build()
@@ -1690,7 +1693,6 @@ mod test {
         );
         assert_eq!(ra.unwrap().responses.len(), 1);
         assert_eq!(rb.unwrap().responses.len(), 1);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     fn test_smtp(from_email: &str) -> SmtpCredentials {
@@ -1707,7 +1709,8 @@ mod test {
 
     #[tokio::test]
     async fn email_send_effect_sends_and_records() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let sender = Arc::new(RecordingMailSender::new());
         let email_effect = Effect {
             kind: "email.send".into(),
@@ -1743,12 +1746,12 @@ mod test {
         assert_eq!(sender.sent()[0].0, "ceo@acme.test");
         let inbox = rt.inbox().messages(rt.id(), "ceo", 10, 0).await.unwrap();
         assert!(inbox.iter().any(|r| r.outbound && r.subject == "Hi"));
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn email_send_effect_without_mail_errors() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let email_effect = Effect {
             kind: "email.send".into(),
             group: EffectGroup::Send,
@@ -1779,12 +1782,12 @@ mod test {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("email is not configured"));
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn established_true_only_after_inbound_from_recipient() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
             .with_mail(CompanyMail {
                 sender: Arc::new(RecordingMailSender::new()),
@@ -1815,12 +1818,12 @@ mod test {
             .unwrap();
 
         assert!(recipient_is_established(&rt, "X@EXT.COM").await);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn send_email_without_mail_returns_clean_error() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         // No `.with_mail(..)`: the company has no mailbox wired at all.
         let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
             .build()
@@ -1839,12 +1842,12 @@ mod test {
                 .unwrap_or_default()
                 .contains("not configured")
         );
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn send_email_bad_args_missing_to_yields_no_effect() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
             .build()
             .await
@@ -1857,12 +1860,12 @@ mod test {
             .unwrap();
         assert!(!res.ok);
         assert!(res.output["error"].is_string());
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn send_email_parks_for_new_recipient() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let sender = Arc::new(RecordingMailSender::new());
         let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
             .with_mail(CompanyMail {
@@ -1880,12 +1883,12 @@ mod test {
             .unwrap();
         assert_eq!(res.output["status"], "pending_approval");
         assert_eq!(sender.sent().len(), 0);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn send_email_sends_for_established_recipient() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let sender = Arc::new(RecordingMailSender::new());
         let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
             .with_mail(CompanyMail {
@@ -1920,7 +1923,6 @@ mod test {
             .unwrap();
         assert_eq!(res.output["status"], "sent");
         assert_eq!(sender.sent().len(), 1);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     // -----------------------------------------------------------------------
@@ -1979,7 +1981,8 @@ mod test {
 
     #[tokio::test]
     async fn spawn_task_arm_opens_a_board_card() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
             .build()
             .await
@@ -2005,12 +2008,12 @@ mod test {
             .unwrap();
         assert!(!bad.ok);
         assert_eq!(rt.tasks().list(rt.id()).await.unwrap().len(), 1);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn delegate_to_desk_arm_records_handoff_and_rejects_unknown_desk() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let rt = RuntimeBuilder::new(home.clone(), desk_manifest())
             .build()
             .await
@@ -2039,12 +2042,12 @@ mod test {
         let cards = rt.tasks().list(rt.id()).await.unwrap();
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].assignee, "eng");
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn call_tool_dispatches_delegation_tools() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
             .build()
             .await
@@ -2061,12 +2064,12 @@ mod test {
             .unwrap();
         assert!(res.ok);
         assert_eq!(rt.tasks().list(rt.id()).await.unwrap().len(), 1);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn handed_task_awareness_surfaces_open_cards_on_a_direct_query() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let seen = Arc::new(StdMutex::new(Vec::new()));
         let rt = RuntimeBuilder::new(home.clone(), desk_manifest())
             .with_brain(Arc::new(CapturingBrain { seen: seen.clone() }))
@@ -2125,12 +2128,12 @@ mod test {
             "unaddressed query has no desk briefing: {:?}",
             seen[1]
         );
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn awareness_skips_done_cards() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let seen = Arc::new(StdMutex::new(Vec::new()));
         let rt = RuntimeBuilder::new(home.clone(), desk_manifest())
             .with_brain(Arc::new(CapturingBrain { seen: seen.clone() }))
@@ -2167,6 +2170,5 @@ mod test {
             "done cards are not surfaced as open work: {:?}",
             seen[0]
         );
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 }

@@ -1512,6 +1512,13 @@ mod test {
     use crate::openhuman::MockOpenHumanRpc;
     use crate::ports::types::ToolCall;
 
+    fn tmp_home(prefix: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir()
+            .expect("tempdir")
+    }
+
     #[test]
     fn slugifies_display_names() {
         assert_eq!(company_id_from_name("Acme Co!").as_ref(), "acme-co");
@@ -1525,7 +1532,8 @@ mod test {
             InviteRecord, LoginCodeRecord, SessionRecord, UserRecord, UserRole, UserStatus,
         };
 
-        let home = std::env::temp_dir().join(format!("oc-users-{}", crate::ports::generate_id()));
+        let home_dir = tmp_home("oc-users-");
+        let home = home_dir.path().to_path_buf();
         let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
         let id = CompanyId::new("acme");
         // No with_users/with_sessions/with_login_codes override: the builder must
@@ -1631,13 +1639,12 @@ mod test {
                 .unwrap()
                 .is_some()
         );
-
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn workspace_seeds_once_and_operator_deletions_stick() {
-        let home = std::env::temp_dir().join(format!("oc-seed-{}", crate::ports::generate_id()));
+        let home_dir = tmp_home("oc-seed-");
+        let home = home_dir.path().to_path_buf();
         // A company definition dir with a workspace subtree.
         let seed_dir = home.join("def");
         std::fs::create_dir_all(seed_dir.join("workspace/Brand")).unwrap();
@@ -1678,8 +1685,6 @@ mod test {
         assert!(!tree.iter().any(|n| n.name == "voice.md"));
         // Sanity: the record store still loads.
         assert!(runtime.store().load(&id).await.unwrap().is_some());
-
-        std::fs::remove_dir_all(&home).ok();
     }
 
     /// Issue #85: the launch path's template provenance is stamped onto the
@@ -1687,7 +1692,8 @@ mod test {
     /// (carried forward), and a company built with no provenance records `None`.
     #[tokio::test]
     async fn template_provenance_stamped_at_launch_and_carried_forward() {
-        let home = std::env::temp_dir().join(format!("oc-prov-{}", crate::ports::generate_id()));
+        let home_dir = tmp_home("oc-prov-");
+        let home = home_dir.path().to_path_buf();
         let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
         let id = CompanyId::new("acme");
         let provenance = TemplateProvenance {
@@ -1730,8 +1736,6 @@ mod test {
             .unwrap();
         let raw = runtime.store().load(&other).await.unwrap().unwrap();
         assert!(raw.template_provenance.is_none());
-
-        std::fs::remove_dir_all(&home).ok();
     }
 
     fn parse(toml_src: &str) -> CompanyManifest {
@@ -1952,8 +1956,8 @@ mod test {
         use crate::ports::types::{CompanyEvent, OverlayDeskOrder};
         use crate::store::{FsCompanyStore, FsContextStore};
 
-        let home =
-            std::env::temp_dir().join(format!("oc-seed-order-{}", crate::ports::generate_id()));
+        let home_dir = tmp_home("oc-seed-order-");
+        let home = home_dir.path().to_path_buf();
         let id = CompanyId::new("order-co");
 
         // A desk `eng` whose blueprint lead is `eng1` (declared first).
@@ -2043,7 +2047,5 @@ mod test {
             !labels.contains(&"task-outcome/eng1"),
             "desk turn routed to the blueprint lead eng1 — the builder dropped the operator desk order; saw {labels:?}"
         );
-
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 }
