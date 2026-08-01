@@ -1,6 +1,18 @@
 //! Workflow surfaces: create a graph (`POST /workflows`), read the company's
-//! saved graphs (`GET /workflows`, `GET /workflows/{wid}`), and run one
-//! (`POST /workflows/{wid}/run`) — under both scope forms.
+//! saved graphs (`GET /workflows`, `GET /workflows/{wid}`), run one
+//! (`POST /workflows/{wid}/run`), and read back what past runs did
+//! (`GET /workflows/runs`) — under both scope forms.
+//!
+//! ## Run history (issue #228)
+//!
+//! A run's outcome used to exist only in the moment: a manual run's
+//! [`DeliveryReport`](crate::ports::DeliveryReport) rows lived in the console
+//! drawer until it was dismissed, and a scheduled run's reached only host
+//! stdout. The run route now journals every finished run through
+//! [`record_run_finished`] — the same helper the cron
+//! [`WorkflowScheduler`](crate::runtime::WorkflowScheduler) calls, so history is
+//! uniform whatever started the run — and `GET /workflows/runs` folds those
+//! events back out, newest first.
 //!
 //! A company's graphs come from two places, unioned by
 //! [`load_workflow_union`](crate::company::load_workflow_union) /
@@ -39,7 +51,7 @@
 use std::collections::HashSet;
 use std::path::Path as FsPath;
 
-use axum::extract::Path;
+use axum::extract::{Path, Query};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -53,7 +65,8 @@ use crate::company::{
     load_workflow_union,
 };
 use crate::error::OpenCompanyError;
-use crate::ports::types::{CompanyRecord, OverlayWorkflow};
+use crate::ports::types::{CompanyEvent, CompanyRecord, EventSeq, OverlayWorkflow};
+use crate::runtime::record_run_finished;
 use crate::server::error::ApiError;
 use crate::server::ops::{ScopedCompany, scoped};
 
@@ -61,6 +74,17 @@ use crate::server::ops::{ScopedCompany, scoped};
 /// run write.
 pub fn router() -> Router<AppState> {
     scoped("/workflows", post(create_workflow).get(list_workflows))
+        // The static `/workflows/runs` GET is registered BEFORE the dynamic
+        // `/workflows/{wid}`, mirroring `GET /tasks/inflight` in
+        // [`super::tasks`]. Axum prefers a static segment over a parameter, so
+        // the run-history read wins even though `runs` is a syntactically valid
+        // `wid`; `run_history_is_not_shadowed_by_the_graph_read` pins it,
+        // because a regression here would silently 404 the history panel.
+        //
+        // The cost is that a workflow whose id is literally `runs` cannot be
+        // read through this route. That is the same trade `tasks/inflight`
+        // takes, and the history surface is worth more than the one reserved id.
+        .merge(scoped("/workflows/runs", get(list_runs)))
         .merge(scoped("/workflows/{wid}", get(get_workflow)))
         .merge(scoped("/workflows/{wid}/run", post(run_workflow)))
 }
@@ -516,16 +540,163 @@ async fn run_workflow(
         })?;
 
     let input = body.map(|Json(b)| b.input).unwrap_or(Value::Null);
-    let run = runner
-        .run(company.id(), &file, input)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    let run = match runner.run(company.id(), &file, input).await {
+        Ok(run) => run,
+        Err(err) => {
+            // Issue #228: a manual run that dies is journaled too, before the
+            // error goes back. The caller sees the 5xx and may well close the
+            // tab; the record is what is still there tomorrow.
+            record_run_finished(
+                company.runtime.events(),
+                company.id(),
+                &wid,
+                false,
+                Err(err.to_string().as_str()),
+            )
+            .await;
+            return Err(ApiError(err).into_response());
+        }
+    };
+
+    // Issue #228: journal the outcome so a manual run's delivery rows stop being
+    // drawer-transient. Until now they lived in the console's run panel until it
+    // was dismissed and then existed nowhere — the operator could not answer
+    // "did that report actually go out?" an hour later. Recorded through the
+    // same helper the scheduler uses, so history is uniform whatever started the
+    // run. Best-effort: the response below is returned either way.
+    record_run_finished(
+        company.runtime.events(),
+        company.id(),
+        &wid,
+        false,
+        Ok(&run),
+    )
+    .await;
 
     Ok(Json(RunWorkflowResponse {
         output: run.output,
         pending_approvals: run.pending_approvals,
         deliveries: run.deliveries,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Run history (issue #228)
+// ---------------------------------------------------------------------------
+
+/// How many run outcomes `GET …/workflows/runs` returns when the caller names
+/// no `?limit=`, and the ceiling it clamps a larger one to. The console's
+/// history panel shows a short recent list; a bigger page would only make the
+/// journal fold slower for no one's benefit.
+const DEFAULT_RUN_LIMIT: usize = 20;
+const MAX_RUN_LIMIT: usize = 200;
+
+/// The `?workflow=` / `?limit=` selectors on the run-history read.
+#[derive(Debug, Deserialize)]
+struct RunsQuery {
+    /// Return only runs of this workflow id. Absent = every workflow.
+    workflow: Option<String>,
+    /// Cap the page. Clamped to [`MAX_RUN_LIMIT`]; `0` falls back to the
+    /// default rather than returning an empty page, which is never what a
+    /// caller means.
+    limit: Option<usize>,
+}
+
+/// One finished run as the console's history panel renders it (camelCase).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowRunOutcome {
+    /// The journal sequence position — a stable, monotonic row key.
+    seq: u64,
+    /// Epoch-millis the outcome was journaled.
+    at_millis: u64,
+    workflow_id: String,
+    /// Whether a cron started this run rather than an operator. The console
+    /// shows the distinction because a scheduled run is the one nobody watched.
+    scheduled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_id: Option<String>,
+    /// The same delivery rows a manual run's response carries — including
+    /// `target`, which the run response already ships to this same console.
+    deliveries: Vec<crate::ports::DeliveryReport>,
+    pending_approvals: Vec<String>,
+    /// Set when the run failed outright instead of finishing with rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// `GET …/workflows/runs?workflow=&limit=` — the company's finished workflow
+/// runs, **newest first** (issue #228).
+///
+/// This is the durable half of the issue: a manual run's delivery rows used to
+/// live only in the console drawer until it was dismissed, and a scheduled run's
+/// only on host stdout. Folding
+/// [`CompanyEvent::WorkflowRunFinished`](crate::ports::types::CompanyEvent) out
+/// of the journal makes both survive a console reload, which is the whole point.
+///
+/// The fold reads the company's whole event log
+/// (`read_from(0, MAX)`) — the same thing
+/// [`chat_history`](crate::server::chat_history) already does on every history
+/// GET. Following that precedent keeps this route from inventing an index the
+/// rest of the read plane doesn't have; if the journal scan ever becomes the
+/// bottleneck it should be fixed for both surfaces at once, not just here.
+async fn list_runs(
+    company: ScopedCompany,
+    Query(query): Query<RunsQuery>,
+) -> Result<Json<Vec<WorkflowRunOutcome>>, ApiError> {
+    let limit = match query.limit {
+        Some(0) | None => DEFAULT_RUN_LIMIT,
+        Some(n) => n.min(MAX_RUN_LIMIT),
+    };
+
+    let stored = company
+        .runtime
+        .events()
+        .read_from(company.id(), EventSeq::new(0), usize::MAX)
+        .await
+        .map_err(ApiError)?;
+
+    let mut runs: Vec<WorkflowRunOutcome> = stored
+        .into_iter()
+        .filter_map(|stored| {
+            let CompanyEvent::WorkflowRunFinished {
+                workflow_id,
+                scheduled,
+                run_id,
+                deliveries,
+                pending_approvals,
+                error,
+            } = stored.event
+            else {
+                return None;
+            };
+            // The `?workflow=` filter is applied here rather than after the
+            // `limit` cut, so asking for one workflow returns that workflow's
+            // most recent N — not "whichever of the last N happen to match".
+            if query
+                .workflow
+                .as_deref()
+                .is_some_and(|wanted| wanted != workflow_id)
+            {
+                return None;
+            }
+            Some(WorkflowRunOutcome {
+                seq: stored.seq.value(),
+                at_millis: stored.at_millis,
+                workflow_id,
+                scheduled,
+                run_id,
+                deliveries,
+                pending_approvals,
+                error,
+            })
+        })
+        .collect();
+
+    // Newest first: a history panel leads with the run that just happened.
+    runs.reverse();
+    runs.truncate(limit);
+    Ok(Json(runs))
 }
 
 #[cfg(test)]
@@ -1080,6 +1251,7 @@ mod tests {
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
 
+        use super::super::{CompanyEvent, DEFAULT_RUN_LIMIT};
         use crate::company::CompanyManifest;
         use crate::ports::CompanyStore;
         use crate::ports::types::{CompanyId, CompanyRecord};
@@ -1374,6 +1546,272 @@ mod tests {
             assert_eq!(items.len(), 1, "body: {listed}");
             assert_eq!(items[0]["id"], "greeter");
             assert_eq!(items[0]["name"], "Greeter");
+        }
+
+        // ── Issue #228: the run-history read ────────────────────────────────
+
+        /// Journals a finished-run outcome directly on the company's event log,
+        /// the way both entry points do via `record_run_finished`.
+        async fn journal_run(
+            state: &AppState,
+            id: &CompanyId,
+            workflow_id: &str,
+            scheduled: bool,
+            deliveries: Vec<crate::ports::DeliveryReport>,
+            error: Option<&str>,
+        ) {
+            let runtime = state.registry().get(id).expect("registered");
+            runtime
+                .events()
+                .append(
+                    id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: workflow_id.to_string(),
+                        scheduled,
+                        run_id: None,
+                        deliveries,
+                        pending_approvals: Vec::new(),
+                        error: error.map(str::to_string),
+                    },
+                )
+                .await
+                .expect("append");
+        }
+
+        fn undelivered_row(node: &str) -> crate::ports::DeliveryReport {
+            crate::ports::DeliveryReport {
+                node: node.to_string(),
+                kind: "email".to_string(),
+                target: Some("ada@example.com".to_string()),
+                status: crate::ports::DeliveryStatus::Skipped,
+                detail: "this recipient has never written to the company".to_string(),
+            }
+        }
+
+        /// **The issue, at the HTTP boundary.** A run's delivery rows read back
+        /// after the fact, newest first — which is what survives a console
+        /// reload, and the reason #228 exists.
+        #[tokio::test]
+        async fn run_history_reads_back_newest_first_with_its_rows() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_run(
+                &state,
+                &id,
+                "digest",
+                true,
+                vec![undelivered_row("owner")],
+                None,
+            )
+            .await;
+            journal_run(&state, &id, "greeter", false, Vec::new(), None).await;
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            let rows = body.as_array().expect("array");
+            assert_eq!(rows.len(), 2, "body: {body}");
+
+            // Newest first: the history panel leads with the run that just ran.
+            assert_eq!(rows[0]["workflowId"], "greeter");
+            assert_eq!(rows[0]["scheduled"], false);
+            assert_eq!(rows[1]["workflowId"], "digest");
+            assert_eq!(rows[1]["scheduled"], true);
+
+            // The delivery row — including the `detail` that names the fix, and
+            // the `target`, which the manual-run response already ships to this
+            // same console.
+            let deliveries = rows[1]["deliveries"].as_array().expect("deliveries");
+            assert_eq!(deliveries.len(), 1);
+            assert_eq!(deliveries[0]["node"], "owner");
+            assert_eq!(deliveries[0]["status"], "skipped");
+            assert_eq!(deliveries[0]["target"], "ada@example.com");
+            assert!(
+                deliveries[0]["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("never written")
+            );
+            // A run that finished carries no `error` key at all.
+            assert!(rows[0].get("error").is_none(), "{body}");
+        }
+
+        /// A run that died outright reads back with its reason. This is the
+        /// outcome that previously left nothing behind but a host-stdout warning.
+        #[tokio::test]
+        async fn run_history_carries_a_failed_run_error() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_run(
+                &state,
+                &id,
+                "digest",
+                true,
+                Vec::new(),
+                Some("no inference source for agent node `worker`"),
+            )
+            .await;
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert_eq!(
+                body[0]["error"],
+                "no inference source for agent node `worker`"
+            );
+            assert_eq!(body[0]["deliveries"].as_array().unwrap().len(), 0);
+        }
+
+        /// `?workflow=` narrows to one graph, and does so BEFORE the limit cut —
+        /// otherwise asking for one workflow would return "whichever of the last
+        /// N happen to match", which for a busy company is usually none.
+        #[tokio::test]
+        async fn run_history_filters_by_workflow_before_the_limit_cut() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_run(&state, &id, "digest", true, Vec::new(), None).await;
+            for _ in 0..5 {
+                journal_run(&state, &id, "greeter", false, Vec::new(), None).await;
+            }
+
+            // Only ONE `digest` run exists, and it is the OLDEST of six. A
+            // filter applied after a `limit=2` cut would find nothing.
+            let response = router(state)
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/runs?workflow=digest&limit=2",
+                    None,
+                ))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            let rows = body.as_array().expect("array");
+            assert_eq!(rows.len(), 1, "body: {body}");
+            assert_eq!(rows[0]["workflowId"], "digest");
+        }
+
+        /// `?limit=` caps the page from the newest end, defaults when absent or
+        /// zero, and clamps above the ceiling rather than folding the whole log.
+        #[tokio::test]
+        async fn run_history_limit_defaults_caps_and_clamps() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            for i in 0..25 {
+                journal_run(&state, &id, &format!("wf-{i}"), false, Vec::new(), None).await;
+            }
+
+            let page = |uri: &'static str| {
+                let state = state.clone();
+                async move {
+                    json_body(
+                        router(state)
+                            .oneshot(request("GET", uri, None))
+                            .await
+                            .unwrap(),
+                    )
+                    .await
+                }
+            };
+
+            // Explicit cap, taken from the newest end.
+            let capped = page("/api/v1/company/workflows/runs?limit=3").await;
+            let rows = capped.as_array().expect("array");
+            assert_eq!(rows.len(), 3);
+            assert_eq!(rows[0]["workflowId"], "wf-24", "newest first: {capped}");
+
+            // No `limit` → the default page, not the whole 25.
+            let defaulted = page("/api/v1/company/workflows/runs").await;
+            assert_eq!(
+                defaulted.as_array().unwrap().len(),
+                DEFAULT_RUN_LIMIT,
+                "{defaulted}"
+            );
+
+            // `limit=0` means "I didn't really mean zero" — an empty page is
+            // never what a caller wants, so it falls back to the default.
+            let zero = page("/api/v1/company/workflows/runs?limit=0").await;
+            assert_eq!(zero.as_array().unwrap().len(), DEFAULT_RUN_LIMIT, "{zero}");
+
+            // Above the ceiling clamps; with only 25 rows that is all of them.
+            let huge = page("/api/v1/company/workflows/runs?limit=100000").await;
+            assert_eq!(huge.as_array().unwrap().len(), 25, "{huge}");
+        }
+
+        /// A company that has never run a workflow gets an empty list, not a
+        /// 404 — the history panel renders "nothing yet" rather than an error.
+        #[tokio::test]
+        async fn run_history_is_empty_before_any_run() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(json_body(response).await.as_array().unwrap().len(), 0);
+        }
+
+        /// **Route-ordering pin.** `runs` is a syntactically valid `wid`, so
+        /// `GET /workflows/runs` overlaps `GET /workflows/{wid}`. Axum prefers
+        /// the static segment; if that ever changed, the history panel would
+        /// silently 404 (there is no workflow named `runs`) instead of failing
+        /// loudly. Same trade, and same pin, as `GET /tasks/inflight`.
+        #[tokio::test]
+        async fn run_history_is_not_shadowed_by_the_graph_read() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            journal_run(&state, &id, "digest", true, Vec::new(), None).await;
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "the static /workflows/runs must win over /workflows/{{wid}}"
+            );
+            // An array of outcomes, not a single graph object.
+            let body = json_body(response).await;
+            assert!(body.is_array(), "graph read shadowed the history: {body}");
+        }
+
+        /// Both scope forms serve the history — the platform
+        /// `…/companies/{id}/…` address as well as the prosumer alias.
+        #[tokio::test]
+        async fn run_history_serves_both_scope_forms() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            journal_run(&state, &id, "digest", true, Vec::new(), None).await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/companies/acme/workflows/runs",
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            assert_eq!(body[0]["workflowId"], "digest");
         }
     }
 }
