@@ -1081,7 +1081,8 @@ to = "done"
     #[tokio::test]
     async fn a_scheduled_run_reports_a_parked_report_without_crying_wolf() {
         let sink = captured_logs();
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let company = "parked-delivery-co";
         let (runner, completed) = RecordingRunner::with_deliveries(vec![report(
             "owner_summary",
@@ -1130,8 +1131,6 @@ to = "done"
         assert!(summary.contains("pending_approval=1"), "{summary}");
         assert!(summary.contains("undelivered=0"), "{summary}");
         assert!(summary.contains("sent=0"), "{summary}");
-
-        cleanup(&home).await;
     }
 
     /// A scheduled run that delivered everything says so without crying wolf:

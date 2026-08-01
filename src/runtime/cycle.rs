@@ -1773,7 +1773,8 @@ mod test {
     /// deciding to park. It was parked directly, exactly as delivery parks it.
     #[tokio::test]
     async fn a_directly_parked_email_send_is_mailed_when_approved() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let sender = Arc::new(RecordingMailSender::new());
         let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
             .with_mail(CompanyMail {
@@ -1836,7 +1837,8 @@ mod test {
     /// queue. A parked report must not leak out on a refusal.
     #[tokio::test]
     async fn a_directly_parked_email_send_is_not_mailed_when_denied() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let sender = Arc::new(RecordingMailSender::new());
         let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
             .with_mail(CompanyMail {
@@ -1888,7 +1890,8 @@ mod test {
     /// `pending` row honest even though the run itself is not persisted.
     #[tokio::test]
     async fn a_parked_email_send_survives_a_restart_and_still_sends() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let effect = Effect {
             kind: EMAIL_SEND_KIND.into(),
             group: EffectGroup::Send,
