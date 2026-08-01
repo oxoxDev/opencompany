@@ -584,17 +584,22 @@ mod tests {
         SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
     }
 
-    fn temp_file(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("oc-tokensrc-{}", crate::ports::generate_id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.join(name)
+    /// The caller must hold the returned handle: it owns the enclosing
+    /// directory and removes it on drop.
+    fn temp_file(name: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-tokensrc-")
+            .tempdir()
+            .expect("tempdir");
+        let path = dir.path().join(name);
+        (dir, path)
     }
 
     // ---- tier precedence ---------------------------------------------------
 
     #[test]
     fn projected_file_beats_static_key() {
-        let path = temp_file("token");
+        let (_path_dir, path) = temp_file("token");
         std::fs::write(&path, "projected").unwrap();
         let env = MapEnv::new([
             (TOKEN_FILE_ENV, path.display().to_string()),
@@ -663,7 +668,7 @@ mod tests {
     /// cache here is the latent outage this tier exists to avoid.
     #[tokio::test]
     async fn projected_file_picks_up_an_in_place_rotation() {
-        let path = temp_file("token");
+        let (_path_dir, path) = temp_file("token");
         // exp 1000s out at t=0 → window = min(0.8 * 1000, 60) = 60s.
         std::fs::write(&path, jwt(serde_json::json!({ "exp": 1000 }))).unwrap();
         let first = std::fs::read_to_string(&path).unwrap();
@@ -717,7 +722,7 @@ mod tests {
     /// sends the next call straight back to the file.
     #[tokio::test]
     async fn invalidate_forces_a_re_read_inside_the_cache_window() {
-        let path = temp_file("token");
+        let (_path_dir, path) = temp_file("token");
         std::fs::write(&path, jwt(serde_json::json!({ "exp": 1000 }))).unwrap();
         let first = std::fs::read_to_string(&path).unwrap();
         let source = TinyhumansTokenSource::projected_file(&path);
@@ -738,7 +743,7 @@ mod tests {
     /// but it can never serve a credential the platform already rotated away.
     #[tokio::test]
     async fn an_undatable_token_is_never_cached() {
-        let path = temp_file("token");
+        let (_path_dir, path) = temp_file("token");
         std::fs::write(&path, "opaque-not-a-jwt").unwrap();
         let source = TinyhumansTokenSource::projected_file(&path);
         assert_eq!(
@@ -760,7 +765,7 @@ mod tests {
     /// locally would turn a recoverable 401 into an outage — but never cached.
     #[tokio::test]
     async fn an_expired_token_is_served_but_not_cached() {
-        let path = temp_file("token");
+        let (_path_dir, path) = temp_file("token");
         std::fs::write(&path, jwt(serde_json::json!({ "exp": 50 }))).unwrap();
         let stale = std::fs::read_to_string(&path).unwrap();
         let source = TinyhumansTokenSource::projected_file(&path);
@@ -783,7 +788,7 @@ mod tests {
         let err = missing.current().await.expect_err("unreadable");
         assert_eq!(err.code(), "config_error");
 
-        let path = temp_file("token");
+        let (_path_dir, path) = temp_file("token");
         std::fs::write(&path, "   \n").unwrap();
         let empty = TinyhumansTokenSource::projected_file(&path);
         assert_eq!(
@@ -897,7 +902,7 @@ mod tests {
             Some("pasted-token")
         );
 
-        let path = temp_file("token");
+        let (_path_dir, path) = temp_file("token");
         std::fs::write(&path, "projected-token").unwrap();
         let source =
             Credential::from_source(Arc::new(TinyhumansTokenSource::projected_file(&path)));
