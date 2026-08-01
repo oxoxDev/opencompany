@@ -86,8 +86,16 @@ export interface WorkflowGraph {
   edges: WorkflowEdge[];
 }
 
-/** What became of one attempt to deliver an output node's report. */
-export type DeliveryStatus = "sent" | "skipped" | "denied" | "failed";
+/**
+ * What became of one attempt to deliver an output node's report.
+ *
+ * `pending` means the send was parked for operator approval (a cold email
+ * recipient a workflow may not open a conversation with on its own). It is a
+ * SNAPSHOT taken when the run finished: runs are not persisted, so nothing ever
+ * comes back to flip the row to `sent`. The Approvals view is the live source of
+ * truth — approving there actually sends the mail.
+ */
+export type DeliveryStatus = "sent" | "pending" | "skipped" | "denied" | "failed";
 
 /**
  * One attempt to route a reached `output` node's report to its destination.

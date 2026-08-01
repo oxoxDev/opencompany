@@ -448,9 +448,11 @@ function describeDestination(destination: NonNullable<WorkflowNodeModel["destina
 
 /** Badge styling per delivery outcome. A report that did NOT go out must not
  * look like one that did — `denied` and `failed` are the two an operator has to
- * act on, so they get the loud treatment. */
+ * act on, so they get the loud treatment. `pending` is neither: the report is
+ * waiting in Approvals, so it reads as informational, not as a failure. */
 const DELIVERY_TONE: Record<DeliveryStatus, string> = {
   sent: "border-emerald-500/40 bg-emerald-500/10",
+  pending: "border-sky-500/40 bg-sky-500/10",
   skipped: "border-amber-500/40 bg-amber-500/10",
   denied: "border-red-500/40 bg-red-500/10",
   failed: "border-red-500/40 bg-red-500/10",
@@ -460,11 +462,22 @@ const DELIVERY_TONE: Record<DeliveryStatus, string> = {
  * output node's report. This is the ONLY place an operator learns a report
  * didn't leave the building — a delivery failure never fails the run. */
 function DeliveryRows({ deliveries }: { deliveries: DeliveryReport[] }) {
-  const undelivered = deliveries.filter((d) => d.status !== "sent").length;
+  // Two counters, not one. A parked report is waiting on the operator, not
+  // broken — badging it red alongside a transport failure would send them
+  // hunting for a bug when the fix is a click in Approvals.
+  const pending = deliveries.filter((d) => d.status === "pending").length;
+  const undelivered = deliveries.filter(
+    (d) => d.status !== "sent" && d.status !== "pending",
+  ).length;
   return (
     <div className="mb-3 space-y-1.5 rounded-lg border bg-background/40 p-2">
       <div className="flex items-center gap-2">
         <span className="text-xs font-medium">Report delivery</span>
+        {pending > 0 && (
+          <Badge variant="outline" className="h-4 px-1.5 text-[10px] font-normal border-sky-500/40 bg-sky-500/10">
+            {pending} awaiting approval
+          </Badge>
+        )}
         {undelivered > 0 && (
           <Badge variant="outline" className="h-4 px-1.5 text-[10px] font-normal border-red-500/40 bg-red-500/10">
             {undelivered} not delivered
@@ -523,13 +536,21 @@ function RunResultPanel({
     [result.output, graph],
   );
   const deliveries = result.deliveries ?? [];
-  const undeliveredCount = deliveries.filter((d) => d.status !== "sent").length;
+  const pendingDeliveryCount = deliveries.filter((d) => d.status === "pending").length;
+  const undeliveredCount = deliveries.filter(
+    (d) => d.status !== "sent" && d.status !== "pending",
+  ).length;
 
   return (
     <div className="border-t bg-card/60">
       <div className="flex items-center justify-between px-4 py-2">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">Run result</span>
+          {pendingDeliveryCount > 0 && (
+            <Badge variant="outline" className="border-sky-500/40 bg-sky-500/10">
+              {pendingDeliveryCount} report{pendingDeliveryCount === 1 ? "" : "s"} awaiting approval
+            </Badge>
+          )}
           {undeliveredCount > 0 && (
             <Badge variant="outline" className="border-red-500/40 bg-red-500/10">
               {undeliveredCount} report{undeliveredCount === 1 ? "" : "s"} not delivered
