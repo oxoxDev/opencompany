@@ -194,6 +194,10 @@ export function AppShell({
   // A monotonic nonce bumped on every task-lifecycle SSE event, so the
   // company-chat in-flight steer strip (issue #111) refetches live.
   const [taskEventTick, setTaskEventTick] = useState(0);
+  // Issue #228: bumped on every `workflow_run_finished` so the Workflows view
+  // refreshes its run history live. Same shape as `taskEventTick` — a counter,
+  // not the payload, so the view owns what it refetches.
+  const [workflowRunTick, setWorkflowRunTick] = useState(0);
   // The live tool timeline, per thread, built from the transient `tool_call` /
   // `tool_result` SSE frames while a turn runs (mirrors OpenHuman's live tool
   // rows). Cleared when the turn's final reply — carrying the authoritative
@@ -443,6 +447,7 @@ export function AppShell({
     onAgentReply: injectAgentReply,
     onTaskEvent: useCallback(() => setTaskEventTick((n) => n + 1), []),
     onTurnEvent,
+    onWorkflowRunEvent: useCallback(() => setWorkflowRunTick((n) => n + 1), []),
   });
 
   return (
@@ -575,7 +580,11 @@ export function AppShell({
                 </div>
               }
             >
-              <WorkflowsView client={client} company={company} />
+              <WorkflowsView
+                client={client}
+                company={company}
+                runEventTick={workflowRunTick}
+              />
             </Suspense>
           )}
           {view === "usage" && (

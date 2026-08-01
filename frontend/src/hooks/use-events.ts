@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
+import type { DeliveryReport } from "@/api/workflows";
 
 /**
  * One attention item off the company → operator SSE feed (issue #66). Mirrors
@@ -25,6 +26,21 @@ export type CompanyStreamEvent =
   | { type: "approval_resolved"; seq: number; atMillis: number; approvalId: string; verdict: string }
   | { type: "lifecycle_changed"; seq: number; atMillis: number; from: string; to: string }
   | { type: "payment_received"; seq: number; atMillis: number; amountUsd: number; memo: string }
+  // A workflow run finished (issue #228), from either entry point. The whole
+  // point is the *scheduled* case: nobody is watching a cron run, so without
+  // this an owner summary that failed to send would be silent until someone
+  // happened to open the history panel.
+  | {
+      type: "workflow_run_finished";
+      seq: number;
+      atMillis: number;
+      workflowId: string;
+      scheduled: boolean;
+      deliveries: DeliveryReport[];
+      pendingApprovals: string[];
+      /** Present only when the run failed outright. */
+      error?: string;
+    }
   // The transient live turn-progress frames (`src/turn_stream.rs`): a tool call
   // just started (status `running`) or finished (status `ok`/`error`). These are
   // ephemeral — never journaled — and drive the in-flight tool timeline the
@@ -90,6 +106,13 @@ interface Options {
    * the folded steps on the final reply.
    */
   onTurnEvent?: (event: CompanyStreamEvent) => void;
+  /**
+   * Called for each `workflow_run_finished` event (issue #228) so the Workflows
+   * view can refresh its run history live. Matters most for a *scheduled* run:
+   * it fires with the tab already open and nothing else would tell the view a
+   * new outcome exists.
+   */
+  onWorkflowRunEvent?: (event: CompanyStreamEvent) => void;
 }
 
 /**
@@ -104,7 +127,13 @@ interface Options {
 export function useEvents(
   client: OpenCompanyClient,
   company: string | null,
-  { pendingApprovals, onAgentReply, onTaskEvent, onTurnEvent }: Options,
+  {
+    pendingApprovals,
+    onAgentReply,
+    onTaskEvent,
+    onTurnEvent,
+    onWorkflowRunEvent,
+  }: Options,
 ): void {
   // Keep the latest callbacks without re-opening the stream when they change.
   const onAgentReplyRef = useRef(onAgentReply);
@@ -119,6 +148,10 @@ export function useEvents(
   useEffect(() => {
     onTurnEventRef.current = onTurnEvent;
   }, [onTurnEvent]);
+  const onWorkflowRunEventRef = useRef(onWorkflowRunEvent);
+  useEffect(() => {
+    onWorkflowRunEventRef.current = onWorkflowRunEvent;
+  }, [onWorkflowRunEvent]);
 
   // The rising-edge detector for pending approvals. Seeded with the current
   // value so we only toast on an *increase* observed while mounted, never on the
@@ -165,7 +198,13 @@ export function useEvents(
         console.debug("[events] dropping unparseable event", err);
         return;
       }
-      handleEvent(event, onAgentReplyRef.current, onTaskEventRef.current, onTurnEventRef.current);
+      handleEvent(
+        event,
+        onAgentReplyRef.current,
+        onTaskEventRef.current,
+        onTurnEventRef.current,
+        onWorkflowRunEventRef.current,
+      );
     };
 
     source.onerror = () => {
@@ -193,6 +232,7 @@ function handleEvent(
   onAgentReply?: (e: AgentReplyEvent) => void,
   onTaskEvent?: (e: CompanyStreamEvent) => void,
   onTurnEvent?: (e: CompanyStreamEvent) => void,
+  onWorkflowRunEvent?: (e: CompanyStreamEvent) => void,
 ): void {
   switch (event.type) {
     // Live turn frames drive the in-flight tool timeline — no toast, they render
@@ -237,6 +277,42 @@ function handleEvent(
         description: `$${event.amountUsd.toFixed(2)} — ${event.memo}`,
       });
       break;
+    // Issue #228. A run that went fine is not an attention signal — toasting
+    // every scheduled run would train the operator to ignore the ones that
+    // matter — so only a failure or an undelivered report speaks up. The view
+    // still refreshes either way, so a clean run shows up in the history.
+    case "workflow_run_finished": {
+      onWorkflowRunEvent?.(event);
+      if (event.error) {
+        toast.error("A workflow run failed", {
+          description: `${event.workflowId} — ${event.error}`,
+        });
+        break;
+      }
+      // `pending` is not a failure: it is a report parked for approval, and
+      // toasting it red would send the operator hunting for a bug that isn't
+      // there. Excluded from the count that speaks up.
+      //
+      // Compared through a widened `string` because `pending` joins
+      // `DeliveryStatus` in issue #227 — a literal would be a no-overlap type
+      // error against today's union, and the host can already send a status
+      // this console's type doesn't name yet.
+      const pendingStatus: string = "pending";
+      const undelivered = event.deliveries.filter(
+        (d) => d.status !== "sent" && d.status !== pendingStatus,
+      ).length;
+      if (undelivered > 0) {
+        toast.warning(
+          `${undelivered} report${undelivered === 1 ? "" : "s"} didn't go out`,
+          {
+            description: `${event.workflowId}${
+              event.scheduled ? " (scheduled run)" : ""
+            } — open Workflows for the reason.`,
+          },
+        );
+      }
+      break;
+    }
     default:
       // An unknown/forward event kind: ignore rather than surface noise.
       break;
