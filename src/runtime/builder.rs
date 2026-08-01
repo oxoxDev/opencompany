@@ -649,7 +649,7 @@ impl RuntimeBuilder {
 
     /// Assembles the runtime, materializing `company.toml` and replaying the
     /// journal to rebuild the approval queue.
-    pub async fn build(self) -> Result<CompanyRuntime> {
+    pub async fn build(mut self) -> Result<CompanyRuntime> {
         let home = self.home;
         let id = self.id;
 
@@ -852,6 +852,26 @@ impl RuntimeBuilder {
             .as_ref()
             .map(|r| r.overlay_workflows.clone())
             .unwrap_or_default();
+        // Issue #208: `[workflows].enabled` is the one manifest field a runtime
+        // write mutates (`create_company_workflow` pushes the new id alongside
+        // the overlay body, in the same save). Rebuilding the record from the
+        // freshly-parsed seed manifest therefore clobbered every console-created
+        // workflow's enablement on each boot, leaving an orphaned graph body the
+        // `list_workflows` route and the GraphQL `Company.workflows` resolver —
+        // both of which read this field — no longer reported.
+        //
+        // Fold the merged list into `self.manifest` ONCE, here, rather than at
+        // the two `CompanyRecord` construction sites below: both build their
+        // manifest from `self.manifest.clone()`, and one of them is inside the
+        // `openhuman`-gated harness arm that the default build never compiles.
+        // Mutating the source keeps the two records in agreement by construction
+        // instead of by a duplicated line only one CI job type-checks.
+        //
+        // Every other `self.manifest` reader in `build` (grants, tool provider,
+        // channels, inference, MCP, plan, policy gate, place) reads fields this
+        // merge never touches.
+        self.manifest.workflows.enabled =
+            merge_enabled_workflows(&self.manifest.workflows.enabled, &overlay_workflows);
         // Issue #85: carry an existing record's source-template provenance
         // forward across the rebuild (a rebuild never re-stamps it); on the very
         // first launch, stamp from the value the launch path recorded (a slug for
@@ -1177,10 +1197,19 @@ impl RuntimeBuilder {
         // Materialize the manifest so status/roster loads have a record to read.
         // The persisted overlays + provenance + ledger + lifecycle were read above
         // (before the brain was constructed, so the brain could be seeded from
-        // them); a rebuild never rewrites the version-controlled manifest, and must
-        // not drop the operator-added teammates, desk memberships, desk order,
-        // operator-created desks, runtime-authored workflow graphs, or the
-        // source-template provenance either.
+        // them), and must not be dropped here: not the operator-added teammates,
+        // desk memberships, desk order, operator-created desks, runtime-authored
+        // workflow graphs, nor the source-template provenance.
+        //
+        // The record's manifest is NOT simply the seed manifest (issue #208). A
+        // rebuild never rewrites the version-controlled `company.toml` *file* —
+        // that much has always held — but the manifest it *persists onto the
+        // record* is the seed manifest with `[workflows].enabled` merged against
+        // the surviving overlay bodies, so a workflow enabled at runtime is still
+        // enabled after a restart. Every other manifest field is seed-authoritative:
+        // the seed wins, and for `[tools]` / `[policy]` that is a security property
+        // — a record-wins merge would let a runtime grant outlive the operator
+        // revoking it in version control.
         store
             .save(&CompanyRecord {
                 id: id.clone(),
