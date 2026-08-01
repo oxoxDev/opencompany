@@ -313,7 +313,13 @@ impl WorkflowScheduler {
                                     workflow = %workflow_id,
                                     node = %report.node,
                                     kind = %report.kind,
-                                    target = report.target.as_deref().unwrap_or("-"),
+                                    // NOT the target itself: for an `email`
+                                    // destination that is the recipient's
+                                    // address, and this line goes to host
+                                    // stdout — which on a hosted tenant is us,
+                                    // not the operator. Whether one resolved is
+                                    // the part with diagnostic value anyway.
+                                    target_configured = report.target.is_some(),
                                     status = ?report.status,
                                     detail = %report.detail,
                                     "workflow scheduler: a scheduled run's report was NOT delivered"
@@ -992,6 +998,17 @@ to = "done"
         assert!(
             line.contains("never written to the company"),
             "carries the detail, which is the part that says what to fix: {line}"
+        );
+        // …but NOT the recipient's address. This line lands on host stdout,
+        // which on a hosted tenant is us rather than the operator, so the
+        // address must never ride it — only whether one resolved at all.
+        assert!(
+            !line.contains("ada@example.com"),
+            "must not leak the recipient address to host stdout: {line}"
+        );
+        assert!(
+            line.contains("target_configured=true"),
+            "keeps the non-sensitive half of the diagnostic: {line}"
         );
 
         // The delivery that DID land gets no warning of its own — otherwise a
