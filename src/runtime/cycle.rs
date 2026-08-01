@@ -1945,7 +1945,8 @@ mod test {
     /// about the recipient, not what the policy did with that belief.
     #[tokio::test]
     async fn established_recipient_past_the_old_page_cap_is_not_first_time() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let sender = Arc::new(RecordingMailSender::new());
         let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
             .with_mail(CompanyMail {
