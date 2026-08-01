@@ -96,7 +96,9 @@ use serde_json::Value;
 use crate::company::WorkflowFile;
 use crate::company::runtime::CompanyMail;
 use crate::company::{WorkflowDestinationDef, WorkflowNodeKind};
-use crate::ports::types::{CompanyId, CompanyRecord, Effect, EffectGroup, OutboundMessage};
+use crate::ports::types::{
+    Actor, ActorKind, CompanyId, CompanyRecord, Effect, EffectGroup, OutboundMessage, Verdict,
+};
 use crate::ports::{
     ApprovalGate, ChannelAdapter, DeliveryReport, DeliveryStatus, EmailRecord, InboxStore,
     UserRole, UserStatus, UserStore, generate_id, now_millis,
@@ -544,21 +546,85 @@ async fn park_cold_recipient(
     }
 }
 
-/// Parks `effect` on the gate and journals it, in that order.
+/// Parks `effect` on the gate and journals it — **both halves or neither**.
 ///
-/// Both halves or neither: a park the journal never recorded is invisible to
-/// `/approvals` and gone on the next restart, so a journal write failure has to
-/// surface as a failure to park rather than as a card nobody can find.
+/// The gate is in-memory; the journal is the durable record `/approvals` reads
+/// and boot replay rehydrates. A gate entry the journal never recorded is the
+/// worst of the three possible outcomes: it shows up in the operator's queue
+/// now, vanishes on the next restart, and backs a `pending` row that promises a
+/// card which no longer exists.
+///
+/// Bundling the two handles in [`DeliveryParking`] makes the *mis-wiring* of
+/// that state unrepresentable, but it does nothing about a **partial failure at
+/// runtime** — `park` succeeding and `record_parked` erroring (a full disk, a
+/// read-only volume, a serialization fault). So the journal write is treated as
+/// the commit point: if it fails, the gate entry is retracted before returning
+/// the error, and the caller degrades to the `skipped` row it already emits for
+/// a parking failure.
+///
+/// Retraction has to undo **two** things, because a failed `record_parked` has
+/// already mutated the journal's in-memory queue (it inserts before it appends,
+/// so the entry is live even though nothing reached disk):
+///
+/// 1. [`ApprovalGate::resolve`] with [`Verdict::Deny`] — the trait's only
+///    removal verb, and the honest one: this effect must never execute. It is
+///    attributed to [`ActorKind::System`](crate::ports::types::ActorKind::System)
+///    (the runtime itself, as boot replay and the TTL sweep are) rather than to
+///    an operator who made no such decision.
+/// 2. [`RuntimeJournal::record_resolved`] — which also removes before it
+///    appends, so it clears the in-memory queue entry that would otherwise show
+///    the operator a card `/approvals` lists but the gate can no longer
+///    execute. Its own append will usually fail for the same reason the first
+///    one did; that is fine and expected, since there is no `ApprovalParked`
+///    line on disk for it to pair with anyway.
+///
+/// The ordering cannot simply be inverted to dodge this: `record_parked` needs
+/// the [`ApprovalId`](crate::ports::types::ApprovalId) that `park` mints, so the
+/// gate write must come first.
+///
+/// Both rollback steps deliberately ignore their own errors and the **original**
+/// journal error propagates — the report is reported unsent either way, and
+/// losing the real cause behind a cleanup error would make the failure harder to
+/// diagnose, not easier.
 async fn park_effect(
     parking: &DeliveryParking,
     company: &CompanyId,
     effect: Effect,
 ) -> Result<(), crate::error::OpenCompanyError> {
     let approval_id = parking.approvals.park(company, effect.clone()).await?;
-    parking
+    if let Err(err) = parking
         .journal
         .record_parked(&approval_id, &effect, now_millis())
         .await
+    {
+        // Roll back to "never parked". Both steps deliberately swallow their own
+        // errors — `err` below is the one worth surfacing.
+        if let Err(rollback) = parking
+            .approvals
+            .resolve(
+                &approval_id,
+                Verdict::Deny,
+                Actor {
+                    kind: ActorKind::System,
+                    id: "workflow-delivery".to_string(),
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                company = %company,
+                error = %rollback,
+                "workflow delivery: a parked effect could not be journaled AND could not be \
+                 retracted from the approval gate; it may linger in the queue until restart"
+            );
+        }
+        // Clears the in-memory queue entry `record_parked` inserted before it
+        // failed to write. Its append will usually fail too — expected, and
+        // ignored: there is no `ApprovalParked` line on disk to pair with.
+        let _ = parking.journal.record_resolved(&approval_id).await;
+        return Err(err);
+    }
+    Ok(())
 }
 
 /// The active admins' email addresses, in store order. An unreadable user store
@@ -968,6 +1034,30 @@ allow = [{allow}]
             self
         }
 
+        /// Wires a gate plus a journal whose every write **fails**, for the
+        /// partial-failure case.
+        ///
+        /// The failure is induced by pointing the journal at a path that is
+        /// already a *directory*: `append` creates the parent fine and then
+        /// `OpenOptions::open` returns `EISDIR`. Deterministic, cross-platform,
+        /// and it fails at the real I/O boundary rather than at a mock, so the
+        /// test exercises the same error path a full disk would.
+        fn with_failing_journal(mut self, dir: &std::path::Path, policy_mode: &str) -> Self {
+            let policy = toml::from_str(&format!("mode = \"{policy_mode}\"\n"))
+                .expect("valid [policy] block");
+            let gate = Arc::new(ManifestApprovalGate::new(policy));
+            let blocked = dir.join("unwritable-journal.jsonl");
+            std::fs::create_dir_all(&blocked).expect("journal path occupied by a directory");
+            let journal = Arc::new(RuntimeJournal::new(blocked));
+            self.deps.parking = Some(DeliveryParking {
+                approvals: gate.clone(),
+                journal: journal.clone(),
+            });
+            self.gate = Some(gate);
+            self.journal = Some(journal);
+            self
+        }
+
         /// Adds an active admin with `email` to the company directory.
         async fn add_admin(&self, id: &str, email: &str) {
             self.users
@@ -1356,6 +1446,61 @@ allow = [{allow}]
             .expect("the gate holds the same id the journal recorded");
         assert_eq!(parked.payload, effect.payload);
         assert_eq!(parked.kind, effect.kind);
+    }
+
+    /// **Data integrity (PR #256 review).** A journal write that fails AFTER the
+    /// gate accepted the park must leave **no gate entry behind**.
+    ///
+    /// The half-wired state the bundled [`DeliveryParking`] makes unrepresentable
+    /// is a *construction* mistake; this is the *runtime* version of it, and
+    /// bundling does nothing for it. An orphaned gate entry is the worst of the
+    /// three outcomes: an executable effect sitting in the queue with no durable
+    /// record, visible now and gone on the next restart, backing a row that
+    /// promises a card which will not survive.
+    ///
+    /// Asserts all four halves of the rollback: `skipped` (not `pending`), no
+    /// gate entry, no in-memory queue entry, and nothing sent.
+    #[tokio::test]
+    async fn a_failed_journal_write_leaves_no_orphaned_gate_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::new(dir.path(), true, true).with_failing_journal(dir.path(), "full");
+        h.receive_from("someone-else@example.com").await;
+
+        let reports = deliver_outputs(
+            Some(&h.deps),
+            &record(&["*"]),
+            &graph("email", Some("stranger@example.com")),
+            &reached_output(),
+        )
+        .await;
+
+        // Degrades to the pre-#227 row, never `pending`: there is no durable
+        // card to point the operator at.
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(
+            reports[0].status,
+            DeliveryStatus::Skipped,
+            "a park that could not be journaled is not pending: {reports:?}"
+        );
+        assert!(
+            reports[0].detail.contains("could not be queued"),
+            "{reports:?}"
+        );
+
+        // THE FINDING: the gate must not still hold the effect.
+        assert!(
+            h.gate.as_ref().unwrap().parked_ids().is_empty(),
+            "a journal write failure must retract the gate entry, not orphan it"
+        );
+        // …and the operator's queue must not list a card the gate can no longer
+        // execute. `record_parked` inserts before it appends, so this only holds
+        // because the rollback clears it too.
+        assert!(
+            h.journal.as_ref().unwrap().pending().is_empty(),
+            "no phantom card may be left in the approvals queue"
+        );
+        // The refusal still held throughout.
+        assert!(h.mail.sent().is_empty(), "nothing may leave the process");
     }
 
     /// **Fail-closed (issue #227).** With no approvals queue wired, delivery
