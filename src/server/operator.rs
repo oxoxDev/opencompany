@@ -613,6 +613,9 @@ async fn company_events(
 /// unexpected (or secret-bearing) ever reaches the console. The actor (`by`) on
 /// `ApprovalResolved` / `LifecycleChanged` is intentionally omitted: the console
 /// renders the attention item without it, and it can carry a user id.
+///
+/// Adding a variant to [`CompanyEvent`] therefore drops it by default; it
+/// reaches the console only by being listed here on purpose.
 fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
     use serde_json::json;
 
@@ -735,6 +738,38 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             let mut o = envelope("task_steered");
             o["taskId"] = json!(task_id);
             o["action"] = json!(action);
+            o
+        }
+        // Issue #228: a finished workflow run, so the console can toast a
+        // report that did not go out *while it is happening* instead of only on
+        // the next reload of the history panel.
+        //
+        // This widens nothing. The projected fields are exactly what the run
+        // drawer already renders, and every one of them — `target` included —
+        // already reaches this same console in the manual run's HTTP response
+        // (see `RunWorkflowResponse` in `super::ops::workflows`). The stream is
+        // operator-authenticated and company-scoped, like that response.
+        //
+        // `runId` is deliberately not projected: it is always `None` today, so
+        // emitting it would put a permanently-null key on the wire.
+        CompanyEvent::WorkflowRunFinished {
+            workflow_id,
+            scheduled,
+            deliveries,
+            pending_approvals,
+            error,
+            ..
+        } => {
+            let mut o = envelope("workflow_run_finished");
+            o["workflowId"] = json!(workflow_id);
+            o["scheduled"] = json!(scheduled);
+            o["deliveries"] = json!(deliveries);
+            o["pendingApprovals"] = json!(pending_approvals);
+            // Omitted rather than null on a run that finished, so the console's
+            // "did this fail?" check is a presence check.
+            if let Some(error) = error {
+                o["error"] = json!(error);
+            }
             o
         }
         // Not an attention signal, or carries a raw payload we never put on the
@@ -2743,11 +2778,93 @@ mod test {
         assert_eq!(v["memo"], "invoice #1");
     }
 
+    // ---- issue #228: the workflow-run outcome projection ----
+
+    fn delivery_row(
+        node: &str,
+        status: crate::ports::DeliveryStatus,
+    ) -> crate::ports::DeliveryReport {
+        crate::ports::DeliveryReport {
+            node: node.into(),
+            kind: "email".into(),
+            target: Some("ada@example.com".into()),
+            status,
+            detail: "this recipient has never written to the company".into(),
+        }
+    }
+
+    /// The live half of #228: a finished run reaches the console as it happens,
+    /// carrying exactly the fields the run drawer already renders — so the
+    /// console can toast an undelivered report instead of waiting for a reload.
+    #[test]
+    fn projects_workflow_run_finished_with_the_fields_the_drawer_renders() {
+        let v = super::project_event(&stored(CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".into(),
+            scheduled: true,
+            run_id: None,
+            deliveries: vec![
+                delivery_row("owner_summary", crate::ports::DeliveryStatus::Skipped),
+                delivery_row("also_sent", crate::ports::DeliveryStatus::Sent),
+            ],
+            pending_approvals: vec!["review".into()],
+            error: None,
+        }))
+        .expect("workflow_run_finished is an attention signal");
+        assert_eq!(v["type"], "workflow_run_finished");
+        assert_eq!(v["seq"], 7);
+        assert_eq!(v["workflowId"], "digest");
+        assert_eq!(v["scheduled"], true);
+        assert_eq!(v["pendingApprovals"][0], "review");
+
+        // Per-row node/kind/target/status/detail — the same shape the manual
+        // run's HTTP response already ships to this console.
+        let rows = v["deliveries"].as_array().expect("rows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["node"], "owner_summary");
+        assert_eq!(rows[0]["kind"], "email");
+        assert_eq!(rows[0]["status"], "skipped");
+        assert_eq!(rows[0]["target"], "ada@example.com");
+        assert!(
+            rows[0]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("never written"),
+            "the detail names the fix: {v}"
+        );
+
+        // A run that finished carries no `error` key, and `runId` — always
+        // `None` today — is never a permanently-null key on the wire.
+        assert!(v.get("error").is_none(), "{v}");
+        assert!(v.get("runId").is_none(), "{v}");
+    }
+
+    /// The failure arm reaches the console too — it is the outcome that used to
+    /// produce nothing but a host-stdout warning.
+    #[test]
+    fn projects_workflow_run_finished_with_the_failure_reason() {
+        let v = super::project_event(&stored(CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".into(),
+            scheduled: true,
+            run_id: None,
+            deliveries: Vec::new(),
+            pending_approvals: Vec::new(),
+            error: Some("no inference source for agent node `worker`".into()),
+        }))
+        .expect("workflow_run_finished is an attention signal");
+        assert_eq!(v["error"], "no inference source for agent node `worker`");
+        assert_eq!(v["deliveries"].as_array().unwrap().len(), 0);
+    }
+
     #[test]
     fn drops_non_attention_and_raw_payload_events() {
         // The operator's own message, and every variant that carries a raw
         // third-party payload or is audit-only, is dropped so nothing unexpected
         // (or secret-bearing) ever reaches the console.
+        //
+        // This list is unchanged by #228: adding `workflow_run_finished` to the
+        // projection widened the wire by exactly one listed variant, and this
+        // test passing untouched is what proves the deny-by-default default
+        // still drops everything it dropped before.
         let dropped = [
             CompanyEvent::OperatorMessage {
                 text: "hi".into(),
