@@ -1758,6 +1758,188 @@ mod test {
         assert!(inbox.iter().any(|r| r.outbound && r.subject == "Hi"));
     }
 
+    /// **The acceptance bar for issue #227.** Parking a cold recipient's report
+    /// is only worth doing if approving it actually sends the mail — otherwise
+    /// `pending` is a nicer-looking way to drop the report.
+    ///
+    /// This parks an `email.send` effect the way
+    /// [`crate::workflows::delivery`] does — straight onto the gate + journal,
+    /// with no cycle running and no brain involved — then resolves it the way
+    /// the HTTP handler does. The mail must go out and leave the outbound audit
+    /// record, through `resolve_approval` → `execute_effect_once` →
+    /// `perform_effect` → `send_company_email`.
+    ///
+    /// Policy mode is `full` on purpose: nothing here relies on the gate
+    /// deciding to park. It was parked directly, exactly as delivery parks it.
+    #[tokio::test]
+    async fn a_directly_parked_email_send_is_mailed_when_approved() {
+        let home = tmp_home();
+        let sender = Arc::new(RecordingMailSender::new());
+        let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
+            .with_mail(CompanyMail {
+                sender: sender.clone(),
+                smtp: test_smtp("ceo@acme.test"),
+            })
+            .build()
+            .await
+            .unwrap();
+
+        // What `park_cold_recipient` builds, field for field.
+        let effect = Effect {
+            kind: EMAIL_SEND_KIND.into(),
+            group: EffectGroup::Send,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: true,
+            payload: serde_json::json!({
+                "to": "stranger@ext.com",
+                "subject": "[Acme] Report flow — Owner summary",
+                "body": "Q3 is up 12%.",
+            }),
+        };
+        let approval_id = rt.approvals.park(rt.id(), effect.clone()).await.unwrap();
+        rt.journal
+            .record_parked(&approval_id, &effect, now_millis())
+            .await
+            .unwrap();
+
+        // It reaches the operator's queue — the same list a workflow's park
+        // shows up in, since it is the same journal.
+        assert_eq!(rt.pending_approvals().len(), 1);
+        assert_eq!(rt.pending_approvals()[0].kind, EMAIL_SEND_KIND);
+        assert!(sender.sent().is_empty(), "parked means not yet sent");
+
+        rt.resolve_approval(&approval_id, Verdict::Approve, operator())
+            .await
+            .unwrap();
+
+        // Approving SENDS.
+        assert_eq!(sender.sent().len(), 1, "approving must mail the report");
+        assert_eq!(sender.sent()[0].1.to, "stranger@ext.com");
+        assert!(sender.sent()[0].1.body.contains("Q3 is up 12%."));
+        // From the company's own address, never anything the payload named.
+        assert_eq!(sender.sent()[0].0, "ceo@acme.test");
+        // …and leaves the outbound audit record, which also makes the recipient
+        // an established thread for next time.
+        let inbox = rt.inbox().messages(rt.id(), "ceo", 10, 0).await.unwrap();
+        assert!(
+            inbox
+                .iter()
+                .any(|r| r.outbound && r.subject.contains("Owner summary")),
+            "{inbox:?}"
+        );
+        assert!(rt.pending_approvals().is_empty(), "the queue drains");
+        tokio::fs::remove_dir_all(&home).await.ok();
+    }
+
+    /// The other half of the same bar: DENYING sends nothing and drains the
+    /// queue. A parked report must not leak out on a refusal.
+    #[tokio::test]
+    async fn a_directly_parked_email_send_is_not_mailed_when_denied() {
+        let home = tmp_home();
+        let sender = Arc::new(RecordingMailSender::new());
+        let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
+            .with_mail(CompanyMail {
+                sender: sender.clone(),
+                smtp: test_smtp("ceo@acme.test"),
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let effect = Effect {
+            kind: EMAIL_SEND_KIND.into(),
+            group: EffectGroup::Send,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: true,
+            payload: serde_json::json!({
+                "to": "stranger@ext.com",
+                "subject": "[Acme] Report flow — Owner summary",
+                "body": "Q3 is up 12%.",
+            }),
+        };
+        let approval_id = rt.approvals.park(rt.id(), effect.clone()).await.unwrap();
+        rt.journal
+            .record_parked(&approval_id, &effect, now_millis())
+            .await
+            .unwrap();
+
+        rt.resolve_approval(&approval_id, Verdict::Deny, operator())
+            .await
+            .unwrap();
+
+        assert!(sender.sent().is_empty(), "a denied report must not go out");
+        assert!(
+            rt.inbox()
+                .messages(rt.id(), "ceo", 10, 0)
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| !r.outbound),
+            "nothing was sent, so there is no outbound record"
+        );
+        assert!(rt.pending_approvals().is_empty());
+        tokio::fs::remove_dir_all(&home).await.ok();
+    }
+
+    /// **Restart durability.** A parked report survives a process restart with
+    /// its original id and still sends on approval — the property that makes a
+    /// `pending` row honest even though the run itself is not persisted.
+    #[tokio::test]
+    async fn a_parked_email_send_survives_a_restart_and_still_sends() {
+        let home = tmp_home();
+        let effect = Effect {
+            kind: EMAIL_SEND_KIND.into(),
+            group: EffectGroup::Send,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: true,
+            payload: serde_json::json!({
+                "to": "stranger@ext.com",
+                "subject": "[Acme] Report flow — Owner summary",
+                "body": "Q3 is up 12%.",
+            }),
+        };
+        let approval_id = {
+            let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
+                .build()
+                .await
+                .unwrap();
+            let id = rt.approvals.park(rt.id(), effect.clone()).await.unwrap();
+            rt.journal
+                .record_parked(&id, &effect, now_millis())
+                .await
+                .unwrap();
+            id
+        };
+
+        // Fresh runtime over the same home: boot replay rehydrates the card.
+        let sender = Arc::new(RecordingMailSender::new());
+        let rt2 = RuntimeBuilder::new(home.clone(), manifest("full"))
+            .with_mail(CompanyMail {
+                sender: sender.clone(),
+                smtp: test_smtp("ceo@acme.test"),
+            })
+            .build()
+            .await
+            .unwrap();
+        let pending = rt2.pending_approvals();
+        assert_eq!(pending.len(), 1, "{pending:?}");
+        assert_eq!(pending[0].id, approval_id, "the ORIGINAL id, not a new one");
+
+        rt2.resolve_approval(&approval_id, Verdict::Approve, operator())
+            .await
+            .unwrap();
+        assert_eq!(
+            sender.sent().len(),
+            1,
+            "a card approved after a restart must still mail"
+        );
+        assert_eq!(sender.sent()[0].1.to, "stranger@ext.com");
+        tokio::fs::remove_dir_all(&home).await.ok();
+    }
+
     #[tokio::test]
     async fn email_send_effect_without_mail_errors() {
         let home_dir = tmp_home();

@@ -1033,6 +1033,29 @@ mod tests {
         assert!(json["pendingApprovals"].is_array());
     }
 
+    /// Issue #227: a parked report rides the run response as `"pending"`. The
+    /// console's `DeliveryStatus` union is spelled in lowercase strings, so the
+    /// wire word is the contract — a rename here silently drops the row into
+    /// the frontend's fallback tone.
+    #[test]
+    fn run_response_serializes_a_parked_delivery_as_pending() {
+        use crate::ports::{DeliveryReport, DeliveryStatus};
+
+        let json = serde_json::to_value(RunWorkflowResponse {
+            output: serde_json::json!({ "nodes": {} }),
+            pending_approvals: Vec::new(),
+            deliveries: vec![DeliveryReport {
+                node: "done".into(),
+                kind: "email".into(),
+                target: Some("stranger@example.com".into()),
+                status: DeliveryStatus::Pending,
+                detail: "waiting for you in Approvals".into(),
+            }],
+        })
+        .unwrap();
+        assert_eq!(json["deliveries"][0]["status"], "pending");
+    }
+
     /// A graph that routes nothing serializes an empty list, not a missing key —
     /// the console can render "no deliveries" without a null check.
     #[test]
