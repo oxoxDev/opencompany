@@ -572,7 +572,7 @@ impl<'a> DelegationRunner<'a> {
                     // note, and `assigned to {assignee}` would record a
                     // sentence that trails off with nothing after it. Name the
                     // effect instead, so the timeline says what happened.
-                    Some(canonical) if canonical.is_empty() => {
+                    Some("") => {
                         card.assignee = String::new();
                         match note {
                             Some(note) => format!("cleared the assignee — {note}"),
