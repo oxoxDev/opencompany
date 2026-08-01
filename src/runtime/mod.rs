@@ -45,6 +45,10 @@ pub mod scheduler;
 pub mod telegram_poller;
 pub mod tools;
 pub mod types;
+/// Issue #228: the single place a finished workflow run is journaled, shared by
+/// the console's run route and the cron [`WorkflowScheduler`] so a run's history
+/// is uniform no matter what started it. See [`workflow_outcome`].
+pub mod workflow_outcome;
 pub mod workflow_scheduler;
 
 pub use builder::{RuntimeBuilder, company_id_from_name};
@@ -55,6 +59,7 @@ pub use registry::CompanyRegistry;
 pub use scheduler::{Clock, CompanyScheduler, FakeClock, SystemClock};
 pub use tools::StubToolProvider;
 pub use types::{ApprovalSummary, CompanyStatus, CycleReport};
+pub use workflow_outcome::record_run_finished;
 pub use workflow_scheduler::WorkflowScheduler;
 
 // The assembly struct lives under `company/` to match the `ports.md` sketch
