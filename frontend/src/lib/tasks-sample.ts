@@ -20,7 +20,9 @@ export interface TaskColumn {
 
 /**
  * The board's columns, left to right. Must stay in step with the backend's
- * `TASK_COLUMNS` (`src/ports/tasks.rs`), which is the source of truth.
+ * `BOARD_COLUMNS` (`src/ports/tasks.rs`), which is the source of truth — and
+ * which the REST write boundary rejects a card against, so a column that
+ * exists only here is one the host will refuse.
  */
 export const TASK_COLUMNS: TaskColumn[] = [
   // The unqueued pool, and where the lifecycle returns work that needs another

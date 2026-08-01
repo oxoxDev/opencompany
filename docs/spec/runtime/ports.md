@@ -331,8 +331,9 @@ pub trait TaskStore: Send + Sync {
 
 `TaskRecord` carries `{id, title, note, column, priority, assignee,
 updated_at}`. `column` ∈ `backlog|todo|in_progress|paused|in_review|done`,
-defined once as `TASK_COLUMNS` in this module and re-exported by
-`harness::lifecycle`; the console mirrors the same list and order.
+defined once as `BOARD_COLUMNS` in this module and re-exported by
+`harness::lifecycle`; the console mirrors the same list and order, and the REST
+write boundary validates against it.
 
 `backlog` and `todo` are both "not started", and the split is deliberate:
 `backlog` is the unqueued pool — and where the lifecycle returns work that needs

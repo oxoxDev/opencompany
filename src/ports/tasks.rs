@@ -1,7 +1,7 @@
 //! The [`TaskStore`] port: the company's durable Kanban board.
 //!
 //! Tasks are the operator-visible work items the console's board renders (see
-//! [`TASK_COLUMNS`]). They are hand-curated state, not cycle working memory —
+//! [`BOARD_COLUMNS`]). They are hand-curated state, not cycle working memory —
 //! the brain's per-cycle task results live in
 //! [`MemoryStore`](crate::ports::MemoryStore). Each record is keyed by a stable
 //! id within the company.
@@ -39,12 +39,19 @@ pub const COLUMN_IN_REVIEW: &str = "in_review";
 /// The terminal column — nothing dispatches out of it.
 pub const COLUMN_DONE: &str = "done";
 
-/// Every board column, in the order the console renders them left to right.
+/// Every column the board renders, in the order the console draws them left to
+/// right — the host's half of the console's `TASK_COLUMNS`
+/// (`frontend/src/lib/tasks-sample.ts`).
 ///
 /// `backlog` and `todo` are both "not started", and the split is deliberate:
 /// `backlog` is the pool — and where the lifecycle returns work that needs
 /// another pass — while `todo` is what has been picked up for the next stretch.
-pub const TASK_COLUMNS: [&str; 6] = [
+///
+/// This is also the list the REST write boundary validates a card's `column`
+/// against, which is why `todo` has to be in it: `POST …/tasks` defaults a new
+/// card here, so a validator that did not know the column would reject every
+/// card the board creates.
+pub const BOARD_COLUMNS: [&str; 6] = [
     COLUMN_BACKLOG,
     COLUMN_TODO,
     COLUMN_IN_PROGRESS,
@@ -53,9 +60,9 @@ pub const TASK_COLUMNS: [&str; 6] = [
     COLUMN_DONE,
 ];
 
-/// Whether `column` is one of the board's known columns.
-pub fn is_known_column(column: &str) -> bool {
-    TASK_COLUMNS.contains(&column)
+/// Whether `column` names a column the board actually renders.
+pub fn is_board_column(column: &str) -> bool {
+    BOARD_COLUMNS.contains(&column)
 }
 
 /// One card on the company's task board.
@@ -69,7 +76,7 @@ pub struct TaskRecord {
     /// An optional longer note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    /// The board column — one of [`TASK_COLUMNS`].
+    /// The board column — one of [`BOARD_COLUMNS`].
     pub column: String,
     /// The priority (`low`, `medium`, `high`).
     pub priority: String,
@@ -136,7 +143,7 @@ mod test {
     #[test]
     fn columns_are_ordered_and_unique() {
         assert_eq!(
-            TASK_COLUMNS,
+            BOARD_COLUMNS,
             [
                 "backlog",
                 "todo",
@@ -146,28 +153,28 @@ mod test {
                 "done"
             ]
         );
-        let mut sorted = TASK_COLUMNS.to_vec();
+        let mut sorted = BOARD_COLUMNS.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(
             sorted.len(),
-            TASK_COLUMNS.len(),
+            BOARD_COLUMNS.len(),
             "column ids must be unique"
         );
     }
 
     #[test]
-    fn is_known_column_accepts_only_board_columns() {
-        for column in TASK_COLUMNS {
-            assert!(is_known_column(column), "{column} is a board column");
+    fn is_board_column_accepts_only_board_columns() {
+        for column in BOARD_COLUMNS {
+            assert!(is_board_column(column), "{column} is a board column");
         }
         // Issue #206 added To-do as a column of its own; Backlog stays.
-        assert!(is_known_column(COLUMN_TODO));
-        assert!(is_known_column(COLUMN_BACKLOG));
+        assert!(is_board_column(COLUMN_TODO));
+        assert!(is_board_column(COLUMN_BACKLOG));
         // Near-misses a typo'd client might send.
-        assert!(!is_known_column("to_do"));
-        assert!(!is_known_column("To-do"));
-        assert!(!is_known_column("inprogress"));
-        assert!(!is_known_column(""));
+        assert!(!is_board_column("to_do"));
+        assert!(!is_board_column("To-do"));
+        assert!(!is_board_column("inprogress"));
+        assert!(!is_board_column(""));
     }
 }
