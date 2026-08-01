@@ -48,9 +48,22 @@ pub struct WorkflowRun {
 pub enum DeliveryStatus {
     /// The transport accepted the report.
     Sent,
-    /// Deliberately not attempted — a policy precondition was unmet (a cold
-    /// email recipient, no mailbox configured). Not an error; the report simply
-    /// was not owed to that address under the current rules.
+    /// Parked for operator approval and not sent — the destination needs a
+    /// human verdict before anything leaves the process (a cold email
+    /// recipient, which a workflow may not cold-open by itself).
+    ///
+    /// **This row is a snapshot taken at run time, not a live status.** A
+    /// workflow run is not persisted, so nothing ever comes back to flip this
+    /// row to `Sent` once the operator approves. The approvals queue is the
+    /// live source of truth: the parked effect is journal-backed, survives a
+    /// restart, and executes on approval through the same path an agent's
+    /// `email.send` does. Read this row as "an approval was opened for this",
+    /// then look at Approvals for what became of it.
+    Pending,
+    /// Deliberately not attempted — a policy precondition was unmet (no mailbox
+    /// configured, or a cold recipient on a runtime that cannot park). Not an
+    /// error; the report simply was not owed to that address under the current
+    /// rules.
     Skipped,
     /// Refused by policy: the company does not grant what the destination needs.
     Denied,

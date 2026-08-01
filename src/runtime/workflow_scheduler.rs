@@ -76,6 +76,7 @@ type WorkflowKey = (CompanyId, String);
 #[derive(Debug, Default, PartialEq, Eq)]
 struct DeliveryCounts {
     sent: usize,
+    pending: usize,
     skipped: usize,
     denied: usize,
     failed: usize,
@@ -87,6 +88,7 @@ impl DeliveryCounts {
         for report in reports {
             match report.status {
                 DeliveryStatus::Sent => counts.sent += 1,
+                DeliveryStatus::Pending => counts.pending += 1,
                 DeliveryStatus::Skipped => counts.skipped += 1,
                 DeliveryStatus::Denied => counts.denied += 1,
                 DeliveryStatus::Failed => counts.failed += 1,
@@ -936,6 +938,7 @@ to = "done"
             counts,
             DeliveryCounts {
                 sent: 2,
+                pending: 0,
                 skipped: 1,
                 denied: 1,
                 failed: 1,
