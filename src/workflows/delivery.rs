@@ -58,9 +58,11 @@
 //!
 //! A delivery failure must not fail a run that already did its work. Every
 //! attempt yields a [`DeliveryReport`] row on
-//! [`WorkflowRun::deliveries`](crate::ports::WorkflowRun), which rides the run
-//! response into the console's run-result panel — so an operator can tell a
-//! delivered report from an undelivered one **without reading a log**. There is
+//! [`WorkflowRun::deliveries`](crate::ports::WorkflowRun). On an **on-demand**
+//! run those rows ride the run response into the console's run-result panel, so
+//! an operator can tell a delivered report from an undelivered one without
+//! reading a log. A **scheduled** run is not persisted, so its rows reach only
+//! the scheduler's log until issue #242 gives a run a durable record. There is
 //! one attempt per recipient and no retry: a workflow run is not a mail queue.
 //!
 //! An output node the run never reached (an untaken branch, or a path that

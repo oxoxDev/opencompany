@@ -60,14 +60,18 @@ Delivery itself is **not** a route concern. It runs host-side in the shared
 `WorkflowRunner` path (`src/workflows/delivery.rs`) once the engine returns,
 because the orchestrator's `run_workflow` tool and the trigger scheduler drive
 that same port — and a scheduled run is exactly the case where nobody is
-watching the console. The run response therefore carries `deliveries`: one row
-per attempt (`sent` / `skipped` / `denied` / `failed`) with an operator-readable
-reason. A delivery failure never fails the run, so that list is where an
-operator learns a report did not go out; an unwired runtime writes a loud
-`failed` row rather than skipping silently. A **scheduled** run has no response
-to carry those rows, so the scheduler logs each undelivered one instead — see
-`src/runtime/workflow_scheduler.rs`, which is also honest that a host log line
-is not the same as an operator-visible surface (issue #228).
+watching the console. An **on-demand** run's response therefore carries
+`deliveries`: one row per attempt (`sent` / `skipped` / `denied` / `failed`)
+with an operator-readable reason. A delivery failure never fails the run, so on
+that run the list is where an operator learns a report did not go out; an
+unwired runtime writes a loud `failed` row rather than skipping silently.
+
+A **scheduled** run is not persisted, so its delivery outcomes are not surfaced
+yet. The scheduler logs each undelivered report and drops the run value — see
+`src/runtime/workflow_scheduler.rs`. That makes a failed scheduled delivery
+diagnosable in the host's stdout, which is not the same as operator-visible.
+Giving a run a durable record to read those rows back from is issue #242
+(first-class `Run` records); #228 tracks this specific gap.
 
 Authoring a destination and reading the result back:
 

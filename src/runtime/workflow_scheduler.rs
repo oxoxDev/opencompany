@@ -46,7 +46,8 @@
 //! needs somewhere durable an operator actually looks, and no such run-history
 //! surface exists for workflows yet (a manual run's deliveries are transient
 //! too — they live only in the drawer until it is dismissed). That is issue
-//! #228; this is the half that can be done without inventing a subsystem.
+//! #228, and the durable record it needs is issue #242's first-class `Run`;
+//! this is the half that can be done without inventing a subsystem.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
