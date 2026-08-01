@@ -1862,6 +1862,242 @@ mod test {
         assert!(merge_enabled_workflows(&[], &[]).is_empty());
     }
 
+    // --- Issue #208: two-build rebuild semantics over one home dir ----------
+
+    /// A seed manifest with the roster the create-path draft below references.
+    fn wf_manifest(extra: &str) -> CompanyManifest {
+        parse(&format!(
+            "[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n\
+             [[agent]]\nid=\"assistant\"\nrole=\"Assistant\"\n{extra}"
+        ))
+    }
+
+    /// The minimal valid three-node graph the create path accepts, mirroring
+    /// `workflow_create`'s own `valid_draft`.
+    fn wf_draft(id: &str, name: &str) -> crate::company::RawWorkflow {
+        use crate::company::{RawEdge, RawNode, RawWorkflow};
+        let node = |id: &str, kind: &str, name: &str, agent: Option<&str>| RawNode {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            name: name.to_string(),
+            summary: None,
+            agent: agent.map(str::to_string),
+            schedule: None,
+            config: None,
+            on_error: None,
+            retry: None,
+            requires_approval: None,
+            destination: None,
+        };
+        RawWorkflow {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: Some("A tiny graph.".to_string()),
+            nodes: vec![
+                node("start", "trigger", "Start", None),
+                node("worker", "agent", "Worker", Some("assistant")),
+                node("done", "output", "Report", None),
+            ],
+            edges: vec![
+                RawEdge {
+                    from: "start".to_string(),
+                    to: "worker".to_string(),
+                    label: None,
+                },
+                RawEdge {
+                    from: "worker".to_string(),
+                    to: "done".to_string(),
+                    label: Some("ok".to_string()),
+                },
+            ],
+        }
+    }
+
+    /// Issue #208: a workflow created at runtime through the real create path
+    /// (console `POST …/workflows` / orchestrator `create_workflow`) is still
+    /// enabled after the runtime is rebuilt on the same home dir — and the
+    /// `enabled_workflow_ids` accessor both REST `list_workflows` and the
+    /// GraphQL `Company.workflows` resolver read still reports it.
+    #[tokio::test]
+    async fn runtime_created_workflow_stays_enabled_across_a_rebuild() {
+        let home_dir = tempfile::Builder::new()
+            .prefix("oc-wf-enabled-")
+            .tempdir()
+            .expect("tempdir");
+        let home = home_dir.path().to_path_buf();
+        let manifest = wf_manifest("[workflows]\nenabled=[\"seeded_pipeline\"]\n");
+        let id = CompanyId::new("acme");
+
+        let runtime = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        // The real writer: overlay body + enabled id in one save.
+        crate::company::create_company_workflow(
+            &id,
+            None,
+            runtime.store(),
+            None,
+            wf_draft("daily_digest", "Daily Digest"),
+        )
+        .await
+        .unwrap();
+        let created = runtime.store().load(&id).await.unwrap().unwrap();
+        assert_eq!(
+            created.manifest.workflows.enabled,
+            vec!["seeded_pipeline", "daily_digest"]
+        );
+        drop(runtime);
+
+        // Rebuild from the same seed manifest — the seed knows nothing about
+        // `daily_digest`, so this is exactly the boot that used to lose it.
+        let runtime = RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let rebuilt = runtime.store().load(&id).await.unwrap().unwrap();
+        assert_eq!(
+            rebuilt.manifest.workflows.enabled,
+            vec!["seeded_pipeline", "daily_digest"],
+            "the rebuild dropped the runtime-enabled workflow"
+        );
+        assert!(
+            rebuilt
+                .overlay_workflows
+                .iter()
+                .any(|w| w.id == "daily_digest"),
+            "the graph body should be untouched by this fix"
+        );
+        // What the REST + GraphQL workflow lists actually read.
+        assert_eq!(
+            runtime.enabled_workflow_ids().await.unwrap(),
+            vec!["seeded_pipeline", "daily_digest"]
+        );
+    }
+
+    /// Issue #208: a record written during the bug era — overlay graph body
+    /// intact, its enabled id already wiped by an earlier restart — is healed
+    /// by the next rebuild, with no migration.
+    #[tokio::test]
+    async fn rebuild_reenables_a_bug_era_orphaned_overlay_body() {
+        let home_dir = tempfile::Builder::new()
+            .prefix("oc-wf-heal-")
+            .tempdir()
+            .expect("tempdir");
+        let home = home_dir.path().to_path_buf();
+        let manifest = wf_manifest("");
+        let id = CompanyId::new("acme");
+
+        let runtime = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let store = runtime.store().clone();
+        let mut record = store.load(&id).await.unwrap().unwrap();
+        // Bug-era shape: body present, `enabled` clobbered back to the seed's.
+        record.overlay_workflows.push(OverlayWorkflow {
+            id: "orphaned".to_string(),
+            toml: "id = \"orphaned\"\n".to_string(),
+        });
+        record.manifest.workflows.enabled.clear();
+        store.save(&record).await.unwrap();
+        drop(runtime);
+
+        let runtime = RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime.enabled_workflow_ids().await.unwrap(),
+            vec!["orphaned"],
+            "an orphaned bug-era overlay body was not re-enabled"
+        );
+    }
+
+    /// Issue #208: `[workflows].enabled` is the ONLY merged field. A
+    /// seed-authoritative field that diverged on the record — here a
+    /// runtime-granted tool, the case where record-wins would let privilege
+    /// outlive a seed rollback — is overwritten by the seed on rebuild.
+    #[tokio::test]
+    async fn rebuild_keeps_every_other_manifest_field_seed_authoritative() {
+        let home_dir = tempfile::Builder::new()
+            .prefix("oc-wf-seedwins-")
+            .tempdir()
+            .expect("tempdir");
+        let home = home_dir.path().to_path_buf();
+        let manifest = wf_manifest("[tools]\nallow=[\"memory.*\"]\n");
+        let id = CompanyId::new("acme");
+
+        let runtime = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let store = runtime.store().clone();
+        let mut record = store.load(&id).await.unwrap().unwrap();
+        record.manifest.tools.allow.push("email.*".to_string());
+        record.manifest.company.name = "Renamed At Runtime".to_string();
+        store.save(&record).await.unwrap();
+        drop(runtime);
+
+        let runtime = RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let rebuilt = runtime.store().load(&id).await.unwrap().unwrap();
+        assert_eq!(
+            rebuilt.manifest.tools.allow,
+            vec!["memory.*"],
+            "a runtime tool grant survived a seed rollback"
+        );
+        assert_eq!(rebuilt.manifest.company.name, "Acme");
+    }
+
+    /// Issue #208: an enabled id with no surviving graph body — a seed entry
+    /// the operator deleted from `company.toml` — is dropped rather than
+    /// carried forward forever with nothing to run.
+    #[tokio::test]
+    async fn rebuild_drops_an_enabled_id_with_no_body() {
+        let home_dir = tempfile::Builder::new()
+            .prefix("oc-wf-zombie-")
+            .tempdir()
+            .expect("tempdir");
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("acme");
+
+        // First boot from a seed that enables `retired`.
+        let runtime = RuntimeBuilder::new(
+            home.clone(),
+            wf_manifest("[workflows]\nenabled=[\"retired\"]\n"),
+        )
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+        assert_eq!(
+            runtime.enabled_workflow_ids().await.unwrap(),
+            vec!["retired"]
+        );
+        drop(runtime);
+
+        // The operator removes it from the version-controlled seed. No overlay
+        // body was ever written for it, so nothing carries it forward.
+        let runtime = RuntimeBuilder::new(home.clone(), wf_manifest(""))
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            runtime.enabled_workflow_ids().await.unwrap().is_empty(),
+            "a bodiless enabled id zombied past its removal from the seed"
+        );
+    }
+
     #[test]
     fn effective_grants_no_roster_is_company_allow() {
         let manifest = parse("[company]\nname=\"X\"\n[tools]\nallow=[\"email.*\",\"email.*\"]\n");
