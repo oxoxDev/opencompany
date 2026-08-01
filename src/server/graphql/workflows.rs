@@ -190,11 +190,16 @@ async fn overlays(runtime: &Arc<CompanyRuntime>) -> async_graphql::Result<Vec<Ov
 ///
 /// Driving this off the manifest's enabled list alone — as it used to — made a
 /// runtime-authored workflow invisible here while `Company.workflow(id)`
-/// returned its full graph. That gap is not hypothetical: the boot rebuild
-/// overwrites the persisted record's manifest with the seed manifest
-/// (`RuntimeBuilder`), so a runtime-added enabled id is gone after a restart and
-/// the graph body on the record is the only surviving evidence the workflow
-/// exists.
+/// returned its full graph. That gap was not hypothetical: a boot rebuild used
+/// to overwrite the persisted record's manifest from the seed
+/// (`RuntimeBuilder`), so a runtime-added enabled id was gone after a restart
+/// and the graph body was the only surviving evidence the workflow existed.
+///
+/// Issue #208 closed that hole at the source — a rebuild now merges surviving
+/// overlay ids back into `[workflows].enabled`, so `enabled` reads `true` again
+/// after a restart. Enumerating from bodies stays the right shape regardless:
+/// it is what keeps this resolver and the REST picker agreeing on the id set
+/// whatever put a record in a body-without-enabled-entry state.
 pub(crate) async fn resolve_summaries(
     _ctx: &Context<'_>,
     runtime: &Arc<CompanyRuntime>,
