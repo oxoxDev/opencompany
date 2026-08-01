@@ -70,9 +70,15 @@ type WorkflowKey = (CompanyId, String);
 /// How a scheduled run's report deliveries came out, folded for one log line.
 ///
 /// A count per status rather than a bare total: `skipped` and `denied` mean
-/// policy refused to send (a cold recipient, a missing `email` grant) while
-/// `failed` means something broke, and an operator reading a scheduled run's
-/// outcome needs to tell those apart before deciding whether to act.
+/// policy refused to send (a missing `email` grant, no mailbox) while `failed`
+/// means something broke, and an operator reading a scheduled run's outcome
+/// needs to tell those apart before deciding whether to act.
+///
+/// `pending` is the fourth thing entirely, and the reason this line matters
+/// most on the scheduled path: the report is not lost and nothing is broken —
+/// it is sitting in the approvals queue waiting for a human. A scheduled run
+/// is exactly the nobody-is-watching case, so without this count an operator
+/// would have no signal that a card is waiting for them.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct DeliveryCounts {
     sent: usize,
@@ -97,7 +103,12 @@ impl DeliveryCounts {
         counts
     }
 
-    /// Reports that did NOT reach their destination, whatever the reason.
+    /// Reports that did NOT reach their destination **and never will without a
+    /// change** — the number worth alerting on.
+    ///
+    /// `pending` is deliberately excluded: it is awaiting a verdict, not a fix,
+    /// and folding it in here would page someone for a queue that is working as
+    /// designed. It gets its own count on the summary line.
     fn undelivered(&self) -> usize {
         self.skipped + self.denied + self.failed
     }
@@ -315,6 +326,23 @@ impl WorkflowScheduler {
                                 if report.status == DeliveryStatus::Sent {
                                     continue;
                                 }
+                                // A parked report is not a failure and must not
+                                // be logged as one — it is a card waiting in
+                                // the approvals queue. Say where to go, at
+                                // info, and move on.
+                                if report.status == DeliveryStatus::Pending {
+                                    tracing::info!(
+                                        %company,
+                                        workflow = %workflow_id,
+                                        node = %report.node,
+                                        kind = %report.kind,
+                                        // Same reason as the warn below: never
+                                        // the recipient's address in a host log.
+                                        target_configured = report.target.is_some(),
+                                        "workflow scheduler: a scheduled run's report is parked for operator approval — see the Approvals view"
+                                    );
+                                    continue;
+                                }
                                 tracing::warn!(
                                     %company,
                                     workflow = %workflow_id,
@@ -337,6 +365,9 @@ impl WorkflowScheduler {
                                 workflow = %workflow_id,
                                 pending_approvals = run.pending_approvals.len(),
                                 sent = counts.sent,
+                                // Awaiting a human, not a fix — counted apart
+                                // from `undelivered` for exactly that reason.
+                                pending_approval = counts.pending,
                                 skipped = counts.skipped,
                                 denied = counts.denied,
                                 failed = counts.failed,
@@ -926,24 +957,28 @@ to = "done"
     /// The fold behind the summary line counts each status separately, because
     /// "policy refused to send" and "something broke" are different problems.
     #[test]
-    fn delivery_counts_separate_the_four_outcomes() {
+    fn delivery_counts_separate_the_five_outcomes() {
         let counts = DeliveryCounts::of(&[
             report("a", DeliveryStatus::Sent, ""),
             report("b", DeliveryStatus::Sent, ""),
             report("c", DeliveryStatus::Skipped, ""),
             report("d", DeliveryStatus::Denied, ""),
             report("e", DeliveryStatus::Failed, ""),
+            report("f", DeliveryStatus::Pending, ""),
         ]);
         assert_eq!(
             counts,
             DeliveryCounts {
                 sent: 2,
-                pending: 0,
+                pending: 1,
                 skipped: 1,
                 denied: 1,
                 failed: 1,
             }
         );
+        // A parked report awaits a verdict, not a fix: it must NOT inflate the
+        // number an operator alerts on, or a working approvals queue would page
+        // someone every scheduled minute.
         assert_eq!(counts.undelivered(), 3);
         // The common case: nothing routed anywhere.
         assert_eq!(DeliveryCounts::of(&[]), DeliveryCounts::default());
@@ -1034,7 +1069,69 @@ to = "done"
         assert!(summary.contains("skipped=1"), "{summary}");
         assert!(summary.contains("denied=0"), "{summary}");
         assert!(summary.contains("failed=0"), "{summary}");
+        assert!(summary.contains("pending_approval=0"), "{summary}");
         assert!(summary.contains("undelivered=1"), "{summary}");
+    }
+
+    /// Issue #227: a scheduled run whose report was parked for approval is the
+    /// nobody-is-watching case squared — there is no drawer AND the operator
+    /// has to be told a card is waiting for them. It must be said, but not as a
+    /// failure: no `was NOT delivered` warning, and it must not inflate the
+    /// `undelivered` number an alert keys on.
+    #[tokio::test]
+    async fn a_scheduled_run_reports_a_parked_report_without_crying_wolf() {
+        let sink = captured_logs();
+        let home = tmp_home();
+        let company = "parked-delivery-co";
+        let (runner, completed) = RecordingRunner::with_deliveries(vec![report(
+            "owner_summary",
+            DeliveryStatus::Pending,
+            "parked for operator approval",
+        )]);
+        let registry = company_with_overlays(
+            &home,
+            company,
+            vec![overlay("digest", Some("* * * * *"))],
+            Some(runner),
+            "running",
+        )
+        .await;
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry, clock);
+
+        assert_eq!(scheduler.tick().await, 1);
+        wait_for(|| completed.load(Ordering::SeqCst) == 1).await;
+        wait_for(|| captured_text(&sink).contains("scheduled run finished")).await;
+
+        let logs = captured_text(&sink);
+        // Said, and pointed at the place the operator has to go.
+        let line = logs
+            .lines()
+            .find(|l| l.contains(company) && l.contains("parked for operator approval"))
+            .unwrap_or_else(|| panic!("no parked-report line for {company}: {logs}"));
+        assert!(line.contains("owner_summary"), "names the node: {line}");
+        assert!(line.contains("Approvals view"), "says where to go: {line}");
+        // Never the recipient's address on host stdout, same as the warn path.
+        assert!(
+            !line.contains("ada@example.com"),
+            "must not leak the recipient address to host stdout: {line}"
+        );
+        // Not cried wolf about.
+        assert!(
+            !logs
+                .lines()
+                .any(|l| l.contains(company) && l.contains("was NOT delivered")),
+            "a parked report is not a failed delivery: {logs}"
+        );
+        let summary = logs
+            .lines()
+            .find(|l| l.contains(company) && l.contains("scheduled run finished"))
+            .unwrap_or_else(|| panic!("no summary line for {company}: {logs}"));
+        assert!(summary.contains("pending_approval=1"), "{summary}");
+        assert!(summary.contains("undelivered=0"), "{summary}");
+        assert!(summary.contains("sent=0"), "{summary}");
+
+        cleanup(&home).await;
     }
 
     /// A scheduled run that delivered everything says so without crying wolf:
