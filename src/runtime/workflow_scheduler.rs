@@ -41,13 +41,23 @@
 //!
 //! **Be clear about the ceiling of that.** A log line reaches whoever can read
 //! the host's stdout. On a self-hosted deployment that is the operator; on a
-//! hosted tenant it is emphatically not — it is us. So this makes a failed
-//! scheduled delivery *diagnosable*, not *operator-visible*. Closing that gap
-//! needs somewhere durable an operator actually looks, and no such run-history
-//! surface exists for workflows yet (a manual run's deliveries are transient
-//! too — they live only in the drawer until it is dismissed). That is issue
-//! #228, and the durable record it needs is issue #242's first-class `Run`;
-//! this is the half that can be done without inventing a subsystem.
+//! hosted tenant it is emphatically not — it is us. So the log makes a failed
+//! scheduled delivery *diagnosable*, not *operator-visible*.
+//!
+//! Issue #228 closes that gap without inventing a subsystem: every finished run
+//! — this scheduler's and the console's Run button alike — is journaled as a
+//! [`CompanyEvent::WorkflowRunFinished`](crate::ports::types::CompanyEvent)
+//! through [`record_run_finished`], projected live onto the operator SSE stream,
+//! and read back durably from `GET …/workflows/runs`. The log lines below stay
+//! exactly as they were: they remain the platform team's diagnostic, and the
+//! event is the operator's surface. The two answer to different readers, so
+//! neither replaces the other.
+//!
+//! (A run outcome is deliberately *not* modelled as issue #242's first-class
+//! `RunRecord`. That is a task-attempt record minted at the task dispatch choke
+//! point and keyed to a board task with an attempt ordinal; a workflow run
+//! enters through the [`WorkflowRunner`] port, has no task, and produces
+//! host-side delivery rows per output node. The shapes don't meet.)
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -63,6 +73,7 @@ use crate::ports::{DeliveryReport, DeliveryStatus};
 use crate::runtime::CompanyRegistry;
 use crate::runtime::cron::{CivilTime, CronExpr};
 use crate::runtime::scheduler::{Clock, MINUTE_MS, millis_to_next_minute};
+use crate::runtime::workflow_outcome::record_run_finished;
 
 /// Identifies one schedulable workflow: which company, which graph.
 type WorkflowKey = (CompanyId, String);
@@ -273,6 +284,12 @@ impl WorkflowScheduler {
 
                 let runner = runner.clone();
                 let workflow = file;
+                // Cloned BEFORE the spawn: the task outlives this loop
+                // iteration (and this borrow of `runtime`), so the handle has to
+                // be moved in rather than reached for from inside. Issue #228 —
+                // this is what turns a scheduled run's outcome from a host-stdout
+                // line into something the tenant's own console can read back.
+                let events = runtime.events().clone();
                 // A FRESH TASK PER FIRE IS CORRECT HERE, and is not a hole in
                 // the `WORKFLOW_DEPTH` re-entry guard
                 // (`crate::workflows::runner`). That guard is a task-local
@@ -343,13 +360,34 @@ impl WorkflowScheduler {
                                 undelivered = counts.undelivered(),
                                 "workflow scheduler: scheduled run finished"
                             );
+                            // Issue #228: the operator-facing half. The log
+                            // lines above stay exactly as they are — they are
+                            // the platform team's diagnostic on host stdout,
+                            // which on a hosted tenant is emphatically not the
+                            // operator. This is the record the tenant's own
+                            // console reads back, after the fact, on reload.
+                            record_run_finished(&events, &company, &workflow_id, true, Ok(&run))
+                                .await;
                         }
-                        Err(err) => tracing::warn!(
-                            %company,
-                            workflow = %workflow_id,
-                            %err,
-                            "workflow scheduler: scheduled run failed"
-                        ),
+                        Err(err) => {
+                            tracing::warn!(
+                                %company,
+                                workflow = %workflow_id,
+                                %err,
+                                "workflow scheduler: scheduled run failed"
+                            );
+                            // The worst outcome was until now the quietest: a
+                            // run that died outright produced one host-stdout
+                            // warning and nothing an operator could ever find.
+                            record_run_finished(
+                                &events,
+                                &company,
+                                &workflow_id,
+                                true,
+                                Err(err.to_string().as_str()),
+                            )
+                            .await;
+                        }
                     }
                 });
                 fired += 1;
@@ -522,7 +560,7 @@ mod test {
 
     use super::*;
     use crate::company::CompanyManifest;
-    use crate::ports::types::{CompanyRecord, OverlayWorkflow};
+    use crate::ports::types::{CompanyEvent, CompanyRecord, EventSeq, OverlayWorkflow};
     use crate::ports::{WorkflowRun, WorkflowRunner};
     use crate::runtime::{FakeClock, RuntimeBuilder};
 
@@ -725,6 +763,38 @@ mod test {
                 pending_approvals: Vec::new(),
                 deliveries: self.deliveries.clone(),
             })
+        }
+    }
+
+    /// A [`WorkflowRunner`] whose every run fails, so a test can drive the
+    /// scheduler's `Err` arm — the outcome that used to leave nothing durable
+    /// behind at all (issue #228).
+    struct FailingRunner {
+        message: String,
+        attempts: Arc<AtomicUsize>,
+    }
+
+    impl FailingRunner {
+        fn new(message: &str) -> (Arc<Self>, Arc<AtomicUsize>) {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let runner = Arc::new(Self {
+                message: message.to_string(),
+                attempts: attempts.clone(),
+            });
+            (runner, attempts)
+        }
+    }
+
+    #[async_trait]
+    impl WorkflowRunner for FailingRunner {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _workflow: &WorkflowFile,
+            _input: Value,
+        ) -> crate::Result<WorkflowRun> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            Err(crate::error::OpenCompanyError::Config(self.message.clone()))
         }
     }
 
@@ -1083,6 +1153,144 @@ to = "done"
         assert!(summary.contains("denied=0"), "{summary}");
         assert!(summary.contains("failed=0"), "{summary}");
         assert!(summary.contains("undelivered=0"), "{summary}");
+    }
+
+    // ── Issue #228: the run outcome reaches the journal, not just stdout ─────
+
+    /// Every `WorkflowRunFinished` journaled for `company`.
+    async fn run_outcomes(registry: &CompanyRegistry, company: &str) -> Vec<CompanyEvent> {
+        let id = CompanyId::new(company);
+        let runtime = registry.get(&id).expect("registered");
+        runtime
+            .events()
+            .read_from(&id, EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read journal")
+            .into_iter()
+            .map(|s| s.event)
+            .filter(|e| matches!(e, CompanyEvent::WorkflowRunFinished { .. }))
+            .collect()
+    }
+
+    /// **The issue.** A scheduled run's delivery rows must land somewhere the
+    /// tenant's own console can read back — the log line only reaches whoever
+    /// reads host stdout, which on a hosted tenant is not the operator.
+    #[tokio::test]
+    async fn a_scheduled_run_journals_its_delivery_rows_and_approvals() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let company = "journal-delivery-co";
+        let (runner, completed) = RecordingRunner::with_deliveries(vec![
+            report(
+                "owner_summary",
+                DeliveryStatus::Skipped,
+                "this recipient has never written to the company",
+            ),
+            report("also_sent", DeliveryStatus::Sent, "emailed the recipient"),
+        ]);
+        let registry = company_with_overlays(
+            &home,
+            company,
+            vec![overlay("digest", Some("* * * * *"))],
+            Some(runner),
+            "running",
+        )
+        .await;
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry.clone(), clock);
+
+        assert_eq!(scheduler.tick().await, 1);
+        wait_for(|| completed.load(Ordering::SeqCst) == 1).await;
+        // The append happens after the run completes, so wait on the journal
+        // rather than racing it.
+        let outcomes = loop {
+            let outcomes = run_outcomes(&registry, company).await;
+            if !outcomes.is_empty() {
+                break outcomes;
+            }
+            tokio::task::yield_now().await;
+        };
+
+        assert_eq!(outcomes.len(), 1);
+        let CompanyEvent::WorkflowRunFinished {
+            workflow_id,
+            scheduled,
+            deliveries,
+            error,
+            ..
+        } = &outcomes[0]
+        else {
+            unreachable!("filtered above")
+        };
+        assert_eq!(workflow_id, "digest");
+        assert!(*scheduled, "a cron fire records itself as scheduled");
+        assert!(error.is_none());
+        assert_eq!(deliveries.len(), 2, "both rows, not just the failed one");
+        let skipped = deliveries
+            .iter()
+            .find(|d| d.node == "owner_summary")
+            .expect("the undelivered row");
+        assert_eq!(skipped.status, DeliveryStatus::Skipped);
+        // The `detail` is the part that says what to fix. The log line carries
+        // it too, but the log is not where the operator can look.
+        assert!(
+            skipped.detail.contains("never written to the company"),
+            "{skipped:?}"
+        );
+        // The journal is operator-scoped — unlike host stdout — so the resolved
+        // target rides it. This is the same field the manual run's HTTP response
+        // already ships to the console today.
+        assert_eq!(skipped.target.as_deref(), Some("ada@example.com"));
+    }
+
+    /// The arm that was quietest of all: a scheduled run that failed outright
+    /// produced one host-stdout warning and nothing durable. Now it records the
+    /// error where an operator can find it.
+    #[tokio::test]
+    async fn a_failed_scheduled_run_journals_the_error() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let company = "journal-failure-co";
+        let (runner, attempts) = FailingRunner::new("no inference source for agent node `worker`");
+        let registry = company_with_overlays(
+            &home,
+            company,
+            vec![overlay("digest", Some("* * * * *"))],
+            Some(runner),
+            "running",
+        )
+        .await;
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry.clone(), clock);
+
+        assert_eq!(scheduler.tick().await, 1);
+        wait_for(|| attempts.load(Ordering::SeqCst) == 1).await;
+        let outcomes = loop {
+            let outcomes = run_outcomes(&registry, company).await;
+            if !outcomes.is_empty() {
+                break outcomes;
+            }
+            tokio::task::yield_now().await;
+        };
+
+        assert_eq!(outcomes.len(), 1);
+        let CompanyEvent::WorkflowRunFinished {
+            scheduled,
+            deliveries,
+            error,
+            ..
+        } = &outcomes[0]
+        else {
+            unreachable!("filtered above")
+        };
+        assert!(*scheduled);
+        assert!(deliveries.is_empty(), "a run that died routed nothing");
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|e| e.contains("no inference source")),
+            "the failure reason must survive: {error:?}"
+        );
     }
 
     /// A workflow with no schedule is never fired by the scheduler — it stays
