@@ -725,9 +725,11 @@ mod test {
     fn projected_token_file_alone_enables_cycles() {
         // The path must actually exist: the projected tier is selected on
         // existence, not on the variable merely being set.
-        let dir = std::env::temp_dir().join(format!("oc-cfg-{}", crate::ports::generate_id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("token");
+        let dir = tempfile::Builder::new()
+            .prefix("oc-cfg-")
+            .tempdir()
+            .expect("tempdir");
+        let path = dir.path().join("token");
         std::fs::write(&path, "projected-token").unwrap();
 
         let env = MapEnv::new([(
@@ -745,8 +747,6 @@ mod test {
             crate::company::CredentialSource::Attested
         );
         assert_eq!(prov.layer("tinyhumans_token_file"), Some(ConfigLayer::Env));
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The docker case: a leftover `TINYHUMANS_TOKEN_FILE` naming a path nothing
@@ -757,8 +757,13 @@ mod test {
     /// `TinyhumansTokenSource::from_env`.
     #[test]
     fn a_token_file_that_does_not_exist_is_not_attested() {
-        let missing =
-            std::env::temp_dir().join(format!("oc-absent-{}", crate::ports::generate_id()));
+        // A real directory, but the token path inside it is never created: the
+        // fixture must name something that does not exist.
+        let dir = tempfile::Builder::new()
+            .prefix("oc-absent-")
+            .tempdir()
+            .expect("tempdir");
+        let missing = dir.path().join("token");
         assert!(!missing.exists(), "fixture path must not exist");
 
         let env = MapEnv::new([(
@@ -780,8 +785,13 @@ mod test {
     /// the static tier rather than to `none`, matching `from_env`'s fallback.
     #[test]
     fn a_missing_token_file_degrades_to_the_static_tier() {
-        let missing =
-            std::env::temp_dir().join(format!("oc-absent-{}", crate::ports::generate_id()));
+        // A real directory, but the token path inside it is never created: the
+        // fixture must name something that does not exist.
+        let dir = tempfile::Builder::new()
+            .prefix("oc-absent-")
+            .tempdir()
+            .expect("tempdir");
+        let missing = dir.path().join("token");
         let env = MapEnv::new([
             (
                 crate::company::credentials::TOKEN_FILE_ENV,
@@ -801,9 +811,11 @@ mod test {
     /// Precedence: a projected file that exists outranks a leftover static key.
     #[test]
     fn projected_file_outranks_a_static_key_for_the_source() {
-        let dir = std::env::temp_dir().join(format!("oc-cfg-{}", crate::ports::generate_id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("token");
+        let dir = tempfile::Builder::new()
+            .prefix("oc-cfg-")
+            .tempdir()
+            .expect("tempdir");
+        let path = dir.path().join("token");
         std::fs::write(&path, "projected-token").unwrap();
 
         let env = MapEnv::new([
@@ -818,7 +830,6 @@ mod test {
             cfg.credential_source(),
             crate::company::CredentialSource::Attested
         );
-        std::fs::remove_dir_all(&dir).ok();
 
         // Docker development keeps working on the static tier alone.
         let static_only = MapEnv::new([(crate::company::credentials::API_KEY_ENV, "th_static")]);

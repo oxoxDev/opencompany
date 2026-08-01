@@ -237,9 +237,11 @@ mod test {
     fn projected_token_file_reports_the_attested_tier() {
         // A real file: the attested tier is selected on the path existing, not on
         // the variable being set, so a fixture path would report `none` here.
-        let dir = std::env::temp_dir().join(format!("oc-doctor-{}", crate::ports::generate_id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("token");
+        let dir = tempfile::Builder::new()
+            .prefix("oc-doctor-")
+            .tempdir()
+            .expect("tempdir");
+        let path = dir.path().join("token");
         std::fs::write(&path, "projected-token").unwrap();
 
         let env = MapEnv::new([(
@@ -256,8 +258,6 @@ mod test {
             value(&report, "tinyhumans_token_file"),
             path.to_str().unwrap()
         );
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A leftover `TINYHUMANS_TOKEN_FILE` naming an unmounted path must not tell
@@ -266,8 +266,13 @@ mod test {
     /// worse than an honest `none`.
     #[test]
     fn a_token_file_that_does_not_exist_does_not_report_attested() {
-        let missing =
-            std::env::temp_dir().join(format!("oc-doctor-absent-{}", crate::ports::generate_id()));
+        // A real directory, but the token path inside it is never created: the
+        // fixture must name something that does not exist.
+        let dir = tempfile::Builder::new()
+            .prefix("oc-doctor-absent-")
+            .tempdir()
+            .expect("tempdir");
+        let missing = dir.path().join("token");
         let env = MapEnv::new([(
             crate::company::credentials::TOKEN_FILE_ENV,
             missing.to_str().unwrap(),

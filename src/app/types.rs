@@ -845,12 +845,16 @@ mod tests {
     /// file (mounted at `/var/run/secrets/tinyhumans.ai/token` in production).
     /// The tier is only selected when the path exists, so the test needs a real
     /// one.
-    fn projected_token_file() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("oc-appcfg-{}", crate::ports::generate_id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("token");
+    /// Returns the directory handle alongside the path: dropping it removes the
+    /// fixture, and holding it is what keeps the file alive for the assertions.
+    fn projected_token_file() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-appcfg-")
+            .tempdir()
+            .expect("tempdir");
+        let path = dir.path().join("token");
         std::fs::write(&path, "projected-token").unwrap();
-        path
+        (dir, path)
     }
 
     /// The hosted shape: no static secret at all, just a projected token file.
@@ -858,7 +862,7 @@ mod tests {
     #[test]
     fn a_projected_token_file_alone_enables_cycles() {
         use crate::app::config::MapEnv;
-        let path = projected_token_file();
+        let (_dir, path) = projected_token_file();
         let env = MapEnv::new([(
             crate::company::credentials::TOKEN_FILE_ENV,
             path.display().to_string(),
@@ -898,7 +902,7 @@ mod tests {
             CredentialSource::Static
         );
 
-        let path = projected_token_file();
+        let (_dir, path) = projected_token_file();
         let projected = MapEnv::new([(
             crate::company::credentials::TOKEN_FILE_ENV,
             path.display().to_string(),
