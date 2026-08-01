@@ -121,6 +121,33 @@ export interface WorkflowRunResult {
   deliveries?: DeliveryReport[];
 }
 
+/**
+ * One finished workflow run, read back from the company's journal (issue #228).
+ *
+ * Before this, a run's outcome existed only in the moment: a manual run's
+ * `deliveries` lived in the run drawer until it was dismissed, and a scheduled
+ * run's reached only the host's stdout — which on a hosted tenant is the
+ * platform team, not the operator. This is the same information, durable, so it
+ * survives a console reload and a scheduled run nobody watched.
+ */
+export interface WorkflowRunOutcome {
+  /** The journal sequence position — a stable, monotonic row key. */
+  seq: number;
+  /** Epoch-millis the outcome was recorded. */
+  atMillis: number;
+  workflowId: string;
+  /** True when a cron started the run rather than an operator. */
+  scheduled: boolean;
+  /** A run correlation id, when the entry point minted one. */
+  runId?: string;
+  /** The same delivery rows a manual run's response carries. */
+  deliveries: DeliveryReport[];
+  /** Node ids the run left waiting on a human approval. */
+  pendingApprovals: string[];
+  /** Set when the run failed outright instead of finishing with rows. */
+  error?: string;
+}
+
 export function listWorkflows(
   client: OpenCompanyClient,
   company: string | null,
@@ -147,6 +174,28 @@ export function runWorkflow(
   return client.post<WorkflowRunResult>(
     `${client.scopeFor(company)}/workflows/${encodeURIComponent(wid)}/run`,
     { input: input ?? {} },
+  );
+}
+
+/**
+ * The company's finished workflow runs, **newest first** (issue #228).
+ *
+ * `workflow` narrows to one graph's runs; `limit` caps the page (the host
+ * defaults to a short recent list and clamps a large ask). A host predating this
+ * route answers 404 — callers should treat that as "no history yet" rather than
+ * an error, since the console still works without it.
+ */
+export function listWorkflowRuns(
+  client: OpenCompanyClient,
+  company: string | null,
+  options?: { workflow?: string; limit?: number },
+): Promise<WorkflowRunOutcome[]> {
+  const params = new URLSearchParams();
+  if (options?.workflow) params.set("workflow", options.workflow);
+  if (options?.limit) params.set("limit", String(options.limit));
+  const query = params.toString();
+  return client.get<WorkflowRunOutcome[]>(
+    `${client.scopeFor(company)}/workflows/runs${query ? `?${query}` : ""}`,
   );
 }
 
