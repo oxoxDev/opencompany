@@ -1023,7 +1023,19 @@ to = "done"
         wait_for(|| completed.load(Ordering::SeqCst) == 1).await;
         // The run task logs after `completed` is bumped, so wait for the line
         // itself rather than racing it.
-        wait_for(|| captured_text(&sink).contains("owner_summary")).await;
+        //
+        // Qualified by BOTH this company and the marker, and scanned per line:
+        // `CAPTURE` is shared across every test in the binary, and
+        // `owner_summary` is the node name three tests in this module use — an
+        // unqualified `contains` could be satisfied by a sibling's line before
+        // this run has logged anything, and the lookup below would then fail
+        // intermittently.
+        wait_for(|| {
+            captured_text(&sink)
+                .lines()
+                .any(|l| l.contains(company) && l.contains("was NOT delivered"))
+        })
+        .await;
 
         let logs = captured_text(&sink);
         let line = logs
@@ -1102,7 +1114,17 @@ to = "done"
 
         assert_eq!(scheduler.tick().await, 1);
         wait_for(|| completed.load(Ordering::SeqCst) == 1).await;
-        wait_for(|| captured_text(&sink).contains("scheduled run finished")).await;
+        // Qualified by BOTH this company and the marker, and scanned per line:
+        // `CAPTURE` is shared across every test in the binary, so an
+        // unqualified `contains("scheduled run finished")` is satisfied by any
+        // sibling test's summary line — including one logged before this run
+        // finished — and the lookups below would then fail intermittently.
+        wait_for(|| {
+            captured_text(&sink)
+                .lines()
+                .any(|l| l.contains(company) && l.contains("scheduled run finished"))
+        })
+        .await;
 
         let logs = captured_text(&sink);
         // Said, and pointed at the place the operator has to go.
