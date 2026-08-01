@@ -134,8 +134,11 @@ mod tests {
     use crate::store::FsCompanyStore;
     use crate::{AppConfig, AppState};
 
-    fn home() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("oc-usage-{}", crate::ports::generate_id()))
+    fn home() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("oc-usage-")
+            .tempdir()
+            .expect("tempdir")
     }
 
     async fn state_with_manifest(home: &std::path::Path, manifest_toml: &str) -> AppState {
@@ -190,7 +193,8 @@ mod tests {
     /// An empty meter zero-fills the series to the range length and totals zero.
     #[tokio::test]
     async fn empty_meter_projects_a_zero_filled_series() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(
             &home,
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n",
@@ -204,15 +208,14 @@ mod tests {
         assert_eq!(dto["totals"]["connections"], 0);
         assert!(dto["byAgent"].as_array().unwrap().is_empty(), "{dto}");
         assert!(dto["byProvider"].as_array().unwrap().is_empty(), "{dto}");
-
-        std::fs::remove_dir_all(&home).ok();
     }
 
     /// A couple of recorded samples project the expected DTO: totals sum, the
     /// series carries the day's tokens, and `byAgent` resolves the roster role.
     #[tokio::test]
     async fn recorded_samples_project_totals_series_and_by_desk() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(
             &home,
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
@@ -265,14 +268,13 @@ mod tests {
         assert_eq!(by_agent.len(), 1, "{dto}");
         assert_eq!(by_agent[0]["name"], "Chief Executive");
         assert_eq!(by_agent[0]["tokens"], 165.0);
-
-        std::fs::remove_dir_all(&home).ok();
     }
 
     /// An absent / unknown `?range=` defaults to the 30-day window.
     #[tokio::test]
     async fn range_defaults_to_thirty_days() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(
             &home,
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n",
@@ -283,7 +285,5 @@ mod tests {
         assert_eq!(dto["series"].as_array().unwrap().len(), 30, "{dto}");
         let (_, dto_bad) = get_usage(&state, "?range=nonsense").await;
         assert_eq!(dto_bad["series"].as_array().unwrap().len(), 30, "{dto_bad}");
-
-        std::fs::remove_dir_all(&home).ok();
     }
 }

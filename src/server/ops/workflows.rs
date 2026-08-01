@@ -1088,11 +1088,11 @@ mod tests {
         use crate::store::FsCompanyStore;
         use crate::{AppConfig, AppState};
 
-        fn home() -> std::path::PathBuf {
-            std::env::temp_dir().join(format!(
-                "oc-workflows-hosted-{}",
-                crate::ports::generate_id()
-            ))
+        fn home() -> tempfile::TempDir {
+            tempfile::Builder::new()
+                .prefix("oc-workflows-hosted-")
+                .tempdir()
+                .expect("tempdir")
         }
 
         /// A manifest declaring one enabled workflow — mirrors what a
@@ -1144,7 +1144,8 @@ mod tests {
 
         #[tokio::test]
         async fn manifest_enabled_workflow_lists_with_no_source_dir() {
-            let home = home();
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
             let state = state_with_hosted_company(&home).await;
 
             let response = router(state)
@@ -1172,8 +1173,6 @@ mod tests {
             // name — same fallback the GraphQL `Company.workflows` resolver
             // uses for the same case.
             assert_eq!(items[0]["name"], "demo");
-
-            std::fs::remove_dir_all(&home).ok();
         }
 
         /// A hosted tenant's record with no manifest-enabled workflows — the
@@ -1273,7 +1272,8 @@ mod tests {
         /// name, and the full body reads back.
         #[tokio::test]
         async fn create_persists_and_reads_back_with_no_source_dir() {
-            let home = home();
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
             let (state, _store, _id) = hosted_state(&home).await;
 
             // POST → 200 with the graph echoed back.
@@ -1312,15 +1312,14 @@ mod tests {
             let graph = json_body(response).await;
             assert_eq!(graph["id"], "greeter");
             assert_eq!(graph["edges"][0]["label"], "ok");
-
-            std::fs::remove_dir_all(&home).ok();
         }
 
         /// A duplicate id is a clean 409, not a 500 — the id-uniqueness check
         /// that replaced the filesystem's `create_new(true)`.
         #[tokio::test]
         async fn duplicate_create_is_a_conflict() {
-            let home = home();
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
             let (state, _store, _id) = hosted_state(&home).await;
 
             let first = router(state.clone())
@@ -1342,8 +1341,6 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(second.status(), StatusCode::CONFLICT);
-
-            std::fs::remove_dir_all(&home).ok();
         }
 
         /// Restart survival: a workflow created through the API is still listed
@@ -1351,7 +1348,8 @@ mod tests {
         /// the body is durable, not process-local.
         #[tokio::test]
         async fn a_created_workflow_survives_a_state_rebuild() {
-            let home = home();
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
             let (state, _store, id) = hosted_state(&home).await;
 
             let response = router(state)
@@ -1376,8 +1374,6 @@ mod tests {
             assert_eq!(items.len(), 1, "body: {listed}");
             assert_eq!(items[0]["id"], "greeter");
             assert_eq!(items[0]["name"], "Greeter");
-
-            std::fs::remove_dir_all(&home).ok();
         }
     }
 }

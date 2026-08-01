@@ -263,8 +263,11 @@ mod tests {
     use crate::store::FsCompanyStore;
     use crate::{AppConfig, AppState};
 
-    fn home() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("oc-capabilities-{}", crate::ports::generate_id()))
+    fn home() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("oc-capabilities-")
+            .tempdir()
+            .expect("tempdir")
     }
 
     async fn state_with_manifest(home: &std::path::Path, manifest_toml: &str) -> AppState {
@@ -318,7 +321,8 @@ mod tests {
 
     #[tokio::test]
     async fn reports_unconfigured_without_a_plan() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(
             &home,
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n",
@@ -333,8 +337,6 @@ mod tests {
             "no tiers when unconfigured: {dto}"
         );
         assert!(dto.get("plan").is_none());
-
-        std::fs::remove_dir_all(&home).ok();
     }
 
     /// Media generation (issue #109): the route surfaces `mediaGranted` from the
@@ -342,7 +344,8 @@ mod tests {
     #[tokio::test]
     async fn reports_media_granted_from_explicit_grant_only() {
         // Explicit `media` grant, no `[plan]` → unconfigured but mediaGranted.
-        let home_a = home();
+        let home_a_dir = home();
+        let home_a = home_a_dir.path().to_path_buf();
         let state = state_with_manifest(
             &home_a,
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"media\"]\n",
@@ -355,10 +358,10 @@ mod tests {
         // The flags are always present so the console can render every state.
         assert!(dto.get("mediaInBuild").is_some(), "{dto}");
         assert!(dto.get("mediaCredentialConfigured").is_some(), "{dto}");
-        std::fs::remove_dir_all(&home_a).ok();
 
         // A `*` wildcard grant must NOT count as a media grant.
-        let home_b = home();
+        let home_b_dir = home();
+        let home_b = home_b_dir.path().to_path_buf();
         let state2 = state_with_manifest(
             &home_b,
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"*\"]\n",
@@ -369,7 +372,6 @@ mod tests {
             dto2["mediaGranted"], false,
             "the `*` wildcard must not grant the real-money media family: {dto2}"
         );
-        std::fs::remove_dir_all(&home_b).ok();
     }
 
     /// Per-tenant Composio (issue #110): the route surfaces `composioGranted`
@@ -377,7 +379,8 @@ mod tests {
     /// `[plan]`.
     #[tokio::test]
     async fn reports_composio_flags_from_explicit_grant_only() {
-        let home_a = home();
+        let home_a_dir = home();
+        let home_a = home_a_dir.path().to_path_buf();
         let state = state_with_manifest(
             &home_a,
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"composio\"]\n",
@@ -388,10 +391,10 @@ mod tests {
         assert_eq!(dto["composioGranted"], true, "{dto}");
         assert_eq!(dto["composioTokenConfigured"], false, "no token yet: {dto}");
         assert!(dto.get("composioInBuild").is_some(), "{dto}");
-        std::fs::remove_dir_all(&home_a).ok();
 
         // A `*` wildcard grant must NOT count as a composio grant.
-        let home_b = home();
+        let home_b_dir = home();
+        let home_b = home_b_dir.path().to_path_buf();
         let state2 = state_with_manifest(
             &home_b,
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"*\"]\n",
@@ -402,12 +405,12 @@ mod tests {
             dto2["composioGranted"], false,
             "the `*` wildcard must not grant composio: {dto2}"
         );
-        std::fs::remove_dir_all(&home_b).ok();
     }
 
     #[tokio::test]
     async fn reports_tiers_and_exhaustion_for_a_configured_plan() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(
             &home,
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[plan]\nname = \"starter\"\n",
@@ -455,8 +458,6 @@ mod tests {
             dto.get("total").is_none(),
             "no total ceiling configured: {dto}"
         );
-
-        std::fs::remove_dir_all(&home).ok();
     }
 
     /// The plan-level total token ceiling (issue #188) surfaces its own `total`
@@ -464,7 +465,8 @@ mod tests {
     /// tiers, and reports `exhausted` once period spend crosses it.
     #[tokio::test]
     async fn reports_total_ceiling_row_when_configured() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(
             &home,
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[plan]\nname = \"starter\"\ntotal_tokens = 300000\n",
@@ -500,7 +502,5 @@ mod tests {
         assert_eq!(total["spentTokens"], 250_000);
         assert_eq!(total["remainingTokens"], 50_000);
         assert_eq!(total["exhausted"], false, "250k < 300k is under budget");
-
-        std::fs::remove_dir_all(&home).ok();
     }
 }

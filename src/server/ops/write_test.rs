@@ -17,8 +17,11 @@ use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
 
-fn home() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("opencompany-ops-{}", crate::ports::generate_id()))
+fn home() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("opencompany-ops-")
+        .tempdir()
+        .expect("tempdir")
 }
 
 fn manifest() -> CompanyManifest {
@@ -105,7 +108,8 @@ async fn send_auth(
 
 #[tokio::test]
 async fn tasks_crud_round_trips_under_both_scopes() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     // Create via the single-company alias.
@@ -159,8 +163,6 @@ async fn tasks_crud_round_trips_under_both_scopes() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// #205: a card may only be assigned to somebody the company actually has.
@@ -169,7 +171,8 @@ async fn tasks_crud_round_trips_under_both_scopes() {
 /// orchestrator instead.
 #[tokio::test]
 async fn task_writes_reject_an_off_roster_assignee() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     let (status, body) = send(
@@ -231,8 +234,6 @@ async fn task_writes_reject_an_off_roster_assignee() {
         card["title"], "Q2 brief",
         "a rejected patch must not persist the fields it did apply"
     );
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// #205: a column the board does not render is refused too. A typo'd
@@ -241,7 +242,8 @@ async fn task_writes_reject_an_off_roster_assignee() {
 /// edge-fires a dispatch — silently never running it.
 #[tokio::test]
 async fn task_writes_reject_a_column_the_board_cannot_render() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     let (status, body) = send(
@@ -277,8 +279,6 @@ async fn task_writes_reject_a_column_the_board_cannot_render() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let (_, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
     assert_eq!(board.as_array().expect("board")[0]["column"], "paused");
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// Issue #206: `POST …/tasks` defaults a new card to To-do — the board's one
@@ -286,7 +286,8 @@ async fn task_writes_reject_a_column_the_board_cannot_render() {
 /// lifecycle paths that place a card themselves are untouched.
 #[tokio::test]
 async fn created_tasks_default_to_the_todo_column() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     let (_, defaulted) = send(
@@ -308,13 +309,12 @@ async fn created_tasks_default_to_the_todo_column() {
     )
     .await;
     assert_eq!(explicit["column"], crate::ports::tasks::COLUMN_BACKLOG);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn steer_task_validates_statuses_and_journals_acceptance() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let company = CompanyId::new("acme");
     let runtime = state.registry().get(&company).unwrap();
@@ -421,13 +421,12 @@ async fn steer_task_validates_statuses_and_journals_acceptance() {
             ..
         } if task_id == "active" && action == "redirect" && instruction == "focus on the API"
     )));
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn memory_create_and_delete_journals_event() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     let (status, fact) = send(
@@ -449,13 +448,12 @@ async fn memory_create_and_delete_journals_event() {
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn memory_list_filters_stats_and_dual_write() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
 
@@ -552,8 +550,6 @@ async fn memory_list_filters_stats_and_dual_write() {
     assert_eq!(stats["facts"], 4);
     assert_eq!(stats["agentChunks"], 1);
     assert_eq!(stats["taskOutcomes"], 0);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// The Brain's "Last updated" stat must move when *agents* write memory, not
@@ -565,7 +561,8 @@ async fn memory_list_filters_stats_and_dual_write() {
 /// never added a fact, showed "—" forever.
 #[tokio::test]
 async fn memory_stats_last_updated_covers_agent_written_context() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
 
@@ -652,8 +649,6 @@ async fn memory_stats_last_updated_covers_agent_written_context() {
             .all(|r| r["updatedAt"].as_u64().unwrap() >= before),
         "each agent-written row carries the time it was stored"
     );
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// End-to-end proof that the dual-write closes the manual-ingest loop: an
@@ -665,7 +660,8 @@ async fn memory_stats_last_updated_covers_agent_written_context() {
 async fn memory_operator_fact_is_injected_into_the_agent_turn() {
     use crate::harness::memory_loop;
 
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
 
@@ -694,8 +690,6 @@ async fn memory_operator_fact_is_injected_into_the_agent_turn() {
     assert!(augmented.contains("Relevant prior work"));
     assert!(augmented.contains("we ship on Friday at noon"));
     assert!(augmented.trim_end().ends_with("when do we ship?"));
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// Two-company isolation over HTTP: company B never sees company A's facts, and
@@ -708,7 +702,8 @@ async fn memory_is_isolated_between_companies() {
     };
     use std::collections::HashSet;
 
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let verifier = std::sync::Arc::new(StaticPlatformVerifier::new("plat-secret"));
     let state = AppState::new(AppConfig::default())
         .with_home(home.clone())
@@ -780,13 +775,12 @@ async fn memory_is_isolated_between_companies() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn workspace_create_write_move_and_cycle_rejection() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     let (_, folder) = send(
@@ -861,13 +855,12 @@ async fn workspace_create_write_move_and_cycle_rejection() {
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn skills_install_toggle_custom_and_builtin_uninstall_conflict() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     // Install from registry, carrying the entry's metadata so the host persists
@@ -951,13 +944,12 @@ async fn skills_install_toggle_custom_and_builtin_uninstall_conflict() {
     assert_eq!(my_skill["source"], "custom");
     assert_eq!(my_skill["name"], "My Skill");
     assert!(!my_skill["enabled"].as_bool().unwrap());
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn team_overlay_add_delete_and_manifest_delete_conflict() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     // The manifest teammate shows up on the read side before any overlay add,
@@ -1023,14 +1015,13 @@ async fn team_overlay_add_delete_and_manifest_delete_conflict() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(ack["key"], "ceo");
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn inbox_read_marks_and_reports_unread() {
     use crate::ports::inbox::EmailRecord;
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
     for i in 0..2 {
@@ -1069,8 +1060,6 @@ async fn inbox_read_marks_and_reports_unread() {
     let (status, body) = send(&state, "POST", "/api/v1/company/inboxes/ceo/read", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["unread"], 0);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// Appends one received email to `inbox`, for the read-surface tests below.
@@ -1108,7 +1097,8 @@ async fn append_mail(
 /// reachable over REST at all.
 #[tokio::test]
 async fn inbox_reads_are_per_agent_and_never_shared() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
 
@@ -1159,8 +1149,6 @@ async fn inbox_reads_are_per_agent_and_never_shared() {
     assert_eq!(items[0]["subject"], "on-call rotation");
     assert_eq!(items[0]["fromEmail"], "cto-sender@x.test");
     assert_eq!(items[0]["inbox"], "cto");
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// An inbox nobody has mail in — or that does not exist at all — reads as an
@@ -1168,7 +1156,8 @@ async fn inbox_reads_are_per_agent_and_never_shared() {
 /// state, and the console must render it as such rather than as an error.
 #[tokio::test]
 async fn inbox_messages_soft_fail_on_unknown_key() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
     append_mail(&runtime, "ceo", "m0", "mail 0", 1).await;
@@ -1186,8 +1175,6 @@ async fn inbox_messages_soft_fail_on_unknown_key() {
     // …and the inbox that *does* hold mail is unaffected by that read.
     let (_, body) = send(&state, "GET", "/api/v1/company/inboxes/ceo/messages", None).await;
     assert_eq!(body.as_array().unwrap().len(), 1);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// An inbox switched on but never written to is still listed, so the console can
@@ -1195,7 +1182,8 @@ async fn inbox_messages_soft_fail_on_unknown_key() {
 /// enabled state, so the toggle isn't a client-side guess.
 #[tokio::test]
 async fn team_read_reports_inbox_enabled_and_empty_inbox_is_listed() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     // Before the toggle: no inbox on the roster, and nothing listed.
@@ -1253,15 +1241,14 @@ async fn team_read_reports_inbox_enabled_and_empty_inbox_is_listed() {
     assert_eq!(status, StatusCode::OK);
     let (_, body) = send(&state, "GET", "/api/v1/company/inboxes", None).await;
     assert_eq!(body.as_array().unwrap()[0]["enabled"], false);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// Mail that arrives through the ingest webhook is exactly what the console's
 /// read surface returns — the end-to-end path issue #173's repro step 4 walked.
 #[tokio::test]
 async fn ingested_mail_shows_up_on_the_console_read_surface() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
 
@@ -1289,14 +1276,13 @@ async fn ingested_mail_shows_up_on_the_console_read_surface() {
     assert_eq!(body["unread"], 0);
     let (_, body) = send(&state, "GET", "/api/v1/company/inboxes", None).await;
     assert_eq!(body.as_array().unwrap()[0]["unread"], 0);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn inbox_list_and_messages_project_store() {
     use crate::ports::inbox::EmailRecord;
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
     // One inbound (unread) + one outbound reply in inbox "ceo".
@@ -1356,13 +1342,12 @@ async fn inbox_list_and_messages_project_store() {
     assert_eq!(msgs[0]["id"], "in1");
     assert_eq!(msgs[0]["fromEmail"], "p@x.test");
     assert_eq!(msgs[1]["outbound"], true);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn chat_accepts_desk_id_and_replies() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     let (status, body) = send(
@@ -1374,8 +1359,6 @@ async fn chat_accepts_desk_id_and_replies() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body["responses"].is_array());
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
@@ -1385,7 +1368,8 @@ async fn credential_route_rejects_foreign_tenant() {
     };
     use std::collections::HashSet;
 
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     // Platform mode: `acme` is owned by `tenant:acme`.
     let verifier = std::sync::Arc::new(StaticPlatformVerifier::new("plat-secret"));
     let state = AppState::new(AppConfig::default())
@@ -1431,13 +1415,12 @@ async fn credential_route_rejects_foreign_tenant() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn unknown_company_scope_is_404() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let (status, _) = send(
         &state,
@@ -1447,7 +1430,6 @@ async fn unknown_company_scope_is_404() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -1497,7 +1479,8 @@ async fn state_with_manifest(home: &std::path::Path, manifest: CompanyManifest) 
 
 #[tokio::test]
 async fn mcp_servers_crud_round_trips_and_token_is_write_only() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     // Cold: no servers.
@@ -1580,13 +1563,12 @@ async fn mcp_servers_crud_round_trips_and_token_is_write_only() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (_, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
     assert_eq!(list.as_array().unwrap().len(), 0);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_manifest(&home, mcp_manifest()).await;
 
     // The manifest server shows up as `manifest`.
@@ -1610,8 +1592,6 @@ async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(updated["server"]["source"], "manifest");
     assert_eq!(updated["server"]["enabled"], false);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// Without the `openhuman` feature there is no MCP transport, so live discovery
@@ -1619,7 +1599,8 @@ async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
 #[cfg(not(feature = "openhuman"))]
 #[tokio::test]
 async fn mcp_discovery_is_not_wired_without_the_feature() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_manifest(&home, mcp_manifest()).await;
     let (status, body) = send(
         &state,
@@ -1630,14 +1611,14 @@ async fn mcp_discovery_is_not_wired_without_the_feature() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["code"], "not_wired");
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// A `user:pass@host` endpoint smuggles a credential into the URL — rejected as
 /// a 400 (the error-hardening cell's validate-on-add).
 #[tokio::test]
 async fn mcp_userinfo_endpoint_is_rejected() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let (status, _) = send(
         &state,
@@ -1647,7 +1628,6 @@ async fn mcp_userinfo_endpoint_is_rejected() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// A query-parameter credential (BrowserBase style) round-trips write-only:
@@ -1655,7 +1635,8 @@ async fn mcp_userinfo_endpoint_is_rejected() {
 /// non-secret id left in the endpoint URL raises the non-blocking advisory.
 #[tokio::test]
 async fn mcp_query_param_auth_round_trips_write_only_with_advisory() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     let (status, added) = send(
@@ -1700,7 +1681,6 @@ async fn mcp_query_param_auth_round_trips_write_only_with_advisory() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -1769,7 +1749,8 @@ fn workflow_body(id: &str) -> Value {
 /// both read routes serve it from there.
 #[tokio::test]
 async fn workflow_create_persists_on_the_record_appends_enabled_and_is_listed() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let seed_dir = home.join("seed");
     std::fs::create_dir_all(&seed_dir).unwrap();
     let state = state_with_source_dir(&home, &seed_dir, manifest()).await;
@@ -1813,13 +1794,12 @@ async fn workflow_create_persists_on_the_record_appends_enabled_and_is_listed() 
     let (status, graph) = send(&state, "GET", "/api/v1/company/workflows/greet", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(graph["name"], "greet");
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn workflow_create_duplicate_id_is_conflict() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let seed_dir = home.join("seed");
     std::fs::create_dir_all(&seed_dir).unwrap();
     let state = state_with_source_dir(&home, &seed_dir, manifest()).await;
@@ -1842,13 +1822,12 @@ async fn workflow_create_duplicate_id_is_conflict() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["code"], "conflict");
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn workflow_create_rejects_bad_edges_missing_agent_and_no_trigger() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let seed_dir = home.join("seed");
     std::fs::create_dir_all(&seed_dir).unwrap();
     let state = state_with_source_dir(&home, &seed_dir, manifest()).await;
@@ -1913,13 +1892,12 @@ async fn workflow_create_rejects_bad_edges_missing_agent_and_no_trigger() {
                 .unwrap_or(true)
         }
     );
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn workflow_create_without_source_dir_succeeds() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     // `state_with_company` boots with no `seed_dir`, so the company has no
     // source directory at all — the platform-provisioned-mode case. Issue #168:
     // creation used to be refused here with a 400; the body now lands on the
@@ -1939,15 +1917,14 @@ async fn workflow_create_without_source_dir_succeeds() {
     let (status, graph) = send(&state, "GET", "/api/v1/company/workflows/greet", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(graph["nodes"].as_array().unwrap().len(), 3);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// Without the `openhuman` feature the on-demand Test route is "not wired".
 #[cfg(not(feature = "openhuman"))]
 #[tokio::test]
 async fn mcp_test_route_is_not_wired_without_the_feature() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     send(
         &state,
@@ -1965,7 +1942,6 @@ async fn mcp_test_route_is_not_wired_without_the_feature() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["code"], "not_wired");
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// Under the `openhuman` feature, adding a server probes it — and a probe that
@@ -1974,7 +1950,8 @@ async fn mcp_test_route_is_not_wired_without_the_feature() {
 #[cfg(feature = "openhuman")]
 #[tokio::test]
 async fn mcp_add_probes_without_rollback_and_persists_health() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     // A syntactically valid but unreachable endpoint (nothing listening).
@@ -2015,8 +1992,6 @@ async fn mcp_add_probes_without_rollback_and_persists_health() {
         health["status"].is_string(),
         "test returns health: {health}"
     );
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 // -- Telegram channel (issue #31) -------------------------------------------
@@ -2117,7 +2092,8 @@ fn telegram_update(chat_id: i64, text: &str) -> Value {
 
 #[tokio::test]
 async fn telegram_config_is_write_only_and_status_reads_back() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     // Nothing configured yet. This host binds loopback with no `public_url`, so
@@ -2169,13 +2145,12 @@ async fn telegram_config_is_write_only_and_status_reads_back() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(cfg["configured"], false);
     assert_eq!(cfg["tokenSet"], false);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn telegram_webhook_rejects_an_unverified_post() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     send(
         &state,
@@ -2192,13 +2167,12 @@ async fn telegram_webhook_rejects_an_unverified_post() {
     // Wrong secret.
     let (status, _, _) = telegram_hook(&state, Some("nope"), telegram_update(1, "hi")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn telegram_inbound_runs_a_turn_and_delivers_the_reply_back() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let api = RecordingTelegramApi::new();
     let state = state_with_telegram(&home, api.clone()).await;
     send(
@@ -2226,13 +2200,12 @@ async fn telegram_inbound_runs_a_turn_and_delivers_the_reply_back() {
         !raw.contains(BOT_TOKEN),
         "token leaked into webhook response"
     );
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn telegram_set_webhook_registers_the_public_url() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let api = RecordingTelegramApi::new();
     // The hosted shape: a real public https URL Telegram can deliver to.
     let state = state_with_telegram_at(&home, api.clone(), Some("https://acme.example")).await;
@@ -2263,8 +2236,6 @@ async fn telegram_set_webhook_registers_the_public_url() {
     let webhooks = api.webhooks();
     assert_eq!(webhooks.len(), 1);
     assert_eq!(webhooks[0], "https://acme.example/hooks/acme/telegram");
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// Issue #203: on a host with no public https URL, registering a webhook is
@@ -2273,7 +2244,8 @@ async fn telegram_set_webhook_registers_the_public_url() {
 /// would take down the one inbound path that does work.
 #[tokio::test]
 async fn telegram_set_webhook_is_refused_on_a_host_telegram_cannot_reach() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let api = RecordingTelegramApi::new();
     let state = state_with_telegram(&home, api.clone()).await;
     send(
@@ -2300,15 +2272,14 @@ async fn telegram_set_webhook_is_refused_on_a_host_telegram_cannot_reach() {
         api.webhooks().is_empty(),
         "no loopback URL was ever handed to Telegram"
     );
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// The channel is usable with a bot token alone: no webhook secret, no public
 /// URL, no `setWebhook` — the polling listener covers inbound.
 #[tokio::test]
 async fn telegram_is_configured_by_a_bot_token_alone() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let api = RecordingTelegramApi::new();
     let state = state_with_telegram(&home, api).await;
 
@@ -2325,13 +2296,12 @@ async fn telegram_is_configured_by_a_bot_token_alone() {
     assert!(cfg["webhookUrl"].is_null());
     // The host has a transport wired, so it long-polls for inbound.
     assert_eq!(cfg["polling"], true);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn telegram_token_never_leaks_even_when_delivery_fails() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     // A transport that fails with an error embedding the bot token.
     let api = RecordingTelegramApi::failing_with_token_echo();
     let state = state_with_telegram(&home, api).await;
@@ -2353,8 +2323,6 @@ async fn telegram_token_never_leaks_even_when_delivery_fails() {
         !raw.contains(BOT_TOKEN),
         "token leaked on a failed delivery"
     );
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// #187: the Artifacts tab's full loop — an agent draft, a human edit appended
@@ -2366,7 +2334,8 @@ async fn telegram_token_never_leaks_even_when_delivery_fails() {
 /// having destroyed the one datum the epic wants.
 #[tokio::test]
 async fn artifact_versions_capture_the_human_edit_and_diff() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     // The agent's draft.
@@ -2437,8 +2406,6 @@ async fn artifact_versions_capture_the_human_edit_and_diff() {
     )
     .await;
     assert_eq!(empty.as_array().unwrap().len(), 0);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// #185: `GET …/tasks/{id}` assembles the header, the per-task timeline, and
@@ -2452,7 +2419,8 @@ async fn artifact_versions_capture_the_human_edit_and_diff() {
 async fn task_detail_assembles_timeline_and_lineage() {
     use crate::ports::types::CompanyEvent;
 
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let company = CompanyId::new("acme");
     let runtime = state.registry().get(&company).unwrap();
@@ -2543,14 +2511,13 @@ async fn task_detail_assembles_timeline_and_lineage() {
     // An unknown id 404s, matching PATCH/DELETE.
     let (status, _) = send(&state, "GET", "/api/v1/company/tasks/nope", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// #187: the diff route's argument contract, and the 404s.
 #[tokio::test]
 async fn artifact_diff_rejects_a_half_specified_range() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     let (_, created) = send(
@@ -2606,8 +2573,6 @@ async fn artifact_diff_rejects_a_half_specified_range() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _) = send(&state, "DELETE", "/api/v1/company/artifacts/nope", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// #185 gave `GET …/tasks/{task_id}` a handler, which now overlaps the static
@@ -2621,7 +2586,8 @@ async fn artifact_diff_rejects_a_half_specified_range() {
 /// in ordinary use.
 #[tokio::test]
 async fn inflight_read_is_not_shadowed_by_task_detail() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     // The strip's read still resolves to the inflight handler: an array, not
@@ -2632,8 +2598,6 @@ async fn inflight_read_is_not_shadowed_by_task_detail() {
         body.is_array(),
         "GET /tasks/inflight must hit list_inflight, not task_detail: {body}"
     );
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// #185 review follow-up: pin the two timeline branches the first test skipped —
@@ -2648,7 +2612,8 @@ async fn inflight_read_is_not_shadowed_by_task_detail() {
 async fn task_timeline_scopes_approvals_to_the_run_window() {
     use crate::ports::types::{Actor, ActorKind, ApprovalId, CompanyEvent, Verdict};
 
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let company = CompanyId::new("acme");
     let runtime = state.registry().get(&company).unwrap();
@@ -2728,8 +2693,6 @@ async fn task_timeline_scopes_approvals_to_the_run_window() {
     let raw = serde_json::to_string(&body["timeline"]).unwrap();
     assert!(raw.contains("needs auth"));
     assert!(!raw.contains("u-1"), "operator identity leaked: {raw}");
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// #185 review follow-up: the lineage forest is enforced at the write boundary.
@@ -2739,7 +2702,8 @@ async fn task_timeline_scopes_approvals_to_the_run_window() {
 /// close a `t1 → t2 → t1` loop — all persisted silently.
 #[tokio::test]
 async fn parent_task_id_rejects_self_unknown_and_cycles() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     let create = |title: &str| {
@@ -2808,8 +2772,6 @@ async fn parent_task_id_rejects_self_unknown_and_cycles() {
         StatusCode::BAD_REQUEST,
         "A → B → A must be rejected"
     );
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// #185 review follow-up: validation is only as good as its atomicity.
@@ -2825,7 +2787,8 @@ async fn parent_task_id_rejects_self_unknown_and_cycles() {
 /// rejected — so the assertion is *exactly* one success, not "usually one".
 #[tokio::test]
 async fn concurrent_reparents_cannot_race_a_cycle_onto_the_board() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = std::sync::Arc::new(state_with_company(&home).await);
 
     let mut ids = Vec::new();
@@ -2883,6 +2846,4 @@ async fn concurrent_reparents_cannot_race_a_cycle_onto_the_board() {
         .filter(|c| c["parentTaskId"].is_string())
         .count();
     assert_eq!(parented, 1, "a cycle reached the board: {board}");
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }

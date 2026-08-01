@@ -540,11 +540,17 @@ mod test {
     use crate::runtime::RuntimeBuilder;
 
     /// Builds an isolated in-memory company runtime for disconnect tests.
-    async fn test_runtime() -> (Arc<CompanyRuntime>, std::path::PathBuf) {
-        let home = std::env::temp_dir().join(format!("oc-disc-{}", crate::ports::generate_id()));
+    ///
+    /// The caller must hold the returned handle for the life of the test: it
+    /// owns the runtime's home directory and removes it on drop.
+    async fn test_runtime() -> (Arc<CompanyRuntime>, tempfile::TempDir) {
+        let home = tempfile::Builder::new()
+            .prefix("oc-disc-")
+            .tempdir()
+            .expect("tempdir");
         let manifest: CompanyManifest =
             toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
-        let runtime = RuntimeBuilder::new(home.clone(), manifest)
+        let runtime = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
             .with_id(CompanyId::new("acme"))
             .build()
             .await
@@ -587,15 +593,13 @@ mod test {
     /// remote to revoke, but the disconnect must still blank the local secret.
     #[tokio::test]
     async fn disconnect_blanks_secret_without_revoke_config() {
-        let (runtime, home) = test_runtime().await;
+        let (runtime, _home) = test_runtime().await;
         let provider = unique_provider();
         store_token(&runtime, &provider, "CANARY-should-never-leak").await;
 
         let resp = do_disconnect(runtime.clone(), &provider).await.unwrap();
         assert_eq!(resp.0["connected"], false);
         assert!(is_blanked(&runtime, &provider).await, "secret not blanked");
-
-        std::fs::remove_dir_all(&home).ok();
     }
 
     /// The best-effort revoke path is invoked: with app credentials + a revoke
@@ -621,7 +625,7 @@ mod test {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let (runtime, home) = test_runtime().await;
+        let (runtime, _home) = test_runtime().await;
         let provider = unique_provider();
         let key = provider.to_ascii_uppercase();
         // SAFETY: unique per-test provider name → no cross-test env collision.
@@ -656,7 +660,6 @@ mod test {
                 std::env::remove_var(format!("OPENCOMPANY_OAUTH_{key}_{suffix}"));
             }
         }
-        std::fs::remove_dir_all(&home).ok();
     }
 
     /// A revoke endpoint that refuses the connection must not fail the
@@ -668,7 +671,7 @@ mod test {
         let dead_addr = dead.local_addr().unwrap();
         drop(dead);
 
-        let (runtime, home) = test_runtime().await;
+        let (runtime, _home) = test_runtime().await;
         let provider = unique_provider();
         let key = provider.to_ascii_uppercase();
         // SAFETY: unique per-test provider name → no cross-test env collision.
@@ -696,6 +699,5 @@ mod test {
                 std::env::remove_var(format!("OPENCOMPANY_OAUTH_{key}_{suffix}"));
             }
         }
-        std::fs::remove_dir_all(&home).ok();
     }
 }

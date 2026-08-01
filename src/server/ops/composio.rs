@@ -345,8 +345,11 @@ mod tests {
 
     const TOKEN: &str = "composio-tenant-bearer-SECRET-xyz";
 
-    fn home() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("oc-composio-{}", crate::ports::generate_id()))
+    fn home() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("oc-composio-")
+            .tempdir()
+            .expect("tempdir")
     }
 
     async fn state_with_manifest(home: &std::path::Path, manifest_toml: &str) -> AppState {
@@ -415,7 +418,8 @@ mod tests {
     /// credential in play: `none` → `static` → `none`.
     #[tokio::test]
     async fn credential_source_tracks_the_byo_token_and_never_carries_it() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(
             &home,
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"composio\"]\n[tools.composio]\ntoolkits = [\"gmail\", \"github\"]\n",
@@ -464,8 +468,6 @@ mod tests {
         )
         .await;
         assert_eq!(resp["status"]["credentialSource"], "none");
-
-        std::fs::remove_dir_all(&home).ok();
     }
 
     /// The hosted shape, driven through the env seam (no process mutation): a
@@ -475,9 +477,11 @@ mod tests {
     fn credential_source_matrix_follows_the_resolver_precedence() {
         use crate::app::config::MapEnv;
 
-        let dir = std::env::temp_dir().join(format!("oc-dto-{}", crate::ports::generate_id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("token");
+        let dir = tempfile::Builder::new()
+            .prefix("oc-dto-")
+            .tempdir()
+            .expect("tempdir");
+        let path = dir.path().join("token");
         std::fs::write(&path, "projected-instance-token").unwrap();
         let projected = MapEnv::new([(
             crate::company::credentials::TOKEN_FILE_ENV,
@@ -543,7 +547,8 @@ mod tests {
     /// route (mirrors the harness build gate).
     #[tokio::test]
     async fn wildcard_grant_does_not_count_as_composio() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(
             &home,
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"*\"]\n",
@@ -551,7 +556,6 @@ mod tests {
         .await;
         let (_, dto, _) = send(&state, "GET", "/api/v1/company/composio", None).await;
         assert_eq!(dto["granted"], false, "{dto}");
-        std::fs::remove_dir_all(&home).ok();
     }
 
     /// The OAuth sign-in plane is always wired into the route table (like the
@@ -562,7 +566,8 @@ mod tests {
     /// non-404 signal rather than a missing route.
     #[tokio::test]
     async fn authorize_route_conflicts_without_build_or_token() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(
             &home,
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"composio\"]\n[tools.composio]\ntoolkits = [\"gmail\"]\n",
@@ -578,15 +583,14 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "{raw}");
         assert_eq!(body["code"], "conflict", "{body}");
-
-        std::fs::remove_dir_all(&home).ok();
     }
 
     /// `GET …/composio/connections` is likewise always wired and conflicts
     /// (`409`) when there is no usable client — no build feature or no token.
     #[tokio::test]
     async fn connections_route_conflicts_without_build_or_token() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(
             &home,
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"composio\"]\n[tools.composio]\ntoolkits = [\"gmail\"]\n",
@@ -597,7 +601,5 @@ mod tests {
             send(&state, "GET", "/api/v1/company/composio/connections", None).await;
         assert_eq!(status, StatusCode::CONFLICT, "{raw}");
         assert_eq!(body["code"], "conflict", "{body}");
-
-        std::fs::remove_dir_all(&home).ok();
     }
 }

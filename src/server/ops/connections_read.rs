@@ -102,8 +102,11 @@ mod tests {
     use crate::store::FsCompanyStore;
     use crate::{AppConfig, AppState};
 
-    fn home() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("oc-connections-{}", crate::ports::generate_id()))
+    fn home() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("oc-connections-")
+            .tempdir()
+            .expect("tempdir")
     }
 
     async fn state_with_manifest(home: &std::path::Path, manifest_toml: &str) -> AppState {
@@ -160,7 +163,8 @@ mod tests {
     /// to flip from "unavailable" to live buttons.
     #[tokio::test]
     async fn projects_connected_and_not_connected() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(
             &home,
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
@@ -253,8 +257,6 @@ mod tests {
             !body.to_string().contains("access_token"),
             "token field leaked into the connections response: {body}"
         );
-
-        std::fs::remove_dir_all(&home).ok();
     }
 
     /// A company with no `[[connection]]` entries returns an empty list (200),
@@ -262,7 +264,8 @@ mod tests {
     /// than the "unavailable" fallback.
     #[tokio::test]
     async fn empty_when_no_connections_declared() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(
             &home,
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n",
@@ -272,7 +275,5 @@ mod tests {
         let (status, body) = get_connections(&state).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, serde_json::json!([]), "empty array: {body}");
-
-        std::fs::remove_dir_all(&home).ok();
     }
 }

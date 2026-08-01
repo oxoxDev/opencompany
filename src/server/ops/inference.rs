@@ -287,8 +287,11 @@ mod tests {
 
     const TOKEN: &str = "sk-super-secret-inference-token-XYZ";
 
-    fn home() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("oc-inference-{}", crate::ports::generate_id()))
+    fn home() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("oc-inference-")
+            .tempdir()
+            .expect("tempdir")
     }
 
     fn manifest() -> CompanyManifest {
@@ -356,7 +359,8 @@ mod tests {
 
     #[tokio::test]
     async fn status_defaults_to_managed_then_switches_to_runtime() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home).await;
 
         // A company with no manifest/runtime inference reports the managed default.
@@ -397,13 +401,12 @@ mod tests {
         assert_eq!(dto["source"], "runtime");
         assert_eq!(dto["keyConfigured"], true);
         assert!(!raw.contains(TOKEN), "GET status leaked the token: {raw}");
-
-        std::fs::remove_dir_all(&home).ok();
     }
 
     #[tokio::test]
     async fn revert_clears_the_runtime_override() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home).await;
 
         send(
@@ -418,13 +421,12 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(resp["status"]["provider"], "managed");
         assert_eq!(resp["status"]["source"], "managed");
-
-        std::fs::remove_dir_all(&home).ok();
     }
 
     #[tokio::test]
     async fn invalid_provider_config_is_rejected() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home).await;
 
         // Ollama requires a base_url.
@@ -443,13 +445,12 @@ mod tests {
                 .contains("base_url"),
             "{err}"
         );
-
-        std::fs::remove_dir_all(&home).ok();
     }
 
     #[tokio::test]
     async fn key_never_leaks_across_any_response() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home).await;
 
         let (_, _, put_raw) = send(
@@ -467,7 +468,5 @@ mod tests {
         for raw in [put_raw, get_raw, test_raw] {
             assert!(!raw.contains(TOKEN), "a response leaked the token: {raw}");
         }
-
-        std::fs::remove_dir_all(&home).ok();
     }
 }
