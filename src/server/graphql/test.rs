@@ -687,11 +687,17 @@ async fn workflows_resolve_from_the_record_overlay_with_no_source_dir() {
 }
 
 /// Issue #168: a runtime-authored workflow with an **empty** manifest
-/// `[workflows].enabled` — the post-restart state on the fs backend, since the
-/// boot rebuild overwrites the record's manifest with the seed manifest — must
-/// still appear in `Company.workflows`. The resolver used to drive its id set
-/// off the enabled list alone, so this returned `[]` while `Company.workflow`
-/// happily returned the full graph.
+/// `[workflows].enabled` must still appear in `Company.workflows`. The resolver
+/// used to drive its id set off the enabled list alone, so this returned `[]`
+/// while `Company.workflow` happily returned the full graph.
+///
+/// This used to be the ordinary post-restart state on the fs backend, because a
+/// boot rebuild overwrote the record's manifest from the seed. Issue #208 fixed
+/// that — a rebuild now merges surviving overlay ids back into `enabled` — so
+/// the state is written here *after* the build instead. The resolver's guarantee
+/// is unchanged and still worth pinning: it enumerates graph bodies on their own
+/// evidence, whatever put the record in this shape (a hand-edited record, a
+/// store written by an older build, a future writer that adds a body first).
 ///
 /// Also pins REST/GraphQL agreement: both surfaces must report the same id set.
 #[tokio::test]
@@ -702,6 +708,22 @@ async fn workflows_summary_lists_an_overlay_workflow_with_no_enabled_entry() {
     // Nothing enabled in the manifest — the graph body is the only evidence.
     let manifest: CompanyManifest =
         toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+
+    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest.clone())
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+    assert!(
+        runtime.source_dir().is_none(),
+        "no source dir in hosted mode"
+    );
+
+    // Write the enabled-less record AFTER the build. Since issue #208 a boot
+    // rebuild merges surviving overlay ids back into `[workflows].enabled`, so
+    // seeding this state before the build would be healed away — and this test
+    // is about the *resolver*, which must enumerate overlay bodies on their own
+    // evidence no matter how the record got into this shape.
     let store = FsCompanyStore::new(home.to_path_buf());
     store
         .save(&CompanyRecord {
@@ -724,15 +746,6 @@ async fn workflows_summary_lists_an_overlay_workflow_with_no_enabled_entry() {
         .await
         .unwrap();
 
-    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
-        .with_id(id.clone())
-        .build()
-        .await
-        .unwrap();
-    assert!(
-        runtime.source_dir().is_none(),
-        "no source dir in hosted mode"
-    );
     let state = AppState::new(AppConfig::default()).with_home(home.to_path_buf());
     state.registry().insert(id, Arc::new(runtime));
     crate::server::test_support::seed_fixed_admin(&state, "acme").await;
