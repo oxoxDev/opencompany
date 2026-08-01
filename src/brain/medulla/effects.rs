@@ -14,6 +14,7 @@ use crate::ports::types::{
     ChunkAddr, CompanyEvent, ContextChunk, ContextOp, ContextOpResult, Effect, EffectGroup,
     LedgerEntry, OutboundMessage, Verdict,
 };
+use crate::ports::workflow_runner::DeliveryStatus;
 
 use super::wire::{EffectFrame, Role, WireEvent};
 
@@ -152,6 +153,37 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             format!("Steered task {task_id} ({action})"),
             "task.steered",
         ),
+        // A finished workflow run (#228). Counts and the failure reason only —
+        // NOT the per-row `target` or `detail`. A delivery row's target is a
+        // recipient's email address and its detail can quote one, and this body
+        // is wired out to the inference sidecar; the console reads the full
+        // rows from the journal instead, where they belong to the operator.
+        CompanyEvent::WorkflowRunFinished {
+            workflow_id,
+            scheduled,
+            deliveries,
+            pending_approvals,
+            error,
+            ..
+        } => {
+            let how = if *scheduled { "Scheduled" } else { "Manual" };
+            let body = match error {
+                Some(err) => format!("{how} run of workflow {workflow_id} failed: {err}"),
+                None => {
+                    let undelivered = deliveries
+                        .iter()
+                        .filter(|d| !matches!(d.status, DeliveryStatus::Sent))
+                        .count();
+                    format!(
+                        "{how} run of workflow {workflow_id} finished — {} report(s) routed, \
+                         {undelivered} not delivered, {} pending approval",
+                        deliveries.len(),
+                        pending_approvals.len(),
+                    )
+                }
+            };
+            (Role::System, "workflow".to_string(), body, "workflow.run")
+        }
     };
     WireEvent {
         seq,

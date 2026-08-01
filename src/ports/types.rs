@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::company::CompanyManifest;
 use crate::ports::ids::{generate_id, now_millis};
+use crate::ports::workflow_runner::DeliveryReport;
 
 // ---------------------------------------------------------------------------
 // Identifiers
@@ -445,6 +446,64 @@ pub enum CompanyEvent {
         /// pause. Lets a reader tell a successful run from a stopped one
         /// without re-deriving it from `output`.
         column: String,
+    },
+    /// A workflow run finished (issue #228) — the durable record of what a run
+    /// actually did, journaled from **both** entry points: the console's Run
+    /// button and the cron [`WorkflowScheduler`](crate::runtime::WorkflowScheduler).
+    ///
+    /// Before this, a run's outcome existed only in the moment. A manual run's
+    /// [`DeliveryReport`] rows lived in the console drawer until it was
+    /// dismissed; a scheduled run's reached only host stdout, which on a hosted
+    /// tenant is the platform team rather than the tenant's operator. Nothing
+    /// wrote a run outcome anywhere the console could read it back — so a report
+    /// that did not leave the building was unfindable an hour later.
+    ///
+    /// This is **not** [issue #242's `RunRecord`](crate::ports::types) and does
+    /// not replace it. That record is a *task-attempt* record minted at the task
+    /// dispatch choke point, keyed to a board task with an attempt ordinal. A
+    /// workflow run enters through a different port entirely
+    /// ([`WorkflowRunner::run`](crate::ports::WorkflowRunner::run)) and produces
+    /// host-side delivery rows per output node; it has no task and no attempt
+    /// ordinal to be keyed on.
+    ///
+    /// Journaled **best-effort, after** the run returns, so it always records a
+    /// finished run and an append failure never disturbs the run path.
+    ///
+    /// Additive: old logs never carry it, and its presence doesn't change how
+    /// any existing variant serializes. Every optional/collection field carries
+    /// `#[serde(default)]` + `skip_serializing_if`, the same contract as
+    /// [`AgentReply`](Self::AgentReply)'s `task_id`, so a journal written before
+    /// this variant existed still loads and every already-persisted event stays
+    /// byte-identical.
+    WorkflowRunFinished {
+        /// The workflow graph that ran (its `workflows/<id>.toml` stem).
+        workflow_id: String,
+        /// Whether a cron schedule started this run rather than an operator.
+        /// The distinction is the point: a scheduled run is the
+        /// nobody-was-watching case this event exists for.
+        scheduled: bool,
+        /// A correlation id for the run, when the entry point minted one.
+        /// `None` today from both entry points — neither has a run id to give —
+        /// and kept `Option` so #242's first-class run, or any future
+        /// correlated entry point, needs no migration.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+        /// One row per attempt to route a reached `output` node's report to its
+        /// destination — the same rows a manual run hands back in its HTTP
+        /// response. Empty for a graph that routes nothing.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        deliveries: Vec<DeliveryReport>,
+        /// Node ids the run left waiting on a human approval.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pending_approvals: Vec<String>,
+        /// The error that ended the run, when it failed outright rather than
+        /// finishing with rows.
+        ///
+        /// This is the field that closes the loudest hole: today a scheduled
+        /// run's `Err` arm only warns to host stdout, so **the worst outcome is
+        /// currently the quietest**. `None` on a run that completed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 }
 
@@ -1486,6 +1545,7 @@ pub struct PaymentReceipt {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::ports::workflow_runner::DeliveryStatus;
 
     fn round_trip<T>(value: &T) -> T
     where
@@ -2344,6 +2404,111 @@ mod test {
         let json = serde_json::to_string(&blob).expect("serialize");
         let again = OverlayBlob::parse(&json).expect("reparse");
         assert_eq!(again.desks, blob.desks);
+    }
+
+    // ── Issue #228: a workflow run's outcome is journaled ───────────────────
+
+    fn delivery(node: &str, status: DeliveryStatus) -> DeliveryReport {
+        DeliveryReport {
+            node: node.to_string(),
+            kind: "owner".to_string(),
+            target: Some("ada@example.com".to_string()),
+            status,
+            detail: "emailed the company's admin".to_string(),
+        }
+    }
+
+    /// The full-bodied variant survives the JSONL round trip the journal puts
+    /// every event through — including the delivery rows, which are the whole
+    /// reason the event exists.
+    #[test]
+    fn workflow_run_finished_round_trips_with_every_field() {
+        let event = CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".to_string(),
+            scheduled: true,
+            run_id: Some("run-1".to_string()),
+            deliveries: vec![
+                delivery("owner_summary", DeliveryStatus::Skipped),
+                delivery("also_sent", DeliveryStatus::Sent),
+            ],
+            pending_approvals: vec!["review".to_string()],
+            error: None,
+        };
+        assert_eq!(round_trip(&event), event);
+    }
+
+    /// The failed-run shape round-trips too. This is the arm that today only
+    /// warns to host stdout, so it is the one an operator most needs read back.
+    #[test]
+    fn workflow_run_finished_round_trips_a_failed_run() {
+        let event = CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".to_string(),
+            scheduled: true,
+            run_id: None,
+            deliveries: Vec::new(),
+            pending_approvals: Vec::new(),
+            error: Some("agent node `worker` had no inference source".to_string()),
+        };
+        assert_eq!(round_trip(&event), event);
+    }
+
+    /// The additive contract, both halves.
+    ///
+    /// **Forward:** a minimal line — only the two required fields, exactly what
+    /// a future/older writer might emit — still loads, so no persisted journal
+    /// needs migrating.
+    ///
+    /// **Backward:** an empty run serializes to *only* those two fields. Every
+    /// optional/collection field is `skip_serializing_if`, which is what keeps
+    /// the wire form of an outcome-less run minimal rather than littered with
+    /// nulls and `[]`s.
+    #[test]
+    fn workflow_run_finished_omits_and_defaults_its_optional_fields() {
+        let json = r#"{"kind":"WorkflowRunFinished","workflow_id":"digest","scheduled":false}"#;
+        let event: CompanyEvent = serde_json::from_str(json).expect("minimal line loads");
+        assert_eq!(
+            event,
+            CompanyEvent::WorkflowRunFinished {
+                workflow_id: "digest".to_string(),
+                scheduled: false,
+                run_id: None,
+                deliveries: Vec::new(),
+                pending_approvals: Vec::new(),
+                error: None,
+            }
+        );
+        // …and serializing it back emits nothing extra.
+        let out = serde_json::to_string(&event).expect("serialize");
+        assert!(!out.contains("run_id"), "{out}");
+        assert!(!out.contains("deliveries"), "{out}");
+        assert!(!out.contains("pending_approvals"), "{out}");
+        assert!(!out.contains("error"), "{out}");
+    }
+
+    /// **The backcompat proof.** A journal written before this variant existed
+    /// still loads, line for line, and every one of those lines re-serializes
+    /// byte-identically — which is what "additive, no migration" actually
+    /// claims. Adding an enum variant cannot change how a sibling serializes,
+    /// but nothing else in the suite asserts it for the whole log, and a
+    /// regression here would corrupt an export/import round trip silently.
+    #[test]
+    fn a_journal_written_before_this_variant_still_loads_byte_identically() {
+        // Verbatim lines in the pre-#228 on-disk shapes, including the pre-`by`
+        // / pre-`chat` `OperatorMessage` and the pre-`steps` `AgentReply`.
+        let legacy = [
+            r#"{"kind":"OperatorMessage","text":"ship it"}"#,
+            r#"{"kind":"AgentReply","chat_id":"general","agent_id":"ceo","text":"on it"}"#,
+            r#"{"kind":"ScheduleFired","cron":"0 9 * * *","prompt":"daily"}"#,
+            r#"{"kind":"WorkflowCreated","workflow_id":"digest","name":"Digest"}"#,
+            r#"{"kind":"TaskDispatched","task_id":"t-1"}"#,
+            r#"{"kind":"DeskTaskCompleted","task_id":"t-1","desk":"ceo","output":"done","column":"in_review"}"#,
+        ];
+        for line in legacy {
+            let event: CompanyEvent = serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("pre-#228 journal line must still load: {line} — {e}"));
+            let again = serde_json::to_string(&event).expect("serialize");
+            assert_eq!(again, line, "pre-#228 line must re-serialize unchanged");
+        }
     }
 
     #[test]
