@@ -75,9 +75,14 @@ Surfacing those outcomes is issue #228; the durable record it needs is issue
 
 Authoring a destination and reading the result back:
 
+Both routes go through `ScopedCompany`, so both need an operator credential —
+`$TOKEN` below is the bearer token the `Authorization` header is parsed from.
+
 ```bash
 # Create a graph whose output node reports to the company's admins.
-curl -X POST "$HOST/api/v1/company/workflows" -H 'content-type: application/json' -d '{
+curl -X POST "$HOST/api/v1/company/workflows" \
+     -H "Authorization: Bearer $TOKEN" \
+     -H 'content-type: application/json' -d '{
   "id": "weekly_digest",
   "name": "Weekly digest",
   "nodes": [
@@ -91,6 +96,7 @@ curl -X POST "$HOST/api/v1/company/workflows" -H 'content-type: application/json
 
 # Run it now. `deliveries` says what happened to the report.
 curl -X POST "$HOST/api/v1/company/workflows/weekly_digest/run" \
+     -H "Authorization: Bearer $TOKEN" \
      -H 'content-type: application/json' -d '{"input":{"request":"last week"}}'
 ```
 
