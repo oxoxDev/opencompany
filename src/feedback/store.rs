@@ -140,9 +140,15 @@ mod test {
     use crate::feedback::types::{ConsentMode, FeedbackCategory, FeedbackInput, FeedbackItem};
     use crate::ports::types::CompanyId;
 
-    fn tmp_bundle() -> Bundle {
-        let root = std::env::temp_dir().join(format!("oc-feedback-{}", generate_id()));
-        Bundle::new(root, &CompanyId::new("acme"))
+    /// The caller must hold the returned handle: it owns the bundle's root and
+    /// removes it on drop.
+    fn tmp_bundle() -> (tempfile::TempDir, Bundle) {
+        let root = tempfile::Builder::new()
+            .prefix("oc-feedback-")
+            .tempdir()
+            .expect("tempdir");
+        let bundle = Bundle::new(root.path().to_path_buf(), &CompanyId::new("acme"));
+        (root, bundle)
     }
 
     fn item(note: &str) -> FeedbackItem {
@@ -161,7 +167,7 @@ mod test {
 
     #[tokio::test]
     async fn append_and_list_round_trips() {
-        let bundle = tmp_bundle();
+        let (_root, bundle) = tmp_bundle();
         let store = FeedbackStore::new(&bundle);
         assert!(store.list().await.unwrap().is_empty());
 
@@ -176,7 +182,7 @@ mod test {
 
     #[tokio::test]
     async fn update_status_records_url_without_losing_others() {
-        let bundle = tmp_bundle();
+        let (_root, bundle) = tmp_bundle();
         let store = FeedbackStore::new(&bundle);
         let a = item("a");
         let b = item("b");
@@ -213,7 +219,7 @@ mod test {
     /// `store::fs::test::concurrent_appends_stay_one_record_per_line` (PR #43).
     #[tokio::test]
     async fn concurrent_appends_stay_one_record_per_line() {
-        let bundle = tmp_bundle();
+        let (_root, bundle) = tmp_bundle();
         let store = std::sync::Arc::new(FeedbackStore::new(&bundle));
 
         const N: usize = 32;
