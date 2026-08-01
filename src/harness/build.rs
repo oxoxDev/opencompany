@@ -694,7 +694,6 @@ mod tests {
             workflow_runner: WorkflowRunnerHandle::default(),
             mcp_failures: McpFailureQueue::default(),
             approval_requests: ApprovalRequestQueue::default(),
-            approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: toolbelt::CapabilityFilter::AllowAll,
