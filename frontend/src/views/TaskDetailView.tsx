@@ -18,6 +18,7 @@ import {
   CornerUpRight,
   Loader2,
   MessageSquare,
+  MessagesSquare,
   Pencil,
   Play,
   Send,
@@ -124,6 +125,7 @@ export function TaskDetailView({
   taskId,
   onBack,
   onNavigate,
+  onOpenThread,
   onSaved,
   onDeleted,
 }: {
@@ -134,6 +136,8 @@ export function TaskDetailView({
   onBack: () => void;
   /** Navigate the detail to a neighbouring (lineage) task. */
   onNavigate: (id: string) => void;
+  /** Open the chat thread this card was created from (issue #246). */
+  onOpenThread?: (threadId: string) => void;
   /** Hand a saved card back to the board for reconciliation. */
   onSaved: (t: Task) => void;
   /** Tell the board a card was deleted. */
@@ -279,6 +283,11 @@ export function TaskDetailView({
               onChanged={load}
               onSaved={onSaved}
               onEdit={() => setEditing(true)}
+            />
+
+            <OriginThreadRow
+              originChatId={detail.task.originChatId}
+              onOpenThread={onOpenThread}
             />
 
             <LineageRail lineage={detail.lineage} onNavigate={onNavigate} />
@@ -617,6 +626,47 @@ function ControlBar({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * "Opened from a conversation" — the card → chat half of issue #246.
+ *
+ * `originChatId` has been on the record since #151, but nothing ever read it
+ * back, so a card created out of a conversation looked exactly like one typed
+ * onto the board. Renders nothing for a card with no conversation behind it,
+ * which is every card the `+` button creates.
+ *
+ * Falls back to plain text when no navigation callback is supplied: stating the
+ * origin is the part that must always work; the jump is a convenience the host
+ * screen may or may not be able to offer.
+ */
+function OriginThreadRow({
+  originChatId,
+  onOpenThread,
+}: {
+  originChatId?: string;
+  onOpenThread?: (threadId: string) => void;
+}) {
+  if (!originChatId) return null;
+  const label = "Opened from chat";
+  if (!onOpenThread) {
+    return (
+      <div className="flex items-center gap-2 rounded-xl border bg-card/40 px-3 py-2 text-xs text-muted-foreground">
+        <MessagesSquare className="size-3.5 shrink-0" />
+        <span className="truncate">{label}</span>
+      </div>
+    );
+  }
+  return (
+    <button
+      className="flex w-full items-center gap-2 rounded-xl border bg-card/40 px-3 py-2 text-left text-xs transition-colors hover:bg-accent"
+      onClick={() => onOpenThread(originChatId)}
+    >
+      <MessagesSquare className="size-3.5 shrink-0 text-muted-foreground" />
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      <span className="shrink-0 text-muted-foreground">Open the conversation</span>
+    </button>
   );
 }
 

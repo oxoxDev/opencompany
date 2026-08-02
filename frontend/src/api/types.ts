@@ -65,6 +65,16 @@ export interface OutboundMessage {
   steps?: TurnStep[];
   /** Channel-specific reply addressing (Telegram). Absent on operator messages. */
   replyTo?: ReplyTo;
+  /**
+   * The board card this turn opened, when it opened one (issue #246). Drives
+   * the reply bubble's "card opened" chip. Absent when the turn opened nothing
+   * — which is every reply the host sent before this field existed.
+   *
+   * Only the *first* card of a turn that opened several: the journal field this
+   * is persisted into is a single id, so the claim is incomplete but never
+   * wrong. The bubble's `steps` timeline still shows every spawn.
+   */
+  taskId?: string;
 }
 
 /** Channel-specific reply addressing. Mirrors `ReplyTo` in `src/ports/types.rs`. */
@@ -141,6 +151,13 @@ export interface ChatHistoryMessageDto {
    * empty (operator messages, tool-less replies).
    */
   steps?: TurnStep[];
+  /**
+   * The board card this reply is about (issue #246) — the card the turn opened,
+   * or the dispatched card it ran for (#185). Projected from the same shared
+   * `MessageView` field the GraphQL `Chat.history` resolver reads, so the chip
+   * renders identically whichever surface hydrated the transcript.
+   */
+  taskId?: string;
 }
 
 /** Response of `/chat` and approval-resolution routes. */
