@@ -579,10 +579,15 @@ type RegistrySkill {
 	The publisher of the registry skill.
 	"""
 	publisher: String!
+	"""
+	The library revision this entry ships, from frontmatter. `None` for a
+	skill authored before `version` existed.
+	"""
+	version: String
 }
 
 """
-One skill installed in a company. Mirrors `frontend/src/lib/skills.ts`.
+One skill installed in a company. Mirrors the console's `@/api/skills` types.
 """
 type Skill {
 	"""
@@ -609,6 +614,10 @@ type Skill {
 	Whether the skill is enabled for the company.
 	"""
 	enabled: Boolean!
+	"""
+	The library revision this skill's document carries, when it has one.
+	"""
+	version: String
 }
 
 """

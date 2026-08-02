@@ -16,7 +16,7 @@ use crate::company::runtime::CompanyRuntime;
 use crate::company::{SkillDoc, load_dir_skills, parse_skill_md};
 use crate::ports::skills_state::{SkillSource, SkillState};
 
-/// One skill installed in a company. Mirrors `frontend/src/lib/skills.ts`.
+/// One skill installed in a company. Mirrors the console's `@/api/skills` types.
 #[derive(SimpleObject)]
 #[graphql(name = "Skill")]
 pub struct SkillGql {
@@ -32,6 +32,8 @@ pub struct SkillGql {
     pub source: String,
     /// Whether the skill is enabled for the company.
     pub enabled: bool,
+    /// The library revision this skill's document carries, when it has one.
+    pub version: Option<String>,
 }
 
 /// One skill in the shared repo-level registry, installable into any company.
@@ -48,6 +50,9 @@ pub struct RegistrySkillGql {
     pub category: String,
     /// The publisher of the registry skill.
     pub publisher: String,
+    /// The library revision this entry ships, from frontmatter. `None` for a
+    /// skill authored before `version` existed.
+    pub version: Option<String>,
 }
 
 /// The default category when a skill doc carries none.
@@ -88,6 +93,7 @@ fn from_doc(doc: &SkillDoc, source: &str, enabled: bool) -> SkillGql {
             .unwrap_or_else(|| DEFAULT_CATEGORY.to_string()),
         source: source.to_string(),
         enabled,
+        version: doc.version.clone(),
     }
 }
 
@@ -95,10 +101,7 @@ fn from_doc(doc: &SkillDoc, source: &str, enabled: bool) -> SkillGql {
 /// directory. Empty when no source checkout is present (platform-provisioned
 /// mode), where the registry has nothing to serve.
 fn registry_docs(state: &AppState) -> Arc<[SkillDoc]> {
-    let Some(dir) = state.skills_root() else {
-        return Arc::from([]);
-    };
-    state.skill_registry(dir).unwrap_or_else(|_| Arc::from([]))
+    state.shared_skill_registry()
 }
 
 /// Resolves `Company.skills`: company-dir docs overlaid with store deltas.
@@ -150,6 +153,7 @@ fn skill_from_state(st: &SkillState, registry: &[SkillDoc]) -> SkillGql {
                 category: DEFAULT_CATEGORY.to_string(),
                 source: "registry".to_string(),
                 enabled: st.enabled,
+                version: None,
             },
         },
         SkillSource::Custom => {
@@ -166,6 +170,7 @@ fn skill_from_state(st: &SkillState, registry: &[SkillDoc]) -> SkillGql {
                     category: DEFAULT_CATEGORY.to_string(),
                     source: "custom".to_string(),
                     enabled: st.enabled,
+                    version: None,
                 },
             }
         }
@@ -176,6 +181,7 @@ fn skill_from_state(st: &SkillState, registry: &[SkillDoc]) -> SkillGql {
             category: DEFAULT_CATEGORY.to_string(),
             source: "company".to_string(),
             enabled: st.enabled,
+            version: None,
         },
     }
 }
@@ -196,6 +202,7 @@ pub(crate) async fn resolve_registry(
                 .clone()
                 .unwrap_or_else(|| DEFAULT_CATEGORY.to_string()),
             publisher: REGISTRY_PUBLISHER.to_string(),
+            version: doc.version.clone(),
         })
         .collect())
 }
