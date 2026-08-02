@@ -221,6 +221,10 @@ pub struct RuntimeBuilder {
     sessions: Option<Arc<dyn SessionStore>>,
     login_codes: Option<Arc<dyn LoginCodeStore>>,
     seed_dir: Option<PathBuf>,
+    /// The repo-level shared skill library, passed to the harness so a pre-fix
+    /// registry install (whose stored `SKILL.md` is a one-line stub) is healed
+    /// from the live library. Empty when no repo checkout backs the host.
+    skills_registry: Arc<[crate::company::SkillDoc]>,
     /// Issue #85: the source-template provenance to stamp on this company's
     /// record at *first* launch. Set by the launch path when the manifest was
     /// seeded from a template directory; left `None` for a raw-manifest
@@ -292,6 +296,7 @@ impl RuntimeBuilder {
             sessions: None,
             login_codes: None,
             seed_dir: None,
+            skills_registry: Arc::from([]),
             template_provenance: None,
             feedback: None,
             github: None,
@@ -470,6 +475,14 @@ impl RuntimeBuilder {
     /// tree is seeded from on first build. Without it, no seeding runs.
     pub fn with_seed_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.seed_dir = Some(dir.into());
+        self
+    }
+
+    /// Sets the repo-level shared skill library (`skills/*/SKILL.md`), used by
+    /// the harness to heal pre-fix registry installs. Unset leaves it empty,
+    /// which simply skips healing.
+    pub fn with_skills_registry(mut self, registry: Arc<[crate::company::SkillDoc]>) -> Self {
+        self.skills_registry = registry;
         self
     }
 
@@ -1046,6 +1059,7 @@ impl RuntimeBuilder {
                                 // supplies the committed bundles.
                                 skills: Some(ops.skills.clone()),
                                 skills_source_dir: self.seed_dir.clone(),
+                                skills_registry: self.skills_registry.clone(),
                                 mcp_servers,
                                 // Orchestrator read surface + delegation queue
                                 // (#53): the company's facts + event log ground

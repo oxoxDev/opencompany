@@ -193,7 +193,8 @@ async fn provision(
     let mut builder = RuntimeBuilder::new(state.home().to_path_buf(), manifest)
         .with_id(id.clone())
         .with_tinyplace_api_url(state.config().tinyplace_api_url.clone())
-        .with_host_base_url(state.config().host_base_url());
+        .with_host_base_url(state.config().host_base_url())
+        .with_skills_registry(state.shared_skill_registry());
     if let Some(stores) = state.stores() {
         builder = builder.with_stores(stores);
     }

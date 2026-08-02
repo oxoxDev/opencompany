@@ -307,6 +307,7 @@ pub fn build_agent(
         let effective = EffectiveSkills::materialize(
             skill_ws,
             deps.skills_source_dir.as_deref(),
+            &deps.skills_registry,
             skill_deltas,
         )?;
         if !effective.is_empty() {
@@ -687,6 +688,7 @@ mod tests {
             artifacts: None,
             skills: None,
             skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,

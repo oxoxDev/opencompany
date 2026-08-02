@@ -420,6 +420,21 @@ impl AppState {
         Ok(self.skill_registry.get().cloned().unwrap_or(registry))
     }
 
+    /// The repo-level shared skill registry, or empty when nothing backs it.
+    ///
+    /// Degrades to empty in two cases, both meaning "this host serves no shared
+    /// library": no [`skills_root`](Self::skills_root) (platform-provisioned
+    /// mode), or a root that fails to load. Callers treat an empty registry as
+    /// "cannot resolve skills from the library" rather than special-casing the
+    /// unset root, so a root pointing at a missing directory behaves the same as
+    /// no root at all.
+    pub fn shared_skill_registry(&self) -> Arc<[SkillDoc]> {
+        let Some(dir) = self.skills_root() else {
+            return Arc::from([]);
+        };
+        self.skill_registry(dir).unwrap_or_else(|_| Arc::from([]))
+    }
+
     /// Installs the injected connection seams (DNS resolver, mail sender).
     pub fn with_connections(mut self, connections: crate::server::ops::ConnectionsRuntime) -> Self {
         self.connections = connections;
