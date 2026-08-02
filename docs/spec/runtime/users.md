@@ -194,10 +194,14 @@ can send mail never echoes it.
 
 ## Abuse and exposure
 
-- **Resend throttle**: one link per address per minute. A throttled request
-  returns the same `202` as a sent one (or the throttle is itself a membership
-  oracle) and leaves the live code alone (or anyone could invalidate a victim's
-  link on demand).
+- **Resend throttle**: one *mailed* link per address per minute. A throttled
+  request returns the same `202` as a sent one (or the throttle is itself a
+  membership oracle) and leaves the live code alone (or anyone could invalidate
+  a victim's link on demand). It does not apply where the code is echoed rather
+  than mailed — a loopback-only bind with no transport wired. There is no
+  mailbox to spare there, only the plaintext's hash is stored (so a throttled
+  answer cannot re-echo the live code), and throttling would lock the sole local
+  sign-in path for a minute after every use.
 - **Login codes are never echoed** from a host that is reachable from anywhere
   else. `dev_code` appears only on a loopback-only bind with no mail
   transport. A routable host with broken mail lets nobody in rather than
