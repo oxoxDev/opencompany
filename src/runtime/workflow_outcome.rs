@@ -115,6 +115,7 @@ mod test {
             target: Some("ada@example.com".to_string()),
             status,
             detail: "this recipient has never written to the company".to_string(),
+            reason: crate::ports::DeliveryReason::RecipientNotEstablished,
         }
     }
 

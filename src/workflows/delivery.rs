@@ -88,6 +88,27 @@
 //! An output node the run never reached (an untaken branch, or a path that
 //! paused for approval) gets no attempt and no row — an absent row means "not
 //! reached", never "silently dropped".
+//!
+//! # Two reasons per row, and why (issue #248)
+//!
+//! Every row carries both a free-text [`DeliveryReport::detail`] and a
+//! [`DeliveryReason`]. They are not redundant — they have different readers:
+//!
+//! * `detail` is for the **operator**: the run response and the
+//!   `WorkflowRunFinished` history their own console reads back. It may quote a
+//!   transport verbatim, which is what makes a failed send diagnosable.
+//! * `reason` is for the **host log**. The scheduler's undelivered-report
+//!   warning goes to host stdout, which on a hosted deployment is the platform
+//!   and not the operator — the same boundary
+//!   [`crate::runtime::workflow_scheduler`]'s module docs draw. A transport
+//!   refusal quotes the mailbox it refused (`550 5.1.1
+//!   <recipient@example.invalid>: Recipient address rejected`), so `detail` is
+//!   not loggable there and `reason` is.
+//!
+//! Both are set at the same construction site, so the classification is made
+//! where the outcome is known rather than recovered later by pattern-matching a
+//! string. `DeliveryReason` has no `String` payload, so the safe half cannot
+//! drift into carrying transport text without changing its type.
 
 use std::sync::Arc;
 
@@ -100,8 +121,8 @@ use crate::ports::types::{
     Actor, ActorKind, CompanyId, CompanyRecord, Effect, EffectGroup, OutboundMessage, Verdict,
 };
 use crate::ports::{
-    ApprovalGate, ChannelAdapter, DeliveryReport, DeliveryStatus, EmailRecord, InboxStore,
-    UserRole, UserStatus, UserStore, generate_id, now_millis,
+    ApprovalGate, ChannelAdapter, DeliveryReason, DeliveryReport, DeliveryStatus, EmailRecord,
+    InboxStore, UserRole, UserStatus, UserStore, generate_id, now_millis,
 };
 use crate::runtime::cycle::EMAIL_SEND_KIND;
 use crate::runtime::journal::RuntimeJournal;
@@ -247,6 +268,7 @@ pub async fn deliver_outputs(
                 detail: "report delivery is not wired on this runtime — the workflow ran and its \
                          result is in this run, but nothing was sent"
                     .to_string(),
+                reason: DeliveryReason::NotWired,
             });
             continue;
         };
@@ -278,12 +300,19 @@ async fn deliver_one(
     text: &str,
     reports: &mut Vec<DeliveryReport>,
 ) {
-    let row = |target: Option<String>, status: DeliveryStatus, detail: String| DeliveryReport {
+    // `reason` sits between `status` and `detail` on purpose: the classification
+    // is not optional trailing garnish, and a caller has to walk past it to
+    // reach the free-text half.
+    let row = |target: Option<String>,
+               status: DeliveryStatus,
+               reason: DeliveryReason,
+               detail: String| DeliveryReport {
         node: node_id.to_string(),
         kind: destination.kind.clone(),
         target,
         status,
         detail,
+        reason,
     };
     let target = destination.target.as_deref().map(str::trim).unwrap_or("");
 
@@ -300,11 +329,16 @@ async fn deliver_one(
                             Ok(()) => row(
                                 Some(address),
                                 DeliveryStatus::Sent,
+                                DeliveryReason::OwnerEmailed,
                                 "emailed the company's admin".to_string(),
                             ),
+                            // `err` is the transport's own words and can quote
+                            // the mailbox it refused, so it stays on the
+                            // operator's half only (issue #248).
                             Err(err) => row(
                                 Some(address),
                                 DeliveryStatus::Failed,
+                                DeliveryReason::MailTransportRefused,
                                 format!("the mail transport refused the message: {err}"),
                             ),
                         });
@@ -314,10 +348,16 @@ async fn deliver_one(
                 // always-present operator channel so the owner still hears about
                 // it. Never a silent no-op.
                 _ => {
-                    let why = if delivery.mail.is_none() {
-                        "no mailbox is configured for this company"
+                    let (why, why_reason) = if delivery.mail.is_none() {
+                        (
+                            "no mailbox is configured for this company",
+                            DeliveryReason::OwnerFellBackNoMailbox,
+                        )
                     } else {
-                        "no active admin has an email address"
+                        (
+                            "no active admin has an email address",
+                            DeliveryReason::OwnerFellBackNoAdminAddress,
+                        )
                     };
                     reports.push(
                         post_to_channel(
@@ -331,13 +371,20 @@ async fn deliver_one(
                             row(
                                 Some(crate::runtime::channel::OPERATOR_CHANNEL.to_string()),
                                 DeliveryStatus::Sent,
+                                why_reason,
                                 format!("{why}, so the report went to the operator channel"),
                             )
                         })
-                        .unwrap_or_else(|detail| {
+                        // The channel's own failure class (`_class`) is dropped
+                        // in favour of naming the fallback, which is the part an
+                        // operator reading a host log needs: the interesting
+                        // fact is that `owner` had nowhere left to go. The full
+                        // text, class included, is on `detail`.
+                        .unwrap_or_else(|(_class, detail)| {
                             row(
                                 Some(crate::runtime::channel::OPERATOR_CHANNEL.to_string()),
                                 DeliveryStatus::Failed,
+                                DeliveryReason::OwnerFallbackFailed,
                                 format!(
                                     "{why}, and the operator channel fallback failed: {detail}"
                                 ),
@@ -363,6 +410,7 @@ async fn deliver_one(
                 reports.push(row(
                     Some(target.to_string()),
                     DeliveryStatus::Denied,
+                    DeliveryReason::EmailNotGranted,
                     "this company's [tools].allow does not grant `email`, so a workflow may not \
                      send mail to a named address"
                         .to_string(),
@@ -373,6 +421,7 @@ async fn deliver_one(
                 reports.push(row(
                     Some(target.to_string()),
                     DeliveryStatus::Skipped,
+                    DeliveryReason::NoMailboxConfigured,
                     "no mailbox is configured for this company, so there is nothing to send from"
                         .to_string(),
                 ));
@@ -399,11 +448,17 @@ async fn deliver_one(
                     Ok(()) => row(
                         Some(target.to_string()),
                         DeliveryStatus::Sent,
+                        DeliveryReason::RecipientEmailed,
                         "emailed the named recipient on an established thread".to_string(),
                     ),
+                    // The `email` arm is where the leak mattered most: `target`
+                    // IS the recipient's address, and an SMTP refusal echoes it
+                    // back inside `err`. Classified here, so the log line can
+                    // say what failed without saying to whom (issue #248).
                     Err(err) => row(
                         Some(target.to_string()),
                         DeliveryStatus::Failed,
+                        DeliveryReason::MailTransportRefused,
                         format!("the mail transport refused the message: {err}"),
                     ),
                 },
@@ -417,9 +472,15 @@ async fn deliver_one(
                     Ok(()) => row(
                         Some(target.to_string()),
                         DeliveryStatus::Sent,
+                        DeliveryReason::ChannelPosted,
                         "posted to the channel".to_string(),
                     ),
-                    Err(detail) => row(Some(target.to_string()), DeliveryStatus::Failed, detail),
+                    Err((reason, detail)) => row(
+                        Some(target.to_string()),
+                        DeliveryStatus::Failed,
+                        reason,
+                        detail,
+                    ),
                 },
             );
         }
@@ -430,6 +491,7 @@ async fn deliver_one(
         other => reports.push(row(
             destination.target.clone(),
             DeliveryStatus::Failed,
+            DeliveryReason::UnknownDestinationKind,
             format!("`{other}` is not a destination kind this runtime knows how to deliver to"),
         )),
     }
@@ -463,7 +525,7 @@ async fn park_cold_recipient(
     target: &str,
     subject: &str,
     text: &str,
-    row: impl Fn(Option<String>, DeliveryStatus, String) -> DeliveryReport,
+    row: impl Fn(Option<String>, DeliveryStatus, DeliveryReason, String) -> DeliveryReport,
 ) -> DeliveryReport {
     let Some(parking) = &delivery.parking else {
         // Fail closed to the pre-#227 behaviour. A `pending` row on a runtime
@@ -478,6 +540,7 @@ async fn park_cold_recipient(
         return row(
             Some(target.to_string()),
             DeliveryStatus::Skipped,
+            DeliveryReason::RecipientNotEstablished,
             "this recipient has never written to the company, so a workflow may not open the \
              conversation — send once from the inbox first"
                 .to_string(),
@@ -513,6 +576,7 @@ async fn park_cold_recipient(
             row(
                 Some(target.to_string()),
                 DeliveryStatus::Pending,
+                DeliveryReason::ParkedForApproval,
                 "this recipient has never written to the company, so a workflow may not open the \
                  conversation on its own — the report is waiting for you in Approvals, and \
                  approving it sends the mail"
@@ -538,6 +602,7 @@ async fn park_cold_recipient(
             row(
                 Some(target.to_string()),
                 DeliveryStatus::Skipped,
+                DeliveryReason::ParkingUnavailable,
                 "this recipient has never written to the company, and this report could not be \
                  queued for your approval either — send once from the inbox first"
                     .to_string(),
@@ -730,14 +795,18 @@ async fn recipient_is_established(
 
 /// Posts a report to the wired channel adapter with id `channel_id`.
 ///
-/// `Err(detail)` carries an operator-readable reason: an unwired id names what
-/// *is* wired, so the fix is obvious from the run result alone.
+/// `Err((reason, detail))` carries both halves the caller needs: `detail` is the
+/// operator-readable text — an unwired id names what *is* wired, so the fix is
+/// obvious from the run result alone — and `reason` is the classification that
+/// may be logged. They are returned together because only this function knows
+/// which of the two failure shapes happened; recovering it later from the string
+/// is exactly the pattern-match-on-prose coupling issue #248 exists to avoid.
 async fn post_to_channel(
     delivery: &WorkflowDeliveryDeps,
     channel_id: &str,
     subject: &str,
     text: &str,
-) -> Result<(), String> {
+) -> Result<(), (DeliveryReason, String)> {
     let Some(adapter) = delivery
         .channels
         .iter()
@@ -748,14 +817,17 @@ async fn post_to_channel(
             .iter()
             .map(|c| c.channel_id())
             .collect::<Vec<_>>();
-        return Err(if wired.is_empty() {
-            format!("`{channel_id}` is not wired on this runtime, which has no channels at all")
-        } else {
-            format!(
-                "`{channel_id}` is not a wired channel — this runtime has: {}",
-                wired.join(", ")
-            )
-        });
+        return Err((
+            DeliveryReason::ChannelNotWired,
+            if wired.is_empty() {
+                format!("`{channel_id}` is not wired on this runtime, which has no channels at all")
+            } else {
+                format!(
+                    "`{channel_id}` is not a wired channel — this runtime has: {}",
+                    wired.join(", ")
+                )
+            },
+        ));
     };
     adapter
         .send(OutboundMessage {
@@ -765,7 +837,14 @@ async fn post_to_channel(
             reply_to: None,
         })
         .await
-        .map_err(|err| format!("the channel refused the message: {err}"))
+        // `err` is the adapter's own words. Same rule as mail: it rides
+        // `detail`, never the classification (issue #248).
+        .map_err(|err| {
+            (
+                DeliveryReason::ChannelRefused,
+                format!("the channel refused the message: {err}"),
+            )
+        })
 }
 
 /// Whether the run's output carries an entry for `node_id` — i.e. the engine
@@ -1771,8 +1850,76 @@ mode = "full"
         assert_eq!(reports.len(), 1, "{reports:?}");
         assert_eq!(reports[0].status, DeliveryStatus::Failed);
         assert!(reports[0].detail.contains("smtp said no"), "{reports:?}");
+        assert_eq!(reports[0].reason, DeliveryReason::MailTransportRefused);
         // A refused send leaves no outbound audit record — the mail never went.
         assert!(h.inbox_messages().await.iter().all(|m| !m.outbound));
+    }
+
+    /// **Issue #248 at the source.** A real SMTP refusal quotes the mailbox it
+    /// refused, so the transport's own words are an address-bearing string. This
+    /// asserts the split holds where the row is built: `detail` keeps the reply
+    /// (the operator needs it), `reason` cannot carry it.
+    ///
+    /// `.invalid` is reserved by RFC 2606 and can never resolve, so the fixture
+    /// names nobody even if it escapes.
+    #[tokio::test]
+    async fn a_refusal_that_quotes_the_address_keeps_it_out_of_the_loggable_half() {
+        const ADDRESS: &str = "recipient@example.invalid";
+
+        /// Refuses the way a real MTA does: `550` with the rejected mailbox
+        /// echoed back inside the reply.
+        struct AddressQuotingMailSender;
+
+        #[async_trait]
+        impl MailSender for AddressQuotingMailSender {
+            async fn send(
+                &self,
+                _creds: &MailCredentials,
+                email: &OutboundEmail,
+            ) -> Result<(), OpenCompanyError> {
+                Err(OpenCompanyError::Config(format!(
+                    "550 5.1.1 <{}>: Recipient address rejected: User unknown in local recipient \
+                     table",
+                    email.to
+                )))
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = Harness::new(dir.path(), true, true);
+        h.deps.mail = Some(CompanyMail {
+            sender: Arc::new(AddressQuotingMailSender),
+            smtp: smtp_creds(),
+        });
+        h.receive_from(ADDRESS).await;
+
+        let reports = deliver_outputs(
+            Some(&h.deps),
+            &record(&["*"]),
+            &graph("email", Some(ADDRESS)),
+            &reached_output(),
+        )
+        .await;
+
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        let row = &reports[0];
+        assert_eq!(row.status, DeliveryStatus::Failed);
+
+        // The operator's half is untouched: the reply is what makes this
+        // fixable, and the run response goes to the tenant, not the platform.
+        assert!(row.detail.contains(ADDRESS), "{row:?}");
+        assert!(row.detail.contains("550 5.1.1"), "{row:?}");
+
+        // The loggable half classifies the same failure and cannot carry the
+        // address — not by scrubbing it, but by having nowhere to put it.
+        assert_eq!(row.reason, DeliveryReason::MailTransportRefused);
+        let reason = row.reason.to_string();
+        assert!(!reason.contains(ADDRESS), "{reason}");
+        assert!(!reason.contains('@'), "{reason}");
+        assert!(
+            reason.contains("the mail transport refused the message"),
+            "{reason}"
+        );
     }
 
     // --- channel -------------------------------------------------------------
@@ -1820,6 +1967,16 @@ mode = "full"
             "{reports:?}"
         );
         assert!(reports[0].detail.contains(OPERATOR_CHANNEL), "{reports:?}");
+        // The two channel failures are classified apart: "you named a channel
+        // that does not exist" and "the channel said no" want different fixes,
+        // and the log line only ever sees this half.
+        assert_eq!(reports[0].reason, DeliveryReason::ChannelNotWired);
+        // The channel id — which for this arm IS the target — stays off the
+        // loggable half, same rule as a recipient address (issue #248).
+        assert!(
+            !reports[0].reason.to_string().contains("telegram"),
+            "{reports:?}"
+        );
         assert!(h.channel.sent().is_empty());
     }
 

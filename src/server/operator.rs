@@ -2790,6 +2790,7 @@ mod test {
             target: Some("ada@example.com".into()),
             status,
             detail: "this recipient has never written to the company".into(),
+            reason: crate::ports::DeliveryReason::RecipientNotEstablished,
         }
     }
 
