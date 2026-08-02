@@ -176,6 +176,18 @@ task-to-task edge that `origin_chat_id` (a *conversation*, shared by every
 sibling spawned in that thread, and absent entirely on a board-native card)
 cannot express. It is the parent half of the Task Detail screen's lineage.
 
+`OutboundMessage` gains `task_id` on the same contract (issue #246): the card a
+chat turn **opened**, so the console can say a card exists instead of leaving an
+operator to notice it on the board. It is journaled onto that turn's
+`AgentReply.task_id`, which widens that field's meaning from "the dispatch that
+produced this reply" to "the card this reply is about" — a card-creating reply
+now also appears on that card's timeline, which is the lineage an operator
+wants and costs no schema change. A turn that opens several cards reports the
+**first**: the journal field is a single optional id, and widening it would
+break the byte-identical round-trip, so the claim is incomplete but never wrong.
+Both `chat/history` surfaces (REST and GraphQL) project it from the shared
+`MessageView`, so the chip survives a transcript reload on either.
+
 ## MemoryStore
 
 The equivalent of Medulla's `CyclePersistence`; TinyCortex is the target
@@ -363,7 +375,10 @@ another pass (a failed dispatch, an orchestrator `revise` verdict) — while
 `todo` is what has been queued up next. `todo` is the board's one manual-entry
 column: the console's `+` button lives there alone and `POST …/tasks` defaults
 to it (issue #206), so an operator cannot create a card straight into
-`in_progress` or a terminal column.
+`in_progress` or a terminal column. The transcript's "Add to board" action
+(issue #246) relies on exactly that default: it omits `column` so the *server*
+decides where a chat-created card lands, which is what keeps the human drag into
+`in_progress` the only thing that spends an agent turn.
 
 `assignee` names a **roster teammate id, a desk, or nobody** (`""`), resolved by
 `crate::runtime::assignee` against the full roster — manifest agents, operator

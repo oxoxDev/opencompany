@@ -456,6 +456,7 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
             if adapter.channel_id() == channel {
                 adapter
                     .send(OutboundMessage {
+                        task_id: None,
                         channel: channel.to_string(),
                         text: text.to_string(),
                         steps: Vec::new(),
@@ -944,6 +945,7 @@ mod test {
                 if let CompanyEvent::OperatorMessage { text, .. } = event {
                     host.emit_effect(self.effect.clone()).await?;
                     responses.push(OutboundMessage {
+                        task_id: None,
                         channel: "operator".into(),
                         text: format!("handled: {text}"),
                         steps: Vec::new(),
@@ -975,6 +977,7 @@ mod test {
                 if let CompanyEvent::OperatorMessage { text, .. } = event {
                     host.park_effect(self.effect.clone()).await?;
                     responses.push(OutboundMessage {
+                        task_id: None,
                         channel: "operator".into(),
                         text: format!("that needs your approval: {text}"),
                         steps: Vec::new(),
@@ -1002,12 +1005,14 @@ mod test {
             Ok(CycleResult {
                 channel_responses: vec![
                     OutboundMessage {
+                        task_id: None,
                         channel: "operator".into(),
                         text: "orchestrator".into(),
                         steps: Vec::new(),
                         reply_to: None,
                     },
                     OutboundMessage {
+                        task_id: None,
                         // Addressed by *agent id*: no adapter answers to this.
                         channel: "maya".into(),
                         text: "delegated reply".into(),
@@ -1429,6 +1434,7 @@ mod test {
         async fn run_cycle(&self, req: CycleRequest, _host: &dyn CycleHost) -> Result<CycleResult> {
             Ok(CycleResult {
                 channel_responses: vec![OutboundMessage {
+                    task_id: None,
                     channel: "operator".into(),
                     text: "thought about it".into(),
                     steps: Vec::new(),

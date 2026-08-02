@@ -676,6 +676,7 @@ impl Brain for EffectBrain {
             if let CompanyEvent::OperatorMessage { text, .. } = event {
                 host.emit_effect(self.effect.clone()).await?;
                 responses.push(OutboundMessage {
+                    task_id: None,
                     channel: "operator".into(),
                     text: format!("handled: {text}"),
                     steps: Vec::new(),

@@ -67,6 +67,7 @@ mod test {
         assert_eq!(adapter.channel_id(), "email");
         adapter
             .send(OutboundMessage {
+                task_id: None,
                 channel: "email".into(),
                 text: "hello".into(),
                 steps: Vec::new(),
@@ -95,6 +96,7 @@ mod test {
         let adapter = OpenHumanChannelAdapter::new("email", rpc);
         let err = adapter
             .send(OutboundMessage {
+                task_id: None,
                 channel: "email".into(),
                 text: "hi".into(),
                 steps: Vec::new(),

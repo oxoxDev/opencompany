@@ -45,6 +45,7 @@ impl Brain for EchoBrain {
         for event in &req.events {
             if let CompanyEvent::OperatorMessage { text, .. } = event {
                 channel_responses.push(OutboundMessage {
+                    task_id: None,
                     channel: "operator".to_string(),
                     text: format!("You said: {text}"),
                     steps: Vec::new(),
@@ -73,6 +74,7 @@ impl Brain for EchoBrain {
                     (format!("webhook on {channel}"), None)
                 };
                 channel_responses.push(OutboundMessage {
+                    task_id: None,
                     channel: channel.clone(),
                     text,
                     steps: Vec::new(),
@@ -82,6 +84,7 @@ impl Brain for EchoBrain {
         }
         if channel_responses.is_empty() {
             channel_responses.push(OutboundMessage {
+                task_id: None,
                 channel: "operator".to_string(),
                 text: "Acknowledged.".to_string(),
                 steps: Vec::new(),

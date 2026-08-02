@@ -267,6 +267,7 @@ pub(crate) fn channel_message_from_effect(effect: &Effect) -> Option<OutboundMes
         .or_else(|| payload_str(payload, "message"))?
         .to_string();
     Some(OutboundMessage {
+        task_id: None,
         channel,
         text,
         steps: Vec::new(),

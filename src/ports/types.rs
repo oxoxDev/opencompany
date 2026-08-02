@@ -945,6 +945,36 @@ pub struct OutboundMessage {
     /// (same `by`/`chat`/`McpCallFailed` additive precedent above).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<ReplyTo>,
+    /// The board card this bubble's turn **opened**, when it opened one (issue
+    /// #246).
+    ///
+    /// A `spawn_task` used to surface nothing at all: the card appeared on the
+    /// board and the operator's reply said nothing about it, so there was no
+    /// way to tell a turn that opened work from one that only talked about it.
+    /// This is the correlation key that lets the console render a "card opened"
+    /// chip, and it is the value journaled onto
+    /// [`AgentReply::task_id`](CompanyEvent::AgentReply) so the chip survives a
+    /// transcript reload rather than existing only on the live response.
+    ///
+    /// **Only the first card of a multi-spawn turn.** The journal field it
+    /// feeds is a single optional id, and widening it to a list would break the
+    /// byte-identical round-trip every stored reply depends on. The claim it
+    /// makes — "this reply opened that card" — is therefore true but
+    /// incomplete, never false; the bubble's [`steps`](Self::steps) timeline
+    /// still shows every `spawn_task` call the turn made.
+    ///
+    /// Additive and non-secret: a card id, omitted on the wire when absent, so
+    /// every prior producer round-trips byte-identically (same `steps` /
+    /// `reply_to` precedent above).
+    ///
+    /// The wire name is pinned to `taskId` rather than inherited, because this
+    /// struct — unlike almost everything else the console reads — carries no
+    /// `rename_all`. The console sees the same card on three surfaces (this
+    /// POST response, the SSE `agent_reply` frame, and the `chat/history` DTO),
+    /// and the other two are camelCase; letting this one alone be `task_id`
+    /// would be a trap for whoever wires the next reader.
+    #[serde(default, rename = "taskId", skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 /// One visible step in an agent turn's processing timeline, surfaced in the
@@ -1690,6 +1720,7 @@ mod test {
     #[test]
     fn outbound_message_steps_are_additive_and_omitted_when_empty() {
         let no_steps = OutboundMessage {
+            task_id: None,
             channel: "operator".to_string(),
             text: "hi".to_string(),
             steps: Vec::new(),
@@ -1703,6 +1734,7 @@ mod test {
         assert!(legacy.steps.is_empty());
 
         let with_steps = OutboundMessage {
+            task_id: None,
             channel: "operator".to_string(),
             text: "done".to_string(),
             steps: vec![TurnStep {
@@ -1715,6 +1747,46 @@ mod test {
             reply_to: None,
         };
         assert_eq!(round_trip(&with_steps), with_steps);
+    }
+
+    /// Issue #246: `OutboundMessage.task_id` is additive on exactly the same
+    /// terms as `steps` above — a bubble that opened no card must serialize
+    /// byte-for-byte as it did before the field existed, and a payload written
+    /// before it existed must still load. Without both halves every already-
+    /// stored response would change shape the moment this field shipped.
+    #[test]
+    fn outbound_message_task_id_is_additive_and_omitted_when_absent() {
+        let no_card = OutboundMessage {
+            task_id: None,
+            channel: "operator".to_string(),
+            text: "hi".to_string(),
+            steps: Vec::new(),
+            reply_to: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&no_card).unwrap(),
+            r#"{"channel":"operator","text":"hi"}"#,
+            "a bubble that opened no card keeps the pre-#246 wire form"
+        );
+
+        let legacy: OutboundMessage =
+            serde_json::from_str(r#"{"channel":"operator","text":"hi"}"#).unwrap();
+        assert!(legacy.task_id.is_none());
+
+        let with_card = OutboundMessage {
+            task_id: Some("t-42".to_string()),
+            channel: "operator".to_string(),
+            text: "opened one".to_string(),
+            steps: Vec::new(),
+            reply_to: None,
+        };
+        assert_eq!(round_trip(&with_card), with_card);
+        assert!(
+            serde_json::to_string(&with_card)
+                .unwrap()
+                .contains(r#""taskId":"t-42""#),
+            "the console reads the card off a camelCase key"
+        );
     }
 
     /// `AgentReply.steps` is additive the same way: a reply journaled before
