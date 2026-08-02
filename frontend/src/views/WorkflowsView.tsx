@@ -116,6 +116,12 @@ export function WorkflowsView({
   // Issue #259: a delete in flight, and the host's message when a write was
   // refused because the graph moved under us.
   const [deleting, setDeleting] = useState(false);
+  // The confirm dialog is CONTROLLED on purpose. `AlertDialogAction` is a plain
+  // `Button`, not an `AlertDialogPrimitive.Close` (only `AlertDialogCancel` is),
+  // so confirming does not dismiss the dialog on its own — it stays up with its
+  // backdrop swallowing every pointer event, over a view whose workflow has just
+  // been deleted. Closing it explicitly in the confirm handler is the fix.
+  const [confirmOpen, setConfirmOpen] = useState(false);
   // A version conflict is deliberately NOT a toast. It means the operator is
   // looking at a stale graph, so it has to persist next to the canvas with a way
   // out (Reload) — a toast that auto-dismisses would leave them staring at the
@@ -413,7 +419,7 @@ export function WorkflowsView({
               button swallows pointer events in most browsers, so a `title` on
               the button itself would never show. */}
           <span title={notEditable ? notEditableReason : undefined}>
-            <AlertDialog>
+            <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
               <AlertDialogTrigger
                 render={
                   <Button
@@ -446,7 +452,13 @@ export function WorkflowsView({
                 <AlertDialogFooter>
                   <AlertDialogCancel>Keep it</AlertDialogCancel>
                   <AlertDialogAction
-                    onClick={() => void remove()}
+                    onClick={() => {
+                      // Close FIRST: `remove()` clears the selection, so a
+                      // dialog left mounted would re-render its title as
+                      // `Delete “”?` over a backdrop nothing can click past.
+                      setConfirmOpen(false);
+                      void remove();
+                    }}
                     className="bg-destructive text-white hover:bg-destructive/90"
                     data-testid="workflow-delete-confirm"
                   >
