@@ -2,6 +2,7 @@
 name: Call Debrief
 description: Distill a call transcript into decisions, action items with owners, and open questions so nothing agreed on the call is lost.
 category: Ops
+version: 1.0.0
 ---
 
 # Call Debrief
