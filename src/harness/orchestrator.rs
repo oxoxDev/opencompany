@@ -1553,6 +1553,45 @@ mod tests {
         }
     }
 
+    /// **Issue #248, the insight-surface twin of the sidecar guard.** This
+    /// one-liner is folded into the orchestrator's recent-activity context, so
+    /// it is read by a model rather than by the tenant. A delivery row's
+    /// `target` is a recipient's address and its `detail` quotes one when the
+    /// transport refuses, so neither may appear here. The exclusion was written
+    /// this way by #228; this pins it.
+    #[test]
+    fn a_finished_run_summarizes_to_counts_without_the_recipient_or_transport_text() {
+        // `.invalid` is reserved by RFC 2606, so this fixture names nobody.
+        const RECIPIENT: &str = "recipient@example.invalid";
+
+        let summary = summarize_event(&CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".to_string(),
+            scheduled: true,
+            run_id: None,
+            deliveries: vec![crate::ports::DeliveryReport {
+                node: "owner_summary".to_string(),
+                kind: "email".to_string(),
+                target: Some(RECIPIENT.to_string()),
+                status: crate::ports::DeliveryStatus::Failed,
+                detail: format!(
+                    "the mail transport refused the message: 550 5.1.1 <{RECIPIENT}>: Recipient \
+                     address rejected"
+                ),
+                reason: crate::ports::DeliveryReason::MailTransportRefused,
+            }],
+            pending_approvals: Vec::new(),
+            error: None,
+        });
+
+        assert!(!summary.contains(RECIPIENT), "{summary}");
+        assert!(!summary.contains("recipient@"), "{summary}");
+        assert!(!summary.contains("Recipient address rejected"), "{summary}");
+        assert!(!summary.contains("550"), "{summary}");
+        // Still useful: which workflow, and that something did not go out.
+        assert!(summary.contains("digest"), "{summary}");
+        assert!(summary.contains("1 not delivered"), "{summary}");
+    }
+
     #[test]
     fn orchestrator_id_prefers_the_tagged_agent() {
         let roster = vec![
