@@ -81,11 +81,44 @@ export function TaskEditDialog({
 
   if (!task) return null;
 
+  /**
+   * The fields the operator actually changed, and only those.
+   *
+   * A `PatchTask` is applied field-by-field on the host, and every field it
+   * *receives* is re-validated — `assignee` included, which re-runs
+   * `assignee::resolve` against the current roster. Sending the whole seeded
+   * draft therefore made a card uneditable the moment its stored assignee left
+   * the roster (a teammate removed, a desk deleted): renaming the title
+   * resubmitted the stale assignee, which came back `Unknown`, and the save
+   * failed with a `400` about a field the operator never touched. Diffing means
+   * an untouched field is never re-validated, so the only assignee the host is
+   * ever asked to resolve is one just picked from the roster.
+   */
+  function changedFields(current: Task): PatchTask {
+    const patch: PatchTask = {};
+    if ((draft.title ?? "") !== current.title) patch.title = draft.title ?? "";
+    if ((draft.note ?? "") !== (current.note ?? "")) patch.note = draft.note ?? "";
+    if (draft.column !== undefined && draft.column !== current.column) patch.column = draft.column;
+    if (draft.priority !== undefined && draft.priority !== current.priority) {
+      patch.priority = draft.priority;
+    }
+    if ((draft.assignee ?? "") !== current.assignee) patch.assignee = draft.assignee ?? "";
+    return patch;
+  }
+
   async function save() {
     if (!task) return;
+    const patch = changedFields(task);
+    if (Object.keys(patch).length === 0) {
+      // Nothing to write. Saying so beats a round-trip that reports "Saved."
+      // for an edit that never happened.
+      toast.success("No changes to save.");
+      onSaved(task);
+      return;
+    }
     setBusy(true);
     try {
-      const saved = await patchTask(client, company, task.id, draft);
+      const saved = await patchTask(client, company, task.id, patch);
       onSaved(saved);
       toast.success("Saved.");
     } catch (e) {
