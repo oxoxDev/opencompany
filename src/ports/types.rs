@@ -389,6 +389,53 @@ pub enum CompanyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<Actor>,
     },
+    /// An existing workflow graph was replaced wholesale (issue #259), from the
+    /// console's `PUT …/workflows/{wid}` route. Journaled best-effort **after**
+    /// the new body is persisted, so it records a completed edit — a journal
+    /// failure never rolls the update back. Additive, same contract as
+    /// [`WorkflowCreated`](Self::WorkflowCreated).
+    ///
+    /// **The graph body is deliberately NOT carried.** A company's journal is
+    /// one append-only log shared by chat, audit and run history, and it is read
+    /// by the operator SSE projection and wired to the inference sidecar — a
+    /// TOML body on it would put the graph's full contents (agent prompts,
+    /// destination addresses) somewhere none of those readers need it. The id
+    /// and name are what an audit reader needs; the body is read from the record.
+    WorkflowUpdated {
+        /// The edited workflow's id. Never changes across an update — a rename
+        /// through `PUT` is rejected, because the id keys the union read path,
+        /// the scheduler and the run history.
+        workflow_id: String,
+        /// The workflow's display name **after** the edit (the name may change
+        /// even though the id may not).
+        name: String,
+        /// Who edited it, when known. `None` from the current unattributed
+        /// surfaces; same forward-compatible shape as
+        /// [`WorkflowCreated`](Self::WorkflowCreated)'s `by`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// A workflow graph was removed (issue #259), from the console's
+    /// `DELETE …/workflows/{wid}` route. Journaled best-effort **after** the
+    /// overlay body and the manifest-enabled id are both gone, so it records a
+    /// completed delete. Additive, same contract as
+    /// [`WorkflowCreated`](Self::WorkflowCreated).
+    ///
+    /// Past [`WorkflowRunFinished`](Self::WorkflowRunFinished) entries for this
+    /// id are deliberately left in place — the journal is append-only, and what
+    /// a workflow *did* stays true after the workflow is gone. `GET
+    /// …/workflows/runs` keeps serving them.
+    WorkflowDeleted {
+        /// The removed workflow's id.
+        workflow_id: String,
+        /// Its display name at the moment it was removed, so a journal reader
+        /// need not resolve an id that no longer exists.
+        name: String,
+        /// Who removed it, when known. `None` from the current unattributed
+        /// surfaces.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
     /// An operator steered an in-flight run — paused, cancelled, or redirected a
     /// dispatched task (or cancelled a delegation) from chat (issue #111).
     /// Journaled best-effort **after** the steer is accepted by the in-flight
@@ -2483,6 +2530,57 @@ mod test {
         assert!(!out.contains("deliveries"), "{out}");
         assert!(!out.contains("pending_approvals"), "{out}");
         assert!(!out.contains("error"), "{out}");
+    }
+
+    /// Issue #259's two variants pin their wire shape the same way
+    /// `WorkflowCreated` does: `kind` + `workflow_id` + `name`, with `by`
+    /// omitted entirely when absent so the common unattributed line stays the
+    /// short one.
+    #[test]
+    fn workflow_updated_and_deleted_pin_their_wire_shape() {
+        let updated = CompanyEvent::WorkflowUpdated {
+            workflow_id: "digest".to_string(),
+            name: "Daily digest".to_string(),
+            by: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&updated).expect("serialize"),
+            r#"{"kind":"WorkflowUpdated","workflow_id":"digest","name":"Daily digest"}"#
+        );
+
+        let deleted = CompanyEvent::WorkflowDeleted {
+            workflow_id: "digest".to_string(),
+            name: "Daily digest".to_string(),
+            by: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&deleted).expect("serialize"),
+            r#"{"kind":"WorkflowDeleted","workflow_id":"digest","name":"Daily digest"}"#
+        );
+
+        // Both round-trip.
+        for event in [updated, deleted] {
+            let line = serde_json::to_string(&event).expect("serialize");
+            let back: CompanyEvent = serde_json::from_str(&line).expect("deserialize");
+            assert_eq!(back, event);
+        }
+    }
+
+    /// The graph body must never reach the journal — see the variant docs. A
+    /// reader of the shared append-only log (operator SSE, the inference
+    /// sidecar) has no business seeing agent prompts or destination addresses,
+    /// and the only way a body could leak here is someone adding a field.
+    #[test]
+    fn workflow_updated_carries_no_graph_body() {
+        let line = serde_json::to_string(&CompanyEvent::WorkflowUpdated {
+            workflow_id: "digest".to_string(),
+            name: "Daily digest".to_string(),
+            by: None,
+        })
+        .expect("serialize");
+        assert!(!line.contains("toml"), "{line}");
+        assert!(!line.contains("node"), "{line}");
+        assert!(!line.contains("graph"), "{line}");
     }
 
     /// **The backcompat proof.** A journal written before this variant existed

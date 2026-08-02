@@ -728,6 +728,27 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             o["name"] = json!(name);
             o
         }
+        // Issue #259: an edited or removed workflow, so a console holding the
+        // Workflows tab open re-reads the picker instead of offering a graph
+        // that changed under it (or one that no longer exists). Same two fields
+        // and same deny-by-default actor omission as `workflow_created` — and,
+        // as the variant docs spell out, there is no graph body to leak here.
+        CompanyEvent::WorkflowUpdated {
+            workflow_id, name, ..
+        } => {
+            let mut o = envelope("workflow_updated");
+            o["workflowId"] = json!(workflow_id);
+            o["name"] = json!(name);
+            o
+        }
+        CompanyEvent::WorkflowDeleted {
+            workflow_id, name, ..
+        } => {
+            let mut o = envelope("workflow_deleted");
+            o["workflowId"] = json!(workflow_id);
+            o["name"] = json!(name);
+            o
+        }
         // Issue #111: surface an accepted operator steer so the console's
         // in-flight strip can refresh live. Only the task id + action word go on
         // the wire — the actor (`by`) and the operator's redirect `instruction`
@@ -2744,6 +2765,40 @@ mod test {
         }))
         .expect("workflow_created is an attention signal");
         assert_eq!(v["type"], "workflow_created");
+        assert_eq!(v["workflowId"], "greeter");
+        assert_eq!(v["name"], "Greeter");
+        assert!(!v.to_string().contains("secret-user-id"));
+    }
+
+    /// Issue #259: the edit and delete signals project the same two fields and
+    /// drop the actor, exactly like `workflow_created` above.
+    #[test]
+    fn projects_workflow_updated_and_deleted_without_the_actor() {
+        let actor = || {
+            Some(Actor {
+                kind: ActorKind::User,
+                id: "secret-user-id".into(),
+            })
+        };
+
+        let v = super::project_event(&stored(CompanyEvent::WorkflowUpdated {
+            workflow_id: "greeter".into(),
+            name: "Greeter v2".into(),
+            by: actor(),
+        }))
+        .expect("workflow_updated is an attention signal");
+        assert_eq!(v["type"], "workflow_updated");
+        assert_eq!(v["workflowId"], "greeter");
+        assert_eq!(v["name"], "Greeter v2");
+        assert!(!v.to_string().contains("secret-user-id"));
+
+        let v = super::project_event(&stored(CompanyEvent::WorkflowDeleted {
+            workflow_id: "greeter".into(),
+            name: "Greeter".into(),
+            by: actor(),
+        }))
+        .expect("workflow_deleted is an attention signal");
+        assert_eq!(v["type"], "workflow_deleted");
         assert_eq!(v["workflowId"], "greeter");
         assert_eq!(v["name"], "Greeter");
         assert!(!v.to_string().contains("secret-user-id"));

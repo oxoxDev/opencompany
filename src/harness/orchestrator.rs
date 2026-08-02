@@ -458,6 +458,12 @@ fn summarize_event(event: &CompanyEvent) -> String {
         CompanyEvent::WorkflowCreated {
             workflow_id, name, ..
         } => format!("workflow created: {name} ({workflow_id})"),
+        CompanyEvent::WorkflowUpdated {
+            workflow_id, name, ..
+        } => format!("workflow updated: {name} ({workflow_id})"),
+        CompanyEvent::WorkflowDeleted {
+            workflow_id, name, ..
+        } => format!("workflow deleted: {name} ({workflow_id})"),
         CompanyEvent::TaskSteered {
             task_id, action, ..
         } => format!("task steered ({action}): {task_id}"),
