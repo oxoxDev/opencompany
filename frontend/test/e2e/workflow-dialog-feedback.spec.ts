@@ -20,6 +20,16 @@ import { expect, test, type Page } from "@playwright/test";
  */
 
 /**
+ * Every cron-preview assertion waits on a round trip the other assertions in
+ * this file do not: a 350 ms debounce, then a request to the host, then a
+ * render. Playwright's default `expect` timeout is 5 s and the config's
+ * `timeout` governs the whole test, not each assertion — so on a slow host
+ * these are the assertions that flake first. Stated explicitly rather than
+ * inherited.
+ */
+const PREVIEW_TIMEOUT = 15_000;
+
+/**
  * Dismisses the first-run tour if it is up — its overlay swallows pointer
  * events, so without this every spec fails on an unrelated modal. Tolerates its
  * absence; a company that has seen it never shows it again.
@@ -158,14 +168,20 @@ test("a cron expression is read back in plain English, in UTC and local time", a
   // apart, both valid, and nine hours apart in meaning. Only the preview tells
   // them apart before the report lands at the wrong time.
   await cron.fill("0 9 * * *");
-  await expect(dialog.getByText("Every day at 09:00 UTC")).toBeVisible();
+  await expect(dialog.getByText("Every day at 09:00 UTC")).toBeVisible({
+    timeout: PREVIEW_TIMEOUT,
+  });
   // The local gloss is the part that earns its keep: it is the only place the
   // UTC contract becomes concrete rather than a hint the author skimmed.
-  await expect(dialog.getByText(/your time\)/)).toBeVisible();
+  await expect(dialog.getByText(/your time\)/)).toBeVisible({ timeout: PREVIEW_TIMEOUT });
 
   await cron.fill("9 0 * * *");
-  await expect(dialog.getByText("Every day at 00:09 UTC")).toBeVisible();
-  await expect(dialog.getByText("Every day at 09:00 UTC")).toHaveCount(0);
+  await expect(dialog.getByText("Every day at 00:09 UTC")).toBeVisible({
+    timeout: PREVIEW_TIMEOUT,
+  });
+  await expect(dialog.getByText("Every day at 09:00 UTC")).toHaveCount(0, {
+    timeout: PREVIEW_TIMEOUT,
+  });
 
   // The UTC hint stays — the preview says what THIS expression means, it does
   // not replace the statement of the contract.
@@ -182,7 +198,7 @@ test("a schedule the humaniser won't paraphrase still previews its next runs", a
   // A restricted day-of-month is left undescribed on purpose — a wrong
   // paraphrase would be worse than none — but the fire times still state it.
   await cron.fill("0 0 1 * *");
-  await expect(dialog.getByText(/^Next runs:/)).toBeVisible();
+  await expect(dialog.getByText(/^Next runs:/)).toBeVisible({ timeout: PREVIEW_TIMEOUT });
 });
 
 test("garbage in the cron field previews the parser's message without blocking", async ({
@@ -196,7 +212,9 @@ test("garbage in the cron field previews the parser's message without blocking",
   // is out of range, so the host's parser rejects it. That arrives as a 200
   // with a message, not a thrown error, and it does not disable anything.
   await cron.fill("0 99 * * *");
-  await expect(dialog.getByText(/value out of range/)).toBeVisible();
+  await expect(dialog.getByText(/value out of range/)).toBeVisible({
+    timeout: PREVIEW_TIMEOUT,
+  });
   await expect(dialog.getByRole("button", { name: "Create workflow" })).toBeEnabled();
 
   // Fewer than five fields never reaches the wire — the pre-flight shape check
@@ -206,7 +224,9 @@ test("garbage in the cron field previews the parser's message without blocking",
   await expect(dialog.getByText(/5-field cron, e\.g\./)).toBeVisible();
   // And one mistake produces ONE complaint, not a blur error stacked on a
   // preview error.
-  await expect(dialog.getByText(/value out of range/)).toHaveCount(0);
+  await expect(dialog.getByText(/value out of range/)).toHaveCount(0, {
+    timeout: PREVIEW_TIMEOUT,
+  });
 });
 
 test("a valid workflow still saves", async ({ page }) => {
@@ -226,7 +246,9 @@ test("a valid workflow still saves", async ({ page }) => {
   await dialog.getByLabel("Node name").first().fill("Start");
   await dialog.getByLabel("Schedule").click();
   await page.getByRole("option", { name: /^Daily/ }).click();
-  await expect(dialog.getByText("Every day at 09:00 UTC")).toBeVisible();
+  await expect(dialog.getByText("Every day at 09:00 UTC")).toBeVisible({
+    timeout: PREVIEW_TIMEOUT,
+  });
 
   // Output row routing to the owner — no target to get wrong.
   await dialog.getByRole("button", { name: "Add node" }).click();
