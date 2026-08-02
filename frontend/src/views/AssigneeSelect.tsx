@@ -96,6 +96,12 @@ export function AssigneeSelect({
   useEffect(() => {
     let cancelled = false;
     setLoaded(false);
+    // Drop the previous company's roster with it. `loaded` alone only stops the
+    // off-roster marker from flashing; the option lists would keep rendering
+    // the old company's desks and teammates until the new fetch resolves, and a
+    // pick made in that window would name something that does not exist here.
+    setDesks([]);
+    setTeam([]);
     // Both halves are best-effort, the stance `DesksView` already takes: a host
     // that does not serve one of these surfaces still gets a usable picker
     // rather than a dialog that fails to render.
