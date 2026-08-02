@@ -90,6 +90,15 @@ pub struct MessageView {
     /// transcript renders the same tool-call timeline the live turn showed.
     /// Empty for operator messages and tool-less replies.
     pub steps: Vec<TurnStep>,
+    /// The board card this reply is about (issue #246) — the card the turn
+    /// opened, or the dispatched card the turn ran for (#185).
+    ///
+    /// Projected here so a rehydrated transcript renders the same "card opened"
+    /// chip the live turn showed. Both surfaces read it from this one field, so
+    /// REST and GraphQL cannot disagree about which messages carry a card
+    /// (issue #65's whole point). `None` on operator messages and on every
+    /// reply journaled before the field existed.
+    pub task_id: Option<String>,
 }
 
 impl MessageView {
@@ -109,6 +118,7 @@ impl MessageView {
                 agent_id,
                 text,
                 steps,
+                task_id,
                 ..
             } => MessageView {
                 id,
@@ -118,6 +128,7 @@ impl MessageView {
                 at_millis,
                 mine: false,
                 steps,
+                task_id,
             },
             CompanyEvent::OperatorMessage { text, by, .. } => {
                 let (author, mine) = match &by {
@@ -142,6 +153,7 @@ impl MessageView {
                     at_millis,
                     mine,
                     steps: Vec::new(),
+                    task_id: None,
                 }
             }
             // `owns` never admits other variants into a history.
@@ -153,6 +165,7 @@ impl MessageView {
                 at_millis,
                 mine: false,
                 steps: Vec::new(),
+                task_id: None,
             },
         }
     }
