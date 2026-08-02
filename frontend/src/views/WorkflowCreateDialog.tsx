@@ -17,6 +17,7 @@ import {
   type WorkflowNode,
 } from "@/api/workflows";
 import type { OpenCompanyClient } from "@/api/client";
+import { CronPreviewLine } from "@/views/CronPreviewLine";
 import type { TeamMemberDto } from "@/api/types";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -518,6 +519,8 @@ export function WorkflowCreateDialog({
               <NodeRow
                 key={n.key}
                 node={n}
+                client={client}
+                company={company}
                 roster={roster}
                 errors={{
                   schedule: fieldErrors[errorKey(n.key, "schedule")],
@@ -598,6 +601,8 @@ function FieldError({ id, message }: { id: string; message?: string }) {
 
 function NodeRow({
   node,
+  client,
+  company,
   roster,
   errors,
   onValidateField,
@@ -605,6 +610,10 @@ function NodeRow({
   onRemove,
 }: {
   node: DraftNode;
+  /** Threaded through solely so the trigger row's schedule field can ask the
+   * host what its cron means (issue #262). */
+  client: OpenCompanyClient;
+  company: string | null;
   roster: TeamMemberDto[];
   /** Blur-time problems for this row's validated fields, if any. */
   errors: Partial<Record<ValidatedField, string>>;
@@ -679,6 +688,8 @@ function NodeRow({
         />
         {node.kind === "trigger" && (
           <ScheduleField
+            client={client}
+            company={company}
             schedule={node.schedule}
             error={errors.schedule}
             onChange={(schedule) => onChange({ schedule })}
@@ -766,11 +777,15 @@ function NodeRow({
  * cover. Rendered only on the trigger node, mirroring how the teammate picker
  * appears only on agent nodes. */
 function ScheduleField({
+  client,
+  company,
   schedule,
   error,
   onChange,
   onBlurValidate,
 }: {
+  client: OpenCompanyClient;
+  company: string | null;
   schedule: string;
   /** The blur-time cron problem for this field, when there is one. */
   error?: string;
@@ -827,6 +842,19 @@ function ScheduleField({
         <p className="text-[10px] text-muted-foreground">
           5-field cron. Times are UTC.
         </p>
+      )}
+      {/* The hint above says the contract; this says what THIS expression means
+          under it (issue #262) — including for a preset, since "Daily — 09:00
+          UTC" is only obviously wrong once you see it land at 14:30 your time.
+          Gated on the same 5-field shape check the pre-flight uses, so nothing
+          goes on the wire until there is a whole expression to read. */}
+      {looksLikeCron(schedule) && (
+        <CronPreviewLine
+          client={client}
+          company={company}
+          schedule={schedule}
+          suppressError={Boolean(error)}
+        />
       )}
     </div>
   );
