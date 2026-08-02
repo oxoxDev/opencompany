@@ -53,6 +53,23 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # Issue #251. `--locked` on the compiling steps already fails a stale
+      # `Cargo.lock` — but it fails inside `Clippy` or `Build`, under a step name
+      # that says nothing about the lock, and in both jobs at once. This step is
+      # the legible version of that failure: it resolves the graph and nothing
+      # else, takes seconds, and is the first cargo invocation in the run, so a
+      # lock that does not match `Cargo.toml` — or a vendored submodule bump
+      # landed without the regenerated lock — is named as such before anything
+      # compiles.
+      #
+      # A STEP, not a separate job, on purpose: a dedicated job would pay for a
+      # second runner plus another submodule checkout — minutes of the run's
+      # wall clock — to print a message this step prints for free. `cargo
+      # metadata` reads the whole lock regardless of the feature selection, so
+      # one invocation covers every feature set CI builds.
+      - name: Verify Cargo.lock is in sync
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
       # No `--locked` here, and none is owed: `cargo fmt` is a `rustfmt` wrapper
       # that never resolves the dependency graph, and `cargo-fmt` does not
       # accept the flag.
