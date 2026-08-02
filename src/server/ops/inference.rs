@@ -627,8 +627,10 @@ mod tests {
     /// and nothing else — the brain is chosen in `RuntimeBuilder::build` and this
     /// one already ran.
     ///
-    /// So the save must report `restartRequired`, and the note must say restart
-    /// rather than "next turn".
+    /// So the save must report `restartRequired`, the note must say restart
+    /// rather than "next turn", and `POST …/workflows/{id}/run` must stop
+    /// claiming the deployment lacks workflow execution when what it lacks is a
+    /// restart.
     #[cfg(feature = "openhuman")]
     #[tokio::test]
     async fn configuring_inference_after_boot_reports_restart_required() {
@@ -696,9 +698,39 @@ mod tests {
         let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
         assert_eq!(dto["restartRequired"], true);
 
+        // Second surface: the run route no longer blames the deployment.
+        let (status, err, _) = send(
+            &state,
+            "POST",
+            "/api/v1/company/workflows/daily/run",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(err["code"], "restart_required");
+        assert!(
+            err["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Restart"),
+            "{err}"
+        );
+
         // Reverting to managed un-strands the company: there is no longer a
         // saved config waiting on a restart, so the flag clears.
         let (_, resp, _) = send(&state, "DELETE", "/api/v1/company/inference", None).await;
         assert_eq!(resp["status"]["restartRequired"], false);
+
+        // ...and with nothing pending, the run route is back to the honest
+        // "this deployment has no workflow execution" 404.
+        let (status, err, _) = send(
+            &state,
+            "POST",
+            "/api/v1/company/workflows/daily/run",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "not_wired");
     }
 }

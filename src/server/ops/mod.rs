@@ -196,6 +196,31 @@ pub(crate) fn not_wired(what: &str) -> axum::response::Response {
         .into_response()
 }
 
+/// A `409 restart_required` response for a surface that this build *does* have,
+/// but this company's running runtime does not — because the runtime was wired
+/// at boot, before the inference config that would have wired it existed
+/// (issue #266).
+///
+/// Deliberately not the `not_wired` 404: the console's bare-catch treats that as
+/// a permanent capability gap and degrades to a read-only view, which is the
+/// wrong answer for a state one restart clears. A distinct `code` lets the
+/// console say what to do instead of hiding the button.
+pub(crate) fn restart_required(what: &str) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    (
+        StatusCode::CONFLICT,
+        axum::Json(serde_json::json!({
+            "error": format!(
+                "{what} is not wired on this company's running runtime: it started with no \
+                 inference source. Restart the company to pick up the saved configuration."
+            ),
+            "code": "restart_required",
+        })),
+    )
+        .into_response()
+}
+
 /// Resolves the sole registered company (single-company alias).
 pub(crate) fn resolve_sole(state: &AppState) -> Result<Arc<CompanyRuntime>, ApiError> {
     state.registry().sole().ok_or_else(|| {

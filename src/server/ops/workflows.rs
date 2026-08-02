@@ -515,9 +515,19 @@ async fn run_workflow(
     Path(WorkflowPath { wid }): Path<WorkflowPath>,
     body: Option<Json<RunWorkflowBody>>,
 ) -> Result<Json<RunWorkflowResponse>, Response> {
-    // No runner wired (default build / no harness) → the same "not wired" seam
-    // the networked surfaces use.
+    // No runner wired. Two very different causes look identical from here, and
+    // `not_wired` only describes the first (issue #266):
+    //   1. this build/deployment has no workflow execution at all — nothing the
+    //      operator can do, so "not wired in this deployment" is the truth;
+    //   2. this *boot* has none, because the company started with no inference
+    //      source. The runner is populated from the harness arm at build time, so
+    //      configuring inference afterwards leaves it `None` until a restart —
+    //      and a `not_wired` 404 sends the operator hunting a deployment problem
+    //      that does not exist.
     let Some(runner) = company.runtime.workflow_runner() else {
+        if super::inference::restart_pending_for(company.runtime.as_ref()).await {
+            return Err(super::restart_required("workflow execution"));
+        }
         return Err(super::not_wired("workflow execution"));
     };
 
