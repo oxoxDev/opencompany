@@ -935,6 +935,12 @@ impl Brain for HarnessBrain {
                     // steps on the operator bubble — one surface, one renderer.
                     self.surface_mcp_failures(&mut operator_steps, None).await?;
                     channel_responses.push(OutboundMessage {
+                        // Issue #246: when the turn opened a board card, say so
+                        // on the bubble it opened it from. Before this a
+                        // `spawn_task` was invisible in chat — the card landed
+                        // on the board and the reply carried nothing tying the
+                        // two together.
+                        task_id: turn.spawned_task,
                         channel: "operator".to_string(),
                         text: operator_reply,
                         reply_to: None,
@@ -959,6 +965,7 @@ impl Brain for HarnessBrain {
         // The runtime requires at least one channel response per cycle.
         if channel_responses.is_empty() {
             channel_responses.push(OutboundMessage {
+                task_id: None,
                 channel: "operator".to_string(),
                 text: "Acknowledged.".to_string(),
                 steps: Vec::new(),
@@ -2266,6 +2273,135 @@ members = ["eng1", "eng2"]
         assert_eq!(cards[0].title, "Draft the plan");
         assert_eq!(cards[0].column, "backlog");
         assert_eq!(cards[0].assignee, "engineer");
+        // Issue #246: it surfaces no *bubble*, but it no longer surfaces
+        // *nothing* — the card it opened is reported, which is what lets the
+        // caller tell the operator a card exists instead of leaving them to
+        // notice it on the board.
+        assert_eq!(
+            out.spawned_task.as_deref(),
+            Some(cards[0].id.as_str()),
+            "the opened card must be reported, and be the one actually written"
+        );
+    }
+
+    /// Issue #246: a chat turn that opened a card says so on the bubble it
+    /// answered from. Before this the card appeared on the board and the reply
+    /// carried nothing tying the two together, so an operator had no way to
+    /// tell a turn that opened work from one that only talked about it.
+    #[tokio::test]
+    async fn a_turn_that_opens_a_card_reports_it_on_the_operator_bubble() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _provider) = brain_that_delegates(
+            dir.path(),
+            vec![Some(Delegation::SpawnTask {
+                title: "Draft the announcement".to_string(),
+                note: None,
+                assignee: None,
+            })],
+        );
+
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::OperatorMessage {
+                    text: "we should announce this".into(),
+                    by: None,
+                    chat: None,
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        assert_eq!(result.channel_responses.len(), 1);
+        let bubble = &result.channel_responses[0];
+        let reported = bubble.task_id.as_deref().expect("the bubble names a card");
+        let cards = brain.deps.tasks.as_ref().unwrap().list(&brain.record.id).await.unwrap();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            reported, cards[0].id,
+            "the reported card must be the one on the board"
+        );
+    }
+
+    /// Issue #246, the documented limitation stated as a test rather than only
+    /// as prose: a turn that opens several cards reports the **first**. The
+    /// journal field this feeds is a single optional id, so widening it would
+    /// break the byte-identical round-trip every already-stored reply relies
+    /// on. Pinned to *first* — not "whichever won" — because a later spawn
+    /// silently overwriting an earlier one would make the reported card depend
+    /// on queue order, which is the model's choice, not a contract.
+    #[tokio::test]
+    async fn a_turn_that_opens_several_cards_reports_the_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _provider) = brain_that_delegates_with(
+            dir.path(),
+            vec![vec![
+                Delegation::SpawnTask {
+                    title: "First".to_string(),
+                    note: None,
+                    assignee: None,
+                },
+                Delegation::SpawnTask {
+                    title: "Second".to_string(),
+                    note: None,
+                    assignee: None,
+                },
+            ]],
+            TurnFaults::default(),
+        );
+
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::OperatorMessage {
+                    text: "two things".into(),
+                    by: None,
+                    chat: None,
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        let reported = result.channel_responses[0]
+            .task_id
+            .as_deref()
+            .expect("the bubble names a card");
+        let cards = brain.deps.tasks.as_ref().unwrap().list(&brain.record.id).await.unwrap();
+        assert_eq!(cards.len(), 2, "both cards are opened either way");
+        let first = cards
+            .iter()
+            .find(|c| c.title == "First")
+            .expect("the first card exists");
+        assert_eq!(
+            reported, first.id,
+            "the bubble reports the first card opened, not the last"
+        );
+    }
+
+    /// The other side of the same contract: a turn that opened no card must
+    /// leave the field empty, so no bubble grows a "card opened" chip it has
+    /// not earned.
+    #[tokio::test]
+    async fn a_turn_that_opens_no_card_reports_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _provider) = brain_that_delegates(dir.path(), Vec::new());
+
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::OperatorMessage {
+                    text: "status?".into(),
+                    by: None,
+                    chat: None,
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        assert!(
+            result.channel_responses[0].task_id.is_none(),
+            "an ordinary chat turn must not claim a card"
+        );
     }
 
     // ── Issue #186 part b: orchestrator lifecycle authority ────────────────

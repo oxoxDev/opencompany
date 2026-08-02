@@ -119,6 +119,19 @@ pub(crate) struct DelegationOutcome {
     /// flag carries the cancellation as a **fact** so a caller can report the
     /// cause rather than inferring one from an absence (issue #213 review).
     pub(crate) cancelled: bool,
+    /// The id of the board card a `spawn_task` opened (issue #246).
+    ///
+    /// A `spawn_task` used to be entirely silent: it returned
+    /// `DelegationOutcome::default()`, documented as surfacing nothing, so the
+    /// operator got a reply with no sign that work had been opened. Reporting
+    /// the id here is what lets the caller stamp it onto the bubble — and, from
+    /// there, onto the journaled reply — so "a card was opened" is a fact the
+    /// console can render rather than something the operator has to spot on the
+    /// board.
+    ///
+    /// `None` for every other delegation kind, and for a `spawn_task` that
+    /// found no task store to write to.
+    pub(crate) spawned_task: Option<String>,
 }
 
 /// A synchronous desk-lead answer captured for the orchestrator to relay: which
@@ -140,6 +153,19 @@ pub(crate) struct OperatorTurn {
     pub(crate) reply: String,
     pub(crate) steps: Vec<TurnStep>,
     pub(crate) bubbles: Vec<OutboundMessage>,
+    /// The board card this turn opened, when it opened one (issue #246) — the
+    /// **first**, if it opened several.
+    ///
+    /// Carried to the caller so the operator bubble can say a card was opened,
+    /// which a `spawn_task` never did before: the card appeared on the board
+    /// and the reply gave no sign of it.
+    ///
+    /// First-only because the field this ultimately lands in — the journaled
+    /// `AgentReply.task_id` — is a single optional id, and widening it would
+    /// break the byte-identical round-trip every already-stored reply relies
+    /// on. The resulting claim is incomplete but never wrong, and the bubble's
+    /// step timeline still shows every `spawn_task` the turn made.
+    pub(crate) spawned_task: Option<String>,
 }
 
 /// What a **dispatched card's** turn handed off (issue #204).
@@ -254,8 +280,17 @@ impl<'a> DelegationRunner<'a> {
         // bubble lands in `bubbles`.
         let mut bubbles = Vec::new();
         let mut desk_replies: Vec<(String, String)> = Vec::new();
+        // Issue #246: the first card this turn opened, which is what the
+        // operator bubble reports. `get_or_insert` rather than assignment keeps
+        // it the FIRST — a later spawn must not overwrite the id an earlier one
+        // already claimed, or the reported card would be whichever the model
+        // happened to queue last.
+        let mut spawned_task: Option<String> = None;
         for delegation in self.queue.drain(self.max_delegations) {
             let out = self.run_delegation(delegation, chat_id).await?;
+            if let Some(id) = out.spawned_task {
+                spawned_task.get_or_insert(id);
+            }
             if let Some(bubble) = out.bubble {
                 bubbles.push(bubble);
             }
@@ -288,6 +323,7 @@ impl<'a> DelegationRunner<'a> {
             reply: operator_reply,
             steps: operator_steps,
             bubbles,
+            spawned_task,
         })
     }
 
@@ -487,7 +523,13 @@ impl<'a> DelegationRunner<'a> {
                     parent_task_id: self.task.clone(),
                 };
                 tasks.upsert(self.company, &card).await?;
-                Ok(DelegationOutcome::default())
+                // Issue #246: report the card so the caller can surface it. The
+                // id is reported only after the write succeeded, so a bubble can
+                // never claim a card that is not on the board.
+                Ok(DelegationOutcome {
+                    spawned_task: Some(card.id),
+                    ..DelegationOutcome::default()
+                })
             }
             Delegation::DelegateToDesk { desk, instruction } => {
                 let Some(member) = desk_lead(self.record, &desk) else {
@@ -534,6 +576,7 @@ impl<'a> DelegationRunner<'a> {
                         steps: outcome.steps,
                     }),
                     cancelled: false,
+                    spawned_task: None,
                 })
             }
             // ── Issue #186 part b: orchestrator lifecycle authority ─────────
