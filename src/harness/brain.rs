@@ -3237,6 +3237,10 @@ members = ["eng1", "eng2"]
         /// Invokes that CANCEL their own in-flight delegation mid-run, so the
         /// delegated reply is discarded exactly as an operator cancel does.
         cancel_on: Vec<usize>,
+        /// Desk keys the first turn's `delegate_to_desk` calls named and the
+        /// tool REFUSED (issue #272). A refusal never becomes a `Delegation`,
+        /// so this is how a test reproduces one without standing up the tool.
+        refused_on_first: Vec<String>,
     }
 
     impl DelegatingProvider {
@@ -3283,6 +3287,11 @@ members = ["eng1", "eng2"]
             self.board.lock().unwrap().push(snapshot);
             for delegation in self.pushes.lock().unwrap().pop_front().unwrap_or_default() {
                 self.queue.push(delegation);
+            }
+            if invoke == 1 {
+                for desk in &self.faults.refused_on_first {
+                    self.queue.push_refusal(desk.clone());
+                }
             }
             let message = request
                 .messages
@@ -3795,6 +3804,103 @@ members = ["eng1", "eng2"]
             "the card must not strand in progress waiting on a delegate that cannot run"
         );
         assert_ne!(after.assignee, "ghost");
+    }
+
+    /// Issue #272: settling under the delegator is the right *behaviour* (#213
+    /// chose it so a card is never stranded), but it used to be silent — the
+    /// board showed a card whose note claimed a hand-off and whose owner was the
+    /// delegator, with nothing connecting the two. The undeliverable hand-off is
+    /// now recorded on the card, so an operator reads the fact instead of
+    /// inferring it from an absence.
+    #[tokio::test]
+    async fn a_hand_off_that_cannot_be_delivered_says_so_on_the_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, provider) = brain_that_delegates(
+            dir.path(),
+            vec![Some(Delegation::DelegateToDesk {
+                desk: "ghost".to_string(),
+                instruction: "look into it".to_string(),
+            })],
+        );
+        dispatch_card(&brain, &provider.tasks.clone(), "t-loud").await;
+
+        let note = only_card(&provider.tasks).await.note.expect("note");
+        assert!(
+            note.contains("hand-off to the \"ghost\" desk was not delivered"),
+            "the card must name the hand-off that did not happen: {note}"
+        );
+        assert!(
+            note.contains("this card is still with chief"),
+            "the card must say who still owns it: {note}"
+        );
+    }
+
+    /// Issue #272, the grounded half: the tool refused the invented target, so
+    /// no `Delegation` was ever queued. The turn is still free to *say* it
+    /// handed the work off — that is exactly what happened on the live company
+    /// — so the board records the refusal independently of the turn's account
+    /// of it. Without this the card settles under the delegator with a note
+    /// that claims a hand-off and nothing anywhere contradicting it.
+    #[tokio::test]
+    async fn a_refused_hand_off_is_recorded_on_the_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, provider) = brain_that_delegates_with(
+            dir.path(),
+            vec![Vec::new()],
+            TurnFaults {
+                refused_on_first: vec!["writer".to_string()],
+                ..TurnFaults::default()
+            },
+        );
+        dispatch_card(&brain, &provider.tasks.clone(), "t-refused").await;
+
+        let after = only_card(&provider.tasks).await;
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a refused hand-off runs no delegate"
+        );
+        assert_eq!(
+            after.column, "in_review",
+            "the card still settles under the delegator (#213); it is only no longer silent"
+        );
+        let note = after.note.expect("note");
+        assert!(
+            note.contains("hand-off to the \"writer\" desk was not delivered"),
+            "the refused target must be named on the card: {note}"
+        );
+        assert!(
+            note.contains("not a desk this company can hand work to"),
+            "the cause must be on the card: {note}"
+        );
+    }
+
+    /// The other half of #272's note: a delegation that never had a desk target
+    /// (a `spawn_task`) must not pick up an undeliverable-hand-off line.
+    #[tokio::test]
+    async fn a_spawn_task_never_records_an_undeliverable_hand_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, provider) = brain_that_delegates(
+            dir.path(),
+            vec![Some(Delegation::SpawnTask {
+                title: "Follow up".to_string(),
+                note: None,
+                assignee: None,
+            })],
+        );
+        dispatch_card(&brain, &provider.tasks.clone(), "t-quiet").await;
+
+        let cards = provider.tasks.list(&CompanyId::new("acme")).await.unwrap();
+        let parent = cards.iter().find(|c| c.id == "t-quiet").expect("parent");
+        assert!(
+            !parent
+                .note
+                .as_deref()
+                .unwrap_or_default()
+                .contains("was not delivered"),
+            "a spawn_task has no desk target to fail: {:?}",
+            parent.note
+        );
     }
 
     /// A `spawn_task` queued by a *dispatched* turn now opens its card with the
