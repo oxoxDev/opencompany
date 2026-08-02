@@ -119,6 +119,9 @@ prompt = "Weekly review and operator digest"
   neither. The status route reports that state as `restartRequired` — a resolved
   config next to a non-harness `cognition` — and the console says "restart"
   instead of "next turn" for it (issue #266).
+  Saving `managed` from the console is a *revert* (`DELETE …/inference`) and
+  carries no credential, so the console refuses that save while a key is still
+  typed in the form rather than dropping it and reporting success (issue #265).
 - **`[channels.*]`** enables `ChannelAdapter`s. Unknown channels are a
   validation error; disabled OpenHuman means non-operator channels degrade
   with a boot warning, never a failure.
