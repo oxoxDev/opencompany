@@ -38,7 +38,7 @@ use std::path::Path;
 
 pub use credentials::{Credential, CredentialSource, TinyhumansTokenSource, TokenTier};
 pub use manifest::{LEGACY_MANIFEST_FILE, Located, MANIFEST_FILE, discover};
-pub use skill_file::{SkillDoc, load_dir_skills, parse_skill_md};
+pub use skill_file::{SkillDoc, load_dir_skills, parse_skill_md, render_skill_md};
 pub use types::{
     Agent, BRAIN_MODES, Brain, Budget, ChannelConfig, Company, CompanyManifest, ComposioTools,
     Connection, DEFAULT_ALWAYS_APPROVE, GATEABLE_NAMESPACES, INFERENCE_PROVIDERS, INFERENCE_TIERS,
