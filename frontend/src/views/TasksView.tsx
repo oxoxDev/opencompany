@@ -28,6 +28,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { ADD_TASK_COLUMN, PRIORITY_STYLES, TASK_COLUMNS } from "@/lib/tasks-sample";
 import { toast } from "sonner";
+import { AssigneeSelect } from "./AssigneeSelect";
 import { TaskDetailView } from "./TaskDetailView";
 
 /**
@@ -469,11 +470,14 @@ function CreateTaskDialog({
             </div>
             <div className="grid gap-1.5">
               <Label htmlFor="new-assignee">Assignee</Label>
-              <Input
+              {/* Issue #263: the roster is a closed set the host enforces, so it
+                  is picked, not typed. Blank is its own labelled row. */}
+              <AssigneeSelect
                 id="new-assignee"
+                client={client}
+                company={company}
                 value={assignee}
-                placeholder="agent id"
-                onChange={(e) => setAssignee(e.target.value)}
+                onChange={setAssignee}
               />
             </div>
           </div>
