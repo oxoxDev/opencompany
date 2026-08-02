@@ -76,6 +76,11 @@ WORKDIR /app
 COPY --from=builder /out/opencompany /usr/local/bin/opencompany
 # The company definitions the switch chooses from at runtime.
 COPY companies ./companies
+# The shared skill library. The host derives `skills_root` from the loaded
+# company's directory (`companies/<name>` → `<repo>/skills`), so without this
+# the registry resolves to a missing directory and serves nothing: the console's
+# registry tab would be empty and installs would fall back to client metadata.
+COPY skills ./skills
 # The built operator console, served at `/` by the host. World-readable so the
 # unprivileged runtime user (uid 10001 under the platform's securityContext)
 # can read it even with a read-only root filesystem.
