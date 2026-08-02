@@ -80,17 +80,15 @@ async function removeWorkflow(request: APIRequestContext, id: string) {
  * Selects the workflow named `name` in the picker and waits for the selection
  * to settle.
  *
- * Picks by name (the listbox options render `name`) but *asserts* on `id`,
- * because the closed trigger renders the workflow **id**: the picker binds
- * `<SelectItem value={w.id}>` and Base UI's `SelectValue` renders the raw value
- * rather than the item's children. That is pre-existing on `upstream/main` and
- * untouched by #259 — worth its own issue, but keying this helper on the id is
- * what makes these specs describe the console as it actually is.
+ * Asserts the trigger shows the **name**. It used to show the raw id — the
+ * picker binds `<SelectItem value={w.id}>` and Base UI's `SelectValue` renders
+ * the value, not the item's children — which is #270, fixed on this branch
+ * because it is the same picker this issue's Delete affordance sits next to.
  */
-async function selectWorkflow(page: Page, id: string, name: string) {
+async function selectWorkflow(page: Page, name: string) {
   await page.getByRole("combobox").first().click();
   await page.getByRole("option", { name, exact: true }).click();
-  await expect(page.getByRole("combobox").first()).toContainText(id);
+  await expect(page.getByRole("combobox").first()).toContainText(name);
 }
 
 const DELETE = "workflow-delete";
@@ -101,7 +99,7 @@ test("a source-defined workflow cannot be deleted, and the console says why", as
   await page.goto("/#/workflows");
   await dismissTour(page);
 
-  await selectWorkflow(page, "committed", "Committed flow");
+  await selectWorkflow(page, "Committed flow");
 
   const button = page.getByTestId(DELETE);
   await expect(button).toBeVisible();
@@ -125,7 +123,7 @@ test("deleting is confirm-gated, and the confirmation says what goes and what st
   try {
     await page.goto("/#/workflows");
     await dismissTour(page);
-    await selectWorkflow(page, id, name);
+    await selectWorkflow(page, name);
 
     const button = page.getByTestId(DELETE);
     await expect(button, "an overlay-backed workflow must be deletable").toBeEnabled();
@@ -160,7 +158,7 @@ test("confirming the delete removes it from the picker and from the host", async
   try {
     await page.goto("/#/workflows");
     await dismissTour(page);
-    await selectWorkflow(page, id, name);
+    await selectWorkflow(page, name);
 
     await page.getByTestId(DELETE).click();
     await page.getByTestId("workflow-delete-confirm").click();
@@ -178,7 +176,7 @@ test("confirming the delete removes it from the picker and from the host", async
 
     // Gone from the picker: the selection moves off it and it is no longer an
     // option.
-    await expect(page.getByRole("combobox").first()).not.toContainText(id, {
+    await expect(page.getByRole("combobox").first()).not.toContainText(name, {
       timeout: 15_000,
     });
 
@@ -204,7 +202,7 @@ test("a version conflict surfaces distinctly with a way out, and deletes nothing
   try {
     await page.goto("/#/workflows");
     await dismissTour(page);
-    await selectWorkflow(page, id, name);
+    await selectWorkflow(page, name);
 
     // Force the race for real: someone else edits the graph while this console
     // holds the token it loaded a moment ago.

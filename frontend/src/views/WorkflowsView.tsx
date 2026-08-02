@@ -367,7 +367,16 @@ export function WorkflowsView({
             disabled={loadingList || workflows.length === 0}
           >
             <SelectTrigger className="h-8 w-56">
-              <SelectValue placeholder={loadingList ? "Loading…" : "Pick a workflow"} />
+              {/* The trigger renders the raw value unless told otherwise, and a
+                  workflow's id is not its name — the closed picker showed
+                  `e2e_conflict_1785687393855` where the popup showed "Conflict
+                  probe". Resolve it back through the list the popup is built
+                  from; fall back to the id if the list has not arrived yet. */}
+              <SelectValue placeholder={loadingList ? "Loading…" : "Pick a workflow"}>
+                {(selected) =>
+                  workflows.find((w) => w.id === selected)?.name ?? String(selected ?? "")
+                }
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
               {workflows.map((w) => (
