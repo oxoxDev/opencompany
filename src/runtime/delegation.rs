@@ -327,6 +327,28 @@ impl<'a> DelegationRunner<'a> {
         card: &mut TaskRecord,
         delegator: &str,
     ) -> Result<Option<TaskHandoff>> {
+        // A hand-off the tool refused (issue #272) never becomes a
+        // `Delegation`, so it is read separately — and recorded on the card
+        // before anything else, because the turn's own account of it is exactly
+        // what cannot be trusted: a refused hand-off is precisely the case where
+        // the reply claimed work had changed hands and the board showed
+        // otherwise.
+        for desk in self.queue.drain_refusals(self.max_delegations) {
+            tracing::warn!(
+                task_id = %card.id,
+                delegator = %delegator,
+                "[task] a hand-off was refused before it could be queued"
+            );
+            card.note = Some(append_note(
+                card.note.as_deref(),
+                delegator,
+                &undeliverable_handoff(
+                    &desk,
+                    delegator,
+                    "it is not a desk this company can hand work to",
+                ),
+            ));
+        }
         let queued = self.queue.drain(self.max_delegations);
         if queued.is_empty() {
             return Ok(None);
@@ -347,7 +369,28 @@ impl<'a> DelegationRunner<'a> {
                 _ => None,
             };
             let Some(member) = lead else {
+                // A hand-off whose desk resolves to no lead cannot be
+                // delivered. #213 settles the card under the delegator rather
+                // than stranding it, which is right — but until #272 it did so
+                // silently, leaving a card whose note claimed a hand-off that
+                // never happened and whose assignee was the delegator, with
+                // nothing on the board connecting the two. Record the
+                // undeliverable hand-off on the card so the operator reads the
+                // fact instead of inferring it from an absence. Every other
+                // delegation kind carries no desk and is unaffected.
+                let desk = desk_of(&delegation).map(str::to_string);
                 self.run_delegation(delegation, None).await?;
+                if let Some(desk) = desk {
+                    card.note = Some(append_note(
+                        card.note.as_deref(),
+                        delegator,
+                        &undeliverable_handoff(
+                            &desk,
+                            delegator,
+                            "no desk with that id has a lead on the roster",
+                        ),
+                    ));
+                }
                 continue;
             };
             // The card belongs to the first hand-off that actually PRODUCES
@@ -491,6 +534,18 @@ impl<'a> DelegationRunner<'a> {
             }
             Delegation::DelegateToDesk { desk, instruction } => {
                 let Some(member) = desk_lead(self.record, &desk) else {
+                    // Since #272 the harness tool refuses an ungrounded target
+                    // before it is ever queued, so reaching here means the desk
+                    // lost its lead between the tool call and this drain (or the
+                    // delegation came from a path with no tool boundary). Either
+                    // way it is a hand-off that will not happen: say so in the
+                    // log, and — on the task path — on the card itself.
+                    tracing::warn!(
+                        company = %self.company,
+                        desk = %desk,
+                        "[delegation] hand-off could not be delivered: no desk with that id has a \
+                         lead on the roster"
+                    );
                     return Ok(DelegationOutcome::default());
                 };
                 // Register the delegated turn so an operator can CANCEL it
@@ -665,6 +720,31 @@ fn instruction_of(delegation: &Delegation) -> &str {
         Delegation::DelegateToDesk { instruction, .. } => instruction,
         _ => "",
     }
+}
+
+/// The desk a hand-off targets, or `None` for every other delegation kind —
+/// which is what distinguishes "this delegation had a target that did not
+/// resolve" from "this delegation never had a target" (issue #272).
+fn desk_of(delegation: &Delegation) -> Option<&str> {
+    match delegation {
+        Delegation::DelegateToDesk { desk, .. } => Some(desk),
+        _ => None,
+    }
+}
+
+/// The note recorded on a card when a hand-off could not be delivered (issue
+/// #272).
+///
+/// Written in the delegator's voice, like every other note this seam appends,
+/// and deliberately explicit about the two facts an operator otherwise has to
+/// infer: nothing was handed off, and the card is still theirs. Names only the
+/// desk key, the cause, and the delegator — no instruction text, no delegate
+/// output.
+fn undeliverable_handoff(desk: &str, delegator: &str, cause: &str) -> String {
+    format!(
+        "hand-off to the \"{desk}\" desk was not delivered — {cause}. Nothing was delegated; this \
+card is still with {delegator}."
+    )
 }
 
 /// Appends a responder-attributed result block to a card's note, preserving any
