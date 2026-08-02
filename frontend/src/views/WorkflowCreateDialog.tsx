@@ -151,6 +151,21 @@ interface DraftEdge {
   label: string;
 }
 
+/** The node fields that validate on blur (issue #261) — the ones with a real
+ * contract, which are the ones authors get wrong. */
+type ValidatedField = "schedule" | "destinationTarget";
+
+/** The key a field's error is filed under.
+ *
+ * Deliberately `node.key`, the stable row key, and NOT `node.id`: the id is a
+ * text field the author edits, so keying on it would strand every error the
+ * moment they renamed a node — the error would still render, attached to
+ * nothing that can clear it.
+ */
+function errorKey(nodeKey: string, field: ValidatedField): string {
+  return `${nodeKey}:${field}`;
+}
+
 /** The "no destination" option's value. A Select item cannot carry an empty
  * string, so the sentinel stands in for `destinationKind: ""`. */
 const NO_DESTINATION = "__none__";
@@ -229,6 +244,11 @@ export function WorkflowCreateDialog({
   const [roster, setRoster] = useState<TeamMemberDto[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Per-field problems raised on blur (issue #261), keyed by
+   * {@link errorKey}. Separate from `error`, the submit-time banner: this one
+   * is inline, scoped to the control that caused it, and never blocks Save on
+   * its own — `validate()` remains the gate. */
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const formId = useId();
 
   // Reload the roster (for the agent-node picker) and reset the draft each
@@ -241,6 +261,7 @@ export function WorkflowCreateDialog({
     setNodes(starterNodes());
     setEdges([]);
     setError(null);
+    setFieldErrors({});
     let live = true;
     (async () => {
       try {
@@ -263,11 +284,65 @@ export function WorkflowCreateDialog({
 
   function updateNode(key: string, fields: Partial<DraftNode>) {
     setNodes((rows) => rows.map((r) => (r.key === key ? { ...r, ...fields } : r)));
+    // Clear whatever the edit invalidated. This MUST stay in step with
+    // `changeKind`: that reset exists so the draft never holds a value whose
+    // control is off screen, and an error is a value too — leaving one behind
+    // would show a complaint about a field the author can no longer see, let
+    // alone fix. Same reasoning for `destinationKind`, which swaps which target
+    // contract (address vs channel id) applies.
+    setFieldErrors((prev) => {
+      const stale: ValidatedField[] = [];
+      if ("kind" in fields) stale.push("schedule", "destinationTarget");
+      if ("destinationKind" in fields) stale.push("destinationTarget");
+      // Typing in a field clears its own error: the author is already fixing
+      // it, and re-checking mid-word would fail on every prefix of a correct
+      // answer (`n`, `no`, `nop` on the way to an address).
+      if ("schedule" in fields) stale.push("schedule");
+      if ("destinationTarget" in fields) stale.push("destinationTarget");
+
+      const next = { ...prev };
+      let changed = false;
+      for (const field of stale) {
+        const k = errorKey(key, field);
+        if (k in next) {
+          delete next[k];
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }
+
+  /** Checks one field's own rule, on blur. Returns nothing — the result lands
+   * in `fieldErrors` — so the caller stays a one-liner on the control.
+   *
+   * An EMPTY field is never flagged here. "You haven't filled this in yet" is
+   * true of every field an author tabs past on the way to somewhere else;
+   * saying so is nagging, not feedback. Emptiness stays `validate()`'s business
+   * at submit, where it is actually a problem. */
+  function validateField(nodeKey: string, field: ValidatedField, value: string) {
+    if (!value.trim()) return;
+    const node = nodes.find((n) => n.key === nodeKey);
+    if (!node) return;
+    const problem =
+      field === "schedule"
+        ? scheduleProblem(value)
+        : destinationTargetProblem(node.destinationKind, value);
+    if (problem) {
+      setFieldErrors((prev) => ({ ...prev, [errorKey(nodeKey, field)]: problem }));
+    }
   }
 
   function removeNode(key: string) {
     const removed = nodes.find((n) => n.key === key);
     setNodes((rows) => rows.filter((r) => r.key !== key));
+    // The row is gone, so its errors have nothing left to point at.
+    setFieldErrors((prev) => {
+      const next = Object.fromEntries(
+        Object.entries(prev).filter(([k]) => !k.startsWith(`${key}:`)),
+      );
+      return Object.keys(next).length === Object.keys(prev).length ? prev : next;
+    });
     // Drop any edge that pointed at the removed node's id — a dangling
     // reference would just bounce back from the server as a 400.
     if (removed?.id) {
@@ -444,6 +519,11 @@ export function WorkflowCreateDialog({
                 key={n.key}
                 node={n}
                 roster={roster}
+                errors={{
+                  schedule: fieldErrors[errorKey(n.key, "schedule")],
+                  destinationTarget: fieldErrors[errorKey(n.key, "destinationTarget")],
+                }}
+                onValidateField={(field, value) => validateField(n.key, field, value)}
                 onChange={(fields) => updateNode(n.key, fields)}
                 onRemove={() => removeNode(n.key)}
               />
@@ -506,17 +586,34 @@ export function WorkflowCreateDialog({
   );
 }
 
+/** A one-line problem shown under the control that caused it (issue #261). */
+function FieldError({ id, message }: { id: string; message?: string }) {
+  if (!message) return null;
+  return (
+    <p id={id} className="text-[11px] leading-snug text-destructive">
+      {message}
+    </p>
+  );
+}
+
 function NodeRow({
   node,
   roster,
+  errors,
+  onValidateField,
   onChange,
   onRemove,
 }: {
   node: DraftNode;
   roster: TeamMemberDto[];
+  /** Blur-time problems for this row's validated fields, if any. */
+  errors: Partial<Record<ValidatedField, string>>;
+  onValidateField: (field: ValidatedField, value: string) => void;
   onChange: (fields: Partial<DraftNode>) => void;
   onRemove: () => void;
 }) {
+  const rowId = useId();
+  const targetErrorId = `${rowId}-target-error`;
   return (
     <div className="grid gap-2 rounded-lg border p-2 sm:grid-cols-[1fr_1fr_1.4fr_auto] sm:items-start">
       <div className="grid gap-1">
@@ -583,7 +680,9 @@ function NodeRow({
         {node.kind === "trigger" && (
           <ScheduleField
             schedule={node.schedule}
+            error={errors.schedule}
             onChange={(schedule) => onChange({ schedule })}
+            onBlurValidate={(value) => onValidateField("schedule", value)}
           />
         )}
         {/* Only an output node reports back, so only it can route that report
@@ -622,16 +721,22 @@ function NodeRow({
               </SelectContent>
             </Select>
             {(node.destinationKind === "email" || node.destinationKind === "channel") && (
-              <Input
-                value={node.destinationTarget}
-                onChange={(e) => onChange({ destinationTarget: e.target.value })}
-                placeholder={
-                  node.destinationKind === "email" ? "recipient@example.com" : "channel id"
-                }
-                aria-label={
-                  node.destinationKind === "email" ? "Recipient address" : "Channel id"
-                }
-              />
+              <>
+                <Input
+                  value={node.destinationTarget}
+                  onChange={(e) => onChange({ destinationTarget: e.target.value })}
+                  onBlur={(e) => onValidateField("destinationTarget", e.target.value)}
+                  aria-invalid={Boolean(errors.destinationTarget)}
+                  aria-describedby={errors.destinationTarget ? targetErrorId : undefined}
+                  placeholder={
+                    node.destinationKind === "email" ? "recipient@example.com" : "channel id"
+                  }
+                  aria-label={
+                    node.destinationKind === "email" ? "Recipient address" : "Channel id"
+                  }
+                />
+                <FieldError id={targetErrorId} message={errors.destinationTarget} />
+              </>
             )}
             {node.destinationKind === "email" && (
               <p className="text-[11px] leading-snug text-muted-foreground">
@@ -662,11 +767,18 @@ function NodeRow({
  * appears only on agent nodes. */
 function ScheduleField({
   schedule,
+  error,
   onChange,
+  onBlurValidate,
 }: {
   schedule: string;
+  /** The blur-time cron problem for this field, when there is one. */
+  error?: string;
   onChange: (schedule: string) => void;
+  onBlurValidate: (value: string) => void;
 }) {
+  const fieldId = useId();
+  const errorId = `${fieldId}-error`;
   // A non-empty value that isn't a preset means the operator typed their own.
   const custom = schedule !== "" && !isPresetSchedule(schedule);
   // Track "Custom is selected but nothing typed yet" so the input stays open.
@@ -703,10 +815,14 @@ function ScheduleField({
           className="h-8 font-mono text-xs"
           value={schedule}
           onChange={(e) => onChange(e.target.value)}
+          onBlur={(e) => onBlurValidate(e.target.value)}
+          aria-invalid={Boolean(error)}
+          aria-describedby={error ? errorId : undefined}
           placeholder="0 9 * * MON"
           aria-label="Custom cron schedule"
         />
       )}
+      <FieldError id={errorId} message={error} />
       {(showCustom || schedule) && (
         <p className="text-[10px] text-muted-foreground">
           5-field cron. Times are UTC.
