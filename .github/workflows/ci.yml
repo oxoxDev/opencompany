@@ -11,6 +11,19 @@ concurrency:
 permissions:
   contents: read
 
+# Issue #251. Every cargo invocation below that resolves a dependency graph
+# passes `--locked` (all of them except `cargo fmt`, which resolves nothing and
+# does not accept the flag): CI must build the graph recorded in the committed
+# `Cargo.lock` and fail loudly rather than re-resolve it in the runner. Without
+# it, a `Cargo.toml` edit whose lock was never regenerated — or a `vendor/`
+# submodule bump that moves a vendored crate's version — is absorbed silently,
+# and a semver-compatible upstream release can change what CI compiles with no
+# change to this repo, so a red run cannot be attributed to the diff.
+#
+# `--locked`, not `--frozen`. `--frozen` is `--locked` plus `--offline`, and
+# these runners have no vendored registry — they must reach crates.io to
+# download the crates the lock names. Pinning *resolution* and forbidding
+# *downloads* are separate properties; only the first is wanted here.
 jobs:
   rust:
     name: Rust
@@ -40,14 +53,17 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # No `--locked` here, and none is owed: `cargo fmt` is a `rustfmt` wrapper
+      # that never resolves the dependency graph, and `cargo-fmt` does not
+      # accept the flag.
       - name: Format
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test
+        run: cargo test --locked
 
   # Issue #202. The `Rust` job above builds DEFAULT FEATURES ONLY, so every line
   # behind `openhuman` (`src/harness/**`, `src/workflows/**`, `src/runtime/`
@@ -120,7 +136,7 @@ jobs:
       # class of bug that motivated this job) surfaces before the lint pass
       # spends time on a tree that does not build.
       - name: Build (openhuman, tinycortex)
-        run: cargo build --features openhuman,tinycortex --all-targets
+        run: cargo build --locked --features openhuman,tinycortex --all-targets
 
       # `--no-deps` is LOAD-BEARING — do not "simplify" it away. Cargo treats the
       # vendored `[patch]` crates as local packages, so an unscoped `-D warnings`
@@ -129,7 +145,7 @@ jobs:
       # reach first-party code. Scoping to the primary package is what makes it
       # meaningful.
       - name: Clippy (openhuman, tinycortex)
-        run: cargo clippy --no-deps --features openhuman,tinycortex --all-targets -- -D warnings
+        run: cargo clippy --locked --no-deps --features openhuman,tinycortex --all-targets -- -D warnings
 
       # `--lib` is LOAD-BEARING — do not widen it to a bare `cargo test`. There
       # is no `tests/` directory, and the only other runnable target the feature
@@ -137,7 +153,7 @@ jobs:
       # inference backend and needs a credential. The build step above already
       # proves it compiles; this step must never try to run it.
       - name: Test (openhuman, tinycortex)
-        run: cargo test --features openhuman,tinycortex --lib
+        run: cargo test --locked --features openhuman,tinycortex --lib
 
       # Catches the combination traps no single feature set can: most often a
       # mandatory struct field constructed differently across feature arms.
@@ -146,4 +162,4 @@ jobs:
       # pins for the openhuman-only set. This step must compile the combination
       # without running its feature-sensitive tests.
       - name: Check (--all-features)
-        run: cargo check --all-features
+        run: cargo check --locked --all-features
