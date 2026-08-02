@@ -33,6 +33,16 @@ pub enum UsageMetering {
     None,
 }
 
+/// The [`Cognition::path`] label of the embedded-harness brain — the only path
+/// a tenant `[inference]` / console BYOK config actually feeds.
+///
+/// A named constant rather than a literal because two places must agree: the
+/// brain that *reports* it (`crate::harness::brain`) and the inference-status
+/// route that *tests* it to decide whether a saved config has reached the
+/// running brain (issue #266). A literal in both would let a wording change on
+/// one side silently turn the test into a permanent `false`.
+pub const HARNESS_PATH: &str = "harness";
+
 /// How a [`Brain`] does cognition, for metering and operator diagnosis.
 ///
 /// The runtime reads [`Self::provider`] when it meters a cycle's usage, and the
@@ -45,8 +55,8 @@ pub enum UsageMetering {
 /// than leaking this shape onto the wire.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cognition {
-    /// Stable label for the path: `harness`, `hosted`, `echo`, `sidecar`, or
-    /// `custom` for an injected brain.
+    /// Stable label for the path: `harness` ([`HARNESS_PATH`]), `hosted`,
+    /// `echo`, `sidecar`, or `custom` for an injected brain.
     pub path: &'static str,
     /// The provider slug this path's cycle usage is metered under.
     pub provider: &'static str,

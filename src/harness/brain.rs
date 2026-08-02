@@ -990,7 +990,7 @@ impl Brain for HarnessBrain {
     /// zero `token_usage` and the runtime's cycle-level metering is a no-op here.
     fn cognition(&self) -> Cognition {
         Cognition {
-            path: "harness",
+            path: crate::ports::brain::HARNESS_PATH,
             provider: "per-turn",
             metering: UsageMetering::PerTurn,
         }
