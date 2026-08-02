@@ -210,7 +210,10 @@ export function TaskEditDialog({
                 </SelectContent>
               </Select>
             </div>
-            <div className="grid gap-1.5">
+            {/* `min-w-0`: a grid item's automatic minimum size is its content's
+                min-content width, so the assignee's long ids would otherwise
+                widen this track and squeeze Column and Priority away. */}
+            <div className="grid min-w-0 gap-1.5">
               <Label htmlFor="task-assignee">Assignee</Label>
               {/* Issue #263: picked from the roster, not typed. An assignee the
                   roster no longer carries still renders — flagged — so a save

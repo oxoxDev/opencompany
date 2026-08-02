@@ -468,7 +468,9 @@ function CreateTaskDialog({
                 </SelectContent>
               </Select>
             </div>
-            <div className="grid gap-1.5">
+            {/* `min-w-0` so a long teammate id cannot widen this grid track
+                and squeeze the Priority select beside it. */}
+            <div className="grid min-w-0 gap-1.5">
               <Label htmlFor="new-assignee">Assignee</Label>
               {/* Issue #263: the roster is a closed set the host enforces, so it
                   is picked, not typed. Blank is its own labelled row. */}

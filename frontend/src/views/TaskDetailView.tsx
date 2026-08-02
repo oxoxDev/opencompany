@@ -614,7 +614,7 @@ function ControlBar({
             value={assignee}
             onChange={setAssignee}
             disabled={busy}
-            className="h-8"
+            className="h-8 min-w-0 flex-1"
           />
           <Button size="sm" className="h-8" disabled={busy} onClick={() => void saveAssignee()}>
             Save

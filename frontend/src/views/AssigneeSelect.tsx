@@ -18,6 +18,7 @@
 //      its own labelled row saying what it does.
 
 import { useEffect, useMemo, useState } from "react";
+import { AlertCircle } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { DeskDto, TeamMemberDto } from "@/api/types";
@@ -171,16 +172,37 @@ export function AssigneeSelect({
     };
   }, [value, deskOptions, teamOptions, loaded, desks.length, team.length]);
 
-  /** The trigger's one-line rendering of a wire value. */
-  const labelFor = useMemo(() => {
+  /**
+   * The trigger's rendering of a wire value.
+   *
+   * The off-roster warning is an icon here, not the words — the trigger is
+   * often a third of a dialog row and an overlay teammate id already fills it,
+   * so spelling it out would truncate the id away and leave a warning with no
+   * subject. The icon keeps both visible; the words stay on the popup row
+   * (which has the width) and in an `sr-only` span, so screen readers and text
+   * assertions still get them.
+   */
+  const renderValue = useMemo(() => {
     const byValue = new Map<string, Option>();
     for (const option of [...deskOptions, ...teamOptions]) byValue.set(option.value, option);
     if (stale) byValue.set(stale.value, stale);
-    return (wire: string): string => {
-      if (!wire) return UNASSIGNED_LABEL;
+    return (wire: string) => {
+      if (!wire) return <span className="min-w-0 truncate">{UNASSIGNED_LABEL}</span>;
       const option = byValue.get(wire);
-      if (!option) return wire;
-      return option.offRoster ? `${option.label} (not on roster)` : option.label;
+      return (
+        <>
+          {option?.offRoster && (
+            <>
+              <AlertCircle
+                className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400"
+                aria-hidden
+              />
+              <span className="sr-only">not on roster:</span>
+            </>
+          )}
+          <span className="min-w-0 truncate">{option?.label ?? wire}</span>
+        </>
+      );
     };
   }, [deskOptions, teamOptions, stale]);
 
@@ -192,12 +214,20 @@ export function AssigneeSelect({
       onValueChange={(next) => onChange(next == null || next === UNASSIGNED ? "" : String(next))}
       disabled={disabled}
     >
-      <SelectTrigger id={id} className={cn("w-full", className)}>
+      {/* `min-w-0` matters: the trigger's content is `whitespace-nowrap`, and a
+          long overlay-teammate id would otherwise set the min-content width of
+          whatever grid or flex track holds this control — squashing its
+          neighbours (the edit dialog's Column and Priority) to nothing. */}
+      <SelectTrigger id={id} className={cn("w-full min-w-0", className)}>
         <SelectValue>
-          {(selected) => labelFor(selected === UNASSIGNED ? "" : String(selected ?? ""))}
+          {(selected) => renderValue(selected === UNASSIGNED ? "" : String(selected ?? ""))}
         </SelectValue>
       </SelectTrigger>
-      <SelectContent className="max-h-72">
+      {/* The popup defaults to the trigger's width, which clips the trailing
+          hints ("— hand it to the orchestrator", "— 2 teammates"). Let it grow
+          to its content instead, bounded so a long role cannot run off-screen —
+          the label truncates first. */}
+      <SelectContent className="max-h-72 w-auto min-w-(--anchor-width) max-w-[min(26rem,90vw)]">
         <SelectGroup>
           <SelectItem value={UNASSIGNED}>
             <OptionRow label={UNASSIGNED_LABEL} hint="hand it to the orchestrator" />
@@ -209,7 +239,7 @@ export function AssigneeSelect({
             <SelectSeparator />
             <SelectGroup>
               <SelectItem value={stale.value}>
-                <OptionRow label={stale.label} hint={stale.hint} />
+                <OptionRow label={stale.label} hint={stale.hint} warn={stale.offRoster} />
               </SelectItem>
             </SelectGroup>
           </>
@@ -247,10 +277,16 @@ export function AssigneeSelect({
   );
 }
 
-function OptionRow({ label, hint }: { label: string; hint?: string }) {
+function OptionRow({ label, hint, warn }: { label: string; hint?: string; warn?: boolean }) {
   return (
     <>
-      <span className="truncate">{label}</span>
+      {warn && (
+        <AlertCircle
+          className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400"
+          aria-hidden
+        />
+      )}
+      <span className="min-w-0 truncate">{label}</span>
       {hint && <span className="shrink-0 text-xs text-muted-foreground">— {hint}</span>}
     </>
   );
