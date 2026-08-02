@@ -653,4 +653,32 @@ mod tests {
         assert!(!task_enters_in_progress(None, "backlog"));
         assert!(!task_enters_in_progress(Some("in_review"), "done"));
     }
+
+    /// Issue #246 spend gate. A card opened from chat goes through
+    /// `POST …/tasks` with **no** `column`, so what stops it from spending
+    /// money the operator never approved is that the server's default column is
+    /// not the dispatch trigger. That is two independent facts — what the
+    /// default is, and what the trigger is — living in two different modules,
+    /// so a change to either alone silently opens the gate. This pins them
+    /// together.
+    ///
+    /// The second assertion is the positive control: without it the first
+    /// would still pass if `task_enters_in_progress` were broken to always
+    /// return `false`, and the test would be guarding nothing.
+    #[test]
+    fn the_column_a_chat_created_card_defaults_to_does_not_dispatch() {
+        use crate::ports::tasks::{COLUMN_IN_PROGRESS, COLUMN_TODO};
+
+        // `create_task` (src/server/ops/tasks.rs) defaults an omitted `column`
+        // to this one.
+        assert!(
+            !task_enters_in_progress(None, COLUMN_TODO),
+            "a chat-created card must not spend an agent turn on arrival — the \
+             human drag into in_progress is the approval gate"
+        );
+        assert!(
+            task_enters_in_progress(None, COLUMN_IN_PROGRESS),
+            "positive control: the trigger this test relies on is still live"
+        );
+    }
 }
