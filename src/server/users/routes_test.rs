@@ -34,6 +34,16 @@ fn manifest() -> CompanyManifest {
 }
 
 async fn state_with(home: &std::path::Path, connections: ConnectionsRuntime) -> AppState {
+    state_bound_to(home, &AppConfig::default().bind, connections).await
+}
+
+/// State on an explicit bind, for the tests that turn on whether the host looks
+/// reachable from anywhere but this machine.
+async fn state_bound_to(
+    home: &std::path::Path,
+    bind: &str,
+    connections: ConnectionsRuntime,
+) -> AppState {
     let store = crate::store::FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
     store
@@ -56,9 +66,12 @@ async fn state_with(home: &std::path::Path, connections: ConnectionsRuntime) -> 
         .build()
         .await
         .unwrap();
-    let state = AppState::new(AppConfig::default())
-        .with_home(home.to_path_buf())
-        .with_connections(connections);
+    let state = AppState::new(AppConfig {
+        bind: bind.to_string(),
+        ..AppConfig::default()
+    })
+    .with_home(home.to_path_buf())
+    .with_connections(connections);
     state.registry().insert(id, Arc::new(runtime));
     state
 }
@@ -1049,43 +1062,94 @@ async fn no_mail_transport_still_returns_202_and_echoes_for_dev() {
 async fn a_routable_host_never_echoes_the_code_even_with_no_mail() {
     let home_dir = home();
     let home = home_dir.path().to_path_buf();
-    let store = crate::store::FsCompanyStore::new(home.clone());
-    let id = CompanyId::new("acme");
-    store
-        .save(&CompanyRecord {
-            id: id.clone(),
-            manifest: manifest(),
-            ledger: Vec::new(),
-            lifecycle: "running".to_string(),
-            overlay_agents: Vec::new(),
-            overlay_desk_members: Vec::new(),
-            overlay_desk_order: Vec::new(),
-            overlay_desks: Vec::new(),
-            overlay_workflows: Vec::new(),
-            template_provenance: None,
-        })
-        .await
-        .unwrap();
-    let runtime = RuntimeBuilder::new(home.clone(), manifest())
-        .with_id(id.clone())
-        .build()
-        .await
-        .unwrap();
     // Routable bind, no mail transport: the code cannot be delivered — and it
     // must NOT come back in the response instead. Returning a credential to
     // whoever asked is worse than nobody being able to sign in.
-    let state = AppState::new(AppConfig {
-        bind: "0.0.0.0:8080".into(),
-        ..AppConfig::default()
-    })
-    .with_home(home.clone())
-    .with_connections(ConnectionsRuntime::new());
-    state.registry().insert(id, Arc::new(runtime));
+    let state = state_bound_to(&home, "0.0.0.0:8080", ConnectionsRuntime::new()).await;
 
     assert_eq!(
         request_dev_code(&state, "ada@example.com").await,
         None,
         "a routable host must never echo a login code"
+    );
+}
+
+#[tokio::test]
+async fn a_loopback_host_with_no_mail_reissues_inside_the_resend_window() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with(&home, ConnectionsRuntime::new()).await;
+
+    // Two sign-ins back to back, well inside the 60s resend window. Nothing is
+    // mailed here — the code is echoed — so there is no mailbox to spare, and
+    // the only thing a throttle could achieve is locking the sole local sign-in
+    // path for a minute after each use. That is issue #271: the console's
+    // Playwright bootstrap re-authenticates on every run and would fail on the
+    // second one within a minute, reporting a broken host.
+    let first = request_dev_code(&state, "ada@example.com")
+        .await
+        .expect("the first request must echo a code");
+    let second = request_dev_code(&state, "ada@example.com")
+        .await
+        .expect("a second request inside the window must still echo a code");
+    assert_ne!(first, second, "the second request must mint a fresh code");
+
+    // And the fresh one is the live one: one live code per address still holds,
+    // so the reissue invalidated its predecessor rather than leaving two open.
+    let app = router(state.clone());
+    let stale = app
+        .oneshot(post(
+            "/api/v1/companies/acme/auth/verify",
+            serde_json::json!({ "code": first }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        stale.status(),
+        StatusCode::UNAUTHORIZED,
+        "reissuing must invalidate the previous code"
+    );
+
+    let app = router(state.clone());
+    let live = app
+        .oneshot(post(
+            "/api/v1/companies/acme/auth/verify",
+            serde_json::json!({ "code": second }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(live.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_routable_host_still_throttles_even_with_no_mail() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    // No transport wired, but the host looks reachable from elsewhere. The
+    // reissue exemption is for the echo path only: this host echoes nothing, so
+    // it keeps the throttle and keeps the live code alone.
+    let state = state_bound_to(&home, "0.0.0.0:8080", ConnectionsRuntime::new()).await;
+    let id = CompanyId::new("acme");
+    let runtime = state.registry().get(&id).unwrap();
+
+    assert_eq!(request_dev_code(&state, "ada@example.com").await, None);
+    let minted = runtime
+        .login_codes()
+        .latest_for_email(&id, "ada@example.com")
+        .await
+        .unwrap()
+        .expect("the first request must have minted a code");
+
+    assert_eq!(request_dev_code(&state, "ada@example.com").await, None);
+    let after = runtime
+        .login_codes()
+        .latest_for_email(&id, "ada@example.com")
+        .await
+        .unwrap()
+        .expect("the throttled request must leave the live code in place");
+    assert_eq!(
+        minted.code_hash, after.code_hash,
+        "a throttled request must not replace the live code"
     );
 }
 
