@@ -111,6 +111,12 @@ function scheduleProblem(schedule: string): string | null {
  * and so have nothing to check.
  *
  * Same two-caller contract as {@link scheduleProblem}.
+ *
+ * Issue #260: each message ends with the SAME fix instruction the host's
+ * rejection ends with, and echoes the offending target the same way, so an
+ * author who trips the pre-flight and an author who trips the 400 are told the
+ * same thing. `destination_messages_match_the_console` in
+ * `src/company/workflow_file.rs` fails if either side is reworded alone.
  */
 function destinationTargetProblem(
   kind: DraftNode["destinationKind"],
@@ -118,12 +124,24 @@ function destinationTargetProblem(
 ): string | null {
   const value = target.trim();
   if (kind === "email" && !value.includes("@")) {
-    return "emails its report — give the recipient's full address.";
+    return `\`${value}\` is not an email address — give the recipient's full address.`;
   }
   if (kind === "channel" && !value) {
-    return "posts its report to a channel — name the channel.";
+    return "A channel destination needs a channel id — name the channel to post the report to.";
   }
   return null;
+}
+
+/** How a validation message names a node.
+ *
+ * Issue #260: the dialog reported `Node \`2\`` — the id, which on a row the
+ * author never renamed is whatever the form put there — while the author had
+ * typed a name. Prefer the name they chose; fall back to the id, and to a
+ * position-free phrase when the row is still blank (which the "needs an id"
+ * check above will have already reported).
+ */
+function nodeLabel(node: DraftNode): string {
+  return node.name.trim() || node.id.trim() || "this node";
 }
 
 interface DraftEdge {
@@ -282,15 +300,15 @@ export function WorkflowCreateDialog({
       if (!n.id.trim()) return "Every node needs an id.";
       if (ids.has(n.id.trim())) return `Node id \`${n.id}\` is used more than once.`;
       ids.add(n.id.trim());
-      if (!n.name.trim()) return `Node \`${n.id}\` needs a name.`;
+      if (!n.name.trim()) return `Node \`${nodeLabel(n)}\` needs a name.`;
       if (n.kind === "agent" && !n.agent.trim()) {
-        return `Node \`${n.id}\` is an agent node — pick who does it.`;
+        return `Node \`${nodeLabel(n)}\` is an agent node — pick who does it.`;
       }
       // Only fires for a node that IS a trigger, so this is a check on visible
       // state, never an off-kind trap.
       if (n.kind === "trigger") {
         const problem = scheduleProblem(n.schedule);
-        if (problem) return problem;
+        if (problem) return `Node \`${nodeLabel(n)}\`: ${problem}`;
       }
       // Mirrors the host's `destination` target rules so a wrong target is
       // caught here rather than after a round trip. There is deliberately NO
@@ -301,7 +319,7 @@ export function WorkflowCreateDialog({
         n.destinationKind,
         n.destinationTarget,
       );
-      if (destinationProblem) return `Node \`${n.id}\` ${destinationProblem}`;
+      if (destinationProblem) return `Node \`${nodeLabel(n)}\`: ${destinationProblem}`;
     }
     const triggerCount = nodes.filter((n) => n.kind === "trigger").length;
     if (triggerCount !== 1) {

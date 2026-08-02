@@ -63,7 +63,15 @@ export interface WorkflowDestination {
   target?: string;
 }
 
-/** The destination kinds the creator's picker offers, with prosumer labels. */
+/**
+ * The destination kinds the creator's picker offers, with prosumer labels.
+ *
+ * Kept in step with the host's `WORKFLOW_DESTINATION_KINDS` by
+ * `destination_kinds_match_the_console` in `src/company/workflow_file.rs`, which
+ * reads the `value:` entries out of this very block — so adding a kind on one
+ * side alone fails `cargo test` rather than shipping a picker the server rejects
+ * (or withholding one it accepts). Issue #260.
+ */
 export const DESTINATION_KINDS: { value: WorkflowDestination["kind"]; label: string }[] = [
   { value: "owner", label: "Owner — the company's admins" },
   { value: "email", label: "Email — a specific address" },
