@@ -53,6 +53,7 @@ PUT    …/workspace/file/{nodeId}             write file content
 PATCH  …/workspace/{nodeId}                  rename / move
 DELETE …/workspace/{nodeId}                  delete a node
 POST   …/skills                             add a custom skill
+GET    …/skills/registry                     browse the shared skill library
 POST   …/skills/{slug}/install              install a registry/company skill
 POST   …/skills/{slug}/uninstall            uninstall a skill
 PUT    …/skills/{slug}                       enable / disable a skill
