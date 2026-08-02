@@ -83,6 +83,7 @@ pub const QUERY_COMPANY_TOOL: &str = "query_company";
 // The `spawn_task` / `delegate_to_desk` names are the brain-agnostic canonical
 // constants (issue #176) — re-exported here so the harness path and the hosted
 // path share one definition and cannot drift.
+use crate::runtime::delegation_tools;
 pub use crate::runtime::delegation_tools::{DELEGATE_TO_DESK_TOOL, SPAWN_TASK_TOOL};
 /// The `run_workflow` tool name (issue #67).
 pub const RUN_WORKFLOW_TOOL: &str = "run_workflow";
@@ -129,11 +130,14 @@ pub fn orchestrator_brief() -> String {
     " You are also this company's orchestrator: the single point of contact for the operator. \
 Answer from whole-company context, and when a request belongs to a specialist desk or should be \
 tracked as work, delegate instead of guessing. Use `query_company` to ground answers in the \
-company's durable facts, recent activity, saved workflows, and team roster — it is the source of \
-truth for what workflows exist and who is on the team, so consult it before answering \"what \
-workflows/teammates do we have?\" rather than guessing or naming a skill \
+company's durable facts, recent activity, saved workflows, team roster, and desks — it is the \
+source of truth for what workflows exist, who is on the team, and which desks can take work, so \
+consult it before answering \"what workflows/teammates do we have?\" or before delegating, rather \
+than guessing or naming a skill \
 — `delegate_to_desk` to hand a turn to a desk's lead \
-member, `spawn_task` to open a tracked task card, `run_workflow` to execute one of the \
+member, naming the desk by an id `query_company` lists under Desks (a desk is not a person: \
+handing work to a teammate's name is not a delegation), \
+`spawn_task` to open a tracked task card, `run_workflow` to execute one of the \
 company's saved workflows by id (for example to advance or finish a task that is waiting on a \
 workflow run) — you can run workflows yourself; never claim the run_workflow tool is unavailable — \
 `create_workflow` to author and save a brand-new workflow graph (a trigger plus agent / tool / \
@@ -203,6 +207,17 @@ pub enum Delegation {
 #[derive(Clone, Default)]
 pub struct DelegationQueue {
     inner: Arc<Mutex<Vec<Delegation>>>,
+    /// Desk keys a `delegate_to_desk` call named that the company does not have
+    /// (issue #272).
+    ///
+    /// A refused hand-off never becomes a [`Delegation`], so without this the
+    /// drain has no way to know one was attempted — and a dispatched card would
+    /// settle under the delegator with only whatever the turn chose to say about
+    /// it. Carried on the queue because it shares the queue's exact lifetime:
+    /// filled by the tool during a turn, read by the drain right after, and
+    /// wiped by the same [`clear`](Self::clear) that keeps a prior turn from
+    /// leaking into this one.
+    refused: Arc<Mutex<Vec<String>>>,
 }
 
 impl DelegationQueue {
@@ -214,10 +229,27 @@ impl DelegationQueue {
             .push(delegation);
     }
 
+    /// Records that a hand-off named `desk`, which the company cannot hand work
+    /// to, so the drain can report the attempt (issue #272).
+    pub fn push_refusal(&self, desk: String) {
+        self.refused.lock().expect("delegation queue").push(desk);
+    }
+
+    /// Drains up to `cap` refused desk keys (FIFO) and discards the rest, so a
+    /// turn that calls the tool repeatedly cannot grow an unbounded note.
+    pub fn drain_refusals(&self, cap: usize) -> Vec<String> {
+        let mut guard = self.refused.lock().expect("delegation queue");
+        let take = guard.len().min(cap);
+        let drained: Vec<String> = guard.drain(..take).collect();
+        guard.clear();
+        drained
+    }
+
     /// Empties the queue (called before an orchestrator turn so stale
     /// delegations from a prior turn never leak into this one).
     pub fn clear(&self) {
         self.inner.lock().expect("delegation queue").clear();
+        self.refused.lock().expect("delegation queue").clear();
     }
 
     /// Drains up to `cap` queued delegations (FIFO) and discards the rest, so a
@@ -284,7 +316,7 @@ impl Tool for QueryCompanyTool {
     }
 
     fn description(&self) -> &str {
-        "Read the company's durable facts, recent activity, saved workflows, and team roster to ground an answer in whole-company context — use this to answer \"what workflows do we have?\" or \"who is on the team?\" instead of guessing. Optionally pass a `query` to filter facts by a case-insensitive substring."
+        "Read the company's durable facts, recent activity, saved workflows, team roster, and desks to ground an answer in whole-company context — use this to answer \"what workflows do we have?\", \"who is on the team?\", or \"which desks can take work?\" instead of guessing, and to get the exact desk id `delegate_to_desk` needs. Optionally pass a `query` to filter facts by a case-insensitive substring."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -426,12 +458,46 @@ impl Tool for QueryCompanyTool {
             }
         }
 
+        // Desks (issue #272). The roster was already here, but the *desks* were
+        // not — so an orchestrator asked to hand work to a desk had nothing
+        // authoritative to read and reached for a teammate's id instead. These
+        // are exactly the ids `delegate_to_desk` accepts, with each desk's lead
+        // named so the two are never confused for one another again.
+        let desks: Vec<(String, Option<String>)> = record
+            .as_ref()
+            .map(|record| {
+                delegation_tools::desk_ids(record)
+                    .into_iter()
+                    .map(|id| {
+                        let lead = delegation_tools::desk_lead(record, &id);
+                        (id, lead)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        md.push_str("\n## Desks\n");
+        if desks.is_empty() {
+            md.push_str("_No desks. Answer directly rather than delegating._\n");
+        } else {
+            for (id, lead) in &desks {
+                match lead {
+                    Some(lead) => md.push_str(&format!(
+                        "- **{id}** — lead: {lead} (delegate with `delegate_to_desk` desk=`{id}`)\n"
+                    )),
+                    None => md.push_str(&format!(
+                        "- **{id}** — no member on the roster, so it cannot be handed work\n"
+                    )),
+                }
+            }
+        }
+
         Ok(ToolResult::success_with_markdown(
             json!({
                 "facts": facts.len(),
                 "recent_events": recent.len(),
                 "workflows": workflows.len(),
                 "team": roster.len(),
+                "desks": desks.len(),
             }),
             md,
         ))
@@ -558,14 +624,58 @@ impl Tool for SpawnTaskTool {
 /// A delegation tool that hands a turn to a desk's lead member. Enqueues a
 /// [`Delegation::DelegateToDesk`]; the harness brain runs the desk turn on
 /// drain and surfaces its reply as its own chat bubble.
+///
+/// The target is **grounded against the company's real desks** before anything
+/// is queued (issue #272): a `desk` that matches no desk — or a desk nobody on
+/// the roster leads, which no turn could ever run for — is refused here, with
+/// the valid desk ids in the refusal, instead of being queued and quietly
+/// dropped at drain time. `delegate_to_desk` is an
+/// [intrinsic tool](crate::harness::steps), so the refusal reaches both the
+/// model (as a failed tool result it can retry from in the same turn) and the
+/// operator's run trail verbatim.
 pub struct DelegateToDeskTool {
     queue: DelegationQueue,
+    company: CompanyId,
+    /// The company store, read at call time so the desk set is the **current**
+    /// one. Deliberately not a snapshot captured when the agent was built: an
+    /// operator can create a desk mid-session (the desk-creation overlay), and a
+    /// stale snapshot would refuse a desk that exists — a worse failure than the
+    /// one this grounding fixes.
+    store: Arc<dyn CompanyStore>,
 }
 
 impl DelegateToDeskTool {
-    /// Builds the tool over the shared delegation queue.
-    pub fn new(queue: DelegationQueue) -> Self {
-        Self { queue }
+    /// Builds the tool over the shared delegation queue and the company store it
+    /// grounds the target against.
+    pub fn new(queue: DelegationQueue, company: CompanyId, store: Arc<dyn CompanyStore>) -> Self {
+        Self {
+            queue,
+            company,
+            store,
+        }
+    }
+
+    /// The refusal for `desk`, or `None` when it names a desk that can take
+    /// work.
+    ///
+    /// **Fails open**: if the record cannot be read the delegation is queued
+    /// exactly as it was before this grounding existed. A store hiccup must not
+    /// take delegation offline; the drain-time fall-through still records what
+    /// happened.
+    async fn refusal(&self, desk: &str) -> Option<String> {
+        match self.store.load(&self.company).await {
+            Ok(Some(record)) => delegation_tools::reject_desk_target(&record, desk),
+            Ok(None) => None,
+            Err(err) => {
+                tracing::warn!(
+                    company = %self.company,
+                    error = %err,
+                    "[delegate_to_desk] could not read the company record to ground the desk target; \
+                     queuing the hand-off ungrounded"
+                );
+                None
+            }
+        }
     }
 }
 
@@ -602,6 +712,21 @@ impl Tool for DelegateToDeskTool {
             .filter(|i| !i.is_empty())
             .ok_or_else(|| anyhow::anyhow!("`instruction` is required"))?
             .to_string();
+
+        // Ground the target before queuing anything: an invented desk is
+        // refused here, in the model's own turn, rather than surviving as a
+        // queued hand-off that the drain silently cannot deliver (issue #272).
+        if let Some(refusal) = self.refusal(&desk).await {
+            tracing::info!(
+                company = %self.company,
+                "[delegate_to_desk] refused an ungrounded delegation target"
+            );
+            // Recorded as well as returned: the model can still describe this
+            // turn however it likes, so the *board* must carry the fact
+            // independently of what the turn says about it.
+            self.queue.push_refusal(desk);
+            return Ok(ToolResult::error(refusal));
+        }
 
         self.queue.push(Delegation::DelegateToDesk {
             desk: desk.clone(),
@@ -787,10 +912,18 @@ fn optional_str(args: &Value, key: &str) -> Option<String> {
 /// `spawn_task`, `delegate_to_desk`, and — since #186 part b — `assign_task`
 /// and `review_task`. `query_company` is built separately because it needs the
 /// read ports, not the queue.
-pub fn delegation_tools(queue: &DelegationQueue) -> Vec<Box<dyn Tool>> {
+///
+/// `delegate_to_desk` additionally takes the company id + store, which it reads
+/// at call time to ground the delegation target against the company's real
+/// desks (issue #272).
+pub fn delegation_tools(
+    queue: &DelegationQueue,
+    company: CompanyId,
+    store: Arc<dyn CompanyStore>,
+) -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(SpawnTaskTool::new(queue.clone())),
-        Box::new(DelegateToDeskTool::new(queue.clone())),
+        Box::new(DelegateToDeskTool::new(queue.clone(), company, store)),
         Box::new(AssignTaskTool::new(queue.clone())),
         Box::new(ReviewTaskTool::new(queue.clone())),
     ]
@@ -961,7 +1094,7 @@ pub fn orchestrator_tools(
         workflow_source_dir.clone(),
         Some(store.clone()),
     ))];
-    tools.extend(delegation_tools(queue));
+    tools.extend(delegation_tools(queue, company.clone(), store.clone()));
     tools.push(Box::new(RunWorkflowTool::new(
         company.clone(),
         workflow_source_dir.clone(),
@@ -1734,7 +1867,9 @@ mod tests {
     /// The orchestrator is actually handed the new tools.
     #[test]
     fn delegation_tools_include_the_lifecycle_tools() {
-        let names: Vec<String> = delegation_tools(&DelegationQueue::default())
+        let company = CompanyId::new("acme");
+        let store = Arc::new(MemStore::seeded(seeded_record(&company)));
+        let names: Vec<String> = delegation_tools(&DelegationQueue::default(), company, store)
             .iter()
             .map(|t| t.name().to_string())
             .collect();
@@ -1748,13 +1883,60 @@ mod tests {
         );
     }
 
+    /// A company with a `strategy` desk led by a roster teammate, an
+    /// `archive` desk nobody on the roster sits on, and a `writer` teammate who
+    /// is *not* a desk — the exact shape issue #272 was observed on.
+    fn desks_record(id: &CompanyId) -> CompanyRecord {
+        let manifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+tier = "orchestrator"
+
+[[agent]]
+id = "writer"
+role = "Writer"
+
+[[group_chat]]
+id = "strategy"
+name = "Strategy desk"
+members = ["writer"]
+
+[[group_chat]]
+id = "archive"
+name = "Archive desk"
+members = ["nobody"]
+"#,
+        )
+        .expect("valid manifest");
+        CompanyRecord {
+            manifest,
+            ..seeded_record(id)
+        }
+    }
+
+    fn desk_tool(record: CompanyRecord, queue: &DelegationQueue) -> DelegateToDeskTool {
+        let company = record.id.clone();
+        DelegateToDeskTool::new(
+            queue.clone(),
+            company,
+            Arc::new(MemStore::seeded(record)) as Arc<dyn CompanyStore>,
+        )
+    }
+
     #[tokio::test]
     async fn delegate_to_desk_tool_enqueues_a_hand_off() {
         let queue = DelegationQueue::default();
-        let tool = DelegateToDeskTool::new(queue.clone());
-        tool.execute(json!({ "desk": "strategy", "instruction": "draft a plan" }))
+        let tool = desk_tool(desks_record(&CompanyId::new("acme")), &queue);
+        let result = tool
+            .execute(json!({ "desk": "strategy", "instruction": "draft a plan" }))
             .await
             .expect("execute");
+        assert!(!result.is_error, "a real desk with a lead is delegatable");
         let drained = queue.drain(MAX_DELEGATIONS_PER_TURN);
         assert_eq!(
             drained,
@@ -1763,6 +1945,79 @@ mod tests {
                 instruction: "draft a plan".to_string(),
             }]
         );
+    }
+
+    /// Issue #272: the observed failure — the orchestrator handed work to
+    /// `writer`, which is a teammate rather than a desk. Nothing may be queued,
+    /// and the refusal must carry the real desk ids so the model can correct
+    /// itself in the same turn.
+    #[tokio::test]
+    async fn delegate_to_desk_tool_refuses_a_desk_that_does_not_exist() {
+        let queue = DelegationQueue::default();
+        let tool = desk_tool(desks_record(&CompanyId::new("acme")), &queue);
+        let result = tool
+            .execute(json!({ "desk": "writer", "instruction": "draft the release note" }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "an invented desk must be refused");
+        let text = result.output_for_llm(true);
+        assert!(text.contains("strategy"), "valid ids must be named: {text}");
+        assert!(
+            text.contains("teammate"),
+            "a teammate-as-desk target must be named as such: {text}"
+        );
+        assert_eq!(
+            queue.queued(),
+            0,
+            "a refused target must not survive as a queued hand-off"
+        );
+        assert_eq!(
+            queue.drain_refusals(MAX_DELEGATIONS_PER_TURN),
+            vec!["writer".to_string()],
+            "the drain must be able to report the attempt on the card"
+        );
+    }
+
+    /// A desk that exists but has nobody on the roster can never run a turn, so
+    /// the hand-off is refused rather than queued into a drain that cannot
+    /// deliver it.
+    #[tokio::test]
+    async fn delegate_to_desk_tool_refuses_a_desk_with_no_roster_lead() {
+        let queue = DelegationQueue::default();
+        let tool = desk_tool(desks_record(&CompanyId::new("acme")), &queue);
+        let result = tool
+            .execute(json!({ "desk": "archive", "instruction": "file it" }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "a leadless desk must be refused");
+        let text = result.output_for_llm(true);
+        assert!(
+            text.contains("no member on the roster"),
+            "the refusal must name the cause: {text}"
+        );
+        assert!(
+            text.contains("strategy"),
+            "a desk that CAN take work must be offered: {text}"
+        );
+        assert_eq!(queue.queued(), 0);
+    }
+
+    /// Fail-open: with no record to read, delegation behaves exactly as it did
+    /// before grounding existed. A store gap must not take delegation offline.
+    #[tokio::test]
+    async fn delegate_to_desk_tool_queues_ungrounded_when_no_record_is_readable() {
+        let queue = DelegationQueue::default();
+        let tool = DelegateToDeskTool::new(
+            queue.clone(),
+            CompanyId::new("acme"),
+            Arc::new(MemStore::default()) as Arc<dyn CompanyStore>,
+        );
+        let result = tool
+            .execute(json!({ "desk": "whatever", "instruction": "do it" }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error);
+        assert_eq!(queue.queued(), 1);
     }
 
     #[tokio::test]
@@ -1827,6 +2082,33 @@ name = "Morning"
         assert!(
             out.contains("Fact Fetcher"),
             "overlay teammate name missing: {out}"
+        );
+    }
+
+    /// Issue #272: `query_company` is the grounding surface the orchestrator is
+    /// told to consult, but it listed the roster and not the **desks** — so an
+    /// orchestrator about to delegate had no authoritative id to read and
+    /// reached for a teammate's name instead. Every desk is listed by the id
+    /// `delegate_to_desk` takes, with its lead, and a desk nobody leads says so.
+    #[tokio::test]
+    async fn query_company_tool_lists_the_desks_delegation_accepts() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(desks_record(&company)));
+        let tool = QueryCompanyTool::new(company, None, None, None, Some(store));
+        let out = tool
+            .execute(json!({}))
+            .await
+            .expect("execute")
+            .output_for_llm(true);
+
+        assert!(out.contains("## Desks"), "{out}");
+        assert!(
+            out.contains("**strategy** — lead: writer"),
+            "a delegatable desk must name its id and lead: {out}"
+        );
+        assert!(
+            out.contains("**archive** — no member on the roster"),
+            "a leadless desk must say it cannot be handed work: {out}"
         );
     }
 
