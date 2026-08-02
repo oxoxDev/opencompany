@@ -112,8 +112,24 @@ export interface DeliveryReport {
   /** The address or channel actually addressed, when there was one. */
   target?: string;
   status: DeliveryStatus;
-  /** An operator-readable reason — populated even on success. */
+  /**
+   * An operator-readable reason — populated even on success. This is the half
+   * the drawer renders: it may quote the transport verbatim, which is what
+   * makes a refused send fixable, and this console is a tenant surface.
+   */
   detail: string;
+  /**
+   * The same outcome as a stable token out of a closed set (issue #248) —
+   * `"mail-transport-refused"`, `"channel-not-wired"`, and so on.
+   *
+   * It exists because the host's own logs may not carry `detail`: on the
+   * transport-failure arms `detail` interpolates the transport's reply, which
+   * routinely quotes the recipient's address, and host stdout is a platform
+   * surface rather than a tenant one. Nothing renders it today — `detail` is
+   * strictly more informative here — so it is optional on the type (not the
+   * wire), and a response from a host predating #248 still parses.
+   */
+  reason?: string;
 }
 
 /** The result of a run: the engine's final state and any pending approvals. */

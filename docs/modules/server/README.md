@@ -73,6 +73,14 @@ diagnosable in the host's stdout, which is not the same as operator-visible.
 Surfacing those outcomes is issue #228; the durable record it needs is the
 first-class `Run` tracked by issue #242.
 
+That distinction decides what the scheduler's log line may say. Every row
+carries two reasons: `detail`, the free text the run response and the console
+render, and `reason`, a closed set (`DeliveryReason`). Only `reason` is logged.
+On the transport-failure arms `detail` interpolates the transport's own reply,
+and a mail transport quotes the mailbox it refused — so `detail` on host stdout
+would put a recipient's address on a platform surface. `reason` says what class
+of thing failed and has no field that could carry the address (issue #248).
+
 Authoring a destination and reading the result back:
 
 Both routes go through `ScopedCompany`, so both need an operator credential —
