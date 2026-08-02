@@ -176,12 +176,25 @@ export function TaskEditDialog({
           <div className="grid grid-cols-3 gap-3">
             <div className="grid gap-1.5">
               <Label htmlFor="task-column">Column</Label>
+              {/* Fall back to the card's own value rather than `undefined`.
+                  `draft` starts empty and is seeded a tick later by the effect
+                  above, so a bare `draft.column` hands Base UI `undefined` on
+                  the first render — which latches the select as *uncontrolled*
+                  and makes it ignore the seeded value, leaving the trigger
+                  blank for the whole life of the dialog. */}
               <Select
-                value={draft.column}
+                value={draft.column ?? task.column}
                 onValueChange={(v) => setDraft((d) => ({ ...d, column: v ?? undefined }))}
               >
                 <SelectTrigger id="task-column">
-                  <SelectValue />
+                  {/* The trigger renders the raw value unless told otherwise,
+                      and a column's id is not its label (`in_progress` vs "In
+                      progress"). */}
+                  <SelectValue>
+                    {(selected) =>
+                      TASK_COLUMNS.find((c) => c.id === selected)?.label ?? String(selected ?? "")
+                    }
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {TASK_COLUMNS.map((c) => (
@@ -194,12 +207,14 @@ export function TaskEditDialog({
             </div>
             <div className="grid gap-1.5">
               <Label htmlFor="task-priority">Priority</Label>
+              {/* Same seeding hazard as Column above. A priority is its own
+                  label, so only the casing the items carry needs restating. */}
               <Select
-                value={draft.priority}
+                value={draft.priority ?? task.priority}
                 onValueChange={(v) => setDraft((d) => ({ ...d, priority: v ?? undefined }))}
               >
                 <SelectTrigger id="task-priority">
-                  <SelectValue />
+                  <SelectValue className="capitalize" />
                 </SelectTrigger>
                 <SelectContent>
                   {PRIORITIES.map((p) => (
