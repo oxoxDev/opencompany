@@ -311,6 +311,126 @@ async fn created_tasks_default_to_the_todo_column() {
     assert_eq!(explicit["column"], crate::ports::tasks::COLUMN_BACKLOG);
 }
 
+/// Issue #246: `POST …/tasks` carries the thread a card was opened from.
+///
+/// `TaskRecord.origin_chat_id` has existed since #151 and the tool-spawn path
+/// stamped it, but this handler hardcoded `None` and no DTO projected it — so a
+/// card opened from a conversation had no way back to it, and #151's
+/// "answer where you were asked" post-back could never fire for anything the
+/// REST surface created. Both halves are checked here: the write keeps it, and
+/// **both** reads (the board list and task detail) hand it back.
+#[tokio::test]
+async fn a_task_created_from_a_thread_remembers_and_reads_back_that_thread() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, created) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Ship the brief", "originChatId": "strategy"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created["originChatId"], "strategy");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // The board read (what the console lists) carries it…
+    let (_, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    assert_eq!(board.as_array().unwrap()[0]["originChatId"], "strategy");
+
+    // …and so does task detail, which is where an operator asks "where did
+    // this come from?".
+    let (status, detail) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/tasks/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["task"]["originChatId"], "strategy");
+
+    // A card created without a thread — the board's `+` button — omits the key
+    // entirely rather than sending null, so the pre-#246 wire shape is
+    // unchanged for every card that has no conversation behind it.
+    let (_, plain) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Typed on the board"})),
+    )
+    .await;
+    assert!(
+        plain.get("originChatId").is_none(),
+        "a card with no originating thread must not grow the key: {plain}"
+    );
+
+    // A blank thread id is normalised away rather than persisted as a thread
+    // that matches nothing.
+    let (_, blank) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Blank origin", "originChatId": "   "})),
+    )
+    .await;
+    assert!(blank.get("originChatId").is_none(), "{blank}");
+}
+
+/// Issue #246 spend gate, at the HTTP boundary. The transcript's "Add to
+/// board" action omits `column` on purpose so the *server* decides where a
+/// chat-created card lands — and the one thing that must never happen is that
+/// it lands on the dispatch trigger, which spends an agent turn nobody
+/// approved. `dispatch_task` is a no-op in this build (no harness attached),
+/// so the load-bearing assertion is the landing column itself; the journal
+/// check is the belt to that braces, and would catch a create that started
+/// journaling a dispatch of its own.
+#[tokio::test]
+async fn a_chat_created_card_lands_off_the_dispatch_trigger() {
+    use crate::ports::tasks::{COLUMN_IN_PROGRESS, COLUMN_TODO};
+    use crate::ports::types::CompanyEvent;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+    let (status, created) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Draft the announcement", "originChatId": "main"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(
+        created["column"], COLUMN_IN_PROGRESS,
+        "a chat-created card must never arrive already dispatched"
+    );
+    assert_eq!(
+        created["column"], COLUMN_TODO,
+        "it lands in the board's intake lane, where the human drag is the gate"
+    );
+
+    let journal = runtime
+        .events()
+        .read_from(
+            runtime.id(),
+            crate::ports::types::EventSeq::new(0),
+            usize::MAX,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !journal
+            .iter()
+            .any(|e| matches!(e.event, CompanyEvent::TaskDispatched { .. })),
+        "creating a card from chat must not dispatch it"
+    );
+}
+
 #[tokio::test]
 async fn steer_task_validates_statuses_and_journals_acceptance() {
     let home_dir = home();

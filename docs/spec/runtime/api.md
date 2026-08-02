@@ -43,7 +43,7 @@ below). Anything a build doesn't serve `404`s — the console treats that as "no
 wired yet".
 
 ```text
-POST   …/tasks                              create a task card
+POST   …/tasks                              create a task card (`originChatId` records the thread it came from, #246)
 PATCH  …/tasks/{taskId}                      edit / move a task
 DELETE …/tasks/{taskId}                      delete a task
 POST   …/memory                             add a memory fact

@@ -66,6 +66,16 @@ struct TaskCard {
     /// the board's existing wire shape is unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
     parent_task_id: Option<String>,
+    /// The chat thread this card was opened from (issue #246).
+    ///
+    /// `TaskRecord::origin_chat_id` has existed since #151 (it is what lets a
+    /// completed run answer in the conversation that asked), and the tool-spawn
+    /// path stamps it — but it was never *readable*: no DTO projected it, so
+    /// task detail could not show where a card came from. Omitted when absent,
+    /// which is every card the board created before this, so the existing wire
+    /// shape is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin_chat_id: Option<String>,
 }
 
 impl From<TaskRecord> for TaskCard {
@@ -79,6 +89,7 @@ impl From<TaskRecord> for TaskCard {
             assignee: t.assignee,
             updated_at: t.updated_at_millis,
             parent_task_id: t.parent_task_id,
+            origin_chat_id: t.origin_chat_id,
         }
     }
 }
@@ -100,6 +111,14 @@ struct CreateTask {
     /// lineage root, which is every card the board creates today.
     #[serde(default)]
     parent_task_id: Option<String>,
+    /// The chat thread this card is being opened from (issue #246).
+    ///
+    /// Set by the transcript's "Add to board" action, which is the one creation
+    /// entry point that *has* an originating conversation; the board's `+`
+    /// button omits it. Absent is the previous behaviour and stays the default,
+    /// so no existing caller changes.
+    #[serde(default)]
+    origin_chat_id: Option<String>,
 }
 
 /// The partial patch body (any subset; a drag sends `{column}`).
@@ -274,7 +293,17 @@ async fn create_task(
         priority: body.priority.unwrap_or_else(|| "medium".to_string()),
         assignee,
         updated_at_millis: now_millis(),
-        origin_chat_id: None,
+        // Issue #246: provenance is now carried, not dropped. This was
+        // hardcoded `None` while the tool-spawn path stamped the same field
+        // correctly, so a card opened from a conversation had no way back to it
+        // — and #151's "answer where you were asked" post-back could never fire
+        // for anything the REST surface created. A blank string is normalised
+        // away so an empty form field cannot persist as a thread id that
+        // matches nothing.
+        origin_chat_id: body
+            .origin_chat_id
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty()),
         parent_task_id: body.parent_task_id,
     };
     company.runtime.upsert_task(&record).await?;
