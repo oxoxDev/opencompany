@@ -1,7 +1,23 @@
 //! Workflow surfaces: create a graph (`POST /workflows`), read the company's
 //! saved graphs (`GET /workflows`, `GET /workflows/{wid}`), run one
-//! (`POST /workflows/{wid}/run`), and read back what past runs did
-//! (`GET /workflows/runs`) — under both scope forms.
+//! (`POST /workflows/{wid}/run`), read back what past runs did
+//! (`GET /workflows/runs`), and preview what a trigger's cron means
+//! (`POST /workflows/cron/preview`) — under both scope forms.
+//!
+//! ## Cron preview (issue #262)
+//!
+//! `POST /workflows/cron/preview` answers what a 5-field expression means and
+//! when it next fires. A schedule's dangerous failure is the one that
+//! *validates*: `0 9 * * *` and `9 0 * * *` are both valid and nine hours
+//! apart, and the dialect is always UTC, so nothing in the authoring flow
+//! contradicts an author who meant something else. Reading the parsed schedule
+//! back is the only defence, since neither expression is invalid.
+//!
+//! It is the only route here that answers **200 on bad input**, carrying the
+//! parser's message in the body — the console calls it while the author is
+//! still typing, so a half-written expression is the normal state rather than
+//! an error. See [`preview_cron`] for the full reasoning; `POST /workflows`
+//! still refuses to save a graph whose schedule does not parse.
 //!
 //! ## Run history (issue #228)
 //!
