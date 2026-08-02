@@ -54,6 +54,9 @@ const MANIFEST_INVITE_TTL_MILLIS: u64 = 30 * 24 * 60 * 60 * 1000;
 /// disturb the live code — otherwise the throttle would itself be the
 /// membership oracle the rest of this module refuses to be, and an attacker
 /// could invalidate a victim's link on demand.
+///
+/// It applies only where a mail can actually go out; see
+/// [`echoes_code_in_response`].
 const RESEND_INTERVAL_MILLIS: u64 = 60 * 1000;
 
 /// Builds the user-auth route fragment.
@@ -350,11 +353,19 @@ async fn request_code(
     // reaches a store read that an eligible one does — and answered with the
     // same 202, so the throttle is not itself an oracle. The live code is left
     // alone: replacing it here would let anyone kill a victim's link at will.
-    if let Some(previous) = runtime
-        .login_codes()
-        .latest_for_email(runtime.id(), &email)
-        .await
-        .map_err(|e| ApiError(e).into_response())?
+    //
+    // Skipped entirely where nothing is mailed and the code comes back in the
+    // response instead (issue #271). Only the plaintext's *hash* is stored, so
+    // a throttled response cannot re-echo the live code — it hands the caller
+    // an acknowledgement and no way in, for a minute after every single sign-in.
+    // On a loopback host with no transport that is not rate-limiting a mail
+    // cannon, it is the only sign-in path locking itself.
+    if !echoes_code_in_response(&state)
+        && let Some(previous) = runtime
+            .login_codes()
+            .latest_for_email(runtime.id(), &email)
+            .await
+            .map_err(|e| ApiError(e).into_response())?
         && now.saturating_sub(previous.created_at_millis) < RESEND_INTERVAL_MILLIS
     {
         tracing::debug!(company = %runtime.id(), "login link throttled");
@@ -420,8 +431,35 @@ async fn request_code(
     }))
 }
 
+/// Whether this host has a mail transport at all.
+///
+/// Not "will this send succeed" — a wired transport that errors still counts,
+/// because the attempt is what the resend throttle rate-limits.
+fn mail_transport_wired(state: &AppState) -> bool {
+    let connections = state.connections();
+    connections.mail.is_some() && connections.mail_credentials.is_some()
+}
+
+/// Whether a minted code comes back in the response instead of going to a
+/// mailbox.
+///
+/// Exactly the shape the dev echo is already gated on: a loopback bind, no
+/// `public_url`, and no mail transport wired. Nothing leaves the machine in
+/// that shape — there is no mailbox to flood and no remote caller to leak to —
+/// which is what makes skipping the resend throttle there safe. Any other host
+/// keeps the throttle.
+fn echoes_code_in_response(state: &AppState) -> bool {
+    state.config().is_local_only() && !mail_transport_wired(state)
+}
+
 /// Mails the magic link. Returns whether it was actually sent.
 async fn deliver_code(state: &AppState, runtime: &CompanyRuntime, email: &str, code: &str) -> bool {
+    // Asked through the shared predicate so "can this host mail at all" has one
+    // answer: the throttle and the dev echo both branch on it, and a second
+    // spelling here is how those three drift apart.
+    if !mail_transport_wired(state) {
+        return false;
+    }
     let connections = state.connections();
     let (Some(sender), Some(creds)) = (&connections.mail, &connections.mail_credentials) else {
         return false;
