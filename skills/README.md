@@ -20,6 +20,7 @@ Skills view against the `Marketing / Research / Ops / Content / Finance` set.
 | [competitor-scan](competitor-scan/SKILL.md) | Research | Profile competitors and surface where you can win. |
 | [deal-memo](deal-memo/SKILL.md) | Research | Turn diligence into a memo with a recommendation. |
 | [meeting-brief](meeting-brief/SKILL.md) | Ops | A one-page brief so the operator walks in ready. |
+| [call-debrief](call-debrief/SKILL.md) | Ops | Turn a call transcript into decisions and owned action items. |
 | [customer-followup](customer-followup/SKILL.md) | Ops | A timely, personal follow-up that moves a thread forward. |
 | [hiring-screen](hiring-screen/SKILL.md) | Ops | Screen a candidate against a role into a recommendation. |
 | [changelog-writer](changelog-writer/SKILL.md) | Content | Turn merged changes into a user-facing changelog. |
