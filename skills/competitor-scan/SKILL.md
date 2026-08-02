@@ -2,6 +2,7 @@
 name: Competitor Scan
 description: Profile a handful of competitors and surface where you can win, in one comparison table.
 category: Research
+version: 1.0.0
 ---
 
 # Competitor Scan

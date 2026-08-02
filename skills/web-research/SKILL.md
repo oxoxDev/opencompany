@@ -1,6 +1,7 @@
 ---
 name: Web Research
 description: Answer a question from multiple independent sources and return a cited, verified summary.
+version: 1.0.0
 ---
 
 # Web Research
