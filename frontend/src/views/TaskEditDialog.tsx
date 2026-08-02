@@ -40,6 +40,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { TASK_COLUMNS } from "@/lib/tasks-sample";
 import { toast } from "sonner";
+import { AssigneeSelect } from "./AssigneeSelect";
 
 const PRIORITIES = ["low", "medium", "high"] as const;
 
@@ -211,11 +212,15 @@ export function TaskEditDialog({
             </div>
             <div className="grid gap-1.5">
               <Label htmlFor="task-assignee">Assignee</Label>
-              <Input
+              {/* Issue #263: picked from the roster, not typed. An assignee the
+                  roster no longer carries still renders — flagged — so a save
+                  that does not touch it can never quietly rewrite it. */}
+              <AssigneeSelect
                 id="task-assignee"
+                client={client}
+                company={company}
                 value={draft.assignee ?? ""}
-                placeholder="agent id"
-                onChange={(e) => setDraft((d) => ({ ...d, assignee: e.target.value }))}
+                onChange={(next) => setDraft((d) => ({ ...d, assignee: next }))}
               />
             </div>
           </div>
