@@ -130,15 +130,6 @@ impl From<ModeArg> for LaunchMode {
     }
 }
 
-/// The default OpenCompany home: `$HOME/.opencompany/companies`, falling back
-/// to a relative path when `$HOME` is unset.
-fn default_home() -> PathBuf {
-    match std::env::var_os("HOME") {
-        Some(home) => PathBuf::from(home).join(".opencompany").join("companies"),
-        None => PathBuf::from(".opencompany").join("companies"),
-    }
-}
-
 /// Resolves a `--company` argument to its source *directory*. `--company`
 /// accepts either the company directory (`companies/<name>`) or the manifest
 /// file inside it (`companies/<name>/company.toml`); the file form is normalized
@@ -611,7 +602,7 @@ async fn run_export(
     include_secrets: bool,
     home: Option<PathBuf>,
 ) -> Result<()> {
-    let home = home.unwrap_or_else(default_home);
+    let home = opencompany::store::resolve_home(home)?;
     let id = CompanyId::new(company);
     let dest = out.unwrap_or_else(|| PathBuf::from(format!("{}-bundle", id.as_ref())));
     export_to_dir(&home, &id, include_secrets, &dest).await?;
@@ -632,7 +623,7 @@ async fn run_export(
 ) -> Result<()> {
     use opencompany::store::export::pack_tar;
 
-    let home = home.unwrap_or_else(default_home);
+    let home = opencompany::store::resolve_home(home)?;
     let id = CompanyId::new(company);
     let out = out.unwrap_or_else(|| PathBuf::from(format!("{}.tar", id.as_ref())));
 
@@ -689,7 +680,7 @@ async fn import_from_dir(dir: &std::path::Path, home: Option<PathBuf>) -> Result
     use opencompany::store::export::{find_bundle_root, import_bundle, restore_fs_artifacts};
     use opencompany::store::paths::Bundle;
 
-    let home = home.unwrap_or_else(default_home);
+    let home = opencompany::store::resolve_home(home)?;
     let root = find_bundle_root(dir)?;
     let (store, events, memory, context) = fs_ports(&home);
     let id = import_bundle(&root, store, events, memory, context).await?;
@@ -712,12 +703,21 @@ async fn main() -> Result<()> {
             home,
             discoverable,
         }) => {
-            let home = home.unwrap_or_else(default_home);
+            // `--home` > OPENCOMPANY_DATA_DIR > $HOME/.opencompany/companies.
+            let home = opencompany::store::resolve_home(home)?;
             // Materialize the canonical data-dir workspace layout and empty the
             // ephemeral `tmp/` scratch so nothing stale survives a restart. The
             // `[workspace]` section of `config.toml` (in the data dir) toggles
             // the tmp clear; absent config keeps the default (clear on startup).
             let data_root = opencompany::app::config::data_dir_from_env();
+            // An explicit `--home` pointing away from the data root splits one
+            // instance in two: bundles here, shared workspace there. Printed
+            // rather than `warn!`d — the default `EnvFilter` drops warnings
+            // unless RUST_LOG is set, so a `warn!` would be exactly as silent
+            // as the bug it reports.
+            if let Some(warning) = opencompany::store::home_divergence_warning(&home, &data_root) {
+                eprintln!("opencompany: {warning}");
+            }
             let workspace_cfg = ConfigFile::load(&data_root)?
                 .map(|c| c.workspace.resolve())
                 .unwrap_or_default();
@@ -1000,10 +1000,15 @@ mod test {
     use super::*;
 
     #[test]
-    fn default_home_lands_under_opencompany() {
-        let home = default_home();
-        assert!(home.ends_with("companies"));
-        assert!(home.to_string_lossy().contains(".opencompany"));
+    fn the_home_flag_is_taken_verbatim() {
+        // The binary owns no home policy of its own: it delegates to
+        // `store::resolve_home`, whose precedence chain (flag >
+        // OPENCOMPANY_DATA_DIR > $HOME/.opencompany/companies) is covered in
+        // `src/store/paths.rs`. This only pins the wiring.
+        assert_eq!(
+            opencompany::store::resolve_home(Some(PathBuf::from("/flag"))).unwrap(),
+            PathBuf::from("/flag")
+        );
     }
 
     #[tokio::test]
