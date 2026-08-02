@@ -471,7 +471,11 @@ function ControlBar({
 
   async function saveAssignee() {
     const next = assignee.trim();
-    if (!next || next === task.assignee) {
+    // Only an unchanged value is a no-op. Blank used to short-circuit here too,
+    // which made the one deliberate way to hand a card back to the orchestrator
+    // unreachable from this screen — the host accepts it happily
+    // (`resolve("") -> Unassigned -> canonical ""`), the row just never sent it.
+    if (next === task.assignee) {
       setReassigning(false);
       return;
     }
