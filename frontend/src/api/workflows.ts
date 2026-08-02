@@ -10,6 +10,17 @@ export interface WorkflowSummary {
   id: string;
   name: string;
   description?: string;
+  /**
+   * Whether this workflow can be edited or deleted through the API (issue
+   * #259). `false` for a graph defined by a file in the company source tree,
+   * and for a name-only entry with no saved graph at all — the host refuses
+   * both with a 409, so the console greys the affordance out instead.
+   *
+   * **Optional on the type, not on the wire.** A host predating #259 sends no
+   * such field, and `undefined` must not read as "not editable" — treat only an
+   * explicit `false` as a refusal.
+   */
+  editable?: boolean;
 }
 
 /** A single graph node. `kind` is one of the tinyflows node kinds. */
@@ -84,6 +95,19 @@ export interface WorkflowGraph {
   description?: string;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
+  /** See {@link WorkflowSummary.editable}. Same "only `false` means no" rule. */
+  editable?: boolean;
+  /**
+   * The opaque optimistic-concurrency token for this graph (issue #259),
+   * present only when `editable`.
+   *
+   * **Echo it back, never parse it.** Pass it to {@link updateWorkflow} or
+   * {@link deleteWorkflow} and the host refuses the write with a 409 if the
+   * graph changed since this read — which is what stops one console silently
+   * overwriting another's edit. Absent from a host predating #259, in which case
+   * the write is unconditional and that protection simply does not exist.
+   */
+  version?: string;
 }
 
 /**
@@ -221,6 +245,71 @@ export function createWorkflow(
   graph: WorkflowGraph,
 ): Promise<WorkflowGraph> {
   return client.post<WorkflowGraph>(`${client.scopeFor(company)}/workflows`, graph);
+}
+
+/**
+ * Replaces a saved workflow graph wholesale (issue #259) — the fix for a
+ * workflow being write-once, so a typo'd cron or a node pointed at the wrong
+ * teammate can be corrected instead of abandoned.
+ *
+ * `graph.id` must equal `wid`: a workflow's id keys its saved graph, its
+ * schedule and its run history, so the host rejects a rename with a `400`. A
+ * rename is a create plus a delete.
+ *
+ * Pass `expectedVersion` — the `version` from the {@link getWorkflow} this edit
+ * was based on — to make the write conditional. If the graph moved in between,
+ * the host answers `409` and **nothing is written**; surface that to the
+ * operator with a reload rather than retrying without the token, which is the
+ * silent-overwrite the guard exists to prevent.
+ *
+ * Other rejections carry the same prosumer-language `ApiError` a create does:
+ * `400` for a bad graph, `404` for an unknown id, `409` for a source-defined
+ * workflow or a display name already taken.
+ *
+ * Returns the stored graph with a **fresh** `version`, so a second save needs no
+ * intervening read.
+ */
+export function updateWorkflow(
+  client: OpenCompanyClient,
+  company: string | null,
+  wid: string,
+  graph: WorkflowGraph,
+  expectedVersion?: string,
+): Promise<WorkflowGraph> {
+  return client.put<WorkflowGraph>(
+    `${client.scopeFor(company)}/workflows/${encodeURIComponent(wid)}`,
+    expectedVersion ? { ...graph, expectedVersion } : graph,
+  );
+}
+
+/**
+ * Removes a saved workflow (issue #259): the graph body and its entry in the
+ * company's enabled list, in one write, so it leaves the picker and stops
+ * firing on its schedule — and stays gone across a host restart.
+ *
+ * **Past runs are kept.** They record what the workflow did, which stays true
+ * after it is gone; {@link listWorkflowRuns} keeps serving them.
+ *
+ * `expectedVersion` makes the delete conditional in exactly the sense the
+ * operator means by clicking Delete on a graph they are looking at: if it
+ * changed underneath them, the host answers `409` and removes nothing.
+ *
+ * Follows the same runtime-vs-source contract as `deleteDesk`: a workflow
+ * defined by a file in the company source tree cannot be removed from the
+ * console and returns `409`; an unknown id is `404`.
+ */
+export function deleteWorkflow(
+  client: OpenCompanyClient,
+  company: string | null,
+  wid: string,
+  expectedVersion?: string,
+): Promise<void> {
+  const query = expectedVersion
+    ? `?expectedVersion=${encodeURIComponent(expectedVersion)}`
+    : "";
+  return client.del<void>(
+    `${client.scopeFor(company)}/workflows/${encodeURIComponent(wid)}${query}`,
+  );
 }
 
 /**
