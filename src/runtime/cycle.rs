@@ -40,6 +40,7 @@ use crate::ports::{generate_id, now_millis};
 use crate::runtime::channel::OPERATOR_CHANNEL;
 use crate::runtime::delegation_tools::{
     DELEGATE_TO_DESK_TOOL, DelegateArgs, SPAWN_TASK_TOOL, SpawnTaskArgs, desk_lead,
+    unknown_desk_message,
 };
 use crate::runtime::types::CycleReport;
 use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
@@ -743,11 +744,27 @@ impl<'a> CycleHostImpl<'a> {
             .as_ref()
             .and_then(|r| r.resolve_desk_id(&parsed.desk))
         else {
+            // Issue #272: the refusal now carries the company's real desk ids
+            // (and, when the invented target names a teammate, the desk that
+            // teammate is on), so the remote cognition can correct itself in the
+            // same turn rather than only learning that its pick was wrong. The
+            // message is the one the harness tool's boundary check uses, so the
+            // two paths cannot drift.
+            //
+            // Only the *unknown* desk is refused here. A real desk with no
+            // roster lead is left alone on this path: the hosted hand-off is a
+            // durable card assigned to the desk, which is visible on the board
+            // whether or not anyone leads it yet — there is nothing silent
+            // about it.
+            let error = match record.as_ref() {
+                Some(record) => unknown_desk_message(record, &parsed.desk),
+                None => format!("no desk matches \"{}\"", parsed.desk),
+            };
             return Ok(ToolResult {
                 ok: false,
                 output: serde_json::json!({
                     "status": "unknown_desk",
-                    "error": format!("no desk matches \"{}\"", parsed.desk),
+                    "error": error,
                 }),
             });
         };
