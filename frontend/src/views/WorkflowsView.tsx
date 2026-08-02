@@ -10,12 +10,13 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useTheme } from "next-themes";
-import { History, Loader2, Play, Plus } from "lucide-react";
+import { History, Loader2, Play, Plus, RotateCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import {
+  deleteWorkflow,
   getWorkflow,
   listWorkflowRuns,
   listWorkflows,
@@ -29,6 +30,18 @@ import {
   type WorkflowSummary,
 } from "@/api/workflows";
 import type { OpenCompanyClient } from "@/api/client";
+import { ApiError } from "@/api/types";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -100,6 +113,17 @@ export function WorkflowsView({
   const [historySupported, setHistorySupported] = useState(true);
   // Bumped after a manual run so the history picks it up without a reload.
   const [runsTick, setRunsTick] = useState(0);
+  // Issue #259: a delete in flight, and the host's message when a write was
+  // refused because the graph moved under us.
+  const [deleting, setDeleting] = useState(false);
+  // A version conflict is deliberately NOT a toast. It means the operator is
+  // looking at a stale graph, so it has to persist next to the canvas with a way
+  // out (Reload) — a toast that auto-dismisses would leave them staring at the
+  // old graph believing the write landed.
+  const [conflict, setConflict] = useState<string | null>(null);
+  // Bumped by the conflict banner's Reload, to re-fetch the selected graph (and
+  // with it a fresh `version`) without changing the selection.
+  const [graphTick, setGraphTick] = useState(0);
 
   // Load the workflow list once, and auto-select the first entry.
   useEffect(() => {
@@ -144,6 +168,9 @@ export function WorkflowsView({
         if (!live) return;
         setGraph(g);
         setError(null);
+        // A successful re-read is exactly what clears a stale-graph warning:
+        // whatever `version` we now hold is current.
+        setConflict(null);
       } catch (e) {
         if (!live) return;
         setGraph(null);
@@ -155,7 +182,7 @@ export function WorkflowsView({
     return () => {
       live = false;
     };
-  }, [client, company, selectedId]);
+  }, [client, company, selectedId, graphTick]);
 
   // Load the SELECTED workflow's run history. Re-runs when the selection or
   // company changes, after a manual run, and on every `workflow_run_finished`
@@ -231,6 +258,42 @@ export function WorkflowsView({
     }
   }, [client, company, selectedId, request]);
 
+  // Issue #259: remove the selected workflow.
+  //
+  // The `version` from the graph we are looking at rides along, so this means
+  // "delete the thing on my screen" rather than "delete whatever is there now".
+  // If it changed underneath us the host refuses with a 409 and removes nothing,
+  // and we surface that instead of quietly deleting a graph the operator never
+  // saw.
+  const remove = useCallback(async () => {
+    if (!selectedId || !graph) return;
+    const removedName = graph.name;
+    setDeleting(true);
+    try {
+      await deleteWorkflow(client, company, selectedId, graph.version);
+      // Drop it locally rather than re-listing: the host has confirmed, and a
+      // re-list would flash an empty picker.
+      const remaining = workflows.filter((w) => w.id !== selectedId);
+      setWorkflows(remaining);
+      setSelectedId(remaining[0]?.id ?? null);
+      setGraph(null);
+      setResult(null);
+      setSelectedNodeId(null);
+      setConflict(null);
+      toast.success(`Deleted “${removedName}”.`);
+    } catch (e) {
+      // A 409 is the one failure the operator can actually act on, and acting
+      // on it means reloading — so it gets the persistent banner, not a toast.
+      if (e instanceof ApiError && e.status === 409) {
+        setConflict(e.message);
+      } else {
+        toast.error(e instanceof Error ? e.message : "could not delete the workflow");
+      }
+    } finally {
+      setDeleting(false);
+    }
+  }, [client, company, selectedId, graph, workflows]);
+
   // The creator posts the full graph back, so the new entry can be spliced
   // straight into the list and selected — no extra round trip to re-list.
   const handleCreated = useCallback((created: WorkflowGraph) => {
@@ -264,6 +327,16 @@ export function WorkflowsView({
   // host filters and orders them. Re-filtering here would be a second source of
   // truth that can only ever disagree with the first.
   const lastRun = runs[0] ?? null;
+
+  // Issue #259. `editable === false` is the host saying "PUT/DELETE on this id
+  // will 409" — a source-defined graph, or a name-only entry with no saved
+  // graph. A host predating #259 sends no field at all, and `undefined` must NOT
+  // read as a refusal, so only an explicit `false` disables the affordance.
+  const notEditable = graph?.editable === false;
+  const canDelete = !!graph && !notEditable && !deleting;
+  const notEditableReason = graph
+    ? `“${graph.name}” is defined by a file in the company source tree, so it can't be removed from the console. Edit workflows/${graph.id}.toml in the company repository instead.`
+    : undefined;
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
@@ -336,12 +409,81 @@ export function WorkflowsView({
               )}
             </Button>
           )}
+          {/* Issue #259. The wrapping span carries the explanation: a disabled
+              button swallows pointer events in most browsers, so a `title` on
+              the button itself would never show. */}
+          <span title={notEditable ? notEditableReason : undefined}>
+            <AlertDialog>
+              <AlertDialogTrigger
+                render={
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={!canDelete}
+                    aria-label="Delete workflow"
+                    data-testid="workflow-delete"
+                  >
+                    {deleting ? (
+                      <Loader2 className="mr-1.5 size-4 animate-spin" />
+                    ) : (
+                      <Trash2 className="mr-1.5 size-4" />
+                    )}
+                    Delete
+                  </Button>
+                }
+              />
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Delete “{graph?.name ?? selectedId}”?</AlertDialogTitle>
+                  {/* Say exactly what goes and what stays. "Stops its schedule"
+                      is the consequence an operator most needs spelled out, and
+                      "past runs stay" stops them hesitating over losing history. */}
+                  <AlertDialogDescription>
+                    This removes the workflow and stops it running on its schedule. Past runs stay
+                    in the run history. This can&apos;t be undone.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Keep it</AlertDialogCancel>
+                  <AlertDialogAction
+                    onClick={() => void remove()}
+                    className="bg-destructive text-white hover:bg-destructive/90"
+                    data-testid="workflow-delete-confirm"
+                  >
+                    Delete workflow
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          </span>
           <Button size="sm" variant="outline" onClick={() => setCreateOpen(true)}>
             <Plus className="mr-1.5 size-4" />
             New workflow
           </Button>
         </div>
       </div>
+
+      {/* Issue #259: a write refused because the graph moved under us. Distinct
+          from `error` on purpose — this one is recoverable, and the recovery is
+          right here, so it must not be mistaken for a generic load failure. */}
+      {conflict && (
+        <div className="px-4 pt-3">
+          <Alert variant="destructive" data-testid="workflow-conflict">
+            <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+              <span>{conflict}</span>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setGraphTick((n) => n + 1)}
+                data-testid="workflow-conflict-reload"
+              >
+                <RotateCw className="mr-1.5 size-4" />
+                Reload
+              </Button>
+            </AlertDescription>
+          </Alert>
+        </div>
+      )}
 
       {error && (
         <div className="px-4 pt-3">
