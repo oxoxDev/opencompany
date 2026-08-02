@@ -66,6 +66,7 @@ use crate::company::{
 };
 use crate::error::OpenCompanyError;
 use crate::ports::types::{CompanyEvent, CompanyRecord, EventSeq, OverlayWorkflow};
+use crate::runtime::cron::{CivilTime, CronExpr};
 use crate::runtime::record_run_finished;
 use crate::server::error::ApiError;
 use crate::server::ops::{ScopedCompany, scoped};
@@ -85,6 +86,9 @@ pub fn router() -> Router<AppState> {
         // read through this route. That is the same trade `tasks/inflight`
         // takes, and the history surface is worth more than the one reserved id.
         .merge(scoped("/workflows/runs", get(list_runs)))
+        // Same static-before-dynamic ordering as `/workflows/runs` above, for
+        // the same reason: `cron` is a syntactically valid `wid`.
+        .merge(scoped("/workflows/cron/preview", post(preview_cron)))
         .merge(scoped("/workflows/{wid}", get(get_workflow)))
         .merge(scoped("/workflows/{wid}/run", post(run_workflow)))
 }
@@ -578,6 +582,105 @@ async fn run_workflow(
         pending_approvals: run.pending_approvals,
         deliveries: run.deliveries,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Cron preview (issue #262)
+// ---------------------------------------------------------------------------
+
+/// How many upcoming fire times the preview returns. Three is enough to show
+/// the *interval* — one time tells you when, three tell you how often — without
+/// turning a one-line hint into a table.
+const CRON_PREVIEW_FIRES: usize = 3;
+
+/// The preview request: the expression as typed, plus an optional instant to
+/// compute the next fires from.
+#[derive(Debug, Deserialize)]
+struct PreviewCronBody {
+    expr: String,
+    /// Epoch millis to search forward from. Defaults to now; present so tests
+    /// can pin the answer instead of asserting against a moving clock.
+    #[serde(default)]
+    after: Option<u64>,
+}
+
+/// The preview response. Untagged, so the two outcomes are two shapes rather
+/// than one shape with half its fields null.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum PreviewCronResponse {
+    /// A valid expression: what it means (`null` when the shape is one
+    /// [`CronExpr::describe`] declines to paraphrase) and when it next fires.
+    Parsed {
+        description: Option<String>,
+        /// Epoch millis, ascending. The console renders each one twice — UTC
+        /// and the viewer's local zone — from this single number, which is what
+        /// makes the two readings incapable of disagreeing.
+        next: Vec<u64>,
+    },
+    /// A malformed expression, carrying the parser's own message.
+    Invalid { error: String },
+}
+
+/// `POST …/workflows/cron/preview` (both scope forms).
+///
+/// Issue #262: a trigger's schedule is a bare cron field, and the failure that
+/// is NOT handled is the *successful* one — `0 9 * * *` saves cleanly whether or
+/// not the author meant 9am, and it is UTC whether or not they read the hint.
+/// Echoing the parsed meaning and the next fire times is the only thing that
+/// turns a silently-wrong schedule into an obviously-wrong one.
+///
+/// **Always answers 200**, including for a malformed expression. The console
+/// calls this while the author is still typing, so half-written garbage is the
+/// normal state, not an exception — and its HTTP client throws on any non-2xx,
+/// so a 400 per keystroke would make an ordinary parse failure arrive as a
+/// thrown error and force try/catch as control flow. The rejection that matters
+/// still happens: the create route validates the schedule and refuses to save a
+/// bad one.
+///
+/// Scoped (and so authenticated) like every other route in this module even
+/// though the computation touches no company state — an unauthenticated compute
+/// endpoint would be a new kind of surface here for no gain.
+async fn preview_cron(
+    _company: ScopedCompany,
+    Json(body): Json<PreviewCronBody>,
+) -> Json<PreviewCronResponse> {
+    let expr = match CronExpr::parse(&body.expr) {
+        Ok(expr) => expr,
+        Err(err) => {
+            return Json(PreviewCronResponse::Invalid {
+                error: err.to_string(),
+            });
+        }
+    };
+
+    let after = body.after.unwrap_or_else(now_millis);
+    let mut cursor = CivilTime::from_unix_millis(after);
+    let mut next = Vec::with_capacity(CRON_PREVIEW_FIRES);
+    for _ in 0..CRON_PREVIEW_FIRES {
+        // `next_after` is bounded and returns `None` only for an expression
+        // that can never fire, which a parsed one cannot be — but stopping
+        // early is still the right answer if that ever changes.
+        let Some(fire) = expr.next_after(&cursor) else {
+            break;
+        };
+        next.push(fire.unix_millis());
+        cursor = fire;
+    }
+
+    Json(PreviewCronResponse::Parsed {
+        description: expr.describe(),
+        next,
+    })
+}
+
+/// Wall-clock epoch millis. Saturates at the epoch rather than panicking on a
+/// clock set before 1970 — a preview is not worth a 500.
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1813,6 +1916,115 @@ mod tests {
             // An array of outcomes, not a single graph object.
             let body = json_body(response).await;
             assert!(body.is_array(), "graph read shadowed the history: {body}");
+        }
+
+        // -------------------------------------------------------------------
+        // Cron preview (issue #262)
+        // -------------------------------------------------------------------
+
+        /// 2026-08-02 12:00 UTC, as epoch millis — the `after` pin every
+        /// preview test searches forward from, so the answers are fixed rather
+        /// than relative to whenever CI runs.
+        const AFTER: u64 = 1_785_672_000_000;
+
+        async fn preview(state: &AppState, expr: &str) -> serde_json::Value {
+            json_body(
+                router(state.clone())
+                    .oneshot(request(
+                        "POST",
+                        "/api/v1/company/workflows/cron/preview",
+                        Some(serde_json::json!({ "expr": expr, "after": AFTER })),
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await
+        }
+
+        /// **The issue #262 pin.** `0 9 * * *` and `9 0 * * *` are two
+        /// characters apart, both valid, and nine hours different. The preview
+        /// is the only thing that tells them apart before the report arrives at
+        /// the wrong time, so the distinction is pinned end-to-end over HTTP,
+        /// not just in the matcher's unit tests.
+        #[tokio::test]
+        async fn cron_preview_distinguishes_nine_am_from_nine_past_midnight() {
+            let home_dir = home();
+            let (state, _store, _id) = hosted_state(home_dir.path()).await;
+
+            let morning = preview(&state, "0 9 * * *").await;
+            assert_eq!(morning["description"], "Every day at 09:00 UTC");
+            // 2026-08-02 12:00 UTC → the next 09:00 is the following morning.
+            assert_eq!(morning["next"][0], 1_785_747_600_000u64);
+            assert_eq!(morning["next"].as_array().unwrap().len(), 3);
+
+            let midnight = preview(&state, "9 0 * * *").await;
+            assert_eq!(midnight["description"], "Every day at 00:09 UTC");
+            assert_ne!(morning["next"][0], midnight["next"][0]);
+        }
+
+        /// A shape the humaniser declines to paraphrase still previews: the
+        /// description is `null` and the fire times carry the meaning. The
+        /// console shows "Next runs: …" rather than nothing.
+        #[tokio::test]
+        async fn cron_preview_returns_fires_without_a_description() {
+            let home_dir = home();
+            let (state, _store, _id) = hosted_state(home_dir.path()).await;
+
+            let body = preview(&state, "0 0 1 * *").await;
+            assert!(body["description"].is_null(), "{body}");
+            assert_eq!(body["next"].as_array().unwrap().len(), 3, "{body}");
+        }
+
+        /// **Malformed input answers 200, not 4xx.** The console previews while
+        /// the author is still typing, so a half-written expression is the
+        /// normal live state — and the console's client throws on any non-2xx,
+        /// which would turn every keystroke into a caught exception. The parser
+        /// message rides in the body instead.
+        #[tokio::test]
+        async fn cron_preview_reports_a_parse_error_as_a_200_body() {
+            let home_dir = home();
+            let (state, _store, _id) = hosted_state(home_dir.path()).await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "POST",
+                    "/api/v1/company/workflows/cron/preview",
+                    Some(serde_json::json!({ "expr": "every day" })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let body = json_body(response).await;
+            let error = body["error"].as_str().expect("an error message: {body}");
+            assert!(error.contains("5 fields"), "{body}");
+            assert!(body["next"].is_null(), "no fire times on a parse error");
+        }
+
+        /// **Route-ordering pin**, the same trade `/workflows/runs` takes:
+        /// `cron` is a syntactically valid `wid`, so the static preview path is
+        /// registered before `/workflows/{wid}`. A regression would route the
+        /// preview into the graph read and 404.
+        #[tokio::test]
+        async fn cron_preview_is_not_shadowed_by_the_graph_read() {
+            let home_dir = home();
+            let (state, _store, _id) = hosted_state(home_dir.path()).await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "POST",
+                    "/api/v1/companies/acme/workflows/cron/preview",
+                    Some(serde_json::json!({ "expr": "0 9 * * MON" })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "the static /workflows/cron/preview must win over /workflows/{{wid}}"
+            );
+            let body = json_body(response).await;
+            assert_eq!(body["description"], "Every Mon at 09:00 UTC", "{body}");
         }
 
         /// Both scope forms serve the history — the platform
