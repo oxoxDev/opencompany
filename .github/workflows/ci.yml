@@ -180,3 +180,78 @@ jobs:
       # without running its feature-sensitive tests.
       - name: Check (--all-features)
         run: cargo check --locked --all-features
+
+  # Issue #281. Both jobs above are Rust-only, so before this job existed NOTHING
+  # in CI installed Node: `frontend/` was invisible to the entire build, and a
+  # TypeScript error there passed every required check and merged. The first
+  # thing that noticed a broken console was `deploy-staging.yml`, which runs
+  # AFTER merge, or a person. Same shape as the #202 blind spot the `rust-gated`
+  # job above closed, with more force — that one hid a subset of the build, this
+  # one hid a whole language.
+  #
+  # `tsconfig.app.json` sets `noUnusedLocals` and `noUnusedParameters`, so the
+  # failure modes are easy to hit: dropping an argument from a helper is enough.
+  #
+  # A THIRD TOP-LEVEL JOB, appended after `rust-gated` rather than folded into
+  # either: it shares no setup with them (no submodules, no system packages, no
+  # toolchain), it runs in parallel so it adds nothing to the critical path, and
+  # it gets its own `Console` check name for branch protection to pin.
+  console:
+    name: Console
+    runs-on: ubuntu-latest
+    # A minute of real work. The cap exists only so a wedged registry fetch fails
+    # in ten minutes instead of burning the runner's six-hour default.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          # No `submodules` — unlike the Rust jobs this one resolves no vendored
+          # manifests, and `vendor/openhuman` is a large checkout to skip.
+
+      # Node 22 tracks `frontend/Dockerfile`, which builds the shipped console
+      # `FROM node:22-slim`. CI must compile on the version that produces the
+      # artifact; bump both together or this job stops being evidence for the
+      # thing that deploys.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # `npm ci`, NOT `npm install` — do not "simplify" this. It is the npm half
+      # of the same property `--locked` buys the cargo steps above (issue #251):
+      # it installs strictly the tree recorded in `package-lock.json` and exits
+      # non-zero when the lock and `package.json` disagree, so a manifest edit
+      # whose lock was never regenerated is named here rather than absorbed.
+      # `npm install` would silently re-resolve and REWRITE the lock in the
+      # runner, which means CI would be typechecking a dependency tree that is
+      # not the one committed — and a green run could not be attributed to the
+      # diff. It is also the command `frontend/Dockerfile` uses.
+      - run: npm ci
+        working-directory: frontend
+
+      # Three steps, not one, because each catches something the others do not
+      # and a separate step names the failure.
+      #
+      # `typecheck` is `tsc -b`: fails fast on `src/` types.
+      - run: npm run typecheck
+        working-directory: frontend
+
+      # `typecheck:e2e` covers `frontend/test/e2e/` and `playwright.config.ts`,
+      # which `tsc -b` does NOT reach — `tsconfig.app.json` is `include: ["src"]`
+      # — so before this the Playwright specs were compiled by nothing at all.
+      # See the header of `frontend/tsconfig.e2e.json`. This does NOT run the
+      # suite: that needs a live host and is still out of CI, per #281.
+      - run: npm run typecheck:e2e
+        working-directory: frontend
+
+      # `build` runs `tsc -b` again but then invokes Vite, which additionally
+      # catches a module-resolution or plugin failure that type-checking alone
+      # never sees — a bad `@/` import or a missing asset builds a green `tsc`
+      # and a broken bundle.
+      - run: npm run build
+        working-directory: frontend
+
+      # No lint step: the package declares no lint script. Adding one is a
+      # separate decision, not something to smuggle in here.
