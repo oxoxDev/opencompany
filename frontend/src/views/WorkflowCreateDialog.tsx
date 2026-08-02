@@ -90,6 +90,42 @@ function looksLikeCron(cron: string): boolean {
   return cron.trim().split(/\s+/).length === 5;
 }
 
+/** What is wrong with `schedule`, or `null` when it is postable.
+ *
+ * One field, one message, no node context — so the same rule can answer both
+ * callers: `validate()` at submit (which prefixes the node it belongs to) and
+ * the field's own blur handler (which shows it under the input). An empty
+ * schedule is fine: "no schedule" is a real choice.
+ */
+function scheduleProblem(schedule: string): string | null {
+  if (!schedule.trim()) return null;
+  if (!looksLikeCron(schedule)) {
+    return "A schedule is a 5-field cron, e.g. `0 9 * * MON` (minute hour day month weekday).";
+  }
+  return null;
+}
+
+/** What is wrong with an output node's `destination.target` for `kind`, or
+ * `null` when it is postable. Mirrors the host's per-kind target contract in
+ * `src/company/workflow_file.rs`; `owner` and "no destination" carry no target
+ * and so have nothing to check.
+ *
+ * Same two-caller contract as {@link scheduleProblem}.
+ */
+function destinationTargetProblem(
+  kind: DraftNode["destinationKind"],
+  target: string,
+): string | null {
+  const value = target.trim();
+  if (kind === "email" && !value.includes("@")) {
+    return "emails its report — give the recipient's full address.";
+  }
+  if (kind === "channel" && !value) {
+    return "posts its report to a channel — name the channel.";
+  }
+  return null;
+}
+
 interface DraftEdge {
   key: string;
   from: string;
@@ -252,21 +288,20 @@ export function WorkflowCreateDialog({
       }
       // Only fires for a node that IS a trigger, so this is a check on visible
       // state, never an off-kind trap.
-      if (n.kind === "trigger" && n.schedule.trim() && !looksLikeCron(n.schedule)) {
-        return "A schedule is a 5-field cron, e.g. `0 9 * * MON` (minute hour day month weekday).";
+      if (n.kind === "trigger") {
+        const problem = scheduleProblem(n.schedule);
+        if (problem) return problem;
       }
       // Mirrors the host's `destination` target rules so a wrong target is
       // caught here rather than after a round trip. There is deliberately NO
       // "destination on a non-output node" check: `changeKind` makes that state
       // unreachable, and re-adding the check would only recreate the trap of an
       // error the author has no visible control to clear.
-      const target = n.destinationTarget.trim();
-      if (n.destinationKind === "email" && !target.includes("@")) {
-        return `Node \`${n.id}\` emails its report — give the recipient's full address.`;
-      }
-      if (n.destinationKind === "channel" && !target) {
-        return `Node \`${n.id}\` posts its report to a channel — name the channel.`;
-      }
+      const destinationProblem = destinationTargetProblem(
+        n.destinationKind,
+        n.destinationTarget,
+      );
+      if (destinationProblem) return `Node \`${n.id}\` ${destinationProblem}`;
     }
     const triggerCount = nodes.filter((n) => n.kind === "trigger").length;
     if (triggerCount !== 1) {
