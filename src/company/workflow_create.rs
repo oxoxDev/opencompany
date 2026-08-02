@@ -214,12 +214,7 @@ pub(crate) async fn create_company_workflow(
     // The seed side is checked by path rather than by scanning: a *malformed*
     // seed file still owns its id (it would shadow the overlay body on read),
     // and a scan would silently skip it.
-    let seed_file_exists = source_dir.is_some_and(|dir| {
-        dir.join("workflows")
-            .join(format!("{}.toml", draft.id))
-            .is_file()
-    });
-    let id_taken = seed_file_exists
+    let id_taken = seed_file_exists(source_dir, &draft.id)
         || record.overlay_workflows.iter().any(|w| w.id == draft.id)
         || record
             .manifest
@@ -389,11 +384,15 @@ pub(crate) fn workflow_version(toml: &str) -> String {
 
 /// Whether `wid` is backed by a **seed file** in the company source tree.
 ///
-/// Checked by path rather than by scanning, for the same reason
-/// [`create_company_workflow`]'s id-uniqueness probe is: a *malformed* seed file
-/// still owns its id — it would shadow an overlay body on read — and a scan that
-/// parses would silently skip it.
-fn seed_file_exists(source_dir: Option<&Path>, wid: &str) -> bool {
+/// Checked by path rather than by scanning: a *malformed* seed file still owns
+/// its id — it would shadow an overlay body on read — and a scan that parses
+/// would silently skip it.
+///
+/// This is the one probe behind three answers that must agree: create's
+/// id-uniqueness 409, update/delete's "not editable from the console" 409, and
+/// the read routes' `editable` flag. Duplicating it is how the console ends up
+/// offering an Edit button for a graph the host will refuse.
+pub(crate) fn seed_file_exists(source_dir: Option<&Path>, wid: &str) -> bool {
     source_dir.is_some_and(|dir| dir.join("workflows").join(format!("{wid}.toml")).is_file())
 }
 

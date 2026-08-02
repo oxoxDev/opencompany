@@ -60,7 +60,8 @@ pub(crate) use workflow_file::{RawEdge, RawNode, RawWorkflow, render_workflow};
 // Ungated: the REST route is in the default build, so gating this behind
 // `openhuman` is what let the two surfaces drift apart (issue #168).
 pub(crate) use workflow_create::{
-    create_company_workflow, delete_company_workflow, update_company_workflow, workflow_version,
+    create_company_workflow, delete_company_workflow, seed_file_exists, update_company_workflow,
+    workflow_version,
 };
 pub use workspace_seed::{NodeKind, SeedNode, extract_wikilinks, walk_workspace};
 
