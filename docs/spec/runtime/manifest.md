@@ -112,6 +112,13 @@ prompt = "Weekly review and operator digest"
   Precedence is **runtime console override > manifest `[inference]` > managed
   default**, and a per-tenant provider re-resolves it every turn — so a console
   switch takes effect on the agents' next turn with **no restart**.
+  That holds only once the company is already on the harness cognition path.
+  *Which brain a company runs* is decided once, when the runtime is built: a
+  company that resolved no inference source at boot gets the offline echo brain
+  and an unwired workflow runner, and a credential saved afterwards reaches
+  neither. The status route reports that state as `restartRequired` — a resolved
+  config next to a non-harness `cognition` — and the console says "restart"
+  instead of "next turn" for it (issue #266).
 - **`[channels.*]`** enables `ChannelAdapter`s. Unknown channels are a
   validation error; disabled OpenHuman means non-operator channels degrade
   with a boot warning, never a failure.
