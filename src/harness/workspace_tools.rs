@@ -820,7 +820,16 @@ impl Tool for WorkspaceWriteTool {
 
         // Required, and deliberately not defaulted: without it there is no
         // read-before-write invariant at all under `full` policy mode.
-        let Some(expected) = args.get("expected_updated_at").and_then(Value::as_u64) else {
+        // Accept `2000` and `"2000"` alike. Models stringify numbers constantly,
+        // and rejecting the string form produced an "is required" error for an
+        // argument the agent had in fact supplied — a misleading message that
+        // costs a whole turn to recover from.
+        let expected = args.get("expected_updated_at").and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+        });
+        let Some(expected) = expected else {
             return Ok(ToolResult::error(format!(
                 "Invalid arguments: `expected_updated_at` is required. Call \
                  `{WORKSPACE_READ_TOOL}` on this note first and pass back the `rev` it reports, \
@@ -1401,6 +1410,57 @@ mod tests {
 
         let (_, body) = store.read(&id, "n-eng").await.unwrap().unwrap();
         assert_eq!(body, "# Engineering\nShip on Fridays.");
+    }
+
+    /// Models stringify numbers constantly. `"2000"` must land exactly as
+    /// `2000` does — the old `as_u64`-only read rejected it with "is required",
+    /// which reads as "you forgot the argument" for an argument the agent did
+    /// supply, and costs a turn to recover from.
+    #[tokio::test]
+    async fn a_revision_is_accepted_as_a_number_or_a_string() {
+        for revision in [json!(2_000), json!("2000"), json!(" 2000 ")] {
+            let (_dir, store) = seeded("acme").await;
+            let id = CompanyId::new("acme");
+            let tool = WorkspaceWriteTool::new(CompanyWorkspace::new(store.clone(), id.clone()));
+            let result = tool
+                .execute(json!({
+                    "id": "n-eng",
+                    "content": "# Engineering\nShip on Fridays.",
+                    "expected_updated_at": revision,
+                }))
+                .await
+                .unwrap();
+            assert!(
+                !result.is_error,
+                "revision {revision} was rejected: {}",
+                text(&result)
+            );
+
+            let (_, body) = store.read(&id, "n-eng").await.unwrap().unwrap();
+            assert_eq!(body, "# Engineering\nShip on Fridays.", "for {revision}");
+        }
+    }
+
+    /// A string that is not a revision is still a missing revision — the
+    /// fallback widens the accepted spelling, never the guard itself.
+    #[tokio::test]
+    async fn a_non_numeric_revision_string_is_still_refused() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        let tool = WorkspaceWriteTool::new(CompanyWorkspace::new(store.clone(), id.clone()));
+        let result = tool
+            .execute(json!({
+                "id": "n-eng",
+                "content": "clobbered",
+                "expected_updated_at": "latest",
+            }))
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(text(&result).contains("expected_updated_at"));
+
+        let (_, body) = store.read(&id, "n-eng").await.unwrap().unwrap();
+        assert_eq!(body, "# Engineering\nReview every PR.");
     }
 
     #[tokio::test]
