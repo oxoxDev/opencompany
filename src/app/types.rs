@@ -58,6 +58,19 @@ pub struct AppConfig {
     /// unique index. `None` (the default) is a no-op: db-per-tenant and
     /// single-tenant deployments are unaffected.
     pub tenant_namespace: Option<String>,
+    /// This instance's slug **as the hub knows it** (`OPENCOMPANY_TENANT_SLUG`).
+    ///
+    /// Not the company id: that is derived from the manifest's company name and
+    /// is a local fact, while a handoff code is minted against the hub's
+    /// instance record. The two are frequently different (`e2e-harness` vs
+    /// `e2e-harness-co`) and conflating them would either refuse every valid
+    /// handoff or, worse, accept one minted for a neighbouring tenant that
+    /// happened to pick a matching company name.
+    ///
+    /// `None` (the default, and every self-hosted deployment) disables the
+    /// console handoff route entirely — an instance that cannot say which slug
+    /// it is has no basis on which to accept a slug-bound code.
+    pub tenant_slug: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -75,6 +88,7 @@ impl Default for AppConfig {
             max_companies_per_tenant: None,
             webhook: None,
             tenant_namespace: None,
+            tenant_slug: None,
         }
     }
 }
@@ -265,6 +279,7 @@ impl std::fmt::Debug for AppConfig {
             .field("max_companies_per_tenant", &self.max_companies_per_tenant)
             .field("webhook", &self.webhook)
             .field("tenant_namespace", &self.tenant_namespace)
+            .field("tenant_slug", &self.tenant_slug)
             .finish()
     }
 }
@@ -306,6 +321,9 @@ pub struct AppState {
     /// Injected network seams for the credential surfaces (DNS resolver, mail
     /// sender). Empty by default so the build stays offline.
     connections: crate::server::ops::ConnectionsRuntime,
+    /// The hub exchange backing `…/auth/handoff`. `None` (the default, and every
+    /// self-hosted host) makes the route refuse every code.
+    console_handoff: Option<Arc<dyn crate::server::handoff::ConsoleHandoffExchange>>,
     /// Cross-origin allowlist. Empty (the default) means CORS is off, which is
     /// correct for every same-origin deployment.
     cors: crate::server::cors::CorsConfig,
@@ -356,6 +374,7 @@ impl AppState {
             skill_registry: Arc::new(OnceLock::new()),
             schema: crate::server::graphql::build_schema(),
             connections: crate::server::ops::ConnectionsRuntime::new(),
+            console_handoff: None,
             cors: crate::server::cors::CorsConfig::default(),
             #[cfg(feature = "tinyplace")]
             nonce: std::sync::Arc::new(crate::economy::NonceCache::new()),
@@ -461,6 +480,32 @@ impl AppState {
     /// The injected connection seams for the credential surfaces.
     pub fn connections(&self) -> &crate::server::ops::ConnectionsRuntime {
         &self.connections
+    }
+
+    /// Installs the console handoff exchange backing `…/auth/handoff`.
+    ///
+    /// An injected seam rather than a client built per request, so the route's
+    /// refusals — replayed code, wrong slug, ineligible address — are testable
+    /// offline against
+    /// [`MockConsoleHandoffExchange`](crate::server::handoff::MockConsoleHandoffExchange)
+    /// in a build that links no HTTP crate at all.
+    pub fn with_console_handoff(
+        mut self,
+        exchange: Arc<dyn crate::server::handoff::ConsoleHandoffExchange>,
+    ) -> Self {
+        self.console_handoff = Some(exchange);
+        self
+    }
+
+    /// The console handoff exchange, when one is wired.
+    ///
+    /// `None` means the route refuses everything, which is the correct default:
+    /// a host with no way to reach the hub cannot check a handoff code, and
+    /// accepting one on trust would make the code a bearer credential.
+    pub fn console_handoff(
+        &self,
+    ) -> Option<&Arc<dyn crate::server::handoff::ConsoleHandoffExchange>> {
+        self.console_handoff.as_ref()
     }
 
     /// Installs platform (multi-tenant) auth. Mirrors [`Self::with_home`].
