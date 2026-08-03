@@ -17,6 +17,7 @@ import {
   CornerDownRight,
   CornerUpLeft,
   CornerUpRight,
+  Hourglass,
   Loader2,
   MessageSquare,
   MessagesSquare,
@@ -101,6 +102,68 @@ function workedMillis(timeline: TimelineEntry[], now: number): { millis: number;
   const live = openAt !== null;
   if (openAt !== null) total += Math.max(0, now - openAt);
   return { millis: total, live };
+}
+
+/**
+ * The task's waiting-on-a-human spans, merged and summed (#305).
+ *
+ * Each resolved approval carries `waitedMillis` — the host's exact park→resolve
+ * span, already clamped to the run window — so a span is reconstructed as
+ * `[atMillis - waitedMillis, atMillis]` rather than inferred from gaps between
+ * rows. A still-parked approval has no resolution event yet, so the live wait
+ * arrives separately as `waitingSince` and runs to `now`.
+ *
+ * Spans are interval-merged before summing. Two approvals can be parked at once
+ * — the company is waiting *once* over that overlap, not twice — and without
+ * the merge the waiting figure could exceed the elapsed time it is subtracted
+ * from, which would read as a bug to anyone doing the arithmetic.
+ */
+function waitingMillis(
+  timeline: TimelineEntry[],
+  waitingSince: number | undefined,
+  now: number,
+): { millis: number; live: boolean } {
+  const spans: Array<[number, number]> = [];
+  for (const e of timeline) {
+    if (e.kind !== "approval") continue;
+    const waited = e.waitedMillis;
+    // `undefined` means the host could not recover the park instant; `0` is a
+    // real (instant) sign-off. Neither contributes a span.
+    if (waited === undefined || waited <= 0) continue;
+    spans.push([e.atMillis - waited, e.atMillis]);
+  }
+  const live = waitingSince !== undefined;
+  if (waitingSince !== undefined) spans.push([waitingSince, Math.max(waitingSince, now)]);
+
+  spans.sort((a, b) => a[0] - b[0]);
+  let total = 0;
+  let cursor: [number, number] | null = null;
+  for (const span of spans) {
+    if (cursor && span[0] <= cursor[1]) {
+      cursor[1] = Math.max(cursor[1], span[1]);
+    } else {
+      if (cursor) total += cursor[1] - cursor[0];
+      cursor = [span[0], span[1]];
+    }
+  }
+  if (cursor) total += cursor[1] - cursor[0];
+  return { millis: Math.max(0, total), live };
+}
+
+/**
+ * The pixel height of a waiting band for a span of `millis` (#305).
+ *
+ * Sub-linear on purpose. The point of the band is that a four-hour wait and a
+ * four-second wait must not look alike, but a linear scale makes the short one
+ * invisible and the long one taller than the screen. A log curve with a floor
+ * and a cap keeps both on the page: ~14px at four seconds, ~112px at four
+ * hours. Past the cap the printed duration inside the band carries the
+ * precision the height no longer can.
+ */
+export function waitingBandHeight(millis: number): number {
+  const minutes = Math.max(0, millis) / 60_000;
+  const raw = 12 + 26 * Math.log2(1 + minutes);
+  return Math.round(Math.min(112, Math.max(12, raw)));
 }
 
 /** `1h 04m 09s` / `4m 09s` / `9s`. */
@@ -224,15 +287,21 @@ export function TaskDetailView({
     () => (detail ? workedMillis(detail.timeline, now) : null),
     [detail, now],
   );
+  const waiting = useMemo(
+    () => (detail ? waitingMillis(detail.timeline, detail.waitingSince, now) : null),
+    [detail, now],
+  );
 
-  // Only tick the 1s clock while a dispatch window is open (worked is live).
+  // Only tick the 1s clock while something is actually running: a dispatch
+  // window is open, or the task is parked on an operator right now.
+  const ticking = Boolean(worked?.live) || Boolean(waiting?.live);
   useEffect(() => {
-    if (!worked?.live) return;
+    if (!ticking) return;
     const timer = window.setInterval(() => {
       if (document.visibilityState !== "hidden") setNow(Date.now());
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [worked?.live]);
+  }, [ticking]);
 
   if (notFound) {
     return (
@@ -276,7 +345,7 @@ export function TaskDetailView({
       ) : detail ? (
         <ScrollArea className="min-h-0 flex-1">
           <div className="mx-auto w-full max-w-3xl space-y-5 p-4">
-            <DetailHeader task={detail.task} worked={worked} />
+            <DetailHeader task={detail.task} worked={worked} waiting={waiting} />
 
             <ControlBar
               task={detail.task}
@@ -304,7 +373,11 @@ export function TaskDetailView({
               </TabsList>
 
               <TabsContent value="timeline" className="mt-4">
-                <TimelineList entries={detail.timeline} />
+                <TimelineList
+                  entries={detail.timeline}
+                  waitingSince={detail.waitingSince}
+                  now={now}
+                />
               </TabsContent>
 
               <TabsContent value="approvals" className="mt-4">
@@ -350,11 +423,22 @@ export function TaskDetailView({
 function DetailHeader({
   task,
   worked,
+  waiting,
 }: {
   task: Task;
   worked: { millis: number; live: boolean } | null;
+  waiting: { millis: number; live: boolean } | null;
 }) {
   const hasDispatch = worked !== null && (worked.millis > 0 || worked.live);
+  // `worked` is the whole elapsed run window; waiting sits *inside* it, so
+  // working time is the remainder. Clamped at zero because the two figures come
+  // from different sources (event log vs journal join) and a clock skew between
+  // them must never render a negative duration.
+  const waitedMs = waiting?.millis ?? 0;
+  const workingMs = Math.max(0, (worked?.millis ?? 0) - waitedMs);
+  // The acceptance line: a task that never waited shows no waiting figure at
+  // all, not a "Waiting 0s".
+  const showWaiting = waitedMs > 0 || Boolean(waiting?.live);
   return (
     <div className="rounded-xl border bg-card p-4">
       <div className="flex items-start justify-between gap-3">
@@ -390,7 +474,7 @@ function DetailHeader({
           {hasDispatch ? (
             <>
               <span className="font-medium text-foreground">
-                Worked {formatDuration(worked!.millis)}
+                Worked {formatDuration(workingMs)}
               </span>
               {worked!.live && (
                 <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
@@ -403,6 +487,20 @@ function DetailHeader({
             <span>Not yet dispatched</span>
           )}
         </span>
+        {showWaiting && (
+          <span className="inline-flex items-center gap-1.5">
+            <Hourglass className="size-3.5 text-amber-600 dark:text-amber-400" />
+            <span className="font-medium text-amber-700 dark:text-amber-400">
+              Waiting {formatDuration(waitedMs)}
+            </span>
+            {waiting!.live && (
+              <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400">
+                <span className="size-1.5 animate-pulse rounded-full bg-current" aria-hidden />
+                on you
+              </span>
+            )}
+          </span>
+        )}
       </div>
 
       {task.note && (
@@ -411,12 +509,16 @@ function DetailHeader({
         </p>
       )}
 
-      {/* Deferred (#172): the working-vs-waiting split needs the park instant a
-          real park effect records. Until then we show only worked time — never
-          a waiting figure fabricated from timeline gaps. */}
-      <p className="mt-2 text-[11px] text-muted-foreground/70">
-        Waiting time appears when parking lands (#172).
-      </p>
+      {/* Each waiting span itself is exact — a real park instant to a real
+          resolution. What stays approximate is which task an approval belonged
+          to: parked effects carry no task id, so they are correlated to the run
+          window. Said plainly rather than left for a reader to discover. */}
+      {showWaiting && (
+        <p className="mt-2 text-[11px] text-muted-foreground/70">
+          Waiting is correlated to this task&rsquo;s run window — approvals are not linked
+          per-task.
+        </p>
+      )}
     </div>
   );
 }
@@ -727,10 +829,31 @@ interface TimelineGroup {
 }
 
 /**
+ * One item in the rendered timeline: an event row, or a waiting band (#305).
+ *
+ * The band is not an event — nothing is journaled while the company waits — so
+ * it cannot be a `TimelineGroup`. Making the list a union keeps the band's
+ * variable height out of the row renderer entirely.
+ */
+type TimelineItem =
+  | { row: "group"; key: string; group: TimelineGroup }
+  | { row: "wait"; key: string; millis: number; live: boolean };
+
+/**
  * Folds a timeline into rows, coalescing consecutive same-label `tool_failed`
  * entries into one `×N` row. Every other kind is its own row.
+ *
+ * Waiting bands (#305) are spliced in *before* the approval row that ended the
+ * wait — the band is the pause that led to the decision, so it reads in that
+ * order — and a live band is appended at the foot when the task is parked on an
+ * operator right now. Approvals are never coalesced, so no band can land inside
+ * a `×N` group.
  */
-function groupTimeline(entries: TimelineEntry[]): TimelineGroup[] {
+function groupTimeline(
+  entries: TimelineEntry[],
+  waitingSince?: number,
+  now: number = Date.now(),
+): TimelineItem[] {
   const groups: TimelineGroup[] = [];
   for (const e of entries) {
     const last = groups[groups.length - 1];
@@ -741,7 +864,26 @@ function groupTimeline(entries: TimelineEntry[]): TimelineGroup[] {
       groups.push({ key: String(e.seq), kind: e.kind, label: e.label, count: 1, entries: [e] });
     }
   }
-  return groups;
+
+  const items: TimelineItem[] = [];
+  for (const g of groups) {
+    const waited = g.kind === "approval" ? g.entries[0].waitedMillis : undefined;
+    if (waited !== undefined && waited > 0) {
+      // `wait-` prefixed so a band can never collide with a row key, which is
+      // the bare sequence number.
+      items.push({ row: "wait", key: `wait-${g.entries[0].seq}`, millis: waited, live: false });
+    }
+    items.push({ row: "group", key: g.key, group: g });
+  }
+  if (waitingSince !== undefined) {
+    items.push({
+      row: "wait",
+      key: "wait-live",
+      millis: Math.max(0, now - waitingSince),
+      live: true,
+    });
+  }
+  return items;
 }
 
 const KIND_ICON: Record<TimelineKind, ReactElement> = {
@@ -765,9 +907,20 @@ function kindTone(kind: TimelineKind): string {
   }
 }
 
-function TimelineList({ entries }: { entries: TimelineEntry[] }) {
-  const groups = useMemo(() => groupTimeline(entries), [entries]);
-  if (groups.length === 0) {
+function TimelineList({
+  entries,
+  waitingSince,
+  now,
+}: {
+  entries: TimelineEntry[];
+  waitingSince?: number;
+  now: number;
+}) {
+  const items = useMemo(
+    () => groupTimeline(entries, waitingSince, now),
+    [entries, waitingSince, now],
+  );
+  if (items.length === 0) {
     return (
       <EmptyState
         title="Nothing has happened yet"
@@ -777,10 +930,45 @@ function TimelineList({ entries }: { entries: TimelineEntry[] }) {
   }
   return (
     <ol className="space-y-1.5">
-      {groups.map((g) => (
-        <TimelineRow key={g.key} group={g} />
-      ))}
+      {items.map((item) =>
+        item.row === "wait" ? (
+          <WaitingBand key={item.key} millis={item.millis} live={item.live} />
+        ) : (
+          <TimelineRow key={item.key} group={item.group} />
+        ),
+      )}
     </ol>
+  );
+}
+
+/**
+ * A waiting period, rendered as space rather than as another uniform row (#305).
+ *
+ * This is the acceptance criterion the timeline exists for: a four-hour wait and
+ * a four-second wait must not look alike. The height carries the comparison at a
+ * glance; the printed duration carries the exact figure, including past the
+ * point the height saturates.
+ */
+function WaitingBand({ millis, live }: { millis: number; live: boolean }) {
+  // Height is quantised to the 4s poll while the band is live, so a 1s text tick
+  // does not relayout the list underneath the reader's cursor every second.
+  const height = waitingBandHeight(live ? Math.round(millis / 4000) * 4000 : millis);
+  return (
+    <li
+      className={cn(
+        "flex items-center justify-center gap-1.5 rounded-lg border border-dashed",
+        "border-amber-400/60 bg-amber-50/60 text-[11px] text-amber-700",
+        "dark:border-amber-500/40 dark:bg-amber-950/20 dark:text-amber-400",
+        live && "animate-pulse",
+      )}
+      style={{ minHeight: height }}
+      aria-label={`Waiting on a human for ${formatDuration(millis)}`}
+    >
+      <Hourglass className="size-3.5 shrink-0" aria-hidden />
+      <span className="font-medium tabular-nums">
+        {live ? `Waiting on you · ${formatDuration(millis)}` : `Waited ${formatDuration(millis)}`}
+      </span>
+    </li>
   );
 }
 
@@ -850,8 +1038,8 @@ function ApprovalsTab({ entries }: { entries: TimelineEntry[] }) {
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
         Approvals resolved <span className="font-medium text-foreground">during this run</span> —
-        correlated to the dispatch window, not linked per-task. The full approvals ledger arrives
-        with #172.
+        correlated to the dispatch window, not linked per-task. Each wait is measured from the
+        moment the effect actually parked.
       </p>
       {approvals.length === 0 ? (
         <EmptyState
@@ -867,6 +1055,11 @@ function ApprovalsTab({ entries }: { entries: TimelineEntry[] }) {
             >
               <ShieldCheck className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
               <span className="min-w-0 flex-1 truncate font-medium">{e.label}</span>
+              {e.waitedMillis !== undefined && (
+                <span className="shrink-0 text-[11px] tabular-nums text-amber-700 dark:text-amber-400">
+                  waited {formatDuration(e.waitedMillis)}
+                </span>
+              )}
               <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
                 {timeOf(e.atMillis)}
               </span>
