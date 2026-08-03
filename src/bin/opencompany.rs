@@ -472,6 +472,39 @@ fn attach_harness(builder: RuntimeBuilder) -> RuntimeBuilder {
 ///
 /// Without the feature this is the identity function, so the default build stays
 /// network-free and keeps the local capture → GitHub/manual-link path.
+/// Wires the console handoff exchange, when this build can reach the hub.
+///
+/// Rides the existing `tinyhumans` feature rather than earning one of its own:
+/// that flag already means "this instance talks to the hub about its
+/// credential's owner", and redeeming a handoff code is the same conversation
+/// about the same owner.
+#[cfg(not(feature = "tinyhumans"))]
+fn attach_console_handoff(state: AppState) -> AppState {
+    state
+}
+
+#[cfg(feature = "tinyhumans")]
+fn attach_console_handoff(state: AppState) -> AppState {
+    use opencompany::server::handoff::HttpConsoleHandoffExchange;
+
+    // No slug, no basis to judge a slug-bound code. Leaving the exchange unset
+    // keeps `…/auth/handoff` refusing rather than reaching the hub to be told
+    // the same thing more slowly.
+    if state.config().tenant_slug.is_none() {
+        return state;
+    }
+    let mut exchange = HttpConsoleHandoffExchange::new(state.config().api_url.clone());
+    // The platform mounts a projected workload identity when attestation is
+    // turned on. It is not, anywhere, today — so this is normally absent and
+    // the hub falls back to the code's own properties.
+    if let Some(path) =
+        std::env::var_os("OPENCOMPANY_ATTESTATION_TOKEN_FILE").filter(|value| !value.is_empty())
+    {
+        exchange = exchange.with_attestation_token_file(path);
+    }
+    state.with_console_handoff(std::sync::Arc::new(exchange))
+}
+
 #[cfg(not(feature = "tinyhumans"))]
 fn attach_tinyhumans_feedback(builder: RuntimeBuilder, _config: &AppConfig) -> RuntimeBuilder {
     builder
@@ -775,6 +808,14 @@ async fn main() -> Result<()> {
             let tenant_namespace = std::env::var("OPENCOMPANY_TENANT_ID")
                 .ok()
                 .filter(|value| !value.trim().is_empty());
+            // This instance's slug as the hub's instance registry knows it.
+            // Distinct from the company id (derived from the manifest name) and
+            // from the shared-DB tenant namespace above: a console handoff code
+            // is bound to the hub's slug, so that is the only value this host
+            // may compare one against. Unset disables the handoff route.
+            let tenant_slug = std::env::var("OPENCOMPANY_TENANT_SLUG")
+                .ok()
+                .filter(|value| !value.trim().is_empty());
             // Hosted-brain credential, resolved with the same precedence the
             // harness uses (`harness_inference_from_env`) so `/spec`'s
             // `cycles_available` reflects whether cognition can actually run.
@@ -790,13 +831,14 @@ async fn main() -> Result<()> {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| AppConfig::default().api_url);
-            let mut state = AppState::new(AppConfig {
+            let state = AppState::new(AppConfig {
                 bind,
                 openhuman_root,
                 api_url,
                 tinyplace_api_url,
                 public_url,
                 tenant_namespace,
+                tenant_slug,
                 tinyhumans_credential,
                 ..AppConfig::default()
             })
@@ -806,6 +848,7 @@ async fn main() -> Result<()> {
                 env_usize("OPENCOMPANY_MAX_COMPANIES"),
                 env_usize("OPENCOMPANY_MAX_COMPANIES_PER_TENANT"),
             );
+            let mut state = attach_console_handoff(state);
             // Storage backend selection: fs (default) needs nothing; sqlite and
             // mongodb are opened once here and injected into every company's
             // builder. A selected-but-unavailable backend aborts boot rather
