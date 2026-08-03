@@ -74,7 +74,15 @@ export interface WorkflowDestination {
   target?: string;
 }
 
-/** The destination kinds the creator's picker offers, with prosumer labels. */
+/**
+ * The destination kinds the creator's picker offers, with prosumer labels.
+ *
+ * Kept in step with the host's `WORKFLOW_DESTINATION_KINDS` by
+ * `destination_kinds_match_the_console` in `src/company/workflow_file.rs`, which
+ * reads the `value:` entries out of this very block — so adding a kind on one
+ * side alone fails `cargo test` rather than shipping a picker the server rejects
+ * (or withholding one it accepts). Issue #260.
+ */
 export const DESTINATION_KINDS: { value: WorkflowDestination["kind"]; label: string }[] = [
   { value: "owner", label: "Owner — the company's admins" },
   { value: "email", label: "Email — a specific address" },
@@ -325,6 +333,55 @@ export function deleteWorkflow(
  * the creator doesn't offer them yet. All of these kinds still render on the
  * canvas and can be authored by hand in `workflows/<id>.toml`.
  */
+/**
+ * What a trigger's cron expression actually means, per the host's parser
+ * (issue #262).
+ *
+ * Exactly one of `error` or (`description`, `next`) is present — the host
+ * answers with two shapes, not one shape with half its fields null.
+ * `description` is `null` for a schedule the host declines to paraphrase; the
+ * fire times still say what it means.
+ */
+export interface CronPreview {
+  /** A plain-English gloss, or `null` when the shape is too gnarly for one. */
+  description?: string | null;
+  /**
+   * The next few fire times as epoch millis. The UTC reading and the viewer's
+   * local reading are BOTH rendered from these numbers, so the two can never
+   * disagree about the same instant — which is the entire point, since the
+   * schedule is UTC and the author is usually not.
+   */
+  next?: number[];
+  /** The parser's message, when the expression did not parse. */
+  error?: string;
+}
+
+/**
+ * Previews a cron expression (issue #262).
+ *
+ * **Answers 200 even for a malformed expression**, with the parser's message in
+ * `error`. The console calls this while the author is still typing, so a
+ * half-written expression is the normal state — and {@link OpenCompanyClient}
+ * throws on any non-2xx, so a 400 per keystroke would make an ordinary parse
+ * failure arrive as a thrown error. Callers still need a `catch` for genuine
+ * network failure; they should render nothing in that case rather than block
+ * authoring on a preview.
+ *
+ * `after` pins the instant the fire times are computed from; the host defaults
+ * to now.
+ */
+export function previewCron(
+  client: OpenCompanyClient,
+  company: string | null,
+  expr: string,
+  after?: number,
+): Promise<CronPreview> {
+  return client.post<CronPreview>(
+    `${client.scopeFor(company)}/workflows/cron/preview`,
+    { expr, after },
+  );
+}
+
 export const CREATABLE_NODE_KINDS: { value: string; label: string }[] = [
   { value: "trigger", label: "Trigger — starts the workflow" },
   { value: "agent", label: "Agent — a teammate performs a step" },
