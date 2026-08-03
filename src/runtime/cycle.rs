@@ -29,6 +29,7 @@ use crate::Result;
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::feedback::tool::SEND_EMAIL_TOOL;
+use crate::policy::gate::ResolveOutcome;
 use crate::ports::brain::{CycleHost, UsageMetering};
 use crate::ports::tasks::TaskRecord;
 use crate::ports::types::{
@@ -280,15 +281,31 @@ working on):\n{}\n]",
 
     /// Resolves a parked approval, executes the effect on approval, and runs a
     /// follow-up cycle feeding the resolution back to the brain.
+    ///
+    /// Resolving an approval that is **not parked** — an unknown id, or one a
+    /// concurrent request already resolved — is a no-op that answers with a
+    /// fixed line (issue #243). It writes no journal record and runs no cycle.
+    ///
+    /// Before this the double-submit path was indistinguishable from a deny (see
+    /// [`ResolveOutcome`]), so a double-clicked approve appended a second
+    /// `ApprovalResolved` to the journal and ran a second follow-up cycle over an
+    /// approval that no longer existed — burning a model turn to tell the brain
+    /// about a resolution it had already been told about.
     pub async fn resolve_approval(
         &self,
         id: &ApprovalId,
         verdict: Verdict,
         by: Actor,
     ) -> Result<CycleReport> {
-        let effect = self.rt.approvals.resolve(id, verdict, by.clone()).await?;
+        let outcome = self
+            .rt
+            .approval_gate
+            .resolve_outcome(id, verdict, by.clone(), now_millis());
+        if outcome == ResolveOutcome::NotParked {
+            return Ok(self.already_resolved_report());
+        }
         self.rt.journal.record_resolved(id).await?;
-        if let Some(effect) = effect {
+        if let ResolveOutcome::Approved(effect) = outcome {
             let key = format!("approval:{id}");
             execute_effect_once(self.rt, &key, &effect).await?;
         }
@@ -300,6 +317,29 @@ working on):\n{}\n]",
             by,
         }])
         .await
+    }
+
+    /// The deterministic answer to resolving an approval that is already gone.
+    ///
+    /// Synthetic on purpose: no events, no effects, nothing parked, and a
+    /// `persisted_seq` of `None` — the caller gets a well-formed report saying
+    /// "nothing happened" instead of an error, because from the operator's side
+    /// a double-submit is not a failure, it is a request whose work was already
+    /// done.
+    fn already_resolved_report(&self) -> CycleReport {
+        CycleReport {
+            cycle_id: generate_id(),
+            responses: vec![OutboundMessage {
+                task_id: None,
+                channel: OPERATOR_CHANNEL.to_string(),
+                text: "This approval was already resolved.".to_string(),
+                steps: Vec::new(),
+                reply_to: None,
+            }],
+            executed_effects: Vec::new(),
+            parked: Vec::new(),
+            persisted_seq: None,
+        }
     }
 
     /// Resolves a parked approval to an operator-amended effect
@@ -1208,6 +1248,84 @@ mod test {
             .unwrap();
         assert!(follow_up.parked.is_empty());
         assert!(rt.pending_approvals().is_empty());
+    }
+
+    /// Issue #243: resolving an approval that is already gone is a no-op, not a
+    /// second resolution.
+    ///
+    /// A double-clicked approve, a retried request, or two operators on the same
+    /// queue all hit this. Before the outcome enum, the second call could not be
+    /// told apart from a deny: the gate returned `None` either way, so the
+    /// runner appended a second `ApprovalResolved` journal record AND ran a
+    /// second follow-up cycle — a whole model turn spent re-announcing a
+    /// resolution the brain had already been given.
+    #[tokio::test]
+    async fn resolving_an_already_resolved_approval_is_a_deterministic_no_op() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let sign_effect = Effect {
+            kind: "filing.submit".into(),
+            group: EffectGroup::Sign,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+        };
+        let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
+            .with_brain(Arc::new(EffectBrain {
+                effect: sign_effect,
+            }))
+            .build()
+            .await
+            .unwrap();
+
+        let report = rt
+            .run_cycle(vec![CompanyEvent::OperatorMessage {
+                text: "file it".into(),
+                by: None,
+                chat: None,
+            }])
+            .await
+            .unwrap();
+        let approval_id = report.parked[0].clone();
+
+        rt.resolve_approval(&approval_id, Verdict::Approve, operator())
+            .await
+            .unwrap();
+        let events_after_first = rt
+            .events
+            .read_from(rt.id(), EventSeq::new(0), 1000)
+            .await
+            .unwrap()
+            .len();
+
+        // The second submit.
+        let again = rt
+            .resolve_approval(&approval_id, Verdict::Approve, operator())
+            .await
+            .unwrap();
+
+        assert_eq!(again.responses.len(), 1);
+        assert_eq!(
+            again.responses[0].text, "This approval was already resolved.",
+            "the operator gets a deterministic line, not an error and not a re-run"
+        );
+        assert!(again.executed_effects.is_empty());
+        assert!(again.parked.is_empty());
+        assert!(
+            again.persisted_seq.is_none(),
+            "a no-op must not claim to have persisted anything"
+        );
+        assert_eq!(
+            rt.events
+                .read_from(rt.id(), EventSeq::new(0), 1000)
+                .await
+                .unwrap()
+                .len(),
+            events_after_first,
+            "no second ApprovalResolved event, and no follow-up cycle behind it"
+        );
     }
 
     /// Issue #172: an already-decided approval request parks and reaches the
