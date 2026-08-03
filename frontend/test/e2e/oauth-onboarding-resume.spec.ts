@@ -12,8 +12,22 @@ import { expect, test } from "@playwright/test";
  * brings it up, there is no `webServer`). CI does not run Playwright.
  */
 
+type Page = import("@playwright/test").Page;
+
+/**
+ * Dismiss the first-run welcome dialog if it is up.
+ *
+ * Not cosmetic: it is a Radix dialog, so while it is open every other element
+ * is `aria-hidden` and therefore invisible to `getByRole`. Any role-based
+ * assertion about the console underneath has to come after this.
+ */
+async function dismissWelcome(page: Page): Promise<void> {
+  const skip = page.getByRole("button", { name: "Skip for now" });
+  if (await skip.isVisible().catch(() => false)) await skip.click();
+}
+
 /** The tour's per-company localStorage key, discovered from the running app. */
-async function tourKey(page: import("@playwright/test").Page): Promise<string> {
+async function tourKey(page: Page): Promise<string> {
   const key = await page.evaluate(() =>
     Object.keys(window.localStorage).find((k) => k.startsWith("oc-tour:")),
   );
@@ -27,11 +41,13 @@ test("a cancelled handshake lands back in the console, not on a dead page", asyn
   // `{"error":"provider returned: access_denied"}` as the document body.
   await page.goto("/connections?connect_error=denied&provider=slack");
 
-  // The console renders — the operator is not stranded on raw JSON.
-  await expect(page.getByRole("heading", { name: "Connections" })).toBeVisible();
-
-  // ...and is told what happened, in recoverable terms.
+  // Assert the message first — the toast auto-dismisses, so anything that
+  // blocks for a timeout before this would race it away.
   await expect(page.getByText(/cancelled/i)).toBeVisible();
+
+  // The console renders — the operator is not stranded on raw JSON.
+  await dismissWelcome(page);
+  await expect(page.getByRole("heading", { name: "Connections", level: 2 })).toBeVisible();
 
   // The param is stripped, so a refresh doesn't re-fire the toast.
   await expect
@@ -45,8 +61,9 @@ test("a cancelled handshake lands back in the console, not on a dead page", asyn
 test("an unknown failure code still produces a usable message", async ({ page }) => {
   // An older console against a newer host must not fall silent.
   await page.goto("/connections?connect_error=something_new_2099");
-  await expect(page.getByRole("heading", { name: "Connections" })).toBeVisible();
   await expect(page.getByText(/couldn't connect/i)).toBeVisible();
+  await dismissWelcome(page);
+  await expect(page.getByRole("heading", { name: "Connections", level: 2 })).toBeVisible();
 });
 
 test("the tour resumes on the Connections stop after a redirect", async ({ page }) => {
