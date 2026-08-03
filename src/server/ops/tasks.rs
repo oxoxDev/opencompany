@@ -412,6 +412,21 @@ struct TimelineEntry {
     /// Optional scrubbed detail (see the type docs for what may appear here).
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+    /// For an `approval` entry: how long the company sat waiting on the
+    /// operator before this resolution landed (issue #305).
+    ///
+    /// Recovered by joining the resolution's `approval_id` against the runtime
+    /// journal's park instants — the park time is journal-only, so the event log
+    /// alone cannot answer it. Omitted, rather than zeroed, when the park
+    /// instant is unknown (an approval parked by a build older than the index):
+    /// the console then renders the row exactly as it did before, and a wait is
+    /// never fabricated from a gap between timeline rows.
+    ///
+    /// Clamped to the run window's opening, so an approval that was already
+    /// parked when this task was dispatched charges only the part of its wait
+    /// that overlapped this run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waited_millis: Option<u64>,
 }
 
 /// A neighbouring card in the lineage, trimmed to what a link needs.
@@ -454,6 +469,16 @@ struct TaskDetail {
     timeline: Vec<TimelineEntry>,
     /// Parent and children.
     lineage: Lineage,
+    /// Epoch-millis the company started waiting on an operator *right now*
+    /// (issue #305), or `None` when nothing is currently parked for this run.
+    ///
+    /// This is the live half of the working-vs-waiting split: a still-open
+    /// approval has no `ApprovalResolved` event yet, so it cannot appear as a
+    /// timeline entry, yet it is precisely the state an operator opening this
+    /// screen most needs to see. Set only while the run window is open, and
+    /// only from approvals parked at or after the window opened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waiting_since: Option<u64>,
 }
 
 /// `GET …/tasks/{task_id}` — the Task Detail screen's single read (issue #185).
@@ -503,12 +528,28 @@ async fn task_detail(
     children.sort_by_key(|t| t.updated_at_millis);
     let children = children.into_iter().map(LineageRef::from).collect();
 
-    let timeline = task_timeline(&company, &task_id).await?;
+    let (timeline, open_window_at) = task_timeline(&company, &task_id).await?;
+
+    // The live wait (issue #305). Only meaningful while a run window is open —
+    // a parked approval on a finished task belongs to whatever runs next, not to
+    // this one — and only for approvals parked at or after the window opened, so
+    // a pre-existing park is not re-attributed to this dispatch. Earliest wins:
+    // waiting started when the first of them parked.
+    let waiting_since = open_window_at.and_then(|opened_at| {
+        company
+            .runtime
+            .pending_approvals()
+            .into_iter()
+            .map(|a| a.at_millis)
+            .filter(|at| *at >= opened_at)
+            .min()
+    });
 
     Ok(Json(TaskDetail {
         task: card.into(),
         timeline,
         lineage: Lineage { parent, children },
+        waiting_since,
     }))
 }
 
@@ -533,14 +574,22 @@ const TIMELINE_PAGE: usize = 512;
 /// which is worse than the cost it saves. Bounding the page size gives the
 /// memory win without that correctness loss; a stored per-task dispatch offset
 /// is the durable fix for the traversal cost and is left to the epic.
+///
+/// Returns the timeline alongside the instant the *still-open* window opened,
+/// or `None` when the task is not mid-run — the caller needs that anchor to
+/// scope the live wait (issue #305).
 async fn task_timeline(
     company: &ScopedCompany,
     task_id: &str,
-) -> Result<Vec<TimelineEntry>, ApiError> {
+) -> Result<(Vec<TimelineEntry>, Option<u64>), ApiError> {
     use crate::ports::types::EventSeq;
 
+    // One snapshot for the whole fold, not a lookup per event: the fold is a
+    // pure function over it, and the journal lock is never held while paging.
+    let park_instants = company.runtime.approval_park_instants();
+
     let mut timeline = Vec::new();
-    let mut window_open = false;
+    let mut window_opened_at: Option<u64> = None;
     let mut next_seq = 0u64;
     loop {
         let page = company
@@ -559,27 +608,41 @@ async fn task_timeline(
             .map(|ev| ev.seq.value() + 1)
             .unwrap_or(next_seq + 1);
         let exhausted = page.len() < TIMELINE_PAGE;
-        fold_page(&page, task_id, &mut window_open, &mut timeline);
+        fold_page(
+            &page,
+            task_id,
+            &park_instants,
+            &mut window_opened_at,
+            &mut timeline,
+        );
         if exhausted {
             break;
         }
     }
-    Ok(timeline)
+    Ok((timeline, window_opened_at))
 }
 
 /// Folds one page of journal events onto `timeline`, carrying the window state
 /// across pages.
+///
+/// `window_opened_at` is both the window flag and its anchor: `Some(at)` while
+/// a dispatch is open, `None` once it closes. `park_instants` is the journal
+/// snapshot the approval arm joins against to recover waiting time (#305);
+/// keeping it a parameter leaves this a pure function of its inputs.
 fn fold_page(
     page: &[crate::ports::types::StoredEvent],
     task_id: &str,
-    window_open: &mut bool,
+    park_instants: &std::collections::HashMap<crate::ports::types::ApprovalId, u64>,
+    window_opened_at: &mut Option<u64>,
     timeline: &mut Vec<TimelineEntry>,
 ) {
+    use crate::ports::types::ActorKind;
+
     for ev in page {
         let entry = match &ev.event {
             CompanyEvent::TaskDispatched { task_id: id } if id == task_id => {
-                *window_open = true;
-                Some(("dispatched", "Dispatched".to_string(), None))
+                *window_opened_at = Some(ev.at_millis);
+                Some(("dispatched", "Dispatched".to_string(), None, None))
             }
             CompanyEvent::AgentReply {
                 agent_id,
@@ -590,6 +653,7 @@ fn fold_page(
                 "reply",
                 format!("Reply from {agent_id}"),
                 Some(text.clone()),
+                None,
             )),
             CompanyEvent::McpCallFailed {
                 server,
@@ -601,6 +665,7 @@ fn fold_page(
                 "tool_failed",
                 format!("{server} · {tool} failed"),
                 Some(message.clone()),
+                None,
             )),
             CompanyEvent::DeskTaskCompleted {
                 task_id: id,
@@ -608,33 +673,55 @@ fn fold_page(
                 output,
                 column,
             } if id == task_id => {
-                *window_open = false;
+                *window_opened_at = None;
                 Some((
                     "completed",
                     format!("Finished on {desk} → {column}"),
                     Some(output.clone()),
+                    None,
                 ))
             }
             // Window-correlated, not id-correlated — see `task_detail`'s docs.
             // The operator's identity is deliberately dropped: it can carry a
             // user id, matching the SSE projection's deny-by-default stance.
-            CompanyEvent::ApprovalResolved { verdict, .. } if *window_open => Some((
-                "approval",
-                format!(
-                    "Approval {}",
-                    crate::brain::medulla::effects::verdict_word(*verdict)
-                ),
-                None,
-            )),
+            // Only `by.kind` is read, which names a category and never a person.
+            CompanyEvent::ApprovalResolved {
+                approval_id,
+                verdict,
+                by,
+            } if window_opened_at.is_some() => {
+                // The approval id joins the resolution back to the journal's
+                // park instant. Clamping to the window's opening keeps a wait
+                // that began before this task was dispatched from charging its
+                // pre-dispatch portion to this run.
+                let waited = park_instants.get(approval_id).map(|parked_at| {
+                    let from =
+                        window_opened_at.map_or(*parked_at, |opened| (*parked_at).max(opened));
+                    ev.at_millis.saturating_sub(from)
+                });
+                // A system actor here is the TTL sweep, not a person: expiry
+                // resolves to a default-deny, and saying "Approval denied" for
+                // it would read as though somebody looked at it and said no.
+                let label = if by.kind == ActorKind::System {
+                    "Approval expired (auto-denied)".to_string()
+                } else {
+                    format!(
+                        "Approval {}",
+                        crate::brain::medulla::effects::verdict_word(*verdict)
+                    )
+                };
+                Some(("approval", label, None, waited))
+            }
             _ => None,
         };
-        if let Some((kind, label, detail)) = entry {
+        if let Some((kind, label, detail, waited_millis)) = entry {
             timeline.push(TimelineEntry {
                 seq: ev.seq.value(),
                 at_millis: ev.at_millis,
                 kind: kind.to_string(),
                 label,
                 detail,
+                waited_millis,
             });
         }
     }
