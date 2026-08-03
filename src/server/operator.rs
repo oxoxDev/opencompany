@@ -1502,6 +1502,7 @@ mod test {
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
+            workspace: None,
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record);
 

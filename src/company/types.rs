@@ -97,6 +97,28 @@ pub fn grants_composio_explicit(grants: &[String]) -> bool {
         .any(|grant| grant == "composio" || grant.starts_with("composio."))
 }
 
+/// Whether a tool-grant list **explicitly** grants writes to the company
+/// workspace (issue #237).
+///
+/// Reading the workspace follows the ordinary namespace rule, so a catch-all
+/// `*` confers it. **Writing does not**: a workspace write overwrites
+/// operator-owned guidance that every other agent then treats as the company's
+/// source of truth, so — like [`grants_media_explicit`] and
+/// [`grants_composio_explicit`] — it must be opted into by name.
+///
+/// It is deliberately *tighter* than those two, which match any `<ns>.` prefix.
+/// Here only the bare `workspace` grant and the exact `workspace.write`
+/// sub-grant confer writes, so `workspace.read` is a genuinely read-only grant
+/// rather than a footgun that silently hands over write access to the same
+/// tree. Lives here (always compiled) so the feature-gated harness wiring
+/// (`build::build_agent`) and always-compiled manifest tooling share one source
+/// of truth.
+pub fn grants_workspace_write_explicit(grants: &[String]) -> bool {
+    grants
+        .iter()
+        .any(|grant| grant == "workspace" || grant == "workspace.write")
+}
+
 /// Built-in capability tier names selectable in `[plan].name` (issue #108). The
 /// name → budget-map table lives in
 /// [`plan_named`](crate::harness::capability_budget::plan_named); this list is
