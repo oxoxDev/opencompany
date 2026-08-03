@@ -83,6 +83,15 @@ export interface TimelineEntry {
   label: string;
   /** Optional scrubbed detail; expands under the row when present. */
   detail?: string;
+  /**
+   * On an `approval` entry: how long the company sat waiting on the operator
+   * before this resolution landed (#305), clamped to the run window.
+   *
+   * Absent — never `0` — when the host cannot recover the park instant, so the
+   * console degrades to rendering the row with no waiting band rather than
+   * claiming an instant sign-off that never happened.
+   */
+  waitedMillis?: number;
 }
 
 /** A neighbouring card in the lineage, trimmed to what a link needs (#185). */
@@ -108,6 +117,15 @@ export interface TaskDetail {
   timeline: TimelineEntry[];
   /** Parent and children. */
   lineage: TaskLineage;
+  /**
+   * Epoch-millis this task started waiting on an operator *right now* (#305),
+   * or absent when nothing is currently parked for its run.
+   *
+   * A still-parked approval has no resolution event yet, so it cannot reach the
+   * timeline — this is the only signal that the task is idle on a human at this
+   * moment, which is the state the screen exists to expose.
+   */
+  waitingSince?: number;
 }
 
 /**
