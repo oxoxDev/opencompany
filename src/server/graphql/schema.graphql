@@ -478,6 +478,14 @@ type Message {
 	parity). Empty for operator messages and tool-less replies.
 	"""
 	steps: [MessageStep!]!
+	"""
+	The board card this reply is about (issue #246): the card the turn
+	opened, or the dispatched card it ran for (#185). Projected from the
+	same [`MessageView`] field the REST route reads, so the two surfaces
+	agree on which messages carry a card. Null on operator messages and on
+	every reply journaled before the field existed.
+	"""
+	taskId: ID
 }
 
 """
