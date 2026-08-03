@@ -16,6 +16,16 @@ interface Props {
   company: string | null;
   /** The company's display name, when the host would tell us before sign-in. */
   companyName?: string;
+  /**
+   * Why they landed here, when it was not simply "not signed in yet".
+   *
+   * Set after a failed ecosystem handoff. Without it a dead or misaddressed
+   * handoff renders an ordinary sign-in form and looks like the click did
+   * nothing — the one failure mode most likely to be reported as "the button is
+   * broken". It never names an address, so it cannot become the membership
+   * oracle the rest of this view refuses to be.
+   */
+  notice?: string;
   /** A code lifted out of a magic-link URL, redeemed on mount by the caller. */
   onSignedIn: (me: Me) => void;
 }
@@ -35,7 +45,7 @@ type Mode = "link" | "password";
  *    keeps; there is nothing to put in localStorage and nothing for an XSS to
  *    steal.
  */
-export function Login({ client, company, companyName, onSignedIn }: Props) {
+export function Login({ client, company, companyName, notice, onSignedIn }: Props) {
   const [mode, setMode] = useState<Mode>("link");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -100,6 +110,12 @@ export function Login({ client, company, companyName, onSignedIn }: Props) {
       </header>
 
       <main className="mx-auto flex w-full max-w-md flex-col justify-center px-6 py-16">
+        {notice && (
+          <Alert className="mb-6">
+            <AlertDescription>{notice}</AlertDescription>
+          </Alert>
+        )}
+
         <div className="mb-6 space-y-1">
           <h1 className="text-2xl font-semibold tracking-tight">
             Sign in{companyName ? ` to ${companyName}` : ""}

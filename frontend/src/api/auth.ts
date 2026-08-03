@@ -57,6 +57,28 @@ export async function verifyCode(
   return client.post<Me>(`${client.scopeFor(company)}/auth/verify`, { code });
 }
 
+/**
+ * Redeems an ecosystem console handoff code for a session.
+ *
+ * The code arrives in the URL as `?oc_handoff=`, minted by the TinyHumans
+ * dashboard when someone opens this company. It is not an identity in itself —
+ * the host spends it against the hub, gets back the address behind it, and
+ * mints a session only if that address is a member here. So this returns the
+ * same `Me` a magic link would, and the browser never holds a token either way.
+ *
+ * The distinguishable failures are `handoff_invalid` (expired or already used —
+ * go back and click through again), `handoff_wrong_company` (a code for someone
+ * else's console), and `not_a_member` (signed in, but this company does not
+ * know them). Read them off {@link ApiError.code}.
+ */
+export async function redeemHandoff(
+  client: OpenCompanyClient,
+  company: string | null,
+  code: string,
+): Promise<Me> {
+  return client.post<Me>(`${client.scopeFor(company)}/auth/handoff`, { code });
+}
+
 /** Exchanges an email and password for a session. */
 export async function loginWithPassword(
   client: OpenCompanyClient,

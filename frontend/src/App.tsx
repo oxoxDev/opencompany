@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 
-import { verifyCode } from "@/api/auth";
+import { redeemHandoff, verifyCode } from "@/api/auth";
 import { OpenCompanyClient } from "@/api/client";
 import { ApiError, type CompanyStatus } from "@/api/types";
 import { AppShell } from "@/components/app-shell";
@@ -14,7 +14,7 @@ import { resolveConfig } from "@/config";
 type Phase =
   | { kind: "loading" }
   | { kind: "error"; message: string; hint?: string }
-  | { kind: "login"; company: string | null }
+  | { kind: "login"; company: string | null; notice?: string }
   | { kind: "picker"; companies: CompanyStatus[] }
   | {
       kind: "console";
@@ -41,15 +41,44 @@ function readMagicLink(): { company: string | null; code: string } | null {
 }
 
 /**
+ * Reads `?oc_handoff=` off an ecosystem landing.
+ *
+ * The TinyHumans dashboard mints this when someone clicks into a company, so it
+ * arrives on a plain top-level navigation from another origin. It is a
+ * single-use credential exactly like a magic-link code, so it obeys the same
+ * three rules that path already learned: read it purely (StrictMode
+ * double-invokes the `useMemo`), strip it in an effect, and redeem it once
+ * through the shared single-flight ref.
+ */
+function readHandoff(): { company: string | null; code: string } | null {
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get("oc_handoff");
+  if (!code) return null;
+  return { company: params.get("company"), code };
+}
+
+/**
  * Strips the magic link out of the address bar.
  *
  * The code is a single-use credential, so it must not linger in the URL, the
  * history, or a `Referer` header once we hold it.
  */
 function clearMagicLinkFromUrl(): void {
+  clearCredentialFromUrl("code");
+}
+
+/**
+ * Strips a single-use sign-in credential out of the address bar.
+ *
+ * `replaceState` rather than a push, so the credential is gone from the entry
+ * as well as from the bar — a back button that restored it would hand a spent
+ * code to a reload, and a `Referer` carrying it would hand it to whatever the
+ * console links out to next.
+ */
+function clearCredentialFromUrl(param: "code" | "oc_handoff"): void {
   const params = new URLSearchParams(window.location.search);
-  if (!params.has("code")) return;
-  params.delete("code");
+  if (!params.has(param)) return;
+  params.delete(param);
   params.delete("company");
   const query = params.toString();
   window.history.replaceState({}, "", window.location.pathname + (query ? `?${query}` : ""));
@@ -61,6 +90,7 @@ export function App() {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   // A pure read, so StrictMode's double render is harmless.
   const magicLink = useMemo(() => readMagicLink(), []);
+  const handoff = useMemo(() => readHandoff(), []);
   /**
    * The in-flight redemption, so a link is redeemed exactly once.
    *
@@ -75,7 +105,8 @@ export function App() {
   // Now that the code is captured in state, take it out of the URL.
   useEffect(() => {
     if (magicLink) clearMagicLinkFromUrl();
-  }, [magicLink]);
+    if (handoff) clearCredentialFromUrl("oc_handoff");
+  }, [magicLink, handoff]);
 
   // An expired or revoked session anywhere in the console drops to sign-in
   // rather than showing a broken page.
@@ -91,6 +122,23 @@ export function App() {
     const set = (p: Phase) => !cancelled && setPhase(p);
 
     async function boot() {
+      // An ecosystem landing: someone clicked this company on their TinyHumans
+      // dashboard. Redeem before anything else, for the same reason a magic
+      // link does — the session has to exist before the console asks for data.
+      if (handoff) {
+        const company = handoff.company ?? config.company;
+        try {
+          redemption.current ??= redeemHandoff(client, company, handoff.code);
+          await redemption.current;
+        } catch (err) {
+          // A dead or misaddressed handoff falls back to this company's own
+          // sign-in rather than stranding them: magic link still works, and it
+          // is the only thing that works on a self-hosted host anyway.
+          set({ kind: "login", company, notice: handoffNotice(err) });
+          return;
+        }
+      }
+
       // A magic-link landing: redeem it before anything else, so the session
       // exists by the time the console asks for data.
       if (magicLink) {
@@ -147,7 +195,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [client, config.company, magicLink]);
+  }, [client, config.company, handoff, magicLink]);
 
   const switchCompany = useCallback(
     async (id: string, companies: CompanyStatus[]) => {
@@ -180,6 +228,7 @@ export function App() {
         <Login
           client={client}
           company={phase.company}
+          notice={phase.notice}
           onSignedIn={() => window.location.reload()}
         />
       );
@@ -229,6 +278,30 @@ function FullScreen({ children }: { children: React.ReactNode }) {
   return (
     <div className="grid min-h-svh place-items-center bg-background p-6 text-center">{children}</div>
   );
+}
+
+/**
+ * What to tell someone whose ecosystem handoff did not work.
+ *
+ * Each line is about the *code*, never about the person: "expired", "for a
+ * different company", "no access". None of them confirms or denies that any
+ * address has an account here, which is the rule the whole sign-in surface is
+ * built around.
+ */
+function handoffNotice(err: unknown): string {
+  const code = err instanceof ApiError ? err.code : "";
+  switch (code) {
+    case "handoff_invalid":
+      return "That sign-in expired. Open this company again from your dashboard, or use a link below.";
+    case "handoff_wrong_company":
+      return "That sign-in was for a different company. Open this one from your dashboard.";
+    case "not_a_member":
+      return "You're signed in to TinyHumans, but this company hasn't given you access yet. Ask an admin to invite you.";
+    case "handoff_unavailable":
+      return "This host isn't connected to a TinyHumans account. Sign in with a link instead.";
+    default:
+      return "We couldn't complete that sign-in. Try a link below.";
+  }
 }
 
 function connectionError(client: OpenCompanyClient, err: unknown, company: string | null): Phase {
