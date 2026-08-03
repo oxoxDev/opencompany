@@ -858,30 +858,37 @@ impl Tool for WorkspaceWriteTool {
             )));
         }
 
-        // Compare-and-swap. The tree read above is the authority on the current
-        // revision, so a note edited in the console since the agent's read is
-        // refused here rather than clobbered.
-        if entry.node.updated_at_millis != expected {
-            return Ok(ToolResult::error(format!(
+        // Revision guard, best-effort: check-then-act, not an atomic
+        // compare-and-swap. The tree snapshot above is one authority on the
+        // current revision and catches the ordinary case — a note edited in the
+        // console since the agent's read is refused here rather than clobbered.
+        // The residual window (an edit landing between this check and the write
+        // below) is narrowed by re-checking against the live read further down,
+        // and can only be closed for real once the port grows a conditional
+        // write.
+        let stale_refusal = |current: u64| {
+            ToolResult::error(format!(
                 "Refused: `{path}` changed since you read it — you passed \
                  expected_updated_at={expected}, but its current revision is {current}. Re-read \
                  it with `{WORKSPACE_READ_TOOL}` and re-apply your change on top of the current \
                  body; do NOT retry with the same expected_updated_at.",
                 path = entry.path,
-                current = entry.node.updated_at_millis,
-            )));
+            ))
+        };
+        if entry.node.updated_at_millis != expected {
+            return Ok(stale_refusal(entry.node.updated_at_millis));
         }
 
         // A note the agent cannot have read in full must not be overwritten
         // from a partial view — OpenHuman's `check_partial_read` lesson, made
         // stateless. Checked against the live body, not the index.
-        let current_len = match self
+        let (live, current_len) = match self
             .workspace
             .store
             .read(&self.workspace.company, &entry.node.id)
             .await
         {
-            Ok(Some((_, body))) => body.len(),
+            Ok(Some((node, body))) => (node, body.len()),
             Ok(None) => {
                 return Ok(ToolResult::error(format!(
                     "Refused: the note `{}` was removed while you were editing it.",
@@ -895,6 +902,13 @@ impl Tool for WorkspaceWriteTool {
                 )));
             }
         };
+        // Second look at the revision, this time from the live read rather than
+        // the tree snapshot. An operator edit that landed between the two would
+        // otherwise be overwritten *and* reported to the agent as a success.
+        if live.updated_at_millis != expected {
+            return Ok(stale_refusal(live.updated_at_millis));
+        }
+
         if current_len > MAX_CONTENT_BYTES {
             return Ok(ToolResult::error(format!(
                 "Refused: `{path}` is {current_len} bytes, larger than the \
