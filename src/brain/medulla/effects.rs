@@ -243,6 +243,7 @@ pub(crate) fn effect_from_frame(frame: &EffectFrame) -> Effect {
             .or_else(|| payload_bool(payload, "first_time_counterparty"))
             .unwrap_or(false),
         payload: frame.payload.clone(),
+        agent: None,
     }
 }
 

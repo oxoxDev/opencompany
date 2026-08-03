@@ -666,6 +666,7 @@ impl<'a> CycleHostImpl<'a> {
             established_thread: established,
             first_time_counterparty: !established,
             payload: serde_json::json!({ "to": to, "subject": subject, "body": body }),
+            agent: None,
         };
         match self.gate_effect(effect).await? {
             EffectDisposition::Executed => Ok(ToolResult {
@@ -1144,6 +1145,7 @@ mod test {
             established_thread: false,
             first_time_counterparty: false,
             payload: serde_json::Value::Null,
+            agent: None,
         };
 
         execute_effect_once(&rt, "k1", &effect).await.unwrap();
@@ -1175,6 +1177,7 @@ mod test {
             established_thread: false,
             first_time_counterparty: false,
             payload: serde_json::Value::Null,
+            agent: None,
         };
         let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
             .with_brain(Arc::new(EffectBrain {
@@ -1226,6 +1229,7 @@ mod test {
             established_thread: false,
             first_time_counterparty: false,
             payload: serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" }),
+            agent: None,
         };
         let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
             .with_brain(Arc::new(ParkingBrain {
@@ -1279,6 +1283,7 @@ mod test {
             established_thread: false,
             first_time_counterparty: false,
             payload: serde_json::Value::Null,
+            agent: None,
         };
         let approval_id = {
             let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
@@ -1328,6 +1333,7 @@ mod test {
             established_thread: false,
             first_time_counterparty: false,
             payload: serde_json::json!({ "channel": "operator", "text": "ORIGINAL" }),
+            agent: None,
         };
         // A recording operator channel we keep a handle to (Arc-shared buffer).
         let operator_channel = OperatorChannel::new();
@@ -1392,6 +1398,7 @@ mod test {
             established_thread: false,
             first_time_counterparty: false,
             payload: serde_json::Value::Null,
+            agent: None,
         };
         // A zero-TTL gate: anything parked is immediately past its deadline.
         let gate = Arc::new(
@@ -1752,6 +1759,7 @@ mod test {
             established_thread: true,
             first_time_counterparty: false,
             payload: serde_json::json!({ "to": "x@ext.com", "subject": "Hi", "body": "yo" }),
+            agent: None,
         };
         let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
             .with_brain(Arc::new(EffectBrain {
@@ -1820,6 +1828,7 @@ mod test {
                 "subject": "[Acme] Report flow — Owner summary",
                 "body": "Q3 is up 12%.",
             }),
+            agent: None,
         };
         let approval_id = rt.approvals.park(rt.id(), effect.clone()).await.unwrap();
         rt.journal
@@ -1883,6 +1892,7 @@ mod test {
                 "subject": "[Acme] Report flow — Owner summary",
                 "body": "Q3 is up 12%.",
             }),
+            agent: None,
         };
         let approval_id = rt.approvals.park(rt.id(), effect.clone()).await.unwrap();
         rt.journal
@@ -1926,6 +1936,7 @@ mod test {
                 "subject": "[Acme] Report flow — Owner summary",
                 "body": "Q3 is up 12%.",
             }),
+            agent: None,
         };
         let approval_id = {
             let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
@@ -1977,6 +1988,7 @@ mod test {
             established_thread: true,
             first_time_counterparty: false,
             payload: serde_json::json!({ "to": "x@ext.com", "subject": "Hi", "body": "yo" }),
+            agent: None,
         };
         let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
             .with_brain(Arc::new(EffectBrain {
@@ -1995,6 +2007,7 @@ mod test {
                 established_thread: true,
                 first_time_counterparty: false,
                 payload: serde_json::json!({ "to": "x@ext.com", "subject": "Hi", "body": "yo" }),
+                agent: None,
             },
         )
         .await

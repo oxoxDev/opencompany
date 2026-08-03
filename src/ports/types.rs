@@ -609,6 +609,31 @@ pub struct Effect {
     pub first_time_counterparty: bool,
     /// Effect-specific payload.
     pub payload: serde_json::Value,
+    /// The roster agent whose **harness tool call** this effect was projected
+    /// from, when it was projected from one at all (issue #243).
+    ///
+    /// This is the discriminator between the two kinds of effect that reach the
+    /// same approval queue, and it exists because they need opposite treatment
+    /// on approval:
+    ///
+    /// * `None` — a *native* effect the runtime itself performs
+    ///   (`CycleHostImpl::send_email`, the workflow delivery path, a Medulla
+    ///   effect frame). Approving it means the runtime executes it, exactly as
+    ///   before this field existed.
+    /// * `Some(agent_id)` — an effect projected from a tool call openhuman
+    ///   already **blocked** inside an agent turn
+    ///   ([`ApprovalPolicy::effect_for`](crate::harness::policy::ApprovalPolicy::effect_for)).
+    ///   There is nothing for the runtime to execute: the real work is the tool,
+    ///   which only that agent can run. Approving it mints a single-use grant and
+    ///   re-dispatches the agent instead.
+    ///
+    /// Only `effect_for` ever stamps this, so `agent.is_some()` is exactly
+    /// "came from a harness tool call". Skipped when serializing and defaulted
+    /// when absent, so journal lines written before this field existed replay as
+    /// `None` — no grant, and the legacy re-ask behaviour — rather than failing
+    /// to parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 impl Effect {
@@ -2125,6 +2150,7 @@ mod test {
             established_thread: true,
             first_time_counterparty: false,
             payload: serde_json::json!({"to": "@vendor"}),
+            agent: None,
         };
         let back = round_trip(&effect);
         assert_eq!(back, effect);

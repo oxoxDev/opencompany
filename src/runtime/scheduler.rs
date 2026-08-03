@@ -430,6 +430,7 @@ mod test {
                             established_thread: false,
                             first_time_counterparty: false,
                             payload: serde_json::Value::Null,
+                            agent: None,
                         })
                         .await?;
                     }

@@ -563,6 +563,7 @@ async fn park_cold_recipient(
             // Already truncated by `report_text`.
             "body": text,
         }),
+        agent: None,
     };
 
     match park_effect(parking, &record.id, effect).await {

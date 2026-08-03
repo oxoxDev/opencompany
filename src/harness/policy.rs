@@ -224,6 +224,7 @@ impl ApprovalPolicy {
             established_thread: false,
             first_time_counterparty: false,
             payload: args.clone(),
+            agent: None,
         }
     }
 

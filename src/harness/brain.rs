@@ -3033,6 +3033,7 @@ members = ["eng1", "eng2"]
                 established_thread: false,
                 first_time_counterparty: false,
                 payload: serde_json::json!({ "prompt": "a logo" }),
+                agent: None,
             },
         });
 
@@ -3109,6 +3110,7 @@ members = ["eng1", "eng2"]
                     established_thread: false,
                     first_time_counterparty: false,
                     payload: serde_json::json!({ "tool": tool }),
+                    agent: None,
                 },
             });
         }
