@@ -513,7 +513,17 @@ fn summarize_event(event: &CompanyEvent) -> String {
         CompanyEvent::ScheduleFired { cron, .. } => format!("schedule fired: {cron}"),
         CompanyEvent::WebhookReceived { channel, .. } => format!("webhook on {channel}"),
         CompanyEvent::A2aTaskReceived { from, .. } => format!("A2A task from {from}"),
-        CompanyEvent::ApprovalResolved { verdict, .. } => format!("approval {verdict:?}"),
+        // The tool this resolved is deliberately NOT named here, though it would
+        // read better: `ApprovalResolved` carries only the id, the verdict and
+        // the actor, so naming the tool would mean threading a journal lookup
+        // into what is a pure function over one event — real coupling for a
+        // non-load-bearing insight string. The id is carried instead, which is
+        // enough to correlate against the approvals surface and costs nothing.
+        CompanyEvent::ApprovalResolved {
+            approval_id,
+            verdict,
+            ..
+        } => format!("approval {approval_id} {verdict:?}"),
         CompanyEvent::FeedbackFiled { .. } => "feedback filed".to_string(),
         CompanyEvent::PaymentReceived { amount_usd, .. } => format!("payment ${amount_usd:.2}"),
         CompanyEvent::LifecycleChanged { from, to, .. } => format!("lifecycle {from} → {to}"),
