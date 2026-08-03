@@ -291,6 +291,61 @@ async fn chat_history_finds_agent_replies_under_general_and_main() {
     );
 }
 
+/// Issue #246 + #65: the card a reply opened is projected on **both** history
+/// surfaces, from the one shared `MessageView` field. The console reads REST,
+/// but GraphQL is the paginated surface, and #65 exists precisely because the
+/// two drifting apart is how a transcript ends up meaning different things
+/// depending on which door you came in.
+#[tokio::test]
+async fn chat_history_projects_the_card_a_reply_opened() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_rich_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    for (text, task_id) in [
+        ("opened a card", Some("t-77".to_string())),
+        ("opened nothing", None),
+    ] {
+        runtime
+            .events()
+            .append(
+                runtime.id(),
+                crate::ports::types::CompanyEvent::AgentReply {
+                    task_id,
+                    chat_id: "General".to_string(),
+                    agent_id: "maya".to_string(),
+                    text: text.to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let app = router(state);
+    let value = query(
+        app,
+        r#"{"query":"{ company(id:\"acme\"){ chat(id:\"general\"){ history(first: 10) { items { text taskId } } } } }"}"#,
+    )
+    .await;
+    let items = value["data"]["company"]["chat"]["history"]["items"]
+        .as_array()
+        .unwrap();
+    let opened = items
+        .iter()
+        .find(|m| m["text"] == "opened a card")
+        .expect("the card-opening reply is in history");
+    assert_eq!(opened["taskId"], "t-77");
+    let plain = items
+        .iter()
+        .find(|m| m["text"] == "opened nothing")
+        .expect("the ordinary reply is in history");
+    assert!(
+        plain["taskId"].is_null(),
+        "an ordinary reply carries no card: {plain}"
+    );
+}
+
 #[tokio::test]
 async fn connections_reflect_manifest_intent_disconnected() {
     let home_dir = home();

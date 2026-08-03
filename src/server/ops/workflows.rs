@@ -68,6 +68,7 @@ use std::collections::HashSet;
 use std::path::Path as FsPath;
 
 use axum::extract::{Path, Query};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -77,8 +78,9 @@ use serde_json::Value;
 use crate::AppState;
 use crate::company::{
     RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowEdgeDef, WorkflowFile,
-    WorkflowNodeDef, WorkflowRetryDef, create_company_workflow, list_workflows_union,
-    load_workflow_union,
+    WorkflowNodeDef, WorkflowRetryDef, create_company_workflow, delete_company_workflow,
+    list_workflows_union, load_workflow_union, seed_file_exists, update_company_workflow,
+    workflow_version,
 };
 use crate::error::OpenCompanyError;
 use crate::ports::types::{CompanyEvent, CompanyRecord, EventSeq, OverlayWorkflow};
@@ -105,7 +107,20 @@ pub fn router() -> Router<AppState> {
         // Same static-before-dynamic ordering as `/workflows/runs` above, for
         // the same reason: `cron` is a syntactically valid `wid`.
         .merge(scoped("/workflows/cron/preview", post(preview_cron)))
-        .merge(scoped("/workflows/{wid}", get(get_workflow)))
+        // Issue #259: read, replace, remove — all on the same id. `PUT` is a
+        // full replace rather than a `PATCH` merge because a workflow *is* its
+        // graph: a partial node/edge merge has no well-defined meaning (which
+        // half of a rewired edge set wins?), and the console always holds the
+        // whole graph anyway.
+        //
+        // Registered LAST of the `/workflows/...` reads, after both static
+        // segments above: this is the dynamic route they have to outrank.
+        .merge(scoped(
+            "/workflows/{wid}",
+            get(get_workflow)
+                .put(update_workflow)
+                .delete(delete_workflow),
+        ))
         .merge(scoped("/workflows/{wid}/run", post(run_workflow)))
 }
 
@@ -117,14 +132,20 @@ struct WorkflowSummary {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    /// Whether `PUT`/`DELETE` on this id will be accepted (issue #259) — see
+    /// [`is_editable`]. The console disables its Edit/Delete affordances on a
+    /// `false`, so an operator is told *before* clicking rather than by a 409
+    /// after.
+    editable: bool,
 }
 
-impl From<WorkflowFile> for WorkflowSummary {
-    fn from(f: WorkflowFile) -> Self {
+impl WorkflowSummary {
+    fn new(f: WorkflowFile, editable: bool) -> Self {
         Self {
             id: f.id,
             name: f.name,
             description: f.description,
+            editable,
         }
     }
 }
@@ -139,16 +160,31 @@ struct WorkflowGraph {
     description: Option<String>,
     nodes: Vec<WorkflowNode>,
     edges: Vec<WorkflowEdge>,
+    /// Whether this graph can be replaced or removed through the API — see
+    /// [`is_editable`].
+    editable: bool,
+    /// The opaque optimistic-concurrency token for this graph (issue #259),
+    /// present only when `editable` (a source-defined graph has nothing to
+    /// version, and a token for an overlay body the read path does not even
+    /// serve would be actively misleading).
+    ///
+    /// The contract is **echo it back**: hand it to `PUT` in the body or to
+    /// `DELETE` as `?expectedVersion=`, and the write is refused with a `409` if
+    /// the graph moved in between. Never parse or derive it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
 }
 
-impl From<WorkflowFile> for WorkflowGraph {
-    fn from(f: WorkflowFile) -> Self {
+impl WorkflowGraph {
+    fn new(f: WorkflowFile, editable: bool, version: Option<String>) -> Self {
         Self {
             id: f.id,
             name: f.name,
             description: f.description,
             nodes: f.nodes.into_iter().map(WorkflowNode::from).collect(),
             edges: f.edges.into_iter().map(WorkflowEdge::from).collect(),
+            editable,
+            version,
         }
     }
 }
@@ -253,6 +289,32 @@ impl From<WorkflowEdgeDef> for WorkflowEdge {
 /// live record. A company with no persisted record contributes none — the read
 /// routes stay tolerant (they still serve the seed files), and the create route
 /// re-loads the record under its write lock and 404s properly there.
+/// Whether `wid` can be replaced or removed through `PUT`/`DELETE` (issue #259):
+/// it is backed by a **record overlay body** and is **not shadowed by a seed
+/// file**.
+///
+/// Both halves are the reader's rules, restated. `load_workflow_union` gives a
+/// seed file precedence on an id collision, so an edit to a seed-shadowed id
+/// would persist a graph nothing serves; and `merge_enabled_workflows` (#208)
+/// re-derives `[workflows].enabled` from seed ids at boot, so a "delete" of a
+/// seed-backed workflow would undo itself on restart. The write core enforces
+/// exactly this and answers `409` — this flag is the same predicate, projected
+/// so the console can grey the button instead of surfacing that 409.
+///
+/// The seed probe is [`seed_file_exists`], shared with the create path's
+/// id-uniqueness check, so the flag and the host's actual answer cannot drift.
+fn is_editable(source_dir: Option<&FsPath>, overlays: &[OverlayWorkflow], wid: &str) -> bool {
+    overlays.iter().any(|w| w.id == wid) && !seed_file_exists(source_dir, wid)
+}
+
+/// The stored overlay TOML for `wid`, when the record has one.
+fn overlay_toml<'a>(overlays: &'a [OverlayWorkflow], wid: &str) -> Option<&'a str> {
+    overlays
+        .iter()
+        .find(|w| w.id == wid)
+        .map(|w| w.toml.as_str())
+}
+
 async fn overlay_workflows(company: &ScopedCompany) -> Result<Vec<OverlayWorkflow>, ApiError> {
     let record: Option<CompanyRecord> = company
         .runtime
@@ -275,10 +337,16 @@ async fn overlay_workflows(company: &ScopedCompany) -> Result<Vec<OverlayWorkflo
 /// than a failure.
 async fn list_workflows(company: ScopedCompany) -> Result<Json<Vec<WorkflowSummary>>, ApiError> {
     let overlays = overlay_workflows(&company).await?;
-    let files = list_workflows_union(company.runtime.source_dir(), &overlays);
+    let source_dir = company.runtime.source_dir();
+    let files = list_workflows_union(source_dir, &overlays);
     let mut seen: HashSet<String> = files.iter().map(|f| f.id.clone()).collect();
-    let mut summaries: Vec<WorkflowSummary> =
-        files.into_iter().map(WorkflowSummary::from).collect();
+    let mut summaries: Vec<WorkflowSummary> = files
+        .into_iter()
+        .map(|f| {
+            let editable = is_editable(source_dir, &overlays, &f.id);
+            WorkflowSummary::new(f, editable)
+        })
+        .collect();
 
     let enabled_ids = company
         .runtime
@@ -295,6 +363,10 @@ async fn list_workflows(company: ScopedCompany) -> Result<Json<Vec<WorkflowSumma
             id: id.clone(),
             name: id,
             description: None,
+            // A manifest-`enabled` id with no body in either source: there is
+            // nothing to replace or remove, and the write core says so with a
+            // 409. Never editable.
+            editable: false,
         });
     }
 
@@ -317,11 +389,19 @@ async fn get_workflow(
             "workflow {wid}"
         ))));
     }
+    let source_dir = company.runtime.source_dir();
     let overlays = overlay_workflows(&company).await?;
-    let file = load_workflow_union(company.runtime.source_dir(), &overlays, &wid)
+    let file = load_workflow_union(source_dir, &overlays, &wid)
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))))?;
-    Ok(Json(WorkflowGraph::from(file)))
+    // Issue #259: the version token rides out with the graph, so the console
+    // gets it for free on the same read it renders from — there is no second
+    // round trip for a caller to skip and thereby lose the concurrency guard.
+    let editable = is_editable(source_dir, &overlays, &wid);
+    let version = editable
+        .then(|| overlay_toml(&overlays, &wid).map(workflow_version))
+        .flatten();
+    Ok(Json(WorkflowGraph::new(file, editable, version)))
 }
 
 /// The create-workflow body — the same camelCase graph shape the GET routes
@@ -490,7 +570,144 @@ async fn create_workflow(
     )
     .await
     .map_err(ApiError)?;
-    Ok(Json(WorkflowGraph::from(file)))
+    // A freshly created graph is always an overlay body and, since create
+    // refuses a seed-colliding id, never seed-shadowed — so it is editable, and
+    // its version token goes back on the create response. That lets the console
+    // hold a valid token from the moment it creates a workflow, without a
+    // follow-up GET.
+    Ok(Json(graph_with_version(&company, file).await?))
+}
+
+/// Re-reads the just-written overlay body to attach the current `editable` flag
+/// and version token to a write response.
+///
+/// The re-read is deliberate rather than derived from the value we just
+/// rendered: the token must be the hash of what is *stored*, so that echoing it
+/// back is guaranteed to match. Computing it from an in-memory copy would work
+/// right up until the persist path ever normalizes the TOML, and then fail as a
+/// mysterious permanent 409.
+async fn graph_with_version(
+    company: &ScopedCompany,
+    file: WorkflowFile,
+) -> Result<WorkflowGraph, ApiError> {
+    let source_dir = company.runtime.source_dir();
+    let overlays = overlay_workflows(company).await?;
+    let editable = is_editable(source_dir, &overlays, &file.id);
+    let version = editable
+        .then(|| overlay_toml(&overlays, &file.id).map(workflow_version))
+        .flatten();
+    Ok(WorkflowGraph::new(file, editable, version))
+}
+
+/// The `PUT …/workflows/{wid}` body: the same camelCase graph shape the read and
+/// create routes speak, plus the optional concurrency token.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateWorkflowBody {
+    #[serde(flatten)]
+    graph: CreateWorkflowBody,
+    /// The token from the `GET`/`PUT` this edit was based on. Omit for an
+    /// unconditional write (the `curl` path); the console always sends it.
+    #[serde(default)]
+    expected_version: Option<String>,
+}
+
+/// `PUT …/workflows/{wid}` — replaces a saved workflow graph wholesale (issue
+/// #259).
+///
+/// Before this, a workflow was write-once: a typo in a cron expression or a
+/// node pointed at the wrong teammate was permanent, and the only recovery was
+/// to author a second workflow and leave the broken one firing forever.
+///
+/// The body's `id` **must equal** `wid`. Renaming an id through `PUT` is
+/// deliberately rejected rather than quietly supported: the id keys the union
+/// read path, the scheduler's per-workflow fire bookkeeping, and every
+/// journalled run in the history — a rename would silently orphan all three. A
+/// rename is a create plus a delete, and the operator should say so.
+///
+/// Statuses: `400` (bad graph, or `id` ≠ `wid`), `404` (unknown id), `409`
+/// (source-defined, body-less, name taken, or a stale `expectedVersion`).
+async fn update_workflow(
+    company: ScopedCompany,
+    Path(WorkflowPath { wid }): Path<WorkflowPath>,
+    Json(body): Json<UpdateWorkflowBody>,
+) -> Result<Json<WorkflowGraph>, ApiError> {
+    if !safe_wid(&wid) {
+        return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
+            "workflow {wid}"
+        ))));
+    }
+    if body.graph.id != wid {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+            "this request would change the workflow's id from `{wid}` to `{}`. A workflow's id \
+             can't change — it keys the saved graph, its schedule and its run history. Create a \
+             new workflow under the new id and delete this one instead.",
+            body.graph.id
+        ))));
+    }
+
+    let expected = body.expected_version.clone();
+    let draft = RawWorkflow::try_from(body.graph)?;
+    let file = update_company_workflow(
+        company.id(),
+        company.runtime.source_dir(),
+        company.runtime.store(),
+        Some(company.runtime.events()),
+        draft,
+        expected.as_deref(),
+    )
+    .await
+    .map_err(ApiError)?;
+    // The response carries the NEW token, so a console can save twice in a row
+    // without a re-read in between.
+    Ok(Json(graph_with_version(&company, file).await?))
+}
+
+/// The optional `?expectedVersion=` query on `DELETE …/workflows/{wid}`.
+///
+/// A query param rather than a body because a `DELETE` with a body is poorly
+/// supported by intermediaries and by `fetch`; the token is 64 hex characters,
+/// so it is URL-safe without escaping.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteWorkflowQuery {
+    #[serde(default)]
+    expected_version: Option<String>,
+}
+
+/// `DELETE …/workflows/{wid}` — removes a saved workflow (issue #259).
+///
+/// Drops the graph body **and** the id from `[workflows].enabled` in one save,
+/// so the workflow stops appearing in the picker and stops firing on its
+/// schedule, and stays gone across a restart.
+///
+/// **Past runs are deliberately kept.** They are journal entries recording what
+/// the workflow did, and that stays true after it is gone — `GET
+/// …/workflows/runs` keeps serving them. See the module doc.
+///
+/// `204` on success. `404` for an unknown id; `409` for a source-defined or
+/// body-less id, or a stale `expectedVersion`.
+async fn delete_workflow(
+    company: ScopedCompany,
+    Path(WorkflowPath { wid }): Path<WorkflowPath>,
+    Query(query): Query<DeleteWorkflowQuery>,
+) -> Result<StatusCode, ApiError> {
+    if !safe_wid(&wid) {
+        return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
+            "workflow {wid}"
+        ))));
+    }
+    delete_company_workflow(
+        company.id(),
+        company.runtime.source_dir(),
+        company.runtime.store(),
+        Some(company.runtime.events()),
+        &wid,
+        query.expected_version.as_deref(),
+    )
+    .await
+    .map_err(ApiError)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Whether `wid` is a single safe on-disk filename stem — no path separators,
@@ -869,12 +1086,45 @@ mod tests {
         dir
     }
 
+    /// **The `editable` predicate, including the case the route harness can't
+    /// reach** (its runtimes are hosted, so they have no source directory).
+    ///
+    /// A seed file wins the union read, so an overlay body sitting behind one is
+    /// not editable even though a body exists — persisting an edit there would
+    /// store a graph nothing serves. This is the same predicate the write core
+    /// enforces with a 409; if the two ever disagree the console offers a button
+    /// that cannot work.
+    #[test]
+    fn editable_is_overlay_backed_and_not_seed_shadowed() {
+        let dir = seed_demo(); // writes workflows/demo.toml
+        let source = Some(dir.path());
+        let overlay = |id: &str| OverlayWorkflow {
+            id: id.to_string(),
+            toml: DEMO.to_string(),
+        };
+
+        // Overlay body, no seed file → editable.
+        assert!(is_editable(source, &[overlay("mine")], "mine"));
+        // Overlay body shadowed by a seed file of the same id → NOT editable.
+        assert!(!is_editable(source, &[overlay("demo")], "demo"));
+        // Seed file only → not editable.
+        assert!(!is_editable(source, &[], "demo"));
+        // Nothing at all → not editable.
+        assert!(!is_editable(source, &[], "ghost"));
+        // No source tree (the hosted shape): an overlay body is editable, and a
+        // seed id that no longer has a tree behind it simply isn't there.
+        assert!(is_editable(None, &[overlay("mine")], "mine"));
+        assert!(!is_editable(None, &[], "demo"));
+    }
+
     #[test]
     fn list_returns_a_summary_per_saved_workflow() {
         let dir = seed_demo();
         let files = list_workflows_union(Some(dir.path()), &[]);
-        let summaries: Vec<WorkflowSummary> =
-            files.into_iter().map(WorkflowSummary::from).collect();
+        let summaries: Vec<WorkflowSummary> = files
+            .into_iter()
+            .map(|f| WorkflowSummary::new(f, false))
+            .collect();
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].id, "demo");
         assert_eq!(summaries[0].name, "Demo flow");
@@ -890,7 +1140,7 @@ mod tests {
         let file = load_workflow_union(Some(dir.path()), &[], "demo")
             .expect("loads")
             .expect("one file");
-        let graph = WorkflowGraph::from(file);
+        let graph = WorkflowGraph::new(file, false, None);
 
         assert_eq!(graph.id, "demo");
         assert_eq!(graph.nodes.len(), 3);
@@ -927,7 +1177,7 @@ mod tests {
         let file = load_workflow_union(Some(dir.path()), &[], "demo")
             .unwrap()
             .unwrap();
-        let json = serde_json::to_value(WorkflowGraph::from(file)).unwrap();
+        let json = serde_json::to_value(WorkflowGraph::new(file, false, None)).unwrap();
         // A node with no summary/agent omits those keys entirely.
         let done = json["nodes"]
             .as_array()
@@ -967,7 +1217,7 @@ mod tests {
             }],
             edges: Vec::new(),
         };
-        let json = serde_json::to_value(WorkflowGraph::from(file)).unwrap();
+        let json = serde_json::to_value(WorkflowGraph::new(file, false, None)).unwrap();
         let node = &json["nodes"][0];
         assert_eq!(node["config"]["slug"], "csv_export");
         assert_eq!(node["onError"], "continue");
@@ -1168,7 +1418,7 @@ mod tests {
             ],
             edges: Vec::new(),
         };
-        let json = serde_json::to_value(WorkflowGraph::from(file)).unwrap();
+        let json = serde_json::to_value(WorkflowGraph::new(file, false, None)).unwrap();
         assert_eq!(json["nodes"][0]["schedule"], "0 * * * *");
         assert!(json["nodes"][1].get("schedule").is_none());
     }
@@ -1219,7 +1469,7 @@ mod tests {
         assert_eq!(dest.target.as_deref(), Some("ada@example.com"));
 
         // …and back out on the read shape, under the same key.
-        let json = serde_json::to_value(WorkflowGraph::from(file)).unwrap();
+        let json = serde_json::to_value(WorkflowGraph::new(file, false, None)).unwrap();
         let node = json["nodes"]
             .as_array()
             .unwrap()
@@ -1253,7 +1503,7 @@ mod tests {
             &crate::company::render_workflow(&raw).expect("renders"),
         )
         .expect("re-parses");
-        let json = serde_json::to_value(WorkflowGraph::from(file)).unwrap();
+        let json = serde_json::to_value(WorkflowGraph::new(file, false, None)).unwrap();
         let node = &json["nodes"][1];
         assert_eq!(node["destination"]["kind"], "owner");
         assert!(node["destination"].get("target").is_none());
@@ -1267,7 +1517,7 @@ mod tests {
         let file = load_workflow_union(Some(dir.path()), &[], "demo")
             .unwrap()
             .unwrap();
-        let json = serde_json::to_value(WorkflowGraph::from(file)).unwrap();
+        let json = serde_json::to_value(WorkflowGraph::new(file, false, None)).unwrap();
         for node in json["nodes"].as_array().unwrap() {
             assert!(node.get("destination").is_none(), "{node}");
         }
@@ -2076,6 +2326,463 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK);
             let body = json_body(response).await;
             assert_eq!(body[0]["workflowId"], "digest");
+        }
+
+        // ── Issue #259: edit + delete at the HTTP boundary ──────────────────
+
+        /// Creates `greeter` and returns its current version token.
+        async fn create_greeter(state: &AppState) -> String {
+            let response = router(state.clone())
+                .oneshot(request(
+                    "POST",
+                    "/api/v1/company/workflows",
+                    Some(create_body()),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let created = json_body(response).await;
+            // A freshly created overlay graph is editable and carries a token.
+            assert_eq!(created["editable"], true, "{created}");
+            created["version"]
+                .as_str()
+                .unwrap_or_else(|| panic!("create must return a version token: {created}"))
+                .to_string()
+        }
+
+        /// `create_body()` with a schedule on the trigger and a changed
+        /// description — the exact "I typo'd my cron" edit the issue is about.
+        fn edited_body(expected_version: Option<&str>) -> serde_json::Value {
+            let mut body = serde_json::json!({
+                "id": "greeter",
+                "name": "Greeter",
+                "description": "Say hi, every morning.",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start", "schedule": "0 9 * * *" },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [ { "from": "start", "to": "done", "label": "ok" } ]
+            });
+            if let Some(v) = expected_version {
+                body["expectedVersion"] = serde_json::json!(v);
+            }
+            body
+        }
+
+        /// **The issue, at the HTTP boundary.** A saved workflow's cron was
+        /// permanent; now it can be corrected and the correction reads back.
+        #[tokio::test]
+        async fn edit_replaces_the_graph_and_reads_back() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+            let version = create_greeter(&state).await;
+
+            let response = router(state.clone())
+                .oneshot(request(
+                    "PUT",
+                    "/api/v1/company/workflows/greeter",
+                    Some(edited_body(Some(&version))),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let updated = json_body(response).await;
+            assert_eq!(updated["nodes"][0]["schedule"], "0 9 * * *");
+            // The response carries the NEW token, so a second save needs no
+            // intervening read.
+            let next = updated["version"].as_str().expect("new token").to_string();
+            assert_ne!(next, version, "the token must move with the body");
+
+            // And a fresh read agrees — the edit is what the read path serves.
+            let response = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            let graph = json_body(response).await;
+            assert_eq!(graph["nodes"][0]["schedule"], "0 9 * * *");
+            assert_eq!(graph["description"], "Say hi, every morning.");
+            assert_eq!(graph["version"], next.as_str());
+
+            // Still exactly one workflow — an edit replaces, never forks.
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows", None))
+                .await
+                .unwrap();
+            let items = json_body(response).await;
+            assert_eq!(items.as_array().unwrap().len(), 1, "{items}");
+        }
+
+        /// **The silent-overwrite guard.** Two consoles hold the same graph; one
+        /// saves, then the other saves its stale copy. The second must be
+        /// refused, not silently win.
+        #[tokio::test]
+        async fn a_stale_expected_version_is_a_conflict() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+            let stale = create_greeter(&state).await;
+
+            // Console A saves first.
+            let first = router(state.clone())
+                .oneshot(request(
+                    "PUT",
+                    "/api/v1/company/workflows/greeter",
+                    Some(edited_body(Some(&stale))),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(first.status(), StatusCode::OK);
+
+            // Console B saves with the token it loaded before A's write.
+            let second = router(state.clone())
+                .oneshot(request(
+                    "PUT",
+                    "/api/v1/company/workflows/greeter",
+                    Some(edited_body(Some(&stale))),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(second.status(), StatusCode::CONFLICT);
+            // The message must tell the operator what to do, not just say no.
+            let body = json_body(second).await;
+            let message = body["error"].as_str().unwrap_or_default().to_lowercase();
+            assert!(message.contains("reload"), "unhelpful 409: {body}");
+
+            // A's edit is intact — the refusal changed nothing.
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            let graph = json_body(response).await;
+            assert_eq!(graph["description"], "Say hi, every morning.");
+        }
+
+        /// Omitting the token is an unconditional write — the `curl` contract.
+        #[tokio::test]
+        async fn an_edit_without_a_token_is_unconditional() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+            create_greeter(&state).await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "PUT",
+                    "/api/v1/company/workflows/greeter",
+                    Some(edited_body(None)),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        /// A `PUT` that would rename the id is a 400, not a silent create — the
+        /// id keys the saved graph, its schedule and its run history.
+        #[tokio::test]
+        async fn an_id_mismatch_is_a_bad_request() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+            create_greeter(&state).await;
+
+            let mut body = edited_body(None);
+            body["id"] = serde_json::json!("greeter-v2");
+            let response = router(state.clone())
+                .oneshot(request(
+                    "PUT",
+                    "/api/v1/company/workflows/greeter",
+                    Some(body),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+            // Nothing was created under the new id.
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows", None))
+                .await
+                .unwrap();
+            let items = json_body(response).await;
+            assert_eq!(items.as_array().unwrap().len(), 1, "{items}");
+            assert_eq!(items[0]["id"], "greeter");
+        }
+
+        #[tokio::test]
+        async fn editing_an_unknown_workflow_is_not_found() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            let mut body = edited_body(None);
+            body["id"] = serde_json::json!("ghost");
+            let response = router(state)
+                .oneshot(request(
+                    "PUT",
+                    "/api/v1/company/workflows/ghost",
+                    Some(body),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        /// A bad edit is refused on the same terms as a bad create — the shared
+        /// validation, at the HTTP boundary.
+        #[tokio::test]
+        async fn a_structurally_invalid_edit_is_a_bad_request() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+            create_greeter(&state).await;
+
+            // No trigger node at all.
+            let body = serde_json::json!({
+                "id": "greeter",
+                "name": "Greeter",
+                "nodes": [ { "id": "done", "kind": "output", "name": "Report" } ],
+                "edges": []
+            });
+            let response = router(state)
+                .oneshot(request(
+                    "PUT",
+                    "/api/v1/company/workflows/greeter",
+                    Some(body),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+
+        /// **The delete, and its durability.** A removed workflow leaves the
+        /// picker AND stays gone across a full state rebuild — the property that
+        /// matters, because `merge_enabled_workflows` (#208) re-derives the
+        /// enabled list at boot and would resurrect a half-delete.
+        #[tokio::test]
+        async fn delete_removes_it_from_the_picker_and_survives_a_rebuild() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let version = create_greeter(&state).await;
+
+            let response = router(state.clone())
+                .oneshot(request(
+                    "DELETE",
+                    &format!("/api/v1/company/workflows/greeter?expectedVersion={version}"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+            // Gone from the picker…
+            let response = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows", None))
+                .await
+                .unwrap();
+            let items = json_body(response).await;
+            assert_eq!(items.as_array().unwrap().len(), 0, "{items}");
+
+            // …and from the graph read.
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+            // Rebuild everything from the same durable store: still gone.
+            let rebuilt = state_over(&home, &id, false).await;
+            let response = router(rebuilt)
+                .oneshot(request("GET", "/api/v1/company/workflows", None))
+                .await
+                .unwrap();
+            let items = json_body(response).await;
+            assert_eq!(
+                items.as_array().unwrap().len(),
+                0,
+                "a deleted workflow must not come back on restart: {items}"
+            );
+        }
+
+        /// **Run history is orphaned, not reaped.** What a workflow did stays
+        /// true after the workflow is gone, and the journal is append-only.
+        #[tokio::test]
+        async fn deleting_a_workflow_keeps_its_run_history() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            create_greeter(&state).await;
+            journal_run(
+                &state,
+                &id,
+                "greeter",
+                true,
+                vec![undelivered_row("done")],
+                None,
+            )
+            .await;
+
+            let response = router(state.clone())
+                .oneshot(request("DELETE", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+            let response = router(state)
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/runs?workflow=greeter",
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let rows = json_body(response).await;
+            assert_eq!(
+                rows.as_array().unwrap().len(),
+                1,
+                "past runs must outlive the workflow: {rows}"
+            );
+            assert_eq!(rows[0]["workflowId"], "greeter");
+        }
+
+        #[tokio::test]
+        async fn deleting_with_a_stale_version_is_a_conflict() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+            let stale = create_greeter(&state).await;
+
+            // Someone edits after the console loaded the graph.
+            let edited = router(state.clone())
+                .oneshot(request(
+                    "PUT",
+                    "/api/v1/company/workflows/greeter",
+                    Some(edited_body(None)),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(edited.status(), StatusCode::OK);
+
+            let response = router(state.clone())
+                .oneshot(request(
+                    "DELETE",
+                    &format!("/api/v1/company/workflows/greeter?expectedVersion={stale}"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+
+            // Still there.
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        #[tokio::test]
+        async fn deleting_an_unknown_workflow_is_not_found() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            let response = router(state)
+                .oneshot(request("DELETE", "/api/v1/company/workflows/ghost", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        /// The write verbs are reachable under the platform scope form too, not
+        /// just the prosumer alias.
+        #[tokio::test]
+        async fn edit_and_delete_serve_both_scope_forms() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+            create_greeter(&state).await;
+
+            let response = router(state.clone())
+                .oneshot(request(
+                    "PUT",
+                    "/api/v1/companies/acme/workflows/greeter",
+                    Some(edited_body(None)),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let response = router(state)
+                .oneshot(request(
+                    "DELETE",
+                    "/api/v1/companies/acme/workflows/greeter",
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        }
+
+        /// A manifest-`enabled` id with no saved graph is listed but NOT
+        /// editable — there is nothing to replace or remove, and the console
+        /// must not offer a button that can only 409.
+        #[tokio::test]
+        async fn a_bodiless_enabled_id_is_listed_but_not_editable() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let store = FsCompanyStore::new(home.clone());
+            let id = CompanyId::new("acme");
+            let mut manifest = empty_manifest();
+            manifest.workflows.enabled.push("legacy".to_string());
+            store
+                .save(&CompanyRecord {
+                    id: id.clone(),
+                    manifest: manifest.clone(),
+                    ledger: Vec::new(),
+                    lifecycle: "running".to_string(),
+                    overlay_agents: Vec::new(),
+                    overlay_desk_members: Vec::new(),
+                    overlay_desk_order: Vec::new(),
+                    overlay_desks: Vec::new(),
+                    overlay_workflows: Vec::new(),
+                    template_provenance: None,
+                })
+                .await
+                .unwrap();
+            // The runtime carries its own manifest — the enabled list the list
+            // route reads comes from there, not from the record we just saved.
+            let runtime = RuntimeBuilder::new(home.clone(), manifest)
+                .with_id(id.clone())
+                .build()
+                .await
+                .unwrap();
+            let state = AppState::new(AppConfig::default());
+            state
+                .registry()
+                .insert(id.clone(), std::sync::Arc::new(runtime));
+            crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+            let response = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows", None))
+                .await
+                .unwrap();
+            let items = json_body(response).await;
+            let legacy = items
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["id"] == "legacy")
+                .expect("listed under its id");
+            assert_eq!(legacy["editable"], false, "{items}");
+
+            // And the host agrees when actually asked to delete it.
+            let response = router(state)
+                .oneshot(request("DELETE", "/api/v1/company/workflows/legacy", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
         }
     }
 }

@@ -11,7 +11,20 @@ import type { DeliveryReport } from "@/api/workflows";
  * raw third-party payload is ever on the wire.
  */
 export type CompanyStreamEvent =
-  | { type: "agent_reply"; seq: number; atMillis: number; chatId: string; agentId: string; text: string }
+  | {
+      type: "agent_reply";
+      seq: number;
+      atMillis: number;
+      chatId: string;
+      agentId: string;
+      text: string;
+      /**
+       * The board card this reply is about (issue #246/#185) — the card the
+       * turn opened, or the dispatched card it ran for. Absent on an ordinary
+       * chat reply.
+       */
+      taskId?: string;
+    }
   | { type: "task_dispatched"; seq: number; atMillis: number; taskId: string }
   | { type: "task_steered"; seq: number; atMillis: number; taskId: string; action: string }
   | {
@@ -79,6 +92,8 @@ export interface AgentReplyEvent {
   chatId: string;
   agentId: string;
   text: string;
+  /** The board card this reply opened (issue #246), when it opened one. */
+  taskId?: string;
 }
 
 interface Options {
@@ -260,7 +275,15 @@ function handleEvent(
       onTaskEvent?.(event);
       break;
     case "agent_reply":
-      onAgentReply?.({ chatId: event.chatId, agentId: event.agentId, text: event.text });
+      onAgentReply?.({
+        chatId: event.chatId,
+        agentId: event.agentId,
+        text: event.text,
+        // Issue #246: a reply injected from the stream — one this console did
+        // not POST for, e.g. an inbound Telegram turn — carries its "card
+        // opened" chip too, rather than only the locally-awaited copy.
+        taskId: event.taskId,
+      });
       break;
     case "approval_resolved":
       toast(event.verdict === "approve" ? "Approval granted" : "Approval denied", {

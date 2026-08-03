@@ -802,7 +802,8 @@ impl HarnessBrain {
     ///
     /// `spawn_task` opens a backlog card through the same
     /// [`TaskStore::upsert`](crate::ports::TaskStore) path the console uses and
-    /// surfaces nothing extra (a missing task store is a silent no-op).
+    /// reports the card's id (issue #246); it surfaces no bubble of its own. A
+    /// missing task store is a silent no-op.
     /// `delegate_to_desk` runs a single turn on the desk's lead member and
     /// **returns its reply for the orchestrator to relay** (a [`DeskReply`]) —
     /// the CEO-relay hand-back: instead of a disconnected sibling bubble the
@@ -935,6 +936,12 @@ impl Brain for HarnessBrain {
                     // steps on the operator bubble — one surface, one renderer.
                     self.surface_mcp_failures(&mut operator_steps, None).await?;
                     channel_responses.push(OutboundMessage {
+                        // Issue #246: when the turn opened a board card, say so
+                        // on the bubble it opened it from. Before this a
+                        // `spawn_task` was invisible in chat — the card landed
+                        // on the board and the reply carried nothing tying the
+                        // two together.
+                        task_id: turn.spawned_task,
                         channel: "operator".to_string(),
                         text: operator_reply,
                         reply_to: None,
@@ -959,6 +966,7 @@ impl Brain for HarnessBrain {
         // The runtime requires at least one channel response per cycle.
         if channel_responses.is_empty() {
             channel_responses.push(OutboundMessage {
+                task_id: None,
                 channel: "operator".to_string(),
                 text: "Acknowledged.".to_string(),
                 steps: Vec::new(),
@@ -2274,6 +2282,149 @@ members = ["eng1", "eng2"]
         assert_eq!(cards[0].title, "Draft the plan");
         assert_eq!(cards[0].column, "backlog");
         assert_eq!(cards[0].assignee, "engineer");
+        // Issue #246: it surfaces no *bubble*, but it no longer surfaces
+        // *nothing* — the card it opened is reported, which is what lets the
+        // caller tell the operator a card exists instead of leaving them to
+        // notice it on the board.
+        assert_eq!(
+            out.spawned_task.as_deref(),
+            Some(cards[0].id.as_str()),
+            "the opened card must be reported, and be the one actually written"
+        );
+    }
+
+    /// Issue #246: a chat turn that opened a card says so on the bubble it
+    /// answered from. Before this the card appeared on the board and the reply
+    /// carried nothing tying the two together, so an operator had no way to
+    /// tell a turn that opened work from one that only talked about it.
+    #[tokio::test]
+    async fn a_turn_that_opens_a_card_reports_it_on_the_operator_bubble() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _provider) = brain_that_delegates(
+            dir.path(),
+            vec![Some(Delegation::SpawnTask {
+                title: "Draft the announcement".to_string(),
+                note: None,
+                assignee: None,
+            })],
+        );
+
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::OperatorMessage {
+                    text: "we should announce this".into(),
+                    by: None,
+                    chat: None,
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        assert_eq!(result.channel_responses.len(), 1);
+        let bubble = &result.channel_responses[0];
+        let reported = bubble.task_id.as_deref().expect("the bubble names a card");
+        let cards = brain
+            .deps
+            .tasks
+            .as_ref()
+            .unwrap()
+            .list(&brain.record.id)
+            .await
+            .unwrap();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            reported, cards[0].id,
+            "the reported card must be the one on the board"
+        );
+    }
+
+    /// Issue #246, the documented limitation stated as a test rather than only
+    /// as prose: a turn that opens several cards reports the **first**. The
+    /// journal field this feeds is a single optional id, so widening it would
+    /// break the byte-identical round-trip every already-stored reply relies
+    /// on. Pinned to *first* — not "whichever won" — because a later spawn
+    /// silently overwriting an earlier one would make the reported card depend
+    /// on queue order, which is the model's choice, not a contract.
+    #[tokio::test]
+    async fn a_turn_that_opens_several_cards_reports_the_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _provider) = brain_that_delegates_with(
+            dir.path(),
+            vec![vec![
+                Delegation::SpawnTask {
+                    title: "First".to_string(),
+                    note: None,
+                    assignee: None,
+                },
+                Delegation::SpawnTask {
+                    title: "Second".to_string(),
+                    note: None,
+                    assignee: None,
+                },
+            ]],
+            TurnFaults::default(),
+        );
+
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::OperatorMessage {
+                    text: "two things".into(),
+                    by: None,
+                    chat: None,
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        let reported = result.channel_responses[0]
+            .task_id
+            .as_deref()
+            .expect("the bubble names a card");
+        let cards = brain
+            .deps
+            .tasks
+            .as_ref()
+            .unwrap()
+            .list(&brain.record.id)
+            .await
+            .unwrap();
+        assert_eq!(cards.len(), 2, "both cards are opened either way");
+        let first = cards
+            .iter()
+            .find(|c| c.title == "First")
+            .expect("the first card exists");
+        assert_eq!(
+            reported, first.id,
+            "the bubble reports the first card opened, not the last"
+        );
+    }
+
+    /// The other side of the same contract: a turn that opened no card must
+    /// leave the field empty, so no bubble grows a "card opened" chip it has
+    /// not earned.
+    #[tokio::test]
+    async fn a_turn_that_opens_no_card_reports_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _provider) = brain_that_delegates(dir.path(), Vec::new());
+
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::OperatorMessage {
+                    text: "status?".into(),
+                    by: None,
+                    chat: None,
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        assert!(
+            result.channel_responses[0].task_id.is_none(),
+            "an ordinary chat turn must not claim a card"
+        );
     }
 
     // ── Issue #186 part b: orchestrator lifecycle authority ────────────────
@@ -3253,6 +3404,10 @@ members = ["eng1", "eng2"]
         /// Invokes that CANCEL their own in-flight delegation mid-run, so the
         /// delegated reply is discarded exactly as an operator cancel does.
         cancel_on: Vec<usize>,
+        /// Desk keys the first turn's `delegate_to_desk` calls named and the
+        /// tool REFUSED (issue #272). A refusal never becomes a `Delegation`,
+        /// so this is how a test reproduces one without standing up the tool.
+        refused_on_first: Vec<String>,
     }
 
     impl DelegatingProvider {
@@ -3299,6 +3454,11 @@ members = ["eng1", "eng2"]
             self.board.lock().unwrap().push(snapshot);
             for delegation in self.pushes.lock().unwrap().pop_front().unwrap_or_default() {
                 self.queue.push(delegation);
+            }
+            if invoke == 1 {
+                for desk in &self.faults.refused_on_first {
+                    self.queue.push_refusal(desk.clone());
+                }
             }
             let message = request
                 .messages
@@ -3813,6 +3973,103 @@ members = ["eng1", "eng2"]
             "the card must not strand in progress waiting on a delegate that cannot run"
         );
         assert_ne!(after.assignee, "ghost");
+    }
+
+    /// Issue #272: settling under the delegator is the right *behaviour* (#213
+    /// chose it so a card is never stranded), but it used to be silent — the
+    /// board showed a card whose note claimed a hand-off and whose owner was the
+    /// delegator, with nothing connecting the two. The undeliverable hand-off is
+    /// now recorded on the card, so an operator reads the fact instead of
+    /// inferring it from an absence.
+    #[tokio::test]
+    async fn a_hand_off_that_cannot_be_delivered_says_so_on_the_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, provider) = brain_that_delegates(
+            dir.path(),
+            vec![Some(Delegation::DelegateToDesk {
+                desk: "ghost".to_string(),
+                instruction: "look into it".to_string(),
+            })],
+        );
+        dispatch_card(&brain, &provider.tasks.clone(), "t-loud").await;
+
+        let note = only_card(&provider.tasks).await.note.expect("note");
+        assert!(
+            note.contains("hand-off to the \"ghost\" desk was not delivered"),
+            "the card must name the hand-off that did not happen: {note}"
+        );
+        assert!(
+            note.contains("this card is still with chief"),
+            "the card must say who still owns it: {note}"
+        );
+    }
+
+    /// Issue #272, the grounded half: the tool refused the invented target, so
+    /// no `Delegation` was ever queued. The turn is still free to *say* it
+    /// handed the work off — that is exactly what happened on the live company
+    /// — so the board records the refusal independently of the turn's account
+    /// of it. Without this the card settles under the delegator with a note
+    /// that claims a hand-off and nothing anywhere contradicting it.
+    #[tokio::test]
+    async fn a_refused_hand_off_is_recorded_on_the_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, provider) = brain_that_delegates_with(
+            dir.path(),
+            vec![Vec::new()],
+            TurnFaults {
+                refused_on_first: vec!["writer".to_string()],
+                ..TurnFaults::default()
+            },
+        );
+        dispatch_card(&brain, &provider.tasks.clone(), "t-refused").await;
+
+        let after = only_card(&provider.tasks).await;
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a refused hand-off runs no delegate"
+        );
+        assert_eq!(
+            after.column, "in_review",
+            "the card still settles under the delegator (#213); it is only no longer silent"
+        );
+        let note = after.note.expect("note");
+        assert!(
+            note.contains("hand-off to the \"writer\" desk was not delivered"),
+            "the refused target must be named on the card: {note}"
+        );
+        assert!(
+            note.contains("not a desk this company can hand work to"),
+            "the cause must be on the card: {note}"
+        );
+    }
+
+    /// The other half of #272's note: a delegation that never had a desk target
+    /// (a `spawn_task`) must not pick up an undeliverable-hand-off line.
+    #[tokio::test]
+    async fn a_spawn_task_never_records_an_undeliverable_hand_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, provider) = brain_that_delegates(
+            dir.path(),
+            vec![Some(Delegation::SpawnTask {
+                title: "Follow up".to_string(),
+                note: None,
+                assignee: None,
+            })],
+        );
+        dispatch_card(&brain, &provider.tasks.clone(), "t-quiet").await;
+
+        let cards = provider.tasks.list(&CompanyId::new("acme")).await.unwrap();
+        let parent = cards.iter().find(|c| c.id == "t-quiet").expect("parent");
+        assert!(
+            !parent
+                .note
+                .as_deref()
+                .unwrap_or_default()
+                .contains("was not delivered"),
+            "a spawn_task has no desk target to fail: {:?}",
+            parent.note
+        );
     }
 
     /// A `spawn_task` queued by a *dispatched* turn now opens its card with the

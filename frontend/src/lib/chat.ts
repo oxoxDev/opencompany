@@ -18,6 +18,43 @@ export interface ChatMessage {
    * on your own messages and on tool-less replies.
    */
   steps?: TurnStep[];
+  /**
+   * The board card this line is about (issue #246): one the turn opened, or one
+   * created from this message by "Add to board". Renders as a chip linking to
+   * `#/tasks/<id>`.
+   */
+  taskId?: string;
+}
+
+/**
+ * How long a card title derived from a chat message may be before it is
+ * elided. Long enough to keep a normal one-line ask intact, short enough that a
+ * pasted paragraph does not become a board card nobody can scan.
+ */
+const TITLE_CAP = 80;
+
+/**
+ * A board-card title derived from a chat message (issue #246).
+ *
+ * Takes the first non-blank line — a multi-line ask reads as "headline, then
+ * detail", and the detail belongs in the card's note, which is where the full
+ * text goes. Returns an empty string for a message with nothing in it, so the
+ * caller can refuse rather than opening a blank card.
+ *
+ * Elides on **code points**, not UTF-16 units, so a title cut mid-emoji cannot
+ * produce a lone surrogate; the cap includes the ellipsis rather than
+ * overshooting by one.
+ */
+export function titleFromMessage(text: string): string {
+  const line = text
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.length > 0);
+  if (!line) return "";
+  const points = Array.from(line);
+  return points.length <= TITLE_CAP
+    ? line
+    : `${points.slice(0, TITLE_CAP - 1).join("")}…`;
 }
 
 let seq = 0;
@@ -27,7 +64,7 @@ const nextId = () => `m${seq++}`;
 export function makeMessage(
   from: ChatMessage["from"],
   text: string,
-  opts: { channel?: string; at?: number; steps?: TurnStep[] } = {},
+  opts: { channel?: string; at?: number; steps?: TurnStep[]; taskId?: string } = {},
 ): ChatMessage {
   return {
     id: nextId(),
@@ -36,6 +73,7 @@ export function makeMessage(
     at: opts.at ?? Date.now(),
     channel: opts.channel,
     steps: opts.steps,
+    taskId: opts.taskId,
   };
 }
 
@@ -60,6 +98,10 @@ export function fromHistory(entries: ChatHistoryMessageDto[]): ChatMessage[] {
       // Rehydrate the persisted tool-call timeline so it survives a thread
       // switch / reload — the render already draws `m.steps` (Conversation.tsx).
       steps: from === "company" ? entry.steps : undefined,
+      // Rehydrate the "card opened" chip (issue #246) for the same reason as
+      // the timeline above: a chip that lives only on the live POST response
+      // vanishes on the first thread switch.
+      taskId: from === "company" ? entry.taskId : undefined,
     };
   });
 }

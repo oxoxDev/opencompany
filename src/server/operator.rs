@@ -728,6 +728,27 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             o["name"] = json!(name);
             o
         }
+        // Issue #259: an edited or removed workflow, so a console holding the
+        // Workflows tab open re-reads the picker instead of offering a graph
+        // that changed under it (or one that no longer exists). Same two fields
+        // and same deny-by-default actor omission as `workflow_created` — and,
+        // as the variant docs spell out, there is no graph body to leak here.
+        CompanyEvent::WorkflowUpdated {
+            workflow_id, name, ..
+        } => {
+            let mut o = envelope("workflow_updated");
+            o["workflowId"] = json!(workflow_id);
+            o["name"] = json!(name);
+            o
+        }
+        CompanyEvent::WorkflowDeleted {
+            workflow_id, name, ..
+        } => {
+            let mut o = envelope("workflow_deleted");
+            o["workflowId"] = json!(workflow_id);
+            o["name"] = json!(name);
+            o
+        }
         // Issue #111: surface an accepted operator steer so the console's
         // in-flight strip can refresh live. Only the task id + action word go on
         // the wire — the actor (`by`) and the operator's redirect `instruction`
@@ -946,7 +967,16 @@ async fn chat_and_emit(
             .append(
                 id,
                 CompanyEvent::AgentReply {
-                    task_id: None,
+                    // Issue #246: carry the card this turn opened onto the
+                    // durable record, so the console's "card opened" chip
+                    // survives a transcript reload instead of living only on
+                    // the live POST response. This widens the field's meaning
+                    // from "the dispatch that produced this reply" to "the card
+                    // this reply is about" — a card-creating reply now shows up
+                    // in that card's timeline alongside its dispatch replies,
+                    // which is the lineage an operator wants and costs no
+                    // schema change.
+                    task_id: response.task_id.clone(),
                     chat_id: desk.clone(),
                     agent_id: response.channel.clone(),
                     text: response.text.clone(),
@@ -1061,6 +1091,12 @@ struct ChatHistoryMessageDto {
     /// empty (operator messages, tool-less replies) — keeps the legacy shape.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     steps: Vec<TurnStep>,
+    /// The board card this reply is about (issue #246), so a rehydrated
+    /// transcript renders the same "card opened" chip the live turn showed.
+    /// Omitted when absent — which is every message journaled before the field
+    /// existed — so the legacy shape is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task_id: Option<String>,
 }
 
 impl From<MessageView> for ChatHistoryMessageDto {
@@ -1073,6 +1109,7 @@ impl From<MessageView> for ChatHistoryMessageDto {
             at_millis: view.at_millis,
             mine: view.mine,
             steps: view.steps,
+            task_id: view.task_id,
         }
     }
 }
@@ -2281,6 +2318,76 @@ mod test {
         assert_eq!(reply["steps"][0]["elapsedMs"], 9);
     }
 
+    /// Issue #246: a reply that opened a board card must still say so after a
+    /// transcript reload. The "card opened" chip is rendered from `taskId`, and
+    /// a chip that exists only on the live POST response vanishes the moment
+    /// the operator switches threads and comes back — which is exactly when
+    /// they would go looking for it.
+    #[tokio::test]
+    async fn chat_history_route_rehydrates_the_card_a_reply_opened() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+        for (text, task_id) in [
+            ("opened one", Some("t-77".to_string())),
+            ("just talking", None),
+        ] {
+            runtime
+                .events()
+                .append(
+                    runtime.id(),
+                    CompanyEvent::AgentReply {
+                        task_id,
+                        chat_id: "main".to_string(),
+                        agent_id: "ceo".to_string(),
+                        text: text.to_string(),
+                        steps: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/company/chat/history")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let messages = value.as_array().unwrap();
+
+        let opened = messages
+            .iter()
+            .find(|m| m["text"] == "opened one")
+            .expect("the card-opening reply is in history");
+        assert_eq!(
+            opened["taskId"], "t-77",
+            "the chip's correlation key must ride back on the history DTO"
+        );
+
+        // A reply that opened nothing omits the key rather than sending null,
+        // so no bubble grows a chip it should not have — and every message
+        // journaled before this field existed reads back unchanged.
+        let chatter = messages
+            .iter()
+            .find(|m| m["text"] == "just talking")
+            .expect("the ordinary reply is in history");
+        assert!(
+            chatter.get("taskId").is_none(),
+            "an ordinary chat reply must not carry a card: {chatter}"
+        );
+    }
+
     /// A desk id with no `?desk=` selector defaults to the operator/General
     /// thread; an unaddressed thread id that neither matches a manifest desk
     /// nor the General desk reads back empty rather than erroring.
@@ -2746,6 +2853,40 @@ mod test {
         }))
         .expect("workflow_created is an attention signal");
         assert_eq!(v["type"], "workflow_created");
+        assert_eq!(v["workflowId"], "greeter");
+        assert_eq!(v["name"], "Greeter");
+        assert!(!v.to_string().contains("secret-user-id"));
+    }
+
+    /// Issue #259: the edit and delete signals project the same two fields and
+    /// drop the actor, exactly like `workflow_created` above.
+    #[test]
+    fn projects_workflow_updated_and_deleted_without_the_actor() {
+        let actor = || {
+            Some(Actor {
+                kind: ActorKind::User,
+                id: "secret-user-id".into(),
+            })
+        };
+
+        let v = super::project_event(&stored(CompanyEvent::WorkflowUpdated {
+            workflow_id: "greeter".into(),
+            name: "Greeter v2".into(),
+            by: actor(),
+        }))
+        .expect("workflow_updated is an attention signal");
+        assert_eq!(v["type"], "workflow_updated");
+        assert_eq!(v["workflowId"], "greeter");
+        assert_eq!(v["name"], "Greeter v2");
+        assert!(!v.to_string().contains("secret-user-id"));
+
+        let v = super::project_event(&stored(CompanyEvent::WorkflowDeleted {
+            workflow_id: "greeter".into(),
+            name: "Greeter".into(),
+            by: actor(),
+        }))
+        .expect("workflow_deleted is an attention signal");
+        assert_eq!(v["type"], "workflow_deleted");
         assert_eq!(v["workflowId"], "greeter");
         assert_eq!(v["name"], "Greeter");
         assert!(!v.to_string().contains("secret-user-id"));

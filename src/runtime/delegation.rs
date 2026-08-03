@@ -98,8 +98,10 @@ summarize it or pass it along. Do not delegate again; just relay what came back.
 
 /// The outcome of draining one queued delegation.
 ///
-/// A `spawn_task` yields nothing operator-visible (it only opens a board card).
-/// A synchronous `delegate_to_desk` yields a [`DeskReply`] — the teammate's
+/// A `spawn_task` yields no bubble of its own — it opens a board card and
+/// reports that card's id (issue #246), which is what the caller stamps onto the
+/// bubble it was already sending. A synchronous `delegate_to_desk` yields a
+/// [`DeskReply`] — the teammate's
 /// answer captured so the orchestrator can **relay** it in a follow-up turn (the
 /// CEO-relay hand-back) instead of leaving it as a disconnected sibling bubble.
 /// `bubble` stays for any future delegation that surfaces its own standalone
@@ -119,6 +121,19 @@ pub(crate) struct DelegationOutcome {
     /// flag carries the cancellation as a **fact** so a caller can report the
     /// cause rather than inferring one from an absence (issue #213 review).
     pub(crate) cancelled: bool,
+    /// The id of the board card a `spawn_task` opened (issue #246).
+    ///
+    /// A `spawn_task` used to be entirely silent: it returned
+    /// `DelegationOutcome::default()`, documented as surfacing nothing, so the
+    /// operator got a reply with no sign that work had been opened. Reporting
+    /// the id here is what lets the caller stamp it onto the bubble — and, from
+    /// there, onto the journaled reply — so "a card was opened" is a fact the
+    /// console can render rather than something the operator has to spot on the
+    /// board.
+    ///
+    /// `None` for every other delegation kind, and for a `spawn_task` that
+    /// found no task store to write to.
+    pub(crate) spawned_task: Option<String>,
 }
 
 /// A synchronous desk-lead answer captured for the orchestrator to relay: which
@@ -140,6 +155,19 @@ pub(crate) struct OperatorTurn {
     pub(crate) reply: String,
     pub(crate) steps: Vec<TurnStep>,
     pub(crate) bubbles: Vec<OutboundMessage>,
+    /// The board card this turn opened, when it opened one (issue #246) — the
+    /// **first**, if it opened several.
+    ///
+    /// Carried to the caller so the operator bubble can say a card was opened,
+    /// which a `spawn_task` never did before: the card appeared on the board
+    /// and the reply gave no sign of it.
+    ///
+    /// First-only because the field this ultimately lands in — the journaled
+    /// `AgentReply.task_id` — is a single optional id, and widening it would
+    /// break the byte-identical round-trip every already-stored reply relies
+    /// on. The resulting claim is incomplete but never wrong, and the bubble's
+    /// step timeline still shows every `spawn_task` the turn made.
+    pub(crate) spawned_task: Option<String>,
 }
 
 /// What a **dispatched card's** turn handed off (issue #204).
@@ -254,8 +282,17 @@ impl<'a> DelegationRunner<'a> {
         // bubble lands in `bubbles`.
         let mut bubbles = Vec::new();
         let mut desk_replies: Vec<(String, String)> = Vec::new();
+        // Issue #246: the first card this turn opened, which is what the
+        // operator bubble reports. `get_or_insert` rather than assignment keeps
+        // it the FIRST — a later spawn must not overwrite the id an earlier one
+        // already claimed, or the reported card would be whichever the model
+        // happened to queue last.
+        let mut spawned_task: Option<String> = None;
         for delegation in self.queue.drain(self.max_delegations) {
             let out = self.run_delegation(delegation, chat_id).await?;
+            if let Some(id) = out.spawned_task {
+                spawned_task.get_or_insert(id);
+            }
             if let Some(bubble) = out.bubble {
                 bubbles.push(bubble);
             }
@@ -288,6 +325,7 @@ impl<'a> DelegationRunner<'a> {
             reply: operator_reply,
             steps: operator_steps,
             bubbles,
+            spawned_task,
         })
     }
 
@@ -327,6 +365,28 @@ impl<'a> DelegationRunner<'a> {
         card: &mut TaskRecord,
         delegator: &str,
     ) -> Result<Option<TaskHandoff>> {
+        // A hand-off the tool refused (issue #272) never becomes a
+        // `Delegation`, so it is read separately — and recorded on the card
+        // before anything else, because the turn's own account of it is exactly
+        // what cannot be trusted: a refused hand-off is precisely the case where
+        // the reply claimed work had changed hands and the board showed
+        // otherwise.
+        for desk in self.queue.drain_refusals(self.max_delegations) {
+            tracing::warn!(
+                task_id = %card.id,
+                delegator = %delegator,
+                "[task] a hand-off was refused before it could be queued"
+            );
+            card.note = Some(append_note(
+                card.note.as_deref(),
+                delegator,
+                &undeliverable_handoff(
+                    &desk,
+                    delegator,
+                    "it is not a desk this company can hand work to",
+                ),
+            ));
+        }
         let queued = self.queue.drain(self.max_delegations);
         if queued.is_empty() {
             return Ok(None);
@@ -347,7 +407,28 @@ impl<'a> DelegationRunner<'a> {
                 _ => None,
             };
             let Some(member) = lead else {
+                // A hand-off whose desk resolves to no lead cannot be
+                // delivered. #213 settles the card under the delegator rather
+                // than stranding it, which is right — but until #272 it did so
+                // silently, leaving a card whose note claimed a hand-off that
+                // never happened and whose assignee was the delegator, with
+                // nothing on the board connecting the two. Record the
+                // undeliverable hand-off on the card so the operator reads the
+                // fact instead of inferring it from an absence. Every other
+                // delegation kind carries no desk and is unaffected.
+                let desk = desk_of(&delegation).map(str::to_string);
                 self.run_delegation(delegation, None).await?;
+                if let Some(desk) = desk {
+                    card.note = Some(append_note(
+                        card.note.as_deref(),
+                        delegator,
+                        &undeliverable_handoff(
+                            &desk,
+                            delegator,
+                            "no desk with that id has a lead on the roster",
+                        ),
+                    ));
+                }
                 continue;
             };
             // The card belongs to the first hand-off that actually PRODUCES
@@ -445,7 +526,10 @@ impl<'a> DelegationRunner<'a> {
     ///
     /// `spawn_task` opens a backlog card through the
     /// [`TaskStore::upsert`](crate::ports::TaskStore) path the console uses and
-    /// surfaces nothing extra (a missing task store is a silent no-op).
+    /// **reports the card's id** so the caller can say one was opened (issue
+    /// #246) — it surfaces no bubble of its own, which is a different thing
+    /// from the nothing it used to surface. A missing task store is a silent
+    /// no-op.
     /// `delegate_to_desk` runs a single turn on the desk's lead member and
     /// **returns its reply for the orchestrator to relay** (a [`DeskReply`]). An
     /// unknown desk (no roster-backed lead) or a cancelled run yields nothing to
@@ -487,10 +571,28 @@ impl<'a> DelegationRunner<'a> {
                     parent_task_id: self.task.clone(),
                 };
                 tasks.upsert(self.company, &card).await?;
-                Ok(DelegationOutcome::default())
+                // Issue #246: report the card so the caller can surface it. The
+                // id is reported only after the write succeeded, so a bubble can
+                // never claim a card that is not on the board.
+                Ok(DelegationOutcome {
+                    spawned_task: Some(card.id),
+                    ..DelegationOutcome::default()
+                })
             }
             Delegation::DelegateToDesk { desk, instruction } => {
                 let Some(member) = desk_lead(self.record, &desk) else {
+                    // Since #272 the harness tool refuses an ungrounded target
+                    // before it is ever queued, so reaching here means the desk
+                    // lost its lead between the tool call and this drain (or the
+                    // delegation came from a path with no tool boundary). Either
+                    // way it is a hand-off that will not happen: say so in the
+                    // log, and — on the task path — on the card itself.
+                    tracing::warn!(
+                        company = %self.company,
+                        desk = %desk,
+                        "[delegation] hand-off could not be delivered: no desk with that id has a \
+                         lead on the roster"
+                    );
                     return Ok(DelegationOutcome::default());
                 };
                 // Register the delegated turn so an operator can CANCEL it
@@ -534,6 +636,7 @@ impl<'a> DelegationRunner<'a> {
                         steps: outcome.steps,
                     }),
                     cancelled: false,
+                    spawned_task: None,
                 })
             }
             // ── Issue #186 part b: orchestrator lifecycle authority ─────────
@@ -665,6 +768,31 @@ fn instruction_of(delegation: &Delegation) -> &str {
         Delegation::DelegateToDesk { instruction, .. } => instruction,
         _ => "",
     }
+}
+
+/// The desk a hand-off targets, or `None` for every other delegation kind —
+/// which is what distinguishes "this delegation had a target that did not
+/// resolve" from "this delegation never had a target" (issue #272).
+fn desk_of(delegation: &Delegation) -> Option<&str> {
+    match delegation {
+        Delegation::DelegateToDesk { desk, .. } => Some(desk),
+        _ => None,
+    }
+}
+
+/// The note recorded on a card when a hand-off could not be delivered (issue
+/// #272).
+///
+/// Written in the delegator's voice, like every other note this seam appends,
+/// and deliberately explicit about the two facts an operator otherwise has to
+/// infer: nothing was handed off, and the card is still theirs. Names only the
+/// desk key, the cause, and the delegator — no instruction text, no delegate
+/// output.
+fn undeliverable_handoff(desk: &str, delegator: &str, cause: &str) -> String {
+    format!(
+        "hand-off to the \"{desk}\" desk was not delivered — {cause}. Nothing was delegated; this \
+card is still with {delegator}."
+    )
 }
 
 /// Appends a responder-attributed result block to a card's note, preserving any

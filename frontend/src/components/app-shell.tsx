@@ -358,7 +358,13 @@ export function AppShell({
         if (dup) return t;
         return {
           ...t,
-          messages: [...t.messages, makeMessage("company", event.text, { channel: event.agentId })],
+          messages: [
+            ...t.messages,
+            makeMessage("company", event.text, {
+              channel: event.agentId,
+              taskId: event.taskId,
+            }),
+          ],
         };
       }),
     );
@@ -546,7 +552,19 @@ export function AppShell({
             />
           )}
           {view === "inbox" && <InboxView client={client} company={company} />}
-          {view === "tasks" && <TasksView client={client} company={company} />}
+          {view === "tasks" && (
+            <TasksView
+              client={client}
+              company={company}
+              // Issue #246: the card → chat half of the round trip. A card
+              // opened from a conversation remembers which one, so its detail
+              // screen can put the operator back in that thread.
+              onOpenThread={(threadId) => {
+                setActiveThreadId(threadId);
+                setView("conversation");
+              }}
+            />
+          )}
           {view === "team" && <TeamView client={client} company={company} />}
           {view === "desks" && <DesksView client={client} company={company} />}
           {view === "people" && <PeopleView client={client} company={company} />}

@@ -1987,4 +1987,164 @@ to = "done"
         let mut scheduler = WorkflowScheduler::new(CompanyRegistry::new(), clock);
         assert_eq!(scheduler.tick().await, 0);
     }
+
+    // ── Issue #259: the tick IS the reconcile ───────────────────────────────
+    //
+    // Editing or removing a workflow deliberately ships NO scheduler change.
+    // The two tests below are why that is safe rather than an omission, and
+    // they are the pin: if someone ever caches the schedule set across ticks —
+    // an obvious-looking optimisation, since the record load is per-minute
+    // per-company — these fail, instead of a deleted workflow quietly firing
+    // forever in production.
+    //
+    // OpenHuman needs `reconcile_schedule_triggers_on_boot` precisely because
+    // it *does* persist a registration: a schedule-trigger flow binds a row in
+    // a separate `cron.db`, which can drift from `flows.db` and must be
+    // re-synced. We persist no registration at all, so there is nothing to
+    // drift and nothing to reconcile.
+
+    /// Replaces a registered company's overlay bodies, standing in for the
+    /// `PUT`/`DELETE` routes' record write.
+    async fn rewrite_overlays(
+        registry: &CompanyRegistry,
+        id: &str,
+        overlays: Vec<OverlayWorkflow>,
+    ) {
+        let company = CompanyId::new(id);
+        let runtime = registry.get(&company).expect("registered");
+        let store = runtime.store().clone();
+        let mut record: CompanyRecord = store.load(&company).await.unwrap().unwrap();
+        record.overlay_workflows = overlays;
+        store.save(&record).await.unwrap();
+    }
+
+    /// **Delete needs no scheduler teardown.** The workflow fires, is removed
+    /// from the record, and never fires again — no restart, no unbind call.
+    #[tokio::test]
+    async fn a_deleted_workflow_stops_firing_on_the_very_next_tick() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (runner, started, _completed) = RecordingRunner::new();
+        let registry = company_with_overlays(
+            &home,
+            "acme",
+            vec![overlay("digest", Some("0 9 * * *"))],
+            Some(runner),
+            "running",
+        )
+        .await;
+
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry.clone(), clock.clone());
+
+        // It fires while it exists.
+        assert_eq!(scheduler.tick().await, 1);
+        wait_for(|| started.lock().unwrap().len() == 1).await;
+        drain(&scheduler).await;
+
+        // The operator deletes it (the route drops the overlay body).
+        rewrite_overlays(&registry, "acme", Vec::new()).await;
+
+        // Next matching minute: nothing. No process restart in between.
+        clock.set(millis_at(2026, 7, 14, 9, 0));
+        assert_eq!(
+            scheduler.tick().await,
+            0,
+            "a deleted workflow must not keep firing"
+        );
+        assert_eq!(started.lock().unwrap().len(), 1);
+    }
+
+    /// **Edit needs no rebinding.** A corrected cron takes effect on the next
+    /// tick: the old expression stops matching and the new one starts. This is
+    /// the issue's own example — a typo'd schedule that used to be permanent.
+    #[tokio::test]
+    async fn an_edited_schedule_takes_effect_without_rebinding() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (runner, started, _completed) = RecordingRunner::new();
+        let registry = company_with_overlays(
+            &home,
+            "acme",
+            vec![overlay("digest", Some("0 9 * * *"))],
+            Some(runner),
+            "running",
+        )
+        .await;
+
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry.clone(), clock.clone());
+
+        assert_eq!(scheduler.tick().await, 1);
+        wait_for(|| started.lock().unwrap().len() == 1).await;
+        drain(&scheduler).await;
+
+        // The operator corrects 09:00 → 10:00.
+        rewrite_overlays(
+            &registry,
+            "acme",
+            vec![overlay("digest", Some("0 10 * * *"))],
+        )
+        .await;
+
+        // The OLD cadence is dead…
+        clock.set(millis_at(2026, 7, 14, 9, 0));
+        assert_eq!(
+            scheduler.tick().await,
+            0,
+            "the replaced schedule must stop firing"
+        );
+
+        // …and the NEW one is live, with no restart and no rebind call.
+        clock.set(millis_at(2026, 7, 14, 10, 0));
+        assert_eq!(
+            scheduler.tick().await,
+            1,
+            "the corrected schedule must start firing"
+        );
+        wait_for(|| started.lock().unwrap().len() == 2).await;
+        drain(&scheduler).await;
+    }
+
+    /// Adding a schedule to a previously manual workflow arms it on the next
+    /// tick — no `enabled` toggle involved, because this scheduler deliberately
+    /// does not gate on `[workflows].enabled` (see [`WorkflowScheduler::tick`]).
+    ///
+    /// This is also the honest record of what #259 does NOT ship: OpenHuman's
+    /// `flows_update` forces `enabled = false` on exactly this manual→automatic
+    /// transition so a schedule cannot go live unreviewed. That rule has no
+    /// lever here yet — writing `enabled = false` would stop nothing — and note
+    /// that create already behaves identically, so an edit is no riskier than
+    /// authoring the same graph fresh. Adopting the disarm rule means first
+    /// reversing the gating decision, for create and update together.
+    #[tokio::test]
+    async fn adding_a_schedule_by_edit_arms_the_workflow_on_the_next_tick() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (runner, started, _completed) = RecordingRunner::new();
+        let registry = company_with_overlays(
+            &home,
+            "acme",
+            vec![overlay("digest", None)], // manual-run only
+            Some(runner),
+            "running",
+        )
+        .await;
+
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry.clone(), clock.clone());
+        assert_eq!(scheduler.tick().await, 0, "no schedule, no fire");
+
+        rewrite_overlays(
+            &registry,
+            "acme",
+            vec![overlay("digest", Some("0 9 * * *"))],
+        )
+        .await;
+
+        clock.set(millis_at(2026, 7, 14, 9, 0));
+        assert_eq!(scheduler.tick().await, 1);
+        wait_for(|| started.lock().unwrap().len() == 1).await;
+        drain(&scheduler).await;
+    }
 }

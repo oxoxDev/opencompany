@@ -144,6 +144,25 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             format!("Created workflow {name} ({workflow_id})"),
             "workflow.created",
         ),
+        // Issue #259. Id + name only, exactly like the create arm above — the
+        // variant carries no graph body precisely so this wire-out to the
+        // inference sidecar cannot leak one.
+        CompanyEvent::WorkflowUpdated {
+            workflow_id, name, ..
+        } => (
+            Role::System,
+            "workflow".to_string(),
+            format!("Updated workflow {name} ({workflow_id})"),
+            "workflow.updated",
+        ),
+        CompanyEvent::WorkflowDeleted {
+            workflow_id, name, ..
+        } => (
+            Role::System,
+            "workflow".to_string(),
+            format!("Deleted workflow {name} ({workflow_id})"),
+            "workflow.deleted",
+        ),
         // Action-only body: the operator's redirect instruction is never wired.
         CompanyEvent::TaskSteered {
             task_id, action, ..
@@ -272,6 +291,7 @@ pub(crate) fn channel_message_from_effect(effect: &Effect) -> Option<OutboundMes
         .or_else(|| payload_str(payload, "message"))?
         .to_string();
     Some(OutboundMessage {
+        task_id: None,
         channel,
         text,
         steps: Vec::new(),

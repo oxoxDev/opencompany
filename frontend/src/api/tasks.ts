@@ -20,6 +20,12 @@ export interface Task {
    * shape is unchanged.
    */
   parentTaskId?: string;
+  /**
+   * The chat thread this card was opened from (issue #246), when it came from
+   * a conversation rather than the board's `+` button. Omitted otherwise, which
+   * is every card created before this shipped.
+   */
+  originChatId?: string;
 }
 
 /** The create body; the host defaults column→`backlog`, priority→`medium`. */
@@ -29,6 +35,16 @@ export interface CreateTask {
   column?: string;
   priority?: string;
   assignee?: string;
+  /**
+   * The chat thread this card is being opened from (issue #246). Set by the
+   * transcript's "Add to board" action; the board's `+` button omits it.
+   *
+   * Note what is deliberately NOT sent alongside it: `column`. Dropping a card
+   * into `in_progress` is what dispatches an agent turn — it spends money — so
+   * the server's intake default decides where a chat-created card lands, and
+   * the human drag stays the only spend gate.
+   */
+  originChatId?: string;
 }
 
 /** A partial update; any omitted field is left as-is. A drag sends `{column}`. */

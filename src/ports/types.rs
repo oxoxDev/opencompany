@@ -389,6 +389,53 @@ pub enum CompanyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<Actor>,
     },
+    /// An existing workflow graph was replaced wholesale (issue #259), from the
+    /// console's `PUT …/workflows/{wid}` route. Journaled best-effort **after**
+    /// the new body is persisted, so it records a completed edit — a journal
+    /// failure never rolls the update back. Additive, same contract as
+    /// [`WorkflowCreated`](Self::WorkflowCreated).
+    ///
+    /// **The graph body is deliberately NOT carried.** A company's journal is
+    /// one append-only log shared by chat, audit and run history, and it is read
+    /// by the operator SSE projection and wired to the inference sidecar — a
+    /// TOML body on it would put the graph's full contents (agent prompts,
+    /// destination addresses) somewhere none of those readers need it. The id
+    /// and name are what an audit reader needs; the body is read from the record.
+    WorkflowUpdated {
+        /// The edited workflow's id. Never changes across an update — a rename
+        /// through `PUT` is rejected, because the id keys the union read path,
+        /// the scheduler and the run history.
+        workflow_id: String,
+        /// The workflow's display name **after** the edit (the name may change
+        /// even though the id may not).
+        name: String,
+        /// Who edited it, when known. `None` from the current unattributed
+        /// surfaces; same forward-compatible shape as
+        /// [`WorkflowCreated`](Self::WorkflowCreated)'s `by`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// A workflow graph was removed (issue #259), from the console's
+    /// `DELETE …/workflows/{wid}` route. Journaled best-effort **after** the
+    /// overlay body and the manifest-enabled id are both gone, so it records a
+    /// completed delete. Additive, same contract as
+    /// [`WorkflowCreated`](Self::WorkflowCreated).
+    ///
+    /// Past [`WorkflowRunFinished`](Self::WorkflowRunFinished) entries for this
+    /// id are deliberately left in place — the journal is append-only, and what
+    /// a workflow *did* stays true after the workflow is gone. `GET
+    /// …/workflows/runs` keeps serving them.
+    WorkflowDeleted {
+        /// The removed workflow's id.
+        workflow_id: String,
+        /// Its display name at the moment it was removed, so a journal reader
+        /// need not resolve an id that no longer exists.
+        name: String,
+        /// Who removed it, when known. `None` from the current unattributed
+        /// surfaces.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
     /// An operator steered an in-flight run — paused, cancelled, or redirected a
     /// dispatched task (or cancelled a delegation) from chat (issue #111).
     /// Journaled best-effort **after** the steer is accepted by the in-flight
@@ -945,6 +992,36 @@ pub struct OutboundMessage {
     /// (same `by`/`chat`/`McpCallFailed` additive precedent above).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<ReplyTo>,
+    /// The board card this bubble's turn **opened**, when it opened one (issue
+    /// #246).
+    ///
+    /// A `spawn_task` used to surface nothing at all: the card appeared on the
+    /// board and the operator's reply said nothing about it, so there was no
+    /// way to tell a turn that opened work from one that only talked about it.
+    /// This is the correlation key that lets the console render a "card opened"
+    /// chip, and it is the value journaled onto
+    /// [`AgentReply::task_id`](CompanyEvent::AgentReply) so the chip survives a
+    /// transcript reload rather than existing only on the live response.
+    ///
+    /// **Only the first card of a multi-spawn turn.** The journal field it
+    /// feeds is a single optional id, and widening it to a list would break the
+    /// byte-identical round-trip every stored reply depends on. The claim it
+    /// makes — "this reply opened that card" — is therefore true but
+    /// incomplete, never false; the bubble's [`steps`](Self::steps) timeline
+    /// still shows every `spawn_task` call the turn made.
+    ///
+    /// Additive and non-secret: a card id, omitted on the wire when absent, so
+    /// every prior producer round-trips byte-identically (same `steps` /
+    /// `reply_to` precedent above).
+    ///
+    /// The wire name is pinned to `taskId` rather than inherited, because this
+    /// struct — unlike almost everything else the console reads — carries no
+    /// `rename_all`. The console sees the same card on three surfaces (this
+    /// POST response, the SSE `agent_reply` frame, and the `chat/history` DTO),
+    /// and the other two are camelCase; letting this one alone be `task_id`
+    /// would be a trap for whoever wires the next reader.
+    #[serde(default, rename = "taskId", skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 /// One visible step in an agent turn's processing timeline, surfaced in the
@@ -1690,6 +1767,7 @@ mod test {
     #[test]
     fn outbound_message_steps_are_additive_and_omitted_when_empty() {
         let no_steps = OutboundMessage {
+            task_id: None,
             channel: "operator".to_string(),
             text: "hi".to_string(),
             steps: Vec::new(),
@@ -1703,6 +1781,7 @@ mod test {
         assert!(legacy.steps.is_empty());
 
         let with_steps = OutboundMessage {
+            task_id: None,
             channel: "operator".to_string(),
             text: "done".to_string(),
             steps: vec![TurnStep {
@@ -1715,6 +1794,46 @@ mod test {
             reply_to: None,
         };
         assert_eq!(round_trip(&with_steps), with_steps);
+    }
+
+    /// Issue #246: `OutboundMessage.task_id` is additive on exactly the same
+    /// terms as `steps` above — a bubble that opened no card must serialize
+    /// byte-for-byte as it did before the field existed, and a payload written
+    /// before it existed must still load. Without both halves every already-
+    /// stored response would change shape the moment this field shipped.
+    #[test]
+    fn outbound_message_task_id_is_additive_and_omitted_when_absent() {
+        let no_card = OutboundMessage {
+            task_id: None,
+            channel: "operator".to_string(),
+            text: "hi".to_string(),
+            steps: Vec::new(),
+            reply_to: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&no_card).unwrap(),
+            r#"{"channel":"operator","text":"hi"}"#,
+            "a bubble that opened no card keeps the pre-#246 wire form"
+        );
+
+        let legacy: OutboundMessage =
+            serde_json::from_str(r#"{"channel":"operator","text":"hi"}"#).unwrap();
+        assert!(legacy.task_id.is_none());
+
+        let with_card = OutboundMessage {
+            task_id: Some("t-42".to_string()),
+            channel: "operator".to_string(),
+            text: "opened one".to_string(),
+            steps: Vec::new(),
+            reply_to: None,
+        };
+        assert_eq!(round_trip(&with_card), with_card);
+        assert!(
+            serde_json::to_string(&with_card)
+                .unwrap()
+                .contains(r#""taskId":"t-42""#),
+            "the console reads the card off a camelCase key"
+        );
     }
 
     /// `AgentReply.steps` is additive the same way: a reply journaled before
@@ -2484,6 +2603,57 @@ mod test {
         assert!(!out.contains("deliveries"), "{out}");
         assert!(!out.contains("pending_approvals"), "{out}");
         assert!(!out.contains("error"), "{out}");
+    }
+
+    /// Issue #259's two variants pin their wire shape the same way
+    /// `WorkflowCreated` does: `kind` + `workflow_id` + `name`, with `by`
+    /// omitted entirely when absent so the common unattributed line stays the
+    /// short one.
+    #[test]
+    fn workflow_updated_and_deleted_pin_their_wire_shape() {
+        let updated = CompanyEvent::WorkflowUpdated {
+            workflow_id: "digest".to_string(),
+            name: "Daily digest".to_string(),
+            by: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&updated).expect("serialize"),
+            r#"{"kind":"WorkflowUpdated","workflow_id":"digest","name":"Daily digest"}"#
+        );
+
+        let deleted = CompanyEvent::WorkflowDeleted {
+            workflow_id: "digest".to_string(),
+            name: "Daily digest".to_string(),
+            by: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&deleted).expect("serialize"),
+            r#"{"kind":"WorkflowDeleted","workflow_id":"digest","name":"Daily digest"}"#
+        );
+
+        // Both round-trip.
+        for event in [updated, deleted] {
+            let line = serde_json::to_string(&event).expect("serialize");
+            let back: CompanyEvent = serde_json::from_str(&line).expect("deserialize");
+            assert_eq!(back, event);
+        }
+    }
+
+    /// The graph body must never reach the journal — see the variant docs. A
+    /// reader of the shared append-only log (operator SSE, the inference
+    /// sidecar) has no business seeing agent prompts or destination addresses,
+    /// and the only way a body could leak here is someone adding a field.
+    #[test]
+    fn workflow_updated_carries_no_graph_body() {
+        let line = serde_json::to_string(&CompanyEvent::WorkflowUpdated {
+            workflow_id: "digest".to_string(),
+            name: "Daily digest".to_string(),
+            by: None,
+        })
+        .expect("serialize");
+        assert!(!line.contains("toml"), "{line}");
+        assert!(!line.contains("node"), "{line}");
+        assert!(!line.contains("graph"), "{line}");
     }
 
     /// **The backcompat proof.** A journal written before this variant existed

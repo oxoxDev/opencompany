@@ -67,9 +67,16 @@ function priorityStyle(priority: string): string {
 export function TasksView({
   client,
   company,
+  onOpenThread,
 }: {
   client: OpenCompanyClient;
   company: string | null;
+  /**
+   * Opens the chat thread a card came from (issue #246). Absent when the board
+   * is rendered somewhere with no conversation pane to jump to, in which case
+   * the detail screen states the origin without offering the jump.
+   */
+  onOpenThread?: (threadId: string) => void;
 }) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
@@ -183,6 +190,7 @@ export function TasksView({
         taskId={detailId}
         onBack={closeDetail}
         onNavigate={openDetail}
+        onOpenThread={onOpenThread}
         onSaved={(saved) => setTasks((ts) => ts.map((t) => (t.id === saved.id ? saved : t)))}
         onDeleted={(id) => setTasks((ts) => ts.filter((t) => t.id !== id))}
       />

@@ -46,7 +46,7 @@ address check for `{id}`, operator + `sole()` for the alias).
 | `domain` | `PUT …/domain`, `POST …/domain/verify` |
 | `smtp` | `PUT …/smtp`, `POST …/smtp/test` |
 | `connections` (feature `oauth`) | `POST …/connections/{provider}/start\|disconnect`, `GET /api/v1/oauth/callback` |
-| `workflows` | `POST …/workflows`, `GET …/workflows`, `GET …/workflows/runs`, `POST …/workflows/cron/preview`, `GET …/workflows/{wid}`, `POST …/workflows/{wid}/run` |
+| `workflows` | `POST …/workflows`, `GET …/workflows`, `GET …/workflows/runs`, `POST …/workflows/cron/preview`, `GET …/workflows/{wid}`, `PUT …/workflows/{wid}`, `DELETE …/workflows/{wid}`, `POST …/workflows/{wid}/run` |
 
 ### Reading a trigger's cron back (issue #262)
 
@@ -90,6 +90,87 @@ console's HTTP client throws on any non-2xx, so a 400 per keystroke would force
 Optional `"after": <epoch millis>` pins the instant the fire times are counted
 from; it defaults to now and exists so tests need not assert against a moving
 clock.
+
+### Editing and removing a workflow (issue #259)
+
+A saved workflow used to be write-once: a typo'd cron or a node pointed at the
+wrong teammate was permanent, and the only recovery was to author a second
+workflow and leave the broken one firing. `PUT` replaces a graph wholesale and
+`DELETE` removes it.
+
+**Only overlay-backed graphs are writable.** A workflow defined by a file in the
+company source tree (`companies/<name>/workflows/<wid>.toml`), or enabled by
+name with no saved graph at all, answers `409` — it is not squeamishness about
+touching disk, it is the reader's rules restated. `load_workflow_union` gives a
+seed file precedence on an id collision, so an edit stored behind one would
+never be served; and `merge_enabled_workflows` re-derives `[workflows].enabled`
+from seed ids at boot, so a "delete" of a seed-backed workflow would come back
+on the next restart. The same invariant is what makes an overlay delete durable.
+
+The read routes project that predicate as `editable`, so the console can grey
+its buttons out instead of surfacing a 409 after the click.
+
+**The version token.** `GET …/workflows/{wid}` returns an opaque `version` for
+an editable graph. Echo it back — in the `PUT` body as `expectedVersion`, or on
+the `DELETE` as `?expectedVersion=` — and the write is refused with `409` if the
+graph moved in between, so one console cannot silently overwrite another's edit.
+The comparison happens under the same per-company write lock as the save, so it
+is a real guard rather than a check-then-act race. **Omitting it is an
+unconditional write**, which keeps `curl` usable without a read-modify-write
+dance; the console always sends it. Never parse the token — the contract is
+"echo back what the read returned", which is what lets the algorithm change
+without a client migration.
+
+**The id may not change.** A `PUT` whose body `id` differs from `{wid}` is a
+`400`. The id keys the union read path, the scheduler and every journalled run,
+so a rename would silently orphan all three. A rename is a create plus a delete.
+
+**Past runs are orphaned, not reaped.** A deleted workflow's
+`WorkflowRunFinished` entries stay in the company journal and keep coming back
+from `GET …/workflows/runs`. The journal is append-only and shared with chat and
+audit, so there is no per-workflow table to cascade; and what a workflow *did*
+stays true after the workflow is gone. Retention is a separate design.
+
+**No scheduler change is involved.** `WorkflowScheduler::tick` re-reads the
+company record and re-derives the schedule set from the overlay union every
+minute, so the tick *is* a continuous reconcile: a deleted workflow stops firing
+on the next tick and an edited cron takes effect on it, with no restart and no
+unbind call. There is no persisted registration to drift — which is why this
+needs no equivalent of OpenHuman's `reconcile_schedule_triggers_on_boot`, whose
+job is re-syncing cron rows that live in a second durable store.
+
+```bash
+# Read the graph and its concurrency token.
+curl -s "$HOST/api/v1/company/workflows/weekly_digest" \
+     -H "Authorization: Bearer $TOKEN"
+# → { "id": "weekly_digest", …, "editable": true, "version": "73e8ccc6…" }
+
+# Correct the schedule, conditional on nothing having changed since that read.
+curl -X PUT "$HOST/api/v1/company/workflows/weekly_digest" \
+     -H "Authorization: Bearer $TOKEN" \
+     -H 'content-type: application/json' -d '{
+  "id": "weekly_digest",
+  "name": "Weekly digest",
+  "nodes": [ { "id": "start", "kind": "trigger", "name": "Monday 10:00",
+               "schedule": "0 10 * * MON" },
+             { "id": "done", "kind": "output", "name": "Owner summary",
+               "destination": { "kind": "owner" } } ],
+  "edges": [ { "from": "start", "to": "done" } ],
+  "expectedVersion": "73e8ccc6…"
+}'
+# → 200 with the stored graph and a FRESH version; or 409 if it moved.
+
+# Remove it. 204 on success; past runs stay readable.
+curl -X DELETE "$HOST/api/v1/company/workflows/weekly_digest?expectedVersion=a60663c5…" \
+     -H "Authorization: Bearer $TOKEN"
+```
+
+**Deliberately not in #259**, each its own follow-up: revision history and
+rollback (OpenHuman keeps a bounded snapshot ring in a dedicated table; our
+overlay bodies live inside `CompanyRecord`, which is saved whole on every write,
+so a ring needs its own store surface); journal retention (see above); and
+enable/disable without deleting, which means first reversing this scheduler's
+deliberate decision not to gate on `[workflows].enabled`.
 
 ### Workflow runs and report delivery
 

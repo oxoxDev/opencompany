@@ -12,6 +12,7 @@ import {
   Pause,
   PenSquare,
   Send,
+  SquareKanban,
   Wrench,
   X,
 } from "lucide-react";
@@ -19,13 +20,19 @@ import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError, type TurnStep, type TurnStepKind } from "@/api/types";
-import { listInflight, steerTask, type InflightRun, type SteerAction } from "@/api/tasks";
+import {
+  createTask,
+  listInflight,
+  steerTask,
+  type InflightRun,
+  type SteerAction,
+} from "@/api/tasks";
 import { Markdown } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { type ChatMessage, makeMessage } from "@/lib/chat";
+import { type ChatMessage, makeMessage, titleFromMessage } from "@/lib/chat";
 import type { Thread, ThreadContact } from "@/lib/threads";
 
 interface Props {
@@ -172,6 +179,8 @@ function ChatPane({
 }) {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  /** The message whose "Add to board" create is in flight (issue #246). */
+  const [addingId, setAddingId] = useState<string | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
 
   const messages = thread.messages;
@@ -194,7 +203,14 @@ function ChatPane({
       const reply = await client.chat(text, company, thread.id);
       const replies = reply.responses.length
         ? reply.responses.map((r) =>
-            makeMessage("company", r.text, { channel: r.channel, steps: r.steps }),
+            // `taskId` (issue #246): when the turn opened a board card, the
+            // bubble says so immediately. The same id is journaled onto the
+            // reply, so the chip is still there after a transcript reload.
+            makeMessage("company", r.text, {
+              channel: r.channel,
+              steps: r.steps,
+              taskId: r.taskId,
+            }),
           )
         : [makeMessage("system", "(no reply)")];
       setMessages(thread.id, (m) => [...m, ...replies]);
@@ -207,6 +223,49 @@ function ChatPane({
       onSendEnd?.(thread.id);
     }
   }
+
+  /**
+   * Turns one transcript message into a board card (issue #246).
+   *
+   * Deliberately goes through the REST create rather than asking the responder
+   * to call `spawn_task`: only the orchestrator carries the delegation tools,
+   * so a toolbelt route would work on the main thread and silently do nothing
+   * on a desk or DM thread. Going through REST is what makes the action true on
+   * *every* thread — which is the whole point — without widening the v1
+   * depth-1 delegation design.
+   *
+   * `column` is omitted on purpose. Dropping a card into `in_progress` is what
+   * dispatches an agent turn, so letting the server's intake default decide
+   * keeps the human drag as the only thing that spends money. `assignee` is
+   * omitted for the same reason: an unassigned card asks nothing of anyone.
+   *
+   * The composer draft is untouched on both paths — a failure surfaces as a
+   * toast and nothing the operator typed is cleared.
+   */
+  const addToBoard = useCallback(
+    async (message: ChatMessage) => {
+      const title = titleFromMessage(message.text);
+      if (!title || addingId) return;
+      setAddingId(message.id);
+      try {
+        const created = await createTask(client, company, {
+          title,
+          // The full text as the note, so nothing is lost to the title's cap.
+          note: message.text,
+          originChatId: thread.id,
+        });
+        setMessages(thread.id, (all) =>
+          all.map((m) => (m.id === message.id ? { ...m, taskId: created.id } : m)),
+        );
+        toast.success(`Added to the board — ${created.title}`);
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "could not add this to the board");
+      } finally {
+        setAddingId(null);
+      }
+    },
+    [addingId, client, company, setMessages, thread.id],
+  );
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -248,7 +307,13 @@ function ChatPane({
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-1.5 px-4 py-6">
           {messages.length === 0 && <EmptyConversation contact={thread.contact} />}
           {groups.map((g, i) => (
-            <MessageGroup key={g.key} group={g} prev={groups[i - 1]} />
+            <MessageGroup
+              key={g.key}
+              group={g}
+              prev={groups[i - 1]}
+              onAddToBoard={addToBoard}
+              addingId={addingId}
+            />
           ))}
           {sending && (
             <>
@@ -520,7 +585,19 @@ interface Group {
   messages: ChatMessage[];
 }
 
-function MessageGroup({ group, prev }: { group: Group; prev?: Group }) {
+function MessageGroup({
+  group,
+  prev,
+  onAddToBoard,
+  addingId,
+}: {
+  group: Group;
+  prev?: Group;
+  /** Turns one message into a board card (issue #246). */
+  onAddToBoard: (message: ChatMessage) => void;
+  /** The message whose create is in flight, if any. */
+  addingId: string | null;
+}) {
   const showDay = !prev || !sameDay(prev.at, group.at);
 
   if (group.sender.kind === "system") {
@@ -556,7 +633,23 @@ function MessageGroup({ group, prev }: { group: Group; prev?: Group }) {
           {group.messages.map((m, i) => (
             <Fragment key={m.id}>
               {!mine && m.steps && m.steps.length > 0 && <StepTimeline steps={m.steps} />}
-              <Bubble message={m} mine={mine} last={i === group.messages.length - 1} />
+              {/* The bubble and its hover action share a row so the action can
+                  sit outside the bubble without overlapping the text. `group`
+                  scopes the reveal to this one message. */}
+              <div
+                className={cn(
+                  "group/msg flex max-w-full items-center gap-1",
+                  mine ? "flex-row-reverse" : "flex-row",
+                )}
+              >
+                <Bubble message={m} mine={mine} last={i === group.messages.length - 1} />
+                <AddToBoardAction
+                  message={m}
+                  busy={addingId === m.id}
+                  disabled={addingId !== null && addingId !== m.id}
+                  onAdd={onAddToBoard}
+                />
+              </div>
             </Fragment>
           ))}
         </div>
@@ -592,7 +685,81 @@ function Bubble({ message, mine, last }: { message: ChatMessage; mine: boolean; 
         // block margins so a reply stays flush inside the tight bubble padding.
         <Markdown className="[&>:first-child]:mt-0 [&>:last-child]:mb-0">{message.text}</Markdown>
       )}
+      {message.taskId && <CardChip taskId={message.taskId} mine={mine} />}
     </div>
+  );
+}
+
+/**
+ * The "this message has a card" chip (issue #246), linking to the card's detail
+ * screen.
+ *
+ * Two provenances, one render. On a company reply it means the turn opened a
+ * card by itself — that id is journaled onto the reply, so this chip survives a
+ * transcript reload. On your own message it means you pressed "Add to board";
+ * that link lives in the session only, because the durable record of it is
+ * `originChatId` on the card rather than anything on the operator message.
+ *
+ * `clear-both` because the bubble floats its timestamp right; without it the
+ * chip tucks under the time instead of starting a fresh line.
+ */
+function CardChip({ taskId, mine }: { taskId: string; mine: boolean }) {
+  return (
+    <a
+      href={`#/tasks/${encodeURIComponent(taskId)}`}
+      className={cn(
+        "mt-1.5 flex w-fit clear-both items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium transition-opacity hover:opacity-80",
+        mine
+          ? "bg-primary-foreground/15 text-primary-foreground"
+          : "bg-accent text-accent-foreground",
+      )}
+    >
+      <SquareKanban className="size-3 shrink-0" />
+      {mine ? "Added to the board" : "Card opened"}
+    </a>
+  );
+}
+
+/**
+ * The per-message "Add to board" affordance (issue #246).
+ *
+ * On every message in every thread — desk, DM and orchestrator — because it
+ * creates through REST rather than through the responder's toolbelt, which only
+ * the orchestrator carries.
+ *
+ * Renders nothing once the message already has a card, so a second press cannot
+ * open a duplicate; and nothing for a message with no text to title a card
+ * from. Revealed on hover on pointer devices, but always present in the DOM and
+ * focusable, so it is reachable by keyboard and on touch.
+ */
+function AddToBoardAction({
+  message,
+  busy,
+  disabled,
+  onAdd,
+}: {
+  message: ChatMessage;
+  busy: boolean;
+  disabled: boolean;
+  onAdd: (message: ChatMessage) => void;
+}) {
+  if (message.taskId || !titleFromMessage(message.text)) return null;
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      className="size-7 shrink-0 text-muted-foreground opacity-0 transition-opacity focus-visible:opacity-100 group-hover/msg:opacity-100"
+      onClick={() => onAdd(message)}
+      disabled={busy || disabled}
+      title="Add to board"
+      aria-label="Add to board"
+    >
+      {busy ? (
+        <Loader2 className="size-3.5 animate-spin" />
+      ) : (
+        <SquareKanban className="size-3.5" />
+      )}
+    </Button>
   );
 }
 
