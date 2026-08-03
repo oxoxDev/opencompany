@@ -39,6 +39,16 @@ pub enum SampleKind {
     /// An OAuth-connected tool invocation (populates the calls-by-provider
     /// chart). Wired by the runtime when a connected tool runs.
     OauthCall,
+    /// One completed metered web search (issue #238).
+    ///
+    /// Deliberately **not** [`Self::OauthCall`]. That kind is defined as
+    /// zero-cost — the money for a connected tool moves at the provider, not
+    /// through our meter — and it is what mints the calls-by-provider /
+    /// connections chart, so reusing it would both drop the cost the search
+    /// backend actually charged and invent a "connection" for a company that
+    /// has connected no account. A search is a *priced* call on the managed
+    /// platform, so it carries a real `cost_usd` and gets its own counter.
+    SearchCall,
 }
 
 /// One metered usage event.

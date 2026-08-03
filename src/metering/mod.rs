@@ -17,6 +17,11 @@
 //! - [`oauth`] mints the
 //!   [`SampleKind::OauthCall`](crate::ports::usage::SampleKind) samples
 //!   [`bucket_usage`] turns into the calls-by-provider chart.
+//! - [`search`] mints the
+//!   [`SampleKind::SearchCall`](crate::ports::usage::SampleKind) samples behind
+//!   the `searchCalls` counter and the cost the managed search backend charged
+//!   (issue #238) — a *priced* call, deliberately not folded into the
+//!   zero-cost, connection-minting `OauthCall` stream.
 //! - [`inference`] mints the
 //!   [`SampleKind::Inference`](crate::ports::usage::SampleKind) samples behind
 //!   the token series and the token/cost totals, for **every** cognition path
@@ -37,6 +42,7 @@ pub mod capability;
 mod finances;
 pub mod inference;
 pub mod oauth;
+pub mod search;
 mod types;
 mod usage;
 
@@ -47,6 +53,9 @@ pub use inference::{
     inference_sample, record_inference_usage,
 };
 pub use oauth::{UNKNOWN_PROVIDER, oauth_call_sample, record_oauth_call};
+pub use search::{
+    FALLBACK_SEARCH_COST_USD, MANAGED_SEARCH_PROVIDER, record_search_call, search_call_sample,
+};
 pub use types::{
     AgentTokens, CategorySpend, Direction, Finances, ProviderCalls, Transaction, Usage, UsagePoint,
     UsageRange, UsageTotals,

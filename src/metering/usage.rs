@@ -42,6 +42,7 @@ pub fn bucket_usage(
     let mut total_output: u64 = 0;
     let mut total_cost: f64 = 0.0;
     let mut oauth_calls: u64 = 0;
+    let mut search_calls: u64 = 0;
 
     for s in samples {
         total_input += s.input_tokens;
@@ -61,6 +62,16 @@ pub fn bucket_usage(
         if s.kind == SampleKind::OauthCall {
             oauth_calls += 1;
             *per_provider.entry(s.provider.clone()).or_default() += 1;
+        }
+
+        // Metered web searches (issue #238) get their own counter and stay OUT
+        // of `per_provider`. That map's *row count* is the connections KPI, so
+        // folding searches in would report a company with no connected account
+        // as having one — the concrete reason this is not an `OauthCall`. The
+        // search's cost is already in `total_cost` above, so it rolls into the
+        // window's spend without a second code path.
+        if s.kind == SampleKind::SearchCall {
+            search_calls += 1;
         }
 
         let day = epoch_day(s.at_millis);
@@ -115,6 +126,7 @@ pub fn bucket_usage(
             cost_usd: total_cost,
             oauth_calls,
             connections,
+            search_calls,
         },
     }
 }
