@@ -1565,6 +1565,66 @@ mod test {
         );
     }
 
+    /// Issue #243: a grant the agent never redeemed expires, is journaled, and
+    /// the operator is TOLD.
+    ///
+    /// The silent version of this is the failure worth designing against: the
+    /// operator approves, watches nothing happen, and has no way to tell whether
+    /// the work is in flight, already done, or quietly dead. Announcing the lapse
+    /// is what makes re-approving an informed choice rather than a guess.
+    #[tokio::test]
+    async fn an_unredeemed_grant_expires_journals_and_tells_the_operator() {
+        let home_dir = tmp_home();
+        let operator_channel = Arc::new(crate::runtime::channel::OperatorChannel::new());
+        let rt = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+            .with_channels(vec![operator_channel.clone()])
+            .build()
+            .await
+            .unwrap();
+
+        // `at_millis: 0` is unambiguously past the 15-minute TTL.
+        rt.grants.grant(GrantedCall {
+            approval_id: ApprovalId::new("appr-stale"),
+            agent: "finance".into(),
+            tool: "composio_execute".into(),
+            args: serde_json::json!({ "to": "a@b.test" }),
+            at_millis: 0,
+        });
+        // A fresh one, to prove the sweep is selective rather than a flush.
+        rt.grants.grant(GrantedCall {
+            approval_id: ApprovalId::new("appr-fresh"),
+            agent: "finance".into(),
+            tool: "workspace_write".into(),
+            args: serde_json::json!({}),
+            at_millis: now_millis(),
+        });
+
+        let expired = rt.sweep_expired_grants().await.unwrap();
+        assert_eq!(expired, vec![ApprovalId::new("appr-stale")]);
+        assert_eq!(rt.grants.live_count(), 1, "the fresh grant is untouched");
+        assert!(rt.grants.peek(&ApprovalId::new("appr-fresh")).is_some());
+
+        // The operator was told, and told which tool and which agent — enough to
+        // decide whether to re-approve without going digging.
+        let sent = operator_channel.sent();
+        assert_eq!(sent.len(), 1);
+        assert!(
+            sent[0].text.contains("composio_execute"),
+            "{}",
+            sent[0].text
+        );
+        assert!(sent[0].text.contains("finance"), "{}", sent[0].text);
+        assert!(sent[0].text.contains("re-approve"), "{}", sent[0].text);
+
+        // The expiry is durable: a restart must not hand the permission back.
+        assert!(
+            rt.journal
+                .replayed_grants()
+                .iter()
+                .all(|g| g.approval_id != ApprovalId::new("appr-stale"))
+        );
+    }
+
     /// Issue #243: resolving an approval that is already gone is a no-op, not a
     /// second resolution.
     ///

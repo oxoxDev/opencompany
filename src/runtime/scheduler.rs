@@ -166,9 +166,18 @@ impl CompanyScheduler {
     }
 
     /// Runs the per-tick maintenance that rides the same minute boundary as
-    /// scheduled fires: sweep parked approvals past their TTL to a default-deny.
+    /// scheduled fires: sweep parked approvals past their TTL to a default-deny,
+    /// then sweep single-use grants the agent never redeemed (issue #243).
+    ///
+    /// The grant sweep's ids are deliberately not folded into the return value —
+    /// callers read it as "approvals that expired", and a grant expiry is a
+    /// different event with a different meaning (the operator DID approve; the
+    /// agent simply never acted). It announces itself on the operator channel
+    /// instead.
     pub async fn tick_maintenance(&self) -> Result<Vec<crate::ports::types::ApprovalId>> {
-        self.runtime.sweep_expired_approvals().await
+        let expired = self.runtime.sweep_expired_approvals().await?;
+        self.runtime.sweep_expired_grants().await?;
+        Ok(expired)
     }
 
     /// Spawns a background task that ticks on every minute boundary until
