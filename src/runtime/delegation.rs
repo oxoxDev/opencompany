@@ -98,8 +98,10 @@ summarize it or pass it along. Do not delegate again; just relay what came back.
 
 /// The outcome of draining one queued delegation.
 ///
-/// A `spawn_task` yields nothing operator-visible (it only opens a board card).
-/// A synchronous `delegate_to_desk` yields a [`DeskReply`] — the teammate's
+/// A `spawn_task` yields no bubble of its own — it opens a board card and
+/// reports that card's id (issue #246), which is what the caller stamps onto the
+/// bubble it was already sending. A synchronous `delegate_to_desk` yields a
+/// [`DeskReply`] — the teammate's
 /// answer captured so the orchestrator can **relay** it in a follow-up turn (the
 /// CEO-relay hand-back) instead of leaving it as a disconnected sibling bubble.
 /// `bubble` stays for any future delegation that surfaces its own standalone
@@ -481,7 +483,10 @@ impl<'a> DelegationRunner<'a> {
     ///
     /// `spawn_task` opens a backlog card through the
     /// [`TaskStore::upsert`](crate::ports::TaskStore) path the console uses and
-    /// surfaces nothing extra (a missing task store is a silent no-op).
+    /// **reports the card's id** so the caller can say one was opened (issue
+    /// #246) — it surfaces no bubble of its own, which is a different thing
+    /// from the nothing it used to surface. A missing task store is a silent
+    /// no-op.
     /// `delegate_to_desk` runs a single turn on the desk's lead member and
     /// **returns its reply for the orchestrator to relay** (a [`DeskReply`]). An
     /// unknown desk (no roster-backed lead) or a cancelled run yields nothing to

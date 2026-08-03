@@ -802,7 +802,8 @@ impl HarnessBrain {
     ///
     /// `spawn_task` opens a backlog card through the same
     /// [`TaskStore::upsert`](crate::ports::TaskStore) path the console uses and
-    /// surfaces nothing extra (a missing task store is a silent no-op).
+    /// reports the card's id (issue #246); it surfaces no bubble of its own. A
+    /// missing task store is a silent no-op.
     /// `delegate_to_desk` runs a single turn on the desk's lead member and
     /// **returns its reply for the orchestrator to relay** (a [`DeskReply`]) —
     /// the CEO-relay hand-back: instead of a disconnected sibling bubble the
