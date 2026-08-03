@@ -10,12 +10,18 @@
 //!
 //! The authorize URL carries a signed `state` nonce binding the flow to one
 //! company + provider + expiry, verified on callback so a tampered `state` is
-//! rejected with `401`.
+//! refused before any token exchange.
+//!
+//! The callback is reached by a **browser navigation**, so it never answers with
+//! a body: every outcome — success, cancellation, a bad nonce, a failed exchange
+//! — redirects to the console's Connections view carrying a stable, non-secret
+//! outcome code. Returning JSON there strands the operator on a blank page with
+//! no route back (issue #300).
 
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
-use axum::http::{StatusCode, Uri};
+use axum::http::Uri;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -120,6 +126,47 @@ fn redirect_uri(state: &AppState) -> String {
 fn state_secret() -> String {
     std::env::var("OPENCOMPANY_OAUTH_STATE_SECRET")
         .unwrap_or_else(|_| "opencompany-oauth-state".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Console bounce-back
+// ---------------------------------------------------------------------------
+
+/// The console origin the callback bounces the operator's browser back to.
+/// `OPENCOMPANY_CONSOLE_URL` overrides it for deployments that serve the console
+/// from a different origin than the API.
+fn console_base(state: &AppState) -> String {
+    let base =
+        std::env::var("OPENCOMPANY_CONSOLE_URL").unwrap_or_else(|_| state.config().host_base_url());
+    base.trim_end_matches('/').to_string()
+}
+
+/// Sends the operator's browser back to the console's Connections view.
+///
+/// **Every** callback exit goes through here, success and failure alike. A
+/// failure arm that renders a JSON body into the document instead leaves the
+/// operator staring at raw error text on a blank page with no route back — the
+/// dead end reported in issue #300. A redirect keeps them in the console, where
+/// the Connections view can explain what happened and offer a retry.
+fn console_redirect(state: &AppState, params: &str) -> Response {
+    Redirect::to(&format!("{}/connections?{params}", console_base(state))).into_response()
+}
+
+/// Bounces back with a stable, non-secret failure code.
+///
+/// The code is one of a closed set the console maps to operator-facing copy.
+/// The provider's own error text is deliberately **not** propagated: it is
+/// attacker-influenced, unbounded, and may carry credential material — none of
+/// which belongs in a URL that lands in browser history and server access logs.
+///
+/// `provider` is optional because the arms that fire before the signed `state`
+/// is verified cannot always know which provider the flow was for.
+fn connect_error(state: &AppState, code: &str, provider: Option<&str>) -> Response {
+    let mut params = format!("connect_error={}", urlencode(code));
+    if let Some(provider) = provider {
+        params.push_str(&format!("&provider={}", urlencode(provider)));
+    }
+    console_redirect(state, &params)
 }
 
 // ---------------------------------------------------------------------------
@@ -235,39 +282,46 @@ fn percent_decode(value: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The provider a callback was for, recovered from a **signature-verified**
+/// `state` — used only to enrich a failure bounce-back with the provider name.
+/// An unverified `state` is never trusted for this, so a tampered value simply
+/// yields `None` and the console shows the provider-less message.
+fn provider_from_state(uri: &Uri) -> Option<String> {
+    let raw = query_param(uri, "state")?;
+    decode_state(&raw).map(|(_, provider)| provider)
+}
+
 /// `GET /api/v1/oauth/callback` — verify state, exchange code, store tokens.
+///
+/// Always answers with a redirect into the console (see [`console_redirect`]):
+/// this route is reached by a **browser navigation**, so any body it returns is
+/// rendered as the page the operator is left on.
 async fn callback(State(state): State<AppState>, uri: Uri) -> Response {
     if let Some(err) = query_param(&uri, "error") {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": format!("provider returned: {err}"), "code": "oauth_error" })),
-        )
-            .into_response();
+        // Log the provider's text host-side for diagnosis; never forward it to
+        // the browser (see `connect_error`).
+        tracing::warn!(provider_error = %err, "oauth callback: provider returned an error");
+        return connect_error(&state, "denied", provider_from_state(&uri).as_deref());
     }
     let (Some(code), Some(raw_state)) = (query_param(&uri, "code"), query_param(&uri, "state"))
     else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "missing code or state", "code": "invalid_request" })),
-        )
-            .into_response();
+        return connect_error(
+            &state,
+            "invalid_request",
+            provider_from_state(&uri).as_deref(),
+        );
     };
     // A tampered or expired `state` is rejected before any exchange.
     let Some((company, provider)) = decode_state(&raw_state) else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "invalid oauth state", "code": "unauthorized" })),
-        )
-            .into_response();
+        // No provider: the only claim to one came from the `state` we just
+        // refused to trust.
+        return connect_error(&state, "invalid_state", None);
     };
     let Some(runtime) = state.registry().get(&CompanyId::new(&company)) else {
-        return ApiError(OpenCompanyError::CompanyNotFound(company)).into_response();
+        return connect_error(&state, "unknown_company", Some(&provider));
     };
     let Some(config) = provider_config(&provider) else {
-        return ApiError(OpenCompanyError::InvalidRequest(format!(
-            "provider '{provider}' is not enabled on this host"
-        )))
-        .into_response();
+        return connect_error(&state, "provider_disabled", Some(&provider));
     };
 
     match exchange_code(&state, &config, &code).await {
@@ -283,18 +337,16 @@ async fn callback(State(state): State<AppState>, uri: Uri) -> Response {
                 )
                 .await
             {
-                return ApiError(err).into_response();
+                tracing::warn!(provider, "oauth callback: storing the token failed: {err}");
+                return connect_error(&state, "store_failed", Some(&provider));
             }
             // Redirect the browser back to the console connections view.
-            let console = std::env::var("OPENCOMPANY_CONSOLE_URL")
-                .unwrap_or_else(|_| state.config().host_base_url());
-            Redirect::to(&format!(
-                "{}/connections?connected={provider}",
-                console.trim_end_matches('/')
-            ))
-            .into_response()
+            console_redirect(&state, &format!("connected={}", urlencode(&provider)))
         }
-        Err(err) => ApiError(err).into_response(),
+        Err(err) => {
+            tracing::warn!(provider, "oauth callback: token exchange failed: {err}");
+            connect_error(&state, "exchange_failed", Some(&provider))
+        }
     }
 }
 
@@ -531,6 +583,193 @@ mod test {
             Some("Acme".to_string())
         );
         assert_eq!(extract_account(&json!({ "access_token": "x" })), None);
+    }
+
+    // ---- callback bounce-back (issue #300) ---------------------------------
+
+    use crate::AppConfig;
+
+    /// Drives `callback` with a raw query string and returns the response.
+    async fn call_callback(state: AppState, query: &str) -> Response {
+        let uri: Uri = format!("/api/v1/oauth/callback?{query}")
+            .parse()
+            .expect("valid uri");
+        callback(State(state), uri).await
+    }
+
+    /// The `Location` header of a redirect response, asserting it *is* one.
+    fn location(resp: &Response) -> String {
+        assert!(
+            resp.status().is_redirection(),
+            "expected a redirect, got {}",
+            resp.status()
+        );
+        resp.headers()
+            .get("location")
+            .expect("redirect carries a Location")
+            .to_str()
+            .expect("ascii location")
+            .to_string()
+    }
+
+    /// Every failure arm must bounce the browser back to the console's
+    /// Connections view — never render a JSON body into the document, which is
+    /// the dead end issue #300 reports.
+    #[tokio::test]
+    async fn callback_failures_redirect_to_console_connections() {
+        let state = AppState::new(AppConfig::default());
+        for query in [
+            "error=access_denied",
+            "code=abc",  // missing state
+            "state=xyz", // missing code
+            "code=abc&state=not-a-valid-state",
+        ] {
+            let resp = call_callback(state.clone(), query).await;
+            let loc = location(&resp);
+            assert!(
+                loc.contains("/connections?"),
+                "{query} did not bounce to the console: {loc}"
+            );
+            assert!(
+                loc.contains("connect_error="),
+                "{query} carried no failure code: {loc}"
+            );
+        }
+    }
+
+    /// A cancel at the consent screen maps to `denied`, and — because the
+    /// `state` is signature-verified — names the provider so the console can say
+    /// which tile failed.
+    #[tokio::test]
+    async fn callback_denied_names_provider_from_verified_state() {
+        let state = AppState::new(AppConfig::default());
+        let nonce = encode_state("acme", "slack", now_millis() + STATE_TTL_MS);
+        let resp = call_callback(
+            state,
+            &format!("error=access_denied&state={}", urlencode(&nonce)),
+        )
+        .await;
+        let loc = location(&resp);
+        assert!(loc.contains("connect_error=denied"), "{loc}");
+        assert!(loc.contains("provider=slack"), "{loc}");
+        // The provider's own error text is host-side only: it is
+        // attacker-influenced and must never ride in a URL.
+        assert!(
+            !loc.contains("access_denied"),
+            "raw provider error leaked into Location: {loc}"
+        );
+    }
+
+    /// Without a verifiable `state` there is no trustworthy provider claim, so
+    /// the bounce-back carries the code alone.
+    #[tokio::test]
+    async fn callback_denied_without_state_omits_provider() {
+        let state = AppState::new(AppConfig::default());
+        let resp = call_callback(state, "error=access_denied").await;
+        let loc = location(&resp);
+        assert!(loc.contains("connect_error=denied"), "{loc}");
+        assert!(!loc.contains("provider="), "{loc}");
+    }
+
+    /// A tampered `state` must not be mined for a provider name — the only
+    /// claim to one came from the value we just refused to trust.
+    #[tokio::test]
+    async fn callback_tampered_state_reports_invalid_state_only() {
+        let state = AppState::new(AppConfig::default());
+        let mut nonce = encode_state("acme", "slack", now_millis() + STATE_TTL_MS);
+        let last = nonce.pop().expect("non-empty");
+        nonce.push(if last == '0' { '1' } else { '0' });
+        let resp = call_callback(state, &format!("code=abc&state={}", urlencode(&nonce))).await;
+        let loc = location(&resp);
+        assert!(loc.contains("connect_error=invalid_state"), "{loc}");
+        assert!(!loc.contains("provider="), "{loc}");
+    }
+
+    /// An expired nonce is a recoverable state (the operator simply took too
+    /// long), so it bounces back rather than dead-ending on a 401 body.
+    #[tokio::test]
+    async fn callback_expired_state_redirects() {
+        let state = AppState::new(AppConfig::default());
+        let nonce = encode_state("acme", "slack", now_millis().saturating_sub(1));
+        let resp = call_callback(state, &format!("code=abc&state={}", urlencode(&nonce))).await;
+        assert!(
+            location(&resp).contains("connect_error=invalid_state"),
+            "expired state must bounce back"
+        );
+    }
+
+    /// A signed state for a company this host doesn't run.
+    #[tokio::test]
+    async fn callback_unknown_company_redirects() {
+        let state = AppState::new(AppConfig::default());
+        let nonce = encode_state("ghost", "slack", now_millis() + STATE_TTL_MS);
+        let resp = call_callback(state, &format!("code=abc&state={}", urlencode(&nonce))).await;
+        let loc = location(&resp);
+        assert!(loc.contains("connect_error=unknown_company"), "{loc}");
+        assert!(loc.contains("provider=slack"), "{loc}");
+    }
+
+    /// A registered company, but the provider has no app credentials on this
+    /// host — the catalog/backend gap the console shows 11 tiles for.
+    #[tokio::test]
+    async fn callback_unconfigured_provider_redirects() {
+        let (runtime, _home) = test_runtime().await;
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(CompanyId::new("acme"), runtime);
+        let provider = unique_provider();
+        let nonce = encode_state("acme", &provider, now_millis() + STATE_TTL_MS);
+        let resp = call_callback(state, &format!("code=abc&state={}", urlencode(&nonce))).await;
+        let loc = location(&resp);
+        assert!(loc.contains("connect_error=provider_disabled"), "{loc}");
+        assert!(loc.contains(&format!("provider={provider}")), "{loc}");
+    }
+
+    /// A token endpoint that cannot be reached must bounce back too — and the
+    /// authorization code must not ride along into browser history or logs.
+    #[tokio::test]
+    async fn callback_exchange_failure_redirects_without_leaking_code() {
+        // Bind then drop to obtain a port with nothing listening on it.
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = dead.local_addr().unwrap();
+        drop(dead);
+
+        let (runtime, _home) = test_runtime().await;
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(CompanyId::new("acme"), runtime);
+        let provider = unique_provider();
+        let key = provider.to_ascii_uppercase();
+        // SAFETY: unique per-test provider name → no cross-test env collision.
+        unsafe {
+            std::env::set_var(format!("OPENCOMPANY_OAUTH_{key}_ID"), "cid");
+            std::env::set_var(format!("OPENCOMPANY_OAUTH_{key}_SECRET"), "csec");
+            std::env::set_var(
+                format!("OPENCOMPANY_OAUTH_{key}_AUTHORIZE_URL"),
+                "http://x/a",
+            );
+            std::env::set_var(
+                format!("OPENCOMPANY_OAUTH_{key}_TOKEN_URL"),
+                format!("http://{dead_addr}/token"),
+            );
+        }
+
+        let nonce = encode_state("acme", &provider, now_millis() + STATE_TTL_MS);
+        let resp = call_callback(
+            state,
+            &format!("code=CANARY-authz-code&state={}", urlencode(&nonce)),
+        )
+        .await;
+        let loc = location(&resp);
+        assert!(loc.contains("connect_error=exchange_failed"), "{loc}");
+        assert!(
+            !loc.contains("CANARY-authz-code"),
+            "authorization code leaked into Location: {loc}"
+        );
+
+        unsafe {
+            for suffix in ["ID", "SECRET", "AUTHORIZE_URL", "TOKEN_URL"] {
+                std::env::remove_var(format!("OPENCOMPANY_OAUTH_{key}_{suffix}"));
+            }
+        }
     }
 
     // ---- disconnect / best-effort revoke ----------------------------------
