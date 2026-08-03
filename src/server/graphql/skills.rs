@@ -139,23 +139,41 @@ pub(crate) async fn resolve_company(
     Ok(out)
 }
 
-/// Projects a store delta with no company-dir doc into a `Skill`, enriching a
-/// registry install from the shared library and a custom skill from its own
+/// Projects a store delta with no company-dir doc into a `Skill`, reading a
+/// registry install from its pinned snapshot and a custom skill from its own
 /// `SKILL.md`.
 fn skill_from_state(st: &SkillState, registry: &[SkillDoc]) -> SkillGql {
     match st.source {
-        SkillSource::Registry => match registry.iter().find(|doc| doc.slug == st.slug) {
-            Some(doc) => from_doc(doc, "registry", st.enabled),
-            None => SkillGql {
-                id: ID(st.slug.clone()),
-                name: titleize(&st.slug),
-                description: String::new(),
-                category: DEFAULT_CATEGORY.to_string(),
-                source: "registry".to_string(),
-                enabled: st.enabled,
-                version: None,
-            },
-        },
+        SkillSource::Registry => {
+            // The install-time snapshot is authoritative, exactly as it is for
+            // the REST projection (`InstalledSkill::from_state`): `install()`
+            // pins the library document into `custom_doc` so a later library
+            // edit does not rewrite an existing install. Reading the live
+            // library here instead would make the two transports report
+            // different `version`s for the same install, and would discard real
+            // persisted content once a slug leaves the library.
+            let pinned = st
+                .custom_doc
+                .as_deref()
+                .and_then(|src| parse_skill_md(&st.slug, src).ok());
+            // The live library is a fallback only: a pre-fix install has no
+            // snapshot, or one that does not parse.
+            match pinned
+                .as_ref()
+                .or_else(|| registry.iter().find(|doc| doc.slug == st.slug))
+            {
+                Some(doc) => from_doc(doc, "registry", st.enabled),
+                None => SkillGql {
+                    id: ID(st.slug.clone()),
+                    name: titleize(&st.slug),
+                    description: String::new(),
+                    category: DEFAULT_CATEGORY.to_string(),
+                    source: "registry".to_string(),
+                    enabled: st.enabled,
+                    version: None,
+                },
+            }
+        }
         SkillSource::Custom => {
             let doc = st
                 .custom_doc
