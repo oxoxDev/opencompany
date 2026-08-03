@@ -12,7 +12,33 @@ export interface TourState {
   completed?: boolean;
   skipped?: boolean;
   seenAt?: number;
+  /**
+   * Set when a tour stop hands the browser to a third party (the OAuth connect
+   * flow navigates the whole document away), so the controller can pick the
+   * tour back up on the stop the operator left. See `pendingResume` helpers.
+   */
+  pendingResume?: TourResume;
 }
+
+/**
+ * Where to resume the tour after a full-page round trip.
+ *
+ * The stop is identified by its **view**, not its index: issue #302 deleted a
+ * stop, and a stored index would have resumed on the wrong one — or past the
+ * end, where the controller's `if (!stop) return` guard swallows it silently.
+ */
+export interface TourResume {
+  view: string;
+  at: number;
+}
+
+/**
+ * How long a resume marker stays good. Deliberately longer than the OAuth
+ * `state` nonce (10 minutes host-side) so a handshake that only just made it
+ * still resumes, but short enough that a marker abandoned mid-flow cannot
+ * hijack an unrelated visit hours later.
+ */
+const RESUME_TTL_MS = 15 * 60 * 1000;
 
 /** Fired by `restartTour` so a mounted controller can replay from the top. */
 export const RESTART_EVENT = "oc-tour:restart";
@@ -38,6 +64,39 @@ export function writeTourState(company: string | null, next: TourState): void {
 export function tourSeen(company: string | null): boolean {
   const s = readTourState(company);
   return Boolean(s.completed || s.skipped);
+}
+
+/**
+ * Record that the tour was on `view` when the page handed off to a third party,
+ * so the next mount resumes there instead of re-offering the tour from step 1.
+ *
+ * Read-modify-write, and in the **same per-company key** as the seen flags: a
+ * marker written under one company must never resume that company's tour inside
+ * another (the contamination the controller's company-switch teardown guards
+ * against).
+ */
+export function markTourResume(company: string | null, view: string): void {
+  const current = readTourState(company);
+  writeTourState(company, { ...current, pendingResume: { view, at: Date.now() } });
+}
+
+/**
+ * The view to resume on, or `null` when there is no marker or it has aged out.
+ * A stale marker is treated as absent — the caller clears it either way.
+ */
+export function readTourResume(company: string | null): string | null {
+  const { pendingResume } = readTourState(company);
+  if (!pendingResume) return null;
+  if (Date.now() - pendingResume.at > RESUME_TTL_MS) return null;
+  return pendingResume.view;
+}
+
+/** Drop the resume marker, keeping the completed/skipped flags intact. */
+export function clearTourResume(company: string | null): void {
+  const current = readTourState(company);
+  if (!current.pendingResume) return;
+  const { pendingResume: _dropped, ...rest } = current;
+  writeTourState(company, rest);
 }
 
 /** Clear the seen flag and ask any mounted controller to replay from step 1. */
