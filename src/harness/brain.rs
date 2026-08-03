@@ -2914,11 +2914,7 @@ members = ["eng1", "eng2"]
         assert_eq!(steps[0].detail.as_deref(), Some("server rejected the call"));
 
         let logged = events
-            .read_from(
-                &CompanyId::new("acme"),
-                crate::ports::EventSeq::new(0),
-                usize::MAX,
-            )
+            .read_from(&CompanyId::new("acme"), EventSeq::new(0), usize::MAX)
             .await
             .expect("read events");
         assert!(
