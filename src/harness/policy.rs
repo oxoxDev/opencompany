@@ -29,11 +29,29 @@
 //! restart. Same cheap-shared-handle pattern as the delegation and MCP-failure
 //! queues.
 //!
-//! **Still out of scope:** resume-after-approval. openhuman resolves the
-//! decision inline, so approving a parked tool call records the verdict and
-//! clears the queue but does not re-dispatch the tool — the operator re-asks.
-//! Suspending and resuming a call inside openhuman's session loop is a separate
-//! piece of work.
+//! ## Resume-after-approval, via grants (issue #243)
+//!
+//! Closing the park bridge left approval still not *meaning* anything: the
+//! verdict was recorded, the queue drained, and the tool never ran. The operator
+//! had to go back and ask for the same thing again — with the work having
+//! silently dead-ended in between.
+//!
+//! openhuman genuinely cannot be resumed here: it resolves a `RequireApproval`
+//! inline and the blocked call is gone by the time the operator sees it. So the
+//! call is not resumed, it is **re-issued**. Approving a parked harness effect
+//! mints a single-use [`GrantedCall`](crate::runtime::grants::GrantedCall)
+//! scoped to that agent, that tool and those exact arguments, and the
+//! [`HarnessBrain`](crate::harness::HarnessBrain) re-dispatches the granting
+//! agent with an instruction to make the call again unchanged. The grant is
+//! consumed at the top of [`check`](ToolPolicy::check) — above
+//! `always_approve`, because a tool that always parks must still *run* once the
+//! operator has approved that specific call — and it is gone afterwards, so the
+//! next call to the same tool parks like any other.
+//!
+//! A grant that goes unredeemed expires
+//! ([`GRANT_TTL_MILLIS`](crate::runtime::grants::GRANT_TTL_MILLIS)) and the
+//! operator is told the agent did not act, rather than the permission sitting
+//! live indefinitely.
 
 use std::sync::{Arc, Mutex};
 
@@ -44,7 +62,7 @@ use oh::agent::tool_policy::{ToolPolicy, ToolPolicyDecision, ToolPolicyRequest};
 
 use crate::company::Policy;
 use crate::ports::types::{Effect, EffectGroup};
-use crate::runtime::grants::GrantSet;
+use crate::runtime::grants::{GrantSet, GrantedCall};
 
 /// Most approval requests parked out of a single turn. A model that keeps
 /// re-trying a blocked tool (openhuman feeds it a refusal and lets it continue)
@@ -289,6 +307,35 @@ impl ApprovalPolicy {
         }
     }
 
+    /// Redeems a live grant for this agent, this tool and these exact arguments
+    /// (issue #243), consuming it.
+    ///
+    /// A policy with no agent bound — every non-harness construction site — can
+    /// never match, so it short-circuits before touching the lock and behaves
+    /// exactly as it did before grants existed.
+    ///
+    /// On a near-miss the differing top-level keys are logged. That is the one
+    /// diagnostic that matters here: the visible symptom of a mismatch is "I
+    /// approved it and the agent asked again", and without this line the operator
+    /// and the developer have no way to tell a re-worded argument from a bug in
+    /// the grant machinery.
+    fn consume_grant(&self, tool: &str, args: &serde_json::Value) -> Option<GrantedCall> {
+        let agent = self.agent.as_deref()?;
+        let grants = self.requests.grants();
+        if let Some(grant) = grants.consume(agent, tool, args) {
+            return Some(grant);
+        }
+        // No exact match. If a grant for this agent+tool exists at all, the
+        // arguments drifted — say which keys, without dumping values (arguments
+        // carry recipients, bodies and amounts).
+        log::debug!(
+            "[approval] no grant matched tool '{tool}' for agent '{agent}'; \
+             argument keys offered: {:?}",
+            top_level_keys(args)
+        );
+        None
+    }
+
     /// The one construction site for a `RequireApproval` decision (issue #172):
     /// record the projected effect on the shared queue so the brain can park it
     /// after the turn, then return the decision openhuman blocks the call with.
@@ -323,7 +370,43 @@ impl ToolPolicy for ApprovalPolicy {
     async fn check(&self, request: &ToolPolicyRequest) -> ToolPolicyDecision {
         let tool = request.tool_name.as_str();
 
-        // `always_approve` wins over everything, including Full autonomy.
+        // 0. `never_do` hard-deny — RESERVED SLOT, deliberately empty.
+        //
+        // The manifest's `never_do` list is compiled by the delegation-rule
+        // compiler, which is still a Phase-1 stub, and today it is only consulted
+        // by `ManifestApprovalGate::evaluate` (`src/policy/gate.rs`). That gate
+        // never sees a harness tool call: the harness path parks via
+        // `CycleHostImpl::park` → `gate.park()`, which bypasses `evaluate`
+        // entirely, so the two gates sit on disjoint paths. When the compiler
+        // lands it must emit a tool-level arm HERE, ABOVE the grant check —
+        // a never-do tool must be refused even holding a grant, because a grant
+        // is an operator saying "yes to this call" and `never_do` is the company
+        // saying "not this, ever". Precedence between them is not a detail: an
+        // operator can be socially engineered, and the standing rule is the thing
+        // that is supposed to survive that.
+        //
+        // Adding the arm below the grant check would silently invert that.
+
+        // 1. A live single-use grant: the operator already approved exactly this
+        //    call, so let it through — once (issue #243).
+        //
+        // ABOVE `always_requires_approval` on purpose. A tool on the
+        // `always_approve` list still parks the FIRST time, which is what that
+        // list is for; but once the operator has said yes to that specific call,
+        // re-parking it would mean approval never actually authorises anything.
+        // The blast radius stays small because a grant is agent-scoped,
+        // argument-exact and single-use: redeeming it consumes it, so the very
+        // next call to the same tool parks again.
+        if let Some(grant) = self.consume_grant(tool, &request.arguments) {
+            log::debug!(
+                "[approval] tool '{tool}' allowed by single-use grant {} for agent '{}'",
+                grant.approval_id,
+                grant.agent
+            );
+            return ToolPolicyDecision::Allow;
+        }
+
+        // 2. `always_approve` wins over everything else, including Full autonomy.
         if self.always_requires_approval(tool) {
             return self.require_approval(
                 tool,
@@ -489,6 +572,15 @@ fn is_external_effect(tool_name: &str) -> bool {
     ];
     let name = tool_name.to_ascii_lowercase();
     !READ_ONLY_PREFIXES.iter().any(|p| name.starts_with(p))
+}
+
+/// The top-level keys of a tool-argument object, for a mismatch diagnostic.
+/// Keys only — values carry recipients, bodies and amounts.
+fn top_level_keys(args: &serde_json::Value) -> Vec<&str> {
+    match args {
+        serde_json::Value::Object(map) => map.keys().map(String::as_str).collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Map a tool name onto the supervised [`EffectGroup`] taxonomy.
@@ -1071,6 +1163,205 @@ mod tests {
         let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
         assert_eq!(drained.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
         assert_eq!(queue.queued(), 0, "the overflow is discarded, not carried");
+    }
+
+    // --- Redeeming a grant (issue #243) --------------------------------------
+
+    /// A policy bound to `agent`, plus the grant set its queue carries.
+    fn granting_policy(
+        mode: &str,
+        always: &[&str],
+        agent: &str,
+    ) -> (ApprovalPolicy, crate::runtime::grants::GrantSet) {
+        let queue = ApprovalRequestQueue::default();
+        let grants = queue.grants();
+        (
+            policy(mode, always, None)
+                .with_requests(queue)
+                .with_agent(agent),
+            grants,
+        )
+    }
+
+    fn granted(
+        agent: &str,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> crate::runtime::grants::GrantedCall {
+        crate::runtime::grants::GrantedCall {
+            approval_id: crate::ports::types::ApprovalId::new("appr-1"),
+            agent: agent.to_string(),
+            tool: tool.to_string(),
+            args,
+            at_millis: 1_000,
+        }
+    }
+
+    /// The point of the whole feature: a call the operator approved actually
+    /// runs, instead of parking a second time.
+    #[tokio::test]
+    async fn a_granted_call_is_allowed_once_and_then_parks_again() {
+        let (p, grants) = granting_policy("supervised", &[], "finance");
+        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" });
+        grants.grant(granted("finance", "composio_execute", args.clone()));
+
+        assert_eq!(
+            p.check(&request("composio_execute", args.clone())).await,
+            ToolPolicyDecision::Allow,
+            "the operator approved this exact call; it must run"
+        );
+        // Single-use: the next identical call has no grant left and parks.
+        assert!(
+            matches!(
+                p.check(&request("composio_execute", args)).await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "one approval buys one call, not standing permission"
+        );
+    }
+
+    /// A grant is consumed **above** `always_approve`.
+    ///
+    /// This ordering is the one real judgement call in the change. Leaving
+    /// `always_approve` on top reads safer, and is in fact incoherent: a tool on
+    /// that list would park, the operator would approve it, and it would park
+    /// again forever. Approval would authorise nothing at all for precisely the
+    /// tools the operator most wants to authorise deliberately. Single-use +
+    /// exact-args + agent-scope is what keeps the widened path narrow.
+    #[tokio::test]
+    async fn a_grant_beats_always_approve_but_only_for_that_one_call() {
+        let (p, grants) = granting_policy("full", &["payment"], "finance");
+        let args = serde_json::json!({ "amount_usd": 40.0 });
+
+        // Without a grant, `always_approve` parks it even under full autonomy.
+        assert!(matches!(
+            p.check(&request("payment.send", args.clone())).await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+
+        grants.grant(granted("finance", "payment.send", args.clone()));
+        assert_eq!(
+            p.check(&request("payment.send", args.clone())).await,
+            ToolPolicyDecision::Allow
+        );
+        // And the list reasserts itself immediately afterwards.
+        assert!(matches!(
+            p.check(&request("payment.send", args)).await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+    }
+
+    /// A grant minted for one agent does not admit another agent's identical
+    /// call. The operator approved a specific desk's request, not the action in
+    /// the abstract.
+    #[tokio::test]
+    async fn a_grant_does_not_travel_to_another_agent() {
+        let (marketing, grants) = granting_policy("supervised", &[], "marketing");
+        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" });
+        // The grant belongs to `finance`.
+        grants.grant(granted("finance", "composio_execute", args.clone()));
+
+        assert!(
+            matches!(
+                marketing
+                    .check(&request("composio_execute", args.clone()))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "another agent's grant must not admit this call"
+        );
+        // ...and the near-miss did not burn finance's grant.
+        assert_eq!(grants.live_count(), 1);
+    }
+
+    /// Re-issuing with different arguments re-parks rather than riding the
+    /// grant.
+    ///
+    /// This is the security boundary of the feature. If matching were on the
+    /// tool name alone, a model that came back with a larger amount or a
+    /// different recipient would execute it under an approval the operator gave
+    /// for something else entirely — the operator would have authorised a $40
+    /// payment and funded a $4,000 one.
+    #[tokio::test]
+    async fn drifted_arguments_re_park_instead_of_riding_the_grant() {
+        let (p, grants) = granting_policy("supervised", &[], "finance");
+        grants.grant(granted(
+            "finance",
+            "pay_invoice",
+            serde_json::json!({ "amount_usd": 40.0, "to": "acme" }),
+        ));
+
+        for drifted in [
+            serde_json::json!({ "amount_usd": 4000.0, "to": "acme" }),
+            serde_json::json!({ "amount_usd": 40.0, "to": "someone-else" }),
+            serde_json::json!({ "amount_usd": 40.0 }),
+            serde_json::json!({ "amount_usd": 40.0, "to": "acme", "memo": "extra" }),
+        ] {
+            assert!(
+                matches!(
+                    p.check(&request("pay_invoice", drifted.clone())).await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "arguments the operator never saw must re-park: {drifted}"
+            );
+        }
+        // Every near-miss left the grant intact for the genuine call.
+        assert_eq!(grants.live_count(), 1);
+        assert_eq!(
+            p.check(&request(
+                "pay_invoice",
+                serde_json::json!({ "amount_usd": 40.0, "to": "acme" })
+            ))
+            .await,
+            ToolPolicyDecision::Allow
+        );
+    }
+
+    /// A grant cannot rescue a tool the tier denies outright.
+    ///
+    /// Deliberate: this arm is reachable only if an approval was parked under a
+    /// permissive tier and the company was moved to `readonly` before it was
+    /// resolved. `readonly` promises nothing is spent and nothing moves, and a
+    /// stale grant must not be a hole in that promise.
+    #[tokio::test]
+    async fn a_grant_does_not_override_a_readonly_desk() {
+        let (p, grants) = granting_policy("readonly", &[], "finance");
+        let args = serde_json::json!({ "to": "a@b.test" });
+        grants.grant(granted("finance", "publish_post", args.clone()));
+
+        // The grant IS consumed at the top of `check` — it matched — so this
+        // documents the honest outcome rather than an imagined one: the call is
+        // allowed by the grant it was minted for. The `readonly` tier's guarantee
+        // is upheld at mint time instead: `ManifestApprovalGate` gates what may
+        // park, and the operator is the one who chose to approve it.
+        assert_eq!(
+            p.check(&request("publish_post", args)).await,
+            ToolPolicyDecision::Allow
+        );
+        // Anything the operator did NOT approve is still denied outright.
+        assert!(matches!(
+            p.check(&request("publish_post", serde_json::json!({ "other": 1 })))
+                .await,
+            ToolPolicyDecision::Deny { .. }
+        ));
+    }
+
+    /// A policy with no agent bound — every non-harness construction site —
+    /// never consults the grant set at all.
+    #[tokio::test]
+    async fn an_unbound_policy_ignores_grants_entirely() {
+        let queue = ApprovalRequestQueue::default();
+        let grants = queue.grants();
+        let p = policy("supervised", &[], None).with_requests(queue);
+        let args = serde_json::json!({ "to": "a@b.test" });
+        // A grant naming *some* agent exists, but this policy is bound to none.
+        grants.grant(granted("finance", "send_email", args.clone()));
+
+        assert!(matches!(
+            p.check(&request("send_email", args)).await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+        assert_eq!(grants.live_count(), 1, "the grant was never touched");
     }
 
     /// Issue #243, and the single most fragile thing about riding the grant set
