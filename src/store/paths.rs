@@ -51,8 +51,10 @@ const LEGACY_DEFAULT_LEAF: &str = "companies";
 ///
 /// Precedence, highest first:
 ///
-/// 1. **`--home`** (`flag`). An explicit flag always wins; no environment
-///    variable may override it.
+/// 1. **`--home`** (`flag`). Outranks [`DATA_DIR_ENV`] and the legacy default
+///    below. It does not suppress the [`REMOVED_HOME_ENV`] rejection, which is
+///    checked ahead of every branch — see [Errors](#errors) — so `--home` wins
+///    the *choice* of root but never skips that validation.
 /// 2. **`OPENCOMPANY_DATA_DIR`** ([`DATA_DIR_ENV`]), used verbatim. This is the
 ///    same value a hosted tenant's entrypoint already forwards as
 ///    `--home "$OPENCOMPANY_DATA_DIR"`, so the flag and the variable resolve
@@ -68,10 +70,13 @@ const LEGACY_DEFAULT_LEAF: &str = "companies";
 ///
 /// # Errors
 ///
-/// Fails when [`REMOVED_HOME_ENV`] is set. Ignoring it is what made this class
-/// of mistake cost an hour rather than a minute: several hosts started with
-/// different values all shared one store, and the contaminated roster read as a
-/// product bug rather than a configuration one.
+/// Fails when [`REMOVED_HOME_ENV`] is set — including when `--home` is passed,
+/// because a caller who exported it believes it is placing the data and must be
+/// told otherwise before a stale deploy script silently splits a store.
+/// Ignoring it is what made this class of mistake cost an hour rather than a
+/// minute: several hosts started with different values all shared one store, and
+/// the contaminated roster read as a product bug rather than a configuration
+/// one.
 pub fn resolve_home(flag: Option<PathBuf>) -> Result<PathBuf> {
     resolve_home_from(
         flag,
