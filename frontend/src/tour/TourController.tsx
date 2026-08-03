@@ -5,7 +5,15 @@ import type { View } from "@/components/app-shell";
 import { TOUR, waitForTarget } from "./steps";
 import { TourTooltip } from "./TourTooltip";
 import { WelcomeDialog } from "./WelcomeDialog";
-import { RESTART_EVENT, tourForced, tourSeen, writeTourState } from "./state";
+import {
+  clearTourResume,
+  readTourResume,
+  RESTART_EVENT,
+  setActiveTourStop,
+  tourForced,
+  tourSeen,
+  writeTourState,
+} from "./state";
 
 // react-joyride (and its floater/popper deps) is a fair chunk; only operators
 // who actually run the tour download it. Types above are `import type`, so they
@@ -53,20 +61,54 @@ export function TourController({
   const [welcomeOpen, setWelcomeOpen] = useState(false);
   const [session, setSession] = useState(false); // mounts Joyride for the run
   const [run, setRun] = useState(false); // joyride active
+  // Which stop this run opens on. `0` for a normal run; the resumed stop when
+  // we came back from a full-page redirect mid-tour.
+  const [startIndex, setStartIndex] = useState(0);
 
   // Offer the tour once per company on first arrival (or every load under the
-  // dev-force flag).
+  // dev-force flag) — unless we're returning mid-tour from a redirect, in which
+  // case pick the tour back up where it left off instead of re-offering it.
   useEffect(() => {
     // A company switch must tear down the prior company's in-flight tour first,
     // otherwise `finish` would record its completion/skip under the NEW
     // company's key (cross-company contamination).
     setRun(false);
     setSession(false);
+    setActiveTourStop(null);
+
+    // Resume takes priority over the welcome dialog: the operator already
+    // started the tour, left to authorize a connection, and came back. Showing
+    // "Welcome to your company" from step 1 here is the bug (issue #300) — the
+    // tour never recorded completed/skipped, so `tourSeen` is still false.
+    const resumeView = readTourResume(company);
+    if (resumeView !== null) {
+      // Consume it either way: a marker that can't be honored must not sit
+      // around waiting to fire on some later, unrelated visit.
+      clearTourResume(company);
+      // Match on view, not index — see `TourResume`. `findIndex` takes the
+      // first stop for a view, which is unambiguous for every view that can
+      // arm a marker today (only Connections navigates the page away).
+      const index = TOUR.findIndex((s) => s.view === resumeView);
+      if (index >= 0) {
+        setStartIndex(index);
+        setWelcomeOpen(false);
+        setSession(true);
+        setRun(true);
+        return;
+      }
+      // -1: the stop was retired since the marker was written (as #302 retired
+      // one). Drop it and fall through to today's behavior.
+    }
+
+    setStartIndex(0);
     if (tourForced() || !tourSeen(company)) setWelcomeOpen(true);
     else setWelcomeOpen(false);
   }, [company]);
 
   const start = useCallback(() => {
+    // A replay from Settings always opens at the top, even if this mount had
+    // resumed mid-tour.
+    setStartIndex(0);
     setWelcomeOpen(false);
     setSession(true);
     setRun(true);
@@ -76,6 +118,9 @@ export function TourController({
     (skipped: boolean) => {
       setRun(false);
       setSession(false);
+      setActiveTourStop(null);
+      // Replaces the whole record, so any resume marker goes with it — the tour
+      // is over, there is nothing left to resume.
       writeTourState(company, skipped ? { skipped: true } : { completed: true });
     },
     [company],
@@ -103,6 +148,9 @@ export function TourController({
     async (data: TourData) => {
       const stop = TOUR[data.index];
       if (!stop) return;
+      // Publish the live position so `armTourResume` can persist it if this
+      // stop hands the browser off to a third party (the OAuth connect flow).
+      setActiveTourStop(stop.view);
       setView(stop.view);
       await waitForTarget(stop.target);
     },
@@ -132,6 +180,11 @@ export function TourController({
           <Joyride
             steps={STEPS}
             run={run}
+            // Resume support without giving up the uncontrolled design: this is
+            // the *initial* index for an uncontrolled tour, so joyride still
+            // owns the stepping from here. (A controlled `stepIndex` would make
+            // us drive every transition by hand.)
+            initialStepIndex={startIndex}
             continuous
             tooltipComponent={TourTooltip}
             options={{

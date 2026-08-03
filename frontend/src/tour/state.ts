@@ -91,6 +91,32 @@ export function readTourResume(company: string | null): string | null {
   return pendingResume.view;
 }
 
+/**
+ * The stop a running tour is currently on, or `null` when no tour is running.
+ *
+ * Module-level rather than persisted: it changes on every step, and only the
+ * one moment that hands the browser away needs it to survive. `armTourResume`
+ * is what turns this live position into a stored marker.
+ */
+let activeStopView: string | null = null;
+
+/** Called by the controller as each stop renders; `null` when the tour ends. */
+export function setActiveTourStop(view: string | null): void {
+  activeStopView = view;
+}
+
+/**
+ * Arm a resume marker for wherever the tour currently is, so a full-page
+ * navigation (the OAuth connect flow) can be picked back up.
+ *
+ * A **no-op when no tour is running** — that is what lets a caller arm
+ * unconditionally without first asking whether it is inside onboarding.
+ */
+export function armTourResume(company: string | null): void {
+  if (activeStopView === null) return;
+  markTourResume(company, activeStopView);
+}
+
 /** Drop the resume marker, keeping the completed/skipped flags intact. */
 export function clearTourResume(company: string | null): void {
   const current = readTourState(company);
