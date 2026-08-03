@@ -141,9 +141,25 @@ jobs:
 
       # Catches the combination traps no single feature set can: most often a
       # mandatory struct field constructed differently across feature arms.
-      # CHECK-ONLY BY DESIGN — `--all-features` enables `mcp`, which legitimately
-      # adds registry tools to the agent tool belt that a `harness::build` test
-      # pins for the openhuman-only set. This step must compile the combination
-      # without running its feature-sensitive tests.
+      # CHECK-ONLY BY DESIGN — `--all-features` also enables the storage
+      # backends, whose test target does not currently compile (#288), so this
+      # step must not be widened to `--all-targets` or to `cargo test`.
       - name: Check (--all-features)
         run: cargo check --all-features
+
+      # The tool belt the SHIPPED tenant image actually builds (issue #297).
+      #
+      # Every other lane here runs `openhuman[,tinycortex]`. `mcp` is the one
+      # feature that changes what an agent's tool belt *contains* rather than
+      # only what compiles, so no lane exercised the belt real deployments get —
+      # and `dispatched_desk_agent_tool_belt_is_pinned` was failing unseen on
+      # `main` for exactly that reason. The pin is now feature-aware, so it is
+      # correct under every combination; this step is what keeps that true.
+      #
+      # Deliberately NARROW. This feature set is a fourth distinct compile of the
+      # tree, so it runs only the belt-contract module rather than the whole
+      # suite: those tests are the entire reason the combination matters, and
+      # everything else in `--lib` is already covered by the step above. Widen it
+      # only if a second behavioural feature-divergence shows up.
+      - name: Test tool-belt contract (openhuman, mcp, telegram)
+        run: cargo test --features openhuman,mcp,telegram --lib harness::build::tests

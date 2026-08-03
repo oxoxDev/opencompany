@@ -738,15 +738,28 @@ mod tests {
     }
 
     /// (a) The EXACT tool belt a dispatched desk agent receives with the broad
-    /// `*` grant, under the openhuman-only feature set. Any tool added to or
-    /// removed from a dispatched agent flips this snapshot and fails CI — the
-    /// whole point of the pin. The set is the curated exec subset (shell / code
-    /// / web) plus the intrinsic memory + file tools; it contains NO delegation
-    /// tool and NO deferred family.
+    /// `*` grant. Any tool added to or removed from a dispatched agent flips
+    /// this snapshot and fails CI — the whole point of the pin. The set is the
+    /// curated exec subset (shell / code / web) plus the intrinsic memory + file
+    /// tools; it contains NO delegation tool and NO deferred family.
+    ///
+    /// **Feature-aware (issue #297).** The belt genuinely differs by feature
+    /// set: `#[cfg(feature = "mcp")]` pushes two `mcp_registry_*` tools
+    /// unconditionally in `build_agent`, so a flat literal was *wrong* under
+    /// `--features openhuman,mcp,telegram` — the combination a full local build
+    /// and the shipped tenant image both use, and which no CI lane ran. The pin
+    /// was therefore failing unseen on `main`. Extending the array
+    /// unconditionally would only move the failure onto plain
+    /// `--features openhuman`, which CI *does* run, so the fix has to branch.
+    /// Composing the expectation from the same `cfg` the wiring uses keeps the
+    /// two from drifting again.
     #[test]
     fn dispatched_desk_agent_tool_belt_is_pinned() {
         let names = built_tool_names(&["*"], false);
-        let expected = vec![
+        // `mut` is only used by the `mcp` arm below; without the feature the
+        // literal is already the whole expectation.
+        #[cfg_attr(not(feature = "mcp"), allow(unused_mut))]
+        let mut expected = vec![
             "apply_patch",
             "csv_export",
             "curl",
@@ -765,6 +778,15 @@ mod tests {
             "shell",
             "web_fetch",
         ];
+        // Mirrors the unconditional `#[cfg(feature = "mcp")]` push in
+        // `build_agent`. These two are intrinsic (unmapped by `namespace_of`),
+        // so no grant gates them — enabling the feature is the whole condition.
+        #[cfg(feature = "mcp")]
+        {
+            expected.push("mcp_registry_list_tools");
+            expected.push("mcp_registry_tool_call");
+            expected.sort();
+        }
         assert_eq!(names, expected, "dispatched desk belt drifted: {names:?}");
     }
 
