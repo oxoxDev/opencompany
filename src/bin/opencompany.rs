@@ -446,7 +446,9 @@ fn attach_harness(builder: RuntimeBuilder) -> RuntimeBuilder {
 fn attach_harness(builder: RuntimeBuilder) -> RuntimeBuilder {
     use opencompany::app::config::ProcessEnv;
     use opencompany::harness::HarnessPool;
-    use opencompany::harness::provider::{harness_inference_from_env, media_backend_from_env};
+    use opencompany::harness::provider::{
+        harness_inference_from_env, media_backend_from_env, search_backend_from_env,
+    };
 
     let builder = builder.with_harness(Arc::new(HarnessPool::new()));
     // Issue #109: the MANAGED media-generation backend, resolved from the
@@ -454,6 +456,13 @@ fn attach_harness(builder: RuntimeBuilder) -> RuntimeBuilder {
     // even for a company that grants `media` (fail-closed).
     let builder = match media_backend_from_env(&ProcessEnv) {
         Some(media_backend) => builder.with_media_backend(media_backend),
+        None => builder,
+    };
+    // Issue #238: the MANAGED web-search backend, on the same platform identity
+    // as managed inference and resolved from the environment only. Absent ⇒
+    // `web_search` stays unwired even for a company that grants `search`.
+    let builder = match search_backend_from_env(&ProcessEnv) {
+        Some(search_backend) => builder.with_search_backend(search_backend),
         None => builder,
     };
     // The managed env default is an *optional*, lowest-precedence source; a

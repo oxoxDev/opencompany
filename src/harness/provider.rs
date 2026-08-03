@@ -184,6 +184,48 @@ pub fn media_backend_from_env(env: &dyn EnvSource) -> Option<super::toolbelt::Me
     })
 }
 
+/// Default managed-search backend base URL — the same tinyhumans backend that
+/// owns the search-provider keys, billing and rate limiting (issue #238).
+pub const DEFAULT_TINYHUMANS_SEARCH_BACKEND_URL: &str = "https://api.tinyhumans.ai";
+
+/// Resolve the MANAGED web-search backend (issue #238) from the environment, or
+/// `None` when no platform credential is present (fail-closed — no credential ⇒
+/// no `web_search` tool is ever wired).
+///
+/// Precedence:
+///
+/// * credential — the shared platform token source
+///   ([`TinyhumansTokenSource::from_env`]: a projected `TINYHUMANS_TOKEN_FILE`
+///   ahead of a static `TINYHUMANS_API_KEY`). **Nothing configured ⇒ `None`.**
+/// * url — `OPENCOMPANY_SEARCH_BACKEND_URL`, else
+///   [`DEFAULT_TINYHUMANS_SEARCH_BACKEND_URL`].
+///
+/// Two deliberate differences from [`media_backend_from_env`]:
+///
+/// 1. **No `OPENCOMPANY_SEARCH_KEY`.** The #188 sign-off is explicit that
+///    managed search rides the platform identity the way managed inference does
+///    rather than acquiring a credential of its own. A per-surface key override
+///    would be a second thing to rotate for no gain — the URL override is kept
+///    because pointing at staging is a real need and carries no secret.
+/// 2. **A [`Credential`], not a `String`.** Search resolves its bearer on the
+///    request path, so a projected token that rotates mid-day keeps working with
+///    no roster rebuild. Media flattens to a `String` at build time; that is a
+///    known rough edge there, not a pattern worth copying.
+///
+/// **Security**: consults ONLY the environment — never a tenant secret store —
+/// so a company can never point search at a key it controls.
+pub fn search_backend_from_env(env: &dyn EnvSource) -> Option<super::search::SearchBackend> {
+    let credential = Credential::from_source(Arc::new(TinyhumansTokenSource::from_env(env)?));
+    let backend_url = env
+        .get("OPENCOMPANY_SEARCH_BACKEND_URL")
+        .unwrap_or_else(|| DEFAULT_TINYHUMANS_SEARCH_BACKEND_URL.to_string());
+    Some(super::search::SearchBackend::new(
+        backend_url,
+        credential,
+        crate::company::DEFAULT_SEARCH_DAILY_CALLS,
+    ))
+}
+
 /// Flatten a tinyagents request's messages into the OpenAI-compatible wire
 /// `[{role, content, …}]` array.
 ///
@@ -1069,6 +1111,53 @@ mod tests {
     fn media_backend_is_none_without_managed_key() {
         let env = MapEnv::new([("OPENCOMPANY_MEDIA_BACKEND_URL", "https://api.tinyhumans.ai")]);
         assert!(media_backend_from_env(&env).is_none());
+    }
+
+    /// Managed search (issue #238) rides the platform identity and accepts a URL
+    /// override for staging, with the default daily cap applied.
+    #[tokio::test]
+    async fn search_backend_rides_the_platform_key_and_honors_the_url_override() {
+        let env = MapEnv::new([
+            ("TINYHUMANS_API_KEY", "platform-key"),
+            (
+                "OPENCOMPANY_SEARCH_BACKEND_URL",
+                "https://staging-api.tinyhumans.ai",
+            ),
+        ]);
+        let backend = search_backend_from_env(&env).expect("configured");
+        assert_eq!(backend.backend_url, "https://staging-api.tinyhumans.ai");
+        assert_eq!(
+            backend.daily_call_cap,
+            crate::company::DEFAULT_SEARCH_DAILY_CALLS
+        );
+        assert_eq!(
+            backend.credential.current().await.unwrap().as_deref(),
+            Some("platform-key")
+        );
+
+        // Default URL when only the platform key is present.
+        let bare = search_backend_from_env(&MapEnv::new([("TINYHUMANS_API_KEY", "platform-key")]))
+            .expect("configured");
+        assert_eq!(bare.backend_url, DEFAULT_TINYHUMANS_SEARCH_BACKEND_URL);
+    }
+
+    /// There is deliberately **no** `OPENCOMPANY_SEARCH_KEY`: the #188 sign-off
+    /// admitted search on the platform identity rather than a credential of its
+    /// own. A per-tenant inference key must never stand in for it, and no
+    /// credential at all means no search tool is ever wired (fail-closed).
+    #[test]
+    fn search_backend_has_no_credential_of_its_own_and_fails_closed() {
+        let env = MapEnv::new([
+            (
+                "OPENCOMPANY_SEARCH_BACKEND_URL",
+                "https://api.tinyhumans.ai",
+            ),
+            // A tenant BYOK inference key is NOT the platform identity.
+            ("OPENCOMPANY_INFERENCE_KEY", "tenant-byok"),
+            // And a hypothetical per-surface key is not consulted.
+            ("OPENCOMPANY_SEARCH_KEY", "search-specific"),
+        ]);
+        assert!(search_backend_from_env(&env).is_none());
     }
 
     #[tokio::test]

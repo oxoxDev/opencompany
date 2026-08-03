@@ -249,6 +249,12 @@ pub struct RuntimeBuilder {
     /// consumed when a company **explicitly** grants the `media` namespace.
     #[cfg(feature = "openhuman")]
     media_backend: Option<crate::harness::toolbelt::MediaBackend>,
+    /// Issue #238: the MANAGED web-search backend (env-resolved platform
+    /// credential + URL). `None` fails closed — no `web_search` tool is wired.
+    /// Threaded onto every harness-built agent's [`HarnessDeps`], but only
+    /// consumed when a company **explicitly** grants the `search` namespace.
+    #[cfg(feature = "openhuman")]
+    search_backend: Option<crate::harness::search::SearchBackend>,
 }
 
 impl RuntimeBuilder {
@@ -303,6 +309,8 @@ impl RuntimeBuilder {
             harness_inference: None,
             #[cfg(feature = "openhuman")]
             media_backend: None,
+            #[cfg(feature = "openhuman")]
+            search_backend: None,
         }
     }
 
@@ -585,6 +593,22 @@ impl RuntimeBuilder {
         media_backend: crate::harness::toolbelt::MediaBackend,
     ) -> Self {
         self.media_backend = Some(media_backend);
+        self
+    }
+
+    /// Issue #238: sets the MANAGED web-search backend (platform credential +
+    /// URL, resolved from the environment via
+    /// [`search_backend_from_env`](crate::harness::provider::search_backend_from_env)).
+    /// This is the ONLY path search is ever fed a credential — never a tenant
+    /// secret — so a company can only ever search on the managed platform
+    /// account. Absent (the default), `web_search` is never wired even for a
+    /// company that grants `search`. Feature-gated.
+    #[cfg(feature = "openhuman")]
+    pub fn with_search_backend(
+        mut self,
+        search_backend: crate::harness::search::SearchBackend,
+    ) -> Self {
+        self.search_backend = Some(search_backend);
         self
     }
 
@@ -1100,6 +1124,24 @@ impl RuntimeBuilder {
                                 // closed — `build_agent` wires no media tools even
                                 // for a company that grants `media`.
                                 media: self.media_backend.clone(),
+                                // Issue #238: the MANAGED search backend,
+                                // resolved from the environment by the CLI
+                                // (`attach_harness` → `search_backend_from_env`)
+                                // and never from a tenant secret. `None` fails
+                                // closed. The daily call cap comes from THIS
+                                // company's manifest, so one process-wide
+                                // credential still yields a per-company budget;
+                                // the clone carries the shared ledger, so every
+                                // agent of the company draws on one budget
+                                // rather than one each.
+                                search: self.search_backend.clone().map(|backend| {
+                                    backend.with_daily_call_cap(
+                                        self.manifest
+                                            .tools
+                                            .search_daily_calls
+                                            .unwrap_or(crate::company::DEFAULT_SEARCH_DAILY_CALLS),
+                                    )
+                                }),
                                 // Issue #110: the per-tenant Composio config
                                 // resolved above (token from the secret store,
                                 // never an env/platform key). `None` fails closed.
