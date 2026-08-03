@@ -2217,4 +2217,165 @@ to = "done"
         let ids: Vec<&str> = files.iter().map(|f| f.id.as_str()).collect();
         assert_eq!(ids, vec!["good"]);
     }
+
+    // -----------------------------------------------------------------------
+    // Console drift guard (issue #260)
+    // -----------------------------------------------------------------------
+    //
+    // The console pre-flights the destination and schedule rules client-side so
+    // a wrong target is caught without a round trip. That is worth keeping — it
+    // is the difference between instant feedback and a save that bounces — but
+    // it makes one rule live in two hand-written places, free to drift. Issue
+    // #260 reports the drift that already happened: two different messages for
+    // the same rule.
+    //
+    // These tests are the coupling. Each shared fragment is asserted TWICE —
+    // once against this module's live `validate()` output, so a server rewording
+    // fails here, and once against the console source, so a console rewording
+    // fails here too. Neither side can be reworded alone.
+    //
+    // This is a tripwire, not a proof. The fragment only has to APPEAR in the
+    // console source, so a stale copy left in a comment would false-pass, and
+    // nothing here checks that the console's rule FIRES in the same cases the
+    // host's does. What it does buy is that the specific failure #260 describes
+    // — one side reworded, the other silently asserting the old contract — can
+    // no longer happen quietly. Closing the rest means option 3 from the issue:
+    // the host exposing the destination contract as data.
+
+    /// The console's workflow creator, read at compile time so a file move is a
+    /// build error naming the path rather than a silently-skipped test.
+    const CONSOLE_DIALOG: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/frontend/src/views/WorkflowCreateDialog.tsx"
+    ));
+    const CONSOLE_DIALOG_PATH: &str = "frontend/src/views/WorkflowCreateDialog.tsx";
+
+    /// The console's workflow API module, which declares the picker's
+    /// destination kinds.
+    const CONSOLE_API: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/frontend/src/api/workflows.ts"
+    ));
+    const CONSOLE_API_PATH: &str = "frontend/src/api/workflows.ts";
+
+    /// How an `email` destination with a non-address target ends, on both sides.
+    const EMAIL_TARGET_TAIL: &str = "is not an email address — give the recipient's full address.";
+    /// How a `channel` destination with no target ends, on both sides.
+    const CHANNEL_TARGET_TAIL: &str = "name the channel to post the report to.";
+
+    /// A graph that trips both destination target rules at once.
+    const BAD_DESTINATIONS: &str = r#"
+        id = "wf"
+        name = "WF"
+
+        [[node]]
+        id = "start"
+        kind = "trigger"
+        name = "Start"
+
+        [[node]]
+        id = "mailer"
+        kind = "output"
+        name = "Mailer"
+        [node.destination]
+        kind = "email"
+        target = "nope"
+
+        [[node]]
+        id = "poster"
+        kind = "output"
+        name = "Poster"
+        [node.destination]
+        kind = "channel"
+    "#;
+
+    #[test]
+    fn destination_messages_match_the_console() {
+        let raw: RawWorkflow = toml::from_str(BAD_DESTINATIONS).expect("the fixture is valid TOML");
+        let problems = validate(&raw).join("\n");
+
+        for tail in [EMAIL_TARGET_TAIL, CHANNEL_TARGET_TAIL] {
+            assert!(
+                problems.contains(tail),
+                "the host stopped saying `{tail}` — if that rewording is deliberate, \
+                 update this const AND the matching message in {CONSOLE_DIALOG_PATH}, \
+                 so an author who trips the pre-flight and an author who trips the 400 \
+                 are still told the same thing.\nhost said:\n{problems}"
+            );
+            assert!(
+                CONSOLE_DIALOG.contains(tail),
+                "{CONSOLE_DIALOG_PATH} no longer says `{tail}` — the console's \
+                 client-side pre-flight has drifted from the host's rule (issue #260). \
+                 Reword both sides together, or drop the pre-flight and surface the \
+                 host's message on the failed save."
+            );
+        }
+    }
+
+    /// The picker's destination kinds, extracted from the console's own
+    /// `DESTINATION_KINDS` block. A kind added on one side alone is either a
+    /// picker option the host rejects or one the host accepts and the author
+    /// can never choose.
+    #[test]
+    fn destination_kinds_match_the_console() {
+        let start = CONSOLE_API.find("export const DESTINATION_KINDS").unwrap_or_else(|| {
+            panic!("`DESTINATION_KINDS` is gone from {CONSOLE_API_PATH} — it is what this test reads")
+        });
+        // Slice from the array opener, NOT from the declaration: the type
+        // annotation in between ends `WorkflowDestination["kind"];`, which
+        // contains a literal `"];` and would close the block before the first
+        // entry.
+        let block = &CONSOLE_API[start..];
+        let open = block.find("= [").unwrap_or_else(|| {
+            panic!("`DESTINATION_KINDS` in {CONSOLE_API_PATH} is no longer an array literal")
+        });
+        let block = &block[open..];
+        let end = block
+            .find("];")
+            .unwrap_or_else(|| panic!("`DESTINATION_KINDS` in {CONSOLE_API_PATH} has no `];`"));
+        let block = &block[..end];
+
+        // Scan for `value: "…"` entries. The type annotation on the same
+        // declaration carries a bare `value:` with no string, so keying on the
+        // opening quote is what keeps it out.
+        let needle = "value: \"";
+        let mut console = std::collections::BTreeSet::new();
+        let mut rest = block;
+        while let Some(at) = rest.find(needle) {
+            rest = &rest[at + needle.len()..];
+            let close = rest
+                .find('"')
+                .unwrap_or_else(|| panic!("unterminated `value:` in {CONSOLE_API_PATH}"));
+            console.insert(&rest[..close]);
+            rest = &rest[close..];
+        }
+
+        let host: std::collections::BTreeSet<&str> =
+            WORKFLOW_DESTINATION_KINDS.iter().copied().collect();
+        assert_eq!(
+            console, host,
+            "the console's DESTINATION_KINDS picker ({CONSOLE_API_PATH}) and the host's \
+             WORKFLOW_DESTINATION_KINDS disagree — one side offers a kind the other \
+             does not know (issue #260)"
+        );
+    }
+
+    /// The console's `looksLikeCron` pre-flight counts whitespace-separated
+    /// fields and accepts exactly five, so it is only correct while the host's
+    /// parser draws the line in the same place. Relaxing the host to accept a
+    /// 6-field (seconds) expression without touching the console would make the
+    /// console reject input the host now takes — the drift direction #260 says
+    /// bites, because the console is the stricter side by construction.
+    #[test]
+    fn cron_arity_matches_the_console_preflight() {
+        use crate::runtime::cron::CronExpr;
+        assert!(CronExpr::parse("0 9 * * MON").is_ok(), "5 fields");
+        assert!(CronExpr::parse("0 9 * *").is_err(), "4 fields");
+        assert!(CronExpr::parse("0 0 9 * * MON").is_err(), "6 fields");
+        assert!(
+            CONSOLE_DIALOG.contains("function looksLikeCron"),
+            "{CONSOLE_DIALOG_PATH} no longer defines `looksLikeCron` — this test \
+             exists to pin the arity that helper assumes"
+        );
+    }
 }

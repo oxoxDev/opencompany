@@ -46,7 +46,50 @@ address check for `{id}`, operator + `sole()` for the alias).
 | `domain` | `PUT …/domain`, `POST …/domain/verify` |
 | `smtp` | `PUT …/smtp`, `POST …/smtp/test` |
 | `connections` (feature `oauth`) | `POST …/connections/{provider}/start\|disconnect`, `GET /api/v1/oauth/callback` |
-| `workflows` | `POST …/workflows`, `GET …/workflows`, `GET …/workflows/{wid}`, `POST …/workflows/{wid}/run` |
+| `workflows` | `POST …/workflows`, `GET …/workflows`, `GET …/workflows/runs`, `POST …/workflows/cron/preview`, `GET …/workflows/{wid}`, `POST …/workflows/{wid}/run` |
+
+### Reading a trigger's cron back (issue #262)
+
+`POST …/workflows/cron/preview` answers what a 5-field expression means and when
+it next fires. It exists because a schedule's *dangerous* failure is the one
+that validates: `0 9 * * *` and `9 0 * * *` are both valid and nine hours apart,
+and the dialect is always UTC — so an author in IST who wants a 9am report
+writes `0 9 * * *` and gets one at 14:30 local. No validation can catch either
+mistake, because neither expression is wrong.
+
+```bash
+curl -X POST "$HOST/api/v1/company/workflows/cron/preview" \
+     -H "Authorization: Bearer $TOKEN" \
+     -H 'content-type: application/json' -d '{"expr":"0 9 * * MON"}'
+```
+
+```jsonc
+{ "description": "Every Mon at 09:00 UTC",
+  "next": [1786007000000, 1786611800000, 1787216600000] }
+```
+
+`description` is `null` for a shape the humaniser declines to paraphrase (a
+restricted month or day-of-month, say) — the fire times still state the schedule
+exactly, so a `null` description is a designed answer rather than a failure.
+`next` is epoch millis, which is what lets the console render each fire time in
+UTC *and* in the viewer's own zone from one number that cannot disagree with
+itself.
+
+**A malformed expression is a 200**, carrying the parser's message:
+
+```jsonc
+{ "error": "cron `every day` needs 5 fields (minute hour day month weekday), found 2" }
+```
+
+That is deliberate. The console previews while the author is still typing, so a
+half-written expression is the normal live state, not an exception — and the
+console's HTTP client throws on any non-2xx, so a 400 per keystroke would force
+`try`/`catch` as ordinary control flow. The rejection that matters is unchanged:
+`POST …/workflows` still validates the schedule and refuses to save a bad one.
+
+Optional `"after": <epoch millis>` pins the instant the fire times are counted
+from; it defaults to now and exists so tests need not assert against a moving
+clock.
 
 ### Workflow runs and report delivery
 

@@ -61,6 +61,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { PRIORITY_STYLES, TASK_COLUMNS } from "@/lib/tasks-sample";
 import { toast } from "sonner";
+import { AssigneeSelect } from "./AssigneeSelect";
 import { TaskEditDialog } from "./TaskEditDialog";
 
 /** How often to re-poll the detail while the screen is open (visibility-gated). */
@@ -471,7 +472,11 @@ function ControlBar({
 
   async function saveAssignee() {
     const next = assignee.trim();
-    if (!next || next === task.assignee) {
+    // Only an unchanged value is a no-op. Blank used to short-circuit here too,
+    // which made the one deliberate way to hand a card back to the orchestrator
+    // unreachable from this screen — the host accepts it happily
+    // (`resolve("") -> Unassigned -> canonical ""`), the row just never sent it.
+    if (next === task.assignee) {
       setReassigning(false);
       return;
     }
@@ -600,16 +605,16 @@ function ControlBar({
 
       {reassigning && (
         <div className="mt-2 flex items-center gap-2">
-          <Input
-            autoFocus
+          {/* Issue #263: the same roster picker the create and edit dialogs use.
+              Unassigned is a row here rather than an empty field, so handing the
+              card back to the orchestrator is something you can see and choose. */}
+          <AssigneeSelect
+            client={client}
+            company={company}
             value={assignee}
-            placeholder="agent id"
-            className="h-8"
+            onChange={setAssignee}
             disabled={busy}
-            onChange={(e) => setAssignee(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void saveAssignee();
-            }}
+            className="h-8 min-w-0 flex-1"
           />
           <Button size="sm" className="h-8" disabled={busy} onClick={() => void saveAssignee()}>
             Save
