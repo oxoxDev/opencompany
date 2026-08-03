@@ -99,9 +99,10 @@ fn from_doc(doc: &SkillDoc, source: &str, enabled: bool) -> SkillGql {
 
 /// The repo-level skill registry docs, loaded from the shared `skills/` library
 /// directory. Empty when no source checkout is present (platform-provisioned
-/// mode), where the registry has nothing to serve.
-fn registry_docs(state: &AppState) -> Arc<[SkillDoc]> {
-    state.shared_skill_registry()
+/// mode), where the registry has nothing to serve. A configured library that
+/// fails to load surfaces as a query error rather than as an empty registry.
+fn registry_docs(state: &AppState) -> async_graphql::Result<Arc<[SkillDoc]>> {
+    Ok(state.shared_skill_registry()?)
 }
 
 /// Resolves `Company.skills`: company-dir docs overlaid with store deltas.
@@ -110,7 +111,7 @@ pub(crate) async fn resolve_company(
     runtime: &Arc<CompanyRuntime>,
 ) -> async_graphql::Result<Vec<SkillGql>> {
     let state = ctx.data::<AppState>()?;
-    let registry = registry_docs(state);
+    let registry = registry_docs(state)?;
 
     // Base: the company's own on-disk skills (`companies/<name>/skills`), all
     // enabled by default. In platform-provisioned mode there is no source dir,
@@ -209,7 +210,7 @@ pub(crate) async fn resolve_registry(
     ctx: &Context<'_>,
 ) -> async_graphql::Result<Vec<RegistrySkillGql>> {
     let state = ctx.data::<AppState>()?;
-    Ok(registry_docs(state)
+    Ok(registry_docs(state)?
         .iter()
         .map(|doc| RegistrySkillGql {
             id: ID(doc.slug.clone()),

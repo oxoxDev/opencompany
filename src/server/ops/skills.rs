@@ -282,16 +282,21 @@ fn company_bundles(source_dir: Option<&FsPath>) -> Vec<InstalledSkill> {
 ///    installs in the first place.
 /// 3. **Empty registry** → fall back to the client's metadata, as before. An
 ///    empty registry means this host serves no shared library at all
-///    (platform-provisioned mode, or a `skills_root` that failed to load), so
-///    there is nothing to resolve against and refusing every install would break
-///    hosted tenants outright.
+///    (platform-provisioned mode, no `skills_root`), so there is nothing to
+///    resolve against and refusing every install would break hosted tenants
+///    outright.
+///
+/// A *configured* library that fails to load is a `500`, never case 3: silently
+/// degrading a broken shared library to "no library" would hand the client
+/// authorship of a registry skill's contents on exactly the hosts that meant to
+/// be server-authoritative.
 async fn install(
     State(state): State<AppState>,
     company: ScopedCompany,
     Path(SlugPath { slug }): Path<SlugPath>,
     body: Option<Json<InstallSkill>>,
 ) -> Result<Json<InstalledSkill>, ApiError> {
-    let registry = state.shared_skill_registry();
+    let registry = state.shared_skill_registry()?;
     let doc = match registry.iter().find(|doc| doc.slug == slug) {
         Some(doc) => render_skill_md(doc),
         None if !registry.is_empty() => {
@@ -339,7 +344,7 @@ async fn list_registry(
 ) -> Result<Json<Vec<RegistrySkill>>, ApiError> {
     Ok(Json(
         state
-            .shared_skill_registry()
+            .shared_skill_registry()?
             .iter()
             .map(RegistrySkill::from_doc)
             .collect(),

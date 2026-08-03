@@ -420,19 +420,25 @@ impl AppState {
         Ok(self.skill_registry.get().cloned().unwrap_or(registry))
     }
 
-    /// The repo-level shared skill registry, or empty when nothing backs it.
+    /// The repo-level shared skill registry, empty when nothing backs it.
     ///
-    /// Degrades to empty in two cases, both meaning "this host serves no shared
-    /// library": no [`skills_root`](Self::skills_root) (platform-provisioned
-    /// mode), or a root that fails to load. Callers treat an empty registry as
-    /// "cannot resolve skills from the library" rather than special-casing the
-    /// unset root, so a root pointing at a missing directory behaves the same as
-    /// no root at all.
-    pub fn shared_skill_registry(&self) -> Arc<[SkillDoc]> {
+    /// Empty means exactly one thing: no [`skills_root`](Self::skills_root) is
+    /// configured, so this host serves no shared library (platform-provisioned
+    /// mode). Callers read that as "there is nothing to resolve against" and
+    /// fall back accordingly — the install route, for one, then accepts the
+    /// client's own metadata.
+    ///
+    /// A *configured* root that cannot load is therefore never flattened to
+    /// empty: doing so would silently downgrade a server-authoritative install
+    /// into a client-authored one whenever a `SKILL.md` is malformed or the
+    /// directory is unreadable. The load error propagates instead, and callers
+    /// surface it (a server error on the HTTP surfaces, a failed boot on the
+    /// serve path).
+    pub fn shared_skill_registry(&self) -> crate::Result<Arc<[SkillDoc]>> {
         let Some(dir) = self.skills_root() else {
-            return Arc::from([]);
+            return Ok(Arc::from([]));
         };
-        self.skill_registry(dir).unwrap_or_else(|_| Arc::from([]))
+        self.skill_registry(dir)
     }
 
     /// Installs the injected connection seams (DNS resolver, mail sender).

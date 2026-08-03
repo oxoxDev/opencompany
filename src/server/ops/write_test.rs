@@ -996,6 +996,56 @@ async fn skills_install_falls_back_to_client_metadata_when_no_registry_is_served
     assert_eq!(skill["source"], "registry");
 }
 
+/// A *configured* shared library that cannot load must not degrade to the
+/// empty-registry fallback above. Doing so would silently hand the client
+/// authorship of a registry skill's contents on exactly the hosts that meant to
+/// be server-authoritative — one malformed `SKILL.md` in the image and every
+/// install starts trusting whatever the browser posted.
+#[tokio::test]
+async fn skills_install_500s_when_the_configured_library_cannot_load() {
+    let home_dir = home();
+    // A skills root that exists but holds a `SKILL.md` with no `description`,
+    // which the parser rejects.
+    let broken_root = home_dir.path().join("broken-skills");
+    std::fs::create_dir_all(broken_root.join("web-research")).expect("skill dir");
+    std::fs::write(
+        broken_root.join("web-research/SKILL.md"),
+        "---\nname: Web Research\n---\n# Web Research\n",
+    )
+    .expect("SKILL.md");
+
+    let state = state_with_company(home_dir.path())
+        .await
+        .with_skills_root(&broken_root);
+
+    // The state itself reports the load failure rather than an empty registry.
+    assert!(
+        state.shared_skill_registry().is_err(),
+        "a configured-but-unloadable library must surface its error"
+    );
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/skills/web-research/install",
+        Some(json!({"name": "Client Authored", "description": "not the library's"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a broken library is a server error, not a client-metadata install: {body}"
+    );
+    assert!(
+        persisted_skills(&state).await.is_empty(),
+        "a failed install must persist nothing"
+    );
+
+    // The registry listing fails the same way rather than reporting "no library".
+    let (status, _) = send(&state, "GET", "/api/v1/company/skills/registry", None).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
 #[tokio::test]
 async fn skills_registry_lists_the_live_library_without_bodies() {
     let home_dir = home();

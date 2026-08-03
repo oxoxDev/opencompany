@@ -202,7 +202,7 @@ async fn register_company(
     .with_seed_dir(source_dir.clone())
     .with_tinyplace_api_url(state.config().tinyplace_api_url.clone())
     .with_host_base_url(state.config().host_base_url())
-    .with_skills_registry(state.shared_skill_registry());
+    .with_skills_registry(state.shared_skill_registry()?);
     if let Some(provenance) = provenance {
         builder = builder.with_template_provenance(provenance);
     }
