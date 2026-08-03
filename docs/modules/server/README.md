@@ -39,7 +39,7 @@ address check for `{id}`, operator + `sole()` for the alias).
 | `tasks` | `POST …/tasks`, `PATCH`/`DELETE …/tasks/{id}` |
 | `memory` | `POST …/memory`, `DELETE …/memory/{id}` (journals `MemoryFactDeleted`) |
 | `workspace` | `POST …/workspace`, `PUT …/workspace/file/{id}`, `PATCH`/`DELETE …/workspace/{id}` |
-| `skills` | `POST …/skills`, `POST …/skills/{slug}/install\|uninstall`, `PUT …/skills/{slug}` |
+| `skills` | `POST …/skills`, `GET …/skills/registry`, `POST …/skills/{slug}/install\|uninstall`, `PUT …/skills/{slug}` |
 | `team` | `POST …/team`, `DELETE …/team/{id}`, `PUT …/team/{id}/inbox` (overlay; roster-only in v1) |
 | `mail` | `POST …/inboxes/{key}/read` |
 | `inbox` | `POST …/inboxes/ingest` (HMAC-signed inbound email) |

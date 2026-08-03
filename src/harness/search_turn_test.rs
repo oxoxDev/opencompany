@@ -274,6 +274,10 @@ async fn harness(
         artifacts: None,
         skills: None,
         skills_source_dir: None,
+        // Issue #294's shared skill library heals pre-fix registry installs;
+        // this fixture installs no skills at all, so an empty library is the
+        // whole truth here and leaves the search path under test untouched.
+        skills_registry: std::sync::Arc::from([]),
         mcp_servers: Vec::new(),
         facts: None,
         events: None,

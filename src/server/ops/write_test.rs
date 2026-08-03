@@ -63,6 +63,32 @@ async fn state_with_company(home: &std::path::Path) -> AppState {
     state
 }
 
+/// The repo's shared skill library (`<crate root>/skills`), the same directory
+/// the serve path derives `skills_root` from.
+fn repo_skills_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills")
+}
+
+/// Like [`state_with_company`], but with the repo's shared skill library wired
+/// in, so registry reads and server-authoritative installs resolve against real
+/// documents instead of degrading to the empty-registry fallback.
+async fn state_with_registry(home: &std::path::Path) -> AppState {
+    // `with_skills_root` consumes and returns the state, so the registered
+    // company and seeded admin move along with it.
+    state_with_company(home)
+        .await
+        .with_skills_root(repo_skills_root())
+}
+
+/// The operator deltas persisted for `acme` — the durable rows behind the API.
+async fn persisted_skills(state: &AppState) -> Vec<crate::ports::skills_state::SkillState> {
+    let runtime = state
+        .registry()
+        .get(&CompanyId::new("acme"))
+        .expect("company");
+    runtime.skills().list(runtime.id()).await.expect("deltas")
+}
+
 async fn send(
     state: &AppState,
     method: &str,
@@ -969,6 +995,221 @@ async fn workspace_create_write_move_and_cycle_rejection() {
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn skills_install_persists_the_registry_document_not_the_client_metadata() {
+    let home_dir = home();
+    let state = state_with_registry(home_dir.path()).await;
+
+    // Deliberately hostile client metadata: if any of it reaches the persisted
+    // document, install is still trusting the client.
+    let (status, skill) = send(
+        &state,
+        "POST",
+        "/api/v1/company/skills/competitor-scan/install",
+        Some(json!({
+            "name": "Not The Real Name",
+            "description": "a one-line stub the client made up",
+            "category": "Finance"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The response reflects the library's own metadata, not the request body.
+    assert_eq!(skill["name"], "Competitor Scan");
+    assert_eq!(skill["category"], "Research");
+    assert_eq!(skill["source"], "registry");
+    // The pinned revision rides on the installed projection, so a later "update
+    // available" check can diff an install against the live library.
+    assert_eq!(skill["version"], "1.0.0");
+    assert!(
+        skill["description"]
+            .as_str()
+            .unwrap()
+            .starts_with("Profile a handful of competitors"),
+        "description came from the registry, got {:?}",
+        skill["description"]
+    );
+
+    // The persisted SKILL.md carries the whole procedure — the actual bug.
+    let deltas = persisted_skills(&state).await;
+    let row = deltas
+        .iter()
+        .find(|s| s.slug == "competitor-scan")
+        .expect("the install persisted a row");
+    let doc = row.custom_doc.as_deref().expect("a document was persisted");
+    assert!(
+        doc.contains("## Steps"),
+        "body lost its Steps section: {doc}"
+    );
+    assert!(
+        doc.contains("## Output"),
+        "body lost its Output section: {doc}"
+    );
+    assert!(
+        doc.contains("version: 1.0.0"),
+        "the snapshot pins the library version: {doc}"
+    );
+    // None of the client's metadata leaked in.
+    assert!(!doc.contains("Not The Real Name"), "{doc}");
+    assert!(!doc.contains("a one-line stub the client made up"), "{doc}");
+    // The body is the real procedure, not a copy of the description.
+    let parsed = crate::company::parse_skill_md("competitor-scan", doc).expect("valid");
+    assert_ne!(
+        parsed.body.trim(),
+        parsed.description.trim(),
+        "the body must not be a degenerate copy of the description"
+    );
+}
+
+#[tokio::test]
+async fn skills_install_404s_a_slug_the_registry_lacks_and_persists_nothing() {
+    let home_dir = home();
+    let state = state_with_registry(home_dir.path()).await;
+
+    // `competitor-analysis` was one of the console's phantom entries — it never
+    // existed in the shared library. It must now fail loudly.
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/skills/competitor-analysis/install",
+        Some(json!({"name": "Competitor Analysis", "description": "phantom"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["code"], "not_found");
+
+    assert!(
+        persisted_skills(&state).await.is_empty(),
+        "a rejected install must persist nothing"
+    );
+}
+
+#[tokio::test]
+async fn skills_install_falls_back_to_client_metadata_when_no_registry_is_served() {
+    // Platform-provisioned mode: no shared library, so there is nothing to
+    // resolve against and the client's metadata is all the host has.
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+
+    let (status, skill) = send(
+        &state,
+        "POST",
+        "/api/v1/company/skills/tenant-only-skill/install",
+        Some(json!({"name": "Tenant Only", "description": "provisioned elsewhere"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an empty registry must not 404 every install"
+    );
+    assert_eq!(skill["name"], "Tenant Only");
+    assert_eq!(skill["source"], "registry");
+}
+
+/// A *configured* shared library that cannot load must not degrade to the
+/// empty-registry fallback above. Doing so would silently hand the client
+/// authorship of a registry skill's contents on exactly the hosts that meant to
+/// be server-authoritative — one malformed `SKILL.md` in the image and every
+/// install starts trusting whatever the browser posted.
+#[tokio::test]
+async fn skills_install_500s_when_the_configured_library_cannot_load() {
+    let home_dir = home();
+    // A skills root that exists but holds a `SKILL.md` with no `description`,
+    // which the parser rejects.
+    let broken_root = home_dir.path().join("broken-skills");
+    std::fs::create_dir_all(broken_root.join("web-research")).expect("skill dir");
+    std::fs::write(
+        broken_root.join("web-research/SKILL.md"),
+        "---\nname: Web Research\n---\n# Web Research\n",
+    )
+    .expect("SKILL.md");
+
+    let state = state_with_company(home_dir.path())
+        .await
+        .with_skills_root(&broken_root);
+
+    // The state itself reports the load failure rather than an empty registry.
+    assert!(
+        state.shared_skill_registry().is_err(),
+        "a configured-but-unloadable library must surface its error"
+    );
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/skills/web-research/install",
+        Some(json!({"name": "Client Authored", "description": "not the library's"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a broken library is a server error, not a client-metadata install: {body}"
+    );
+    assert!(
+        persisted_skills(&state).await.is_empty(),
+        "a failed install must persist nothing"
+    );
+
+    // The registry listing fails the same way rather than reporting "no library".
+    let (status, _) = send(&state, "GET", "/api/v1/company/skills/registry", None).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn skills_registry_lists_the_live_library_without_bodies() {
+    let home_dir = home();
+    let state = state_with_registry(home_dir.path()).await;
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/skills/registry", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = body.as_array().expect("an array");
+    // Counted from disk rather than hardcoded, so adding a skill to the shared
+    // library does not break this test — it still asserts the route lists the
+    // *whole* library.
+    let on_disk = crate::company::load_dir_skills(&repo_skills_root())
+        .expect("the shared library parses")
+        .len();
+    assert!(on_disk >= 14, "sanity: the library is populated");
+    assert_eq!(rows.len(), on_disk, "every shared skill is listed");
+
+    for row in rows {
+        assert!(
+            row.get("body").is_none(),
+            "registry rows must never carry a body: {row}"
+        );
+        assert_eq!(row["version"], "1.0.0", "{row}");
+        assert_eq!(row["publisher"], "OpenCompany", "{row}");
+    }
+
+    let scan = rows
+        .iter()
+        .find(|r| r["id"] == "competitor-scan")
+        .expect("competitor-scan is in the library");
+    assert_eq!(scan["name"], "Competitor Scan");
+    assert_eq!(scan["category"], "Research");
+
+    // The console's old hardcoded array listed slugs the host cannot serve;
+    // the live list must not contain them.
+    for phantom in ["competitor-analysis", "social-scheduler", "meeting-notes"] {
+        assert!(
+            !rows.iter().any(|r| r["id"] == phantom),
+            "phantom slug {phantom} is not in the live registry"
+        );
+    }
+}
+
+#[tokio::test]
+async fn skills_registry_is_empty_when_no_library_is_served() {
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+    let (status, body) = send(&state, "GET", "/api/v1/company/skills/registry", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().expect("an array").len(), 0);
 }
 
 #[tokio::test]

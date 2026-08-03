@@ -674,6 +674,121 @@ async fn skills_and_workflows_resolve_from_source_dir() {
     assert!(registry.iter().any(|s| s["id"] == "web-research"));
 }
 
+/// Issue #239: `install` pins the library document into the delta, so a later
+/// library edit must not rewrite an existing install. `Company.skills` has to
+/// project that pinned snapshot rather than re-reading the live library —
+/// otherwise GraphQL and REST report different `version`s for the same install,
+/// and a slug that later leaves the library loses its persisted content.
+#[tokio::test]
+async fn company_skills_project_the_pinned_snapshot_of_a_registry_install() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let id = CompanyId::new("acme");
+
+    // The shared library has moved on to a rewritten v2 of `web-research`, and
+    // never had `retired-skill` at all.
+    let skills_root = home.join("skills");
+    tokio::fs::create_dir_all(skills_root.join("web-research"))
+        .await
+        .unwrap();
+    tokio::fs::write(
+        skills_root.join("web-research/SKILL.md"),
+        "---\nname: Web Research v2\ndescription: Rewritten upstream.\ncategory: Ops\nversion: 2.0.0\n---\n# Web Research v2\n",
+    )
+    .await
+    .unwrap();
+
+    let store = FsCompanyStore::new(home.clone());
+    store
+        .save(&CompanyRecord {
+            id: id.clone(),
+            manifest: manifest(),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            template_provenance: None,
+        })
+        .await
+        .unwrap();
+    let runtime = RuntimeBuilder::new(home.clone(), manifest())
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+
+    // Two registry installs, each holding the document pinned at install time.
+    for (slug, doc) in [
+        (
+            "web-research",
+            "---\nname: Web Research\ndescription: Research on the web.\ncategory: Research\nversion: 1.0.0\n---\n# Web Research\nStep one.\n",
+        ),
+        (
+            "retired-skill",
+            "---\nname: Retired Skill\ndescription: Withdrawn from the library.\ncategory: Ops\nversion: 1.0.0\n---\n# Retired Skill\nStill installed here.\n",
+        ),
+    ] {
+        runtime
+            .skills()
+            .set(
+                runtime.id(),
+                &crate::ports::skills_state::SkillState {
+                    slug: slug.to_string(),
+                    enabled: true,
+                    source: crate::ports::skills_state::SkillSource::Registry,
+                    custom_doc: Some(doc.to_string()),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let state = AppState::new(AppConfig::default())
+        .with_home(home.clone())
+        .with_skills_root(skills_root);
+    state.registry().insert(id, Arc::new(runtime));
+    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+    let value = query(
+        router(state.clone()),
+        r#"{"query":"{ company(id:\"acme\"){ skills { id name description category source version } } skillRegistry { id version } }"}"#,
+    )
+    .await;
+    let skills = value["data"]["company"]["skills"].as_array().unwrap();
+    assert_eq!(skills.len(), 2, "both installs resolve: {value}");
+
+    let pinned = skills
+        .iter()
+        .find(|s| s["id"] == "web-research")
+        .expect("the installed library skill");
+    assert_eq!(pinned["source"], "registry");
+    assert_eq!(
+        pinned["version"], "1.0.0",
+        "the pinned revision survives a later library edit"
+    );
+    assert_eq!(pinned["name"], "Web Research");
+    assert_eq!(pinned["category"], "Research");
+
+    // A slug the library no longer serves keeps its real persisted content
+    // instead of degrading to a titleized name and a blank description.
+    let retired = skills
+        .iter()
+        .find(|s| s["id"] == "retired-skill")
+        .expect("the install whose slug left the library");
+    assert_eq!(retired["name"], "Retired Skill");
+    assert_eq!(retired["description"], "Withdrawn from the library.");
+    assert_eq!(retired["version"], "1.0.0");
+
+    // The registry tab itself is *not* pinned — it browses the live library.
+    let registry = value["data"]["skillRegistry"].as_array().unwrap();
+    assert_eq!(registry.len(), 1);
+    assert_eq!(registry[0]["id"], "web-research");
+    assert_eq!(registry[0]["version"], "2.0.0");
+}
+
 /// Issue #168: a hosted tenant has no source directory, so its workflows live
 /// only as runtime-authored bodies on the record. `Company.workflows` must
 /// resolve their real display name (not the id fallback) and `Company.workflow`

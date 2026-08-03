@@ -5,10 +5,22 @@ company's domain. Company-specific skills live in
 `companies/<name>/skills/`; these are the shared registry.
 
 Each skill is a directory with a `SKILL.md` — YAML frontmatter (`name`,
-`description`, and an optional `category`) followed by the write-up (When to use
-/ Steps / Output). This is the same format used per company, so skills move
-between the two without change. `category` groups a skill in the console's
-Skills view against the `Marketing / Research / Ops / Content / Finance` set.
+`description`, and an optional `category` and `version`) followed by the
+write-up (When to use / Steps / Output). This is the same format used per
+company, so skills move between the two without change. `category` groups a
+skill in the console's Skills view against the
+`Marketing / Research / Ops / Content / Finance` set.
+
+`version` records the revision a skill ships. Installing a skill snapshots this
+whole file into the company, `version` included, so an install is pinned to the
+revision it was made from. Bump it when you change a skill's procedure. Every
+skill here carries one (a test enforces that), so add `version` to any new
+skill.
+
+The console's registry tab lists this directory live, over
+`GET …/skills/registry`. Installing resolves the slug against this library
+server-side and stores the document verbatim — the client cannot supply skill
+content, and installing a slug that is not here fails with `404`.
 
 | Skill | Category | What it does |
 | --- | --- | --- |

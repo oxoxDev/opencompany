@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { BrainCircuit, Check, Loader2, RotateCcw, Save, Zap } from "lucide-react";
+import { AlertTriangle, BrainCircuit, Check, Loader2, RotateCcw, Save, Zap } from "lucide-react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
@@ -136,6 +136,18 @@ export function InferenceSection({
 
   async function save() {
     if (busy) return;
+    // Managed is a revert, and a revert cannot carry a credential — so a key
+    // typed under a different provider and left behind by a switch would be
+    // dropped by the save below while the toast claimed success (issue #265).
+    // Refuse instead: a save that reports success must never have discarded
+    // what the operator typed. The Save button is disabled in this state; this
+    // is the guard that makes the invariant hold regardless of the button.
+    if (provider === "managed" && key.trim()) {
+      toast.error(
+        "Managed uses the platform credential and can't store a key. Choose OpenRouter or Custom (OpenAI-compatible) to save it, or discard it first.",
+      );
+      return;
+    }
     setBusy("save");
     try {
       // "Managed" means "use the platform default" — that's a revert, not a
@@ -219,6 +231,10 @@ export function InferenceSection({
   if (load === "unavailable") return null;
 
   const modelRows = status ? Object.entries(status.models) : [];
+  // A credential typed under a BYOK provider survives a switch to managed (the
+  // input is hidden, the state is not). Managed has nowhere to put it, so this
+  // is the one combination that would silently lose operator input on save.
+  const managedWouldDiscardKey = provider === "managed" && key.trim().length > 0;
 
   return (
     <section className="space-y-3">
@@ -357,7 +373,37 @@ export function InferenceSection({
                 )}
               </div>
 
-              {provider !== "managed" && (
+              {provider === "managed" ? (
+                <div className="space-y-2">
+                  <p className="text-xs text-muted-foreground" data-testid="inference-managed-note">
+                    Managed runs on the platform credential, so there is no key to paste here. To
+                    bring your own key, choose OpenRouter or Custom (OpenAI-compatible).
+                  </p>
+                  {managedWouldDiscardKey && (
+                    <div
+                      className="space-y-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+                      data-testid="inference-key-conflict"
+                    >
+                      <p className="flex items-start gap-1.5">
+                        <AlertTriangle className="mt-px size-3.5 shrink-0" />
+                        <span>
+                          You typed a key, and managed can&apos;t store one — saving now would throw
+                          it away. Choose OpenRouter or Custom (OpenAI-compatible) to save it, or
+                          discard it to stay on managed.
+                        </span>
+                      </p>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        data-testid="inference-discard-key"
+                        onClick={() => setKey("")}
+                      >
+                        Discard key
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              ) : (
                 <>
                   <div className="grid gap-2 sm:grid-cols-2">
                     {TIERS.map((tier) => (
@@ -393,7 +439,11 @@ export function InferenceSection({
               )}
 
               <div className="flex items-center gap-2">
-                <Button disabled={busy !== null} onClick={() => void save()}>
+                <Button
+                  data-testid="inference-save"
+                  disabled={busy !== null || managedWouldDiscardKey}
+                  onClick={() => void save()}
+                >
                   {busy === "save" ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
                   Save
                 </Button>

@@ -1522,6 +1522,7 @@ mod test {
             artifacts: None,
             skills: None,
             skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,

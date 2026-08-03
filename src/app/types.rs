@@ -420,6 +420,27 @@ impl AppState {
         Ok(self.skill_registry.get().cloned().unwrap_or(registry))
     }
 
+    /// The repo-level shared skill registry, empty when nothing backs it.
+    ///
+    /// Empty means exactly one thing: no [`skills_root`](Self::skills_root) is
+    /// configured, so this host serves no shared library (platform-provisioned
+    /// mode). Callers read that as "there is nothing to resolve against" and
+    /// fall back accordingly — the install route, for one, then accepts the
+    /// client's own metadata.
+    ///
+    /// A *configured* root that cannot load is therefore never flattened to
+    /// empty: doing so would silently downgrade a server-authoritative install
+    /// into a client-authored one whenever a `SKILL.md` is malformed or the
+    /// directory is unreadable. The load error propagates instead, and callers
+    /// surface it (a server error on the HTTP surfaces, a failed boot on the
+    /// serve path).
+    pub fn shared_skill_registry(&self) -> crate::Result<Arc<[SkillDoc]>> {
+        let Some(dir) = self.skills_root() else {
+            return Ok(Arc::from([]));
+        };
+        self.skill_registry(dir)
+    }
+
     /// Installs the injected connection seams (DNS resolver, mail sender).
     pub fn with_connections(mut self, connections: crate::server::ops::ConnectionsRuntime) -> Self {
         self.connections = connections;

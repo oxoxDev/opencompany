@@ -2,6 +2,7 @@
 name: SEO Audit
 description: Audit a site's organic-search health and produce a prioritized, effort-ranked list of fixes.
 category: Marketing
+version: 1.0.0
 ---
 
 # SEO Audit

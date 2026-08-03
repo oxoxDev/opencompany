@@ -150,6 +150,14 @@ pub struct HarnessDeps {
     /// subtree supplies the committed skill bundles unioned into the effective
     /// set. `None` surfaces only the operator deltas.
     pub skills_source_dir: Option<PathBuf>,
+    /// The repo-level shared skill library (`skills/*/SKILL.md`), the same set
+    /// the console's registry tab browses. Used only to heal pre-fix registry
+    /// installs, whose stored snapshot is a one-line stub — see
+    /// [`EffectiveSkills::materialize`](crate::harness::skills::EffectiveSkills::materialize).
+    /// Empty only when the host serves no shared skill library, where a stub
+    /// simply stays as it is; a platform-provisioned runtime otherwise receives
+    /// the library the application state loaded, same as the serve path.
+    pub skills_registry: Arc<[crate::company::SkillDoc]>,
     /// The company's effective MCP servers (issue #50), resolved to **data**
     /// (manifest `[[mcp_server]]` ∪ the runtime index, with each server's
     /// outbound credential materialized to
@@ -1584,6 +1592,7 @@ description = "Builds the product."
                 artifacts: None,
                 skills: None,
                 skills_source_dir: None,
+                skills_registry: std::sync::Arc::from([]),
                 mcp_servers: Vec::new(),
                 facts: None,
                 events: None,
@@ -1646,6 +1655,7 @@ description = "Builds the product."
             artifacts: None,
             skills: None,
             skills_source_dir: Some(source.path().to_path_buf()),
+            skills_registry: std::sync::Arc::from([]),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -1933,6 +1943,7 @@ description = "Builds the product."
             artifacts: None,
             skills: None,
             skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -2092,6 +2103,7 @@ description = "Builds the product."
             artifacts: None,
             skills: None,
             skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -2403,6 +2415,7 @@ description = "Builds the product."
             artifacts: None,
             skills: None,
             skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -2558,6 +2571,7 @@ description = "Sets direction."
             artifacts: None,
             skills: None,
             skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -2697,6 +2711,7 @@ description = "Sets direction."
             tasks: None,
             skills: None,
             skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
