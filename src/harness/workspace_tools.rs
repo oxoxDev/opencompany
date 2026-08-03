@@ -181,6 +181,11 @@ struct PathIndex {
     /// Nodes omitted from the index because they are not addressable by path:
     /// a dangling/cyclic ancestor chain, or a name carrying a path separator.
     ///
+    /// Omitted from **both** maps — a node counted here is absent from `by_id`
+    /// too, so no tool can reach it by either key. That is deliberate: falling
+    /// back to id lookup would hand agents the very nodes the path rules
+    /// exclude. Only a rename in the console brings one back.
+    ///
     /// The `fs` backend rejects such names at creation (`reject_unsafe_name`),
     /// but the sqlite and mongodb backends do not, so the tool layer stays
     /// closed against them regardless of which backend is wired.
@@ -568,7 +573,9 @@ impl Tool for WorkspaceListTool {
         }
         if index.unaddressable > 0 {
             out.push_str(&format!(
-                "[{} node(s) have no valid path and were omitted; they are reachable by id only.]\n",
+                "[{} node(s) have no valid path and were omitted entirely; they cannot be \
+                 reached by this tool, by path or by id. Ask the operator to rename them in the \
+                 console.]\n",
                 index.unaddressable
             ));
         }
