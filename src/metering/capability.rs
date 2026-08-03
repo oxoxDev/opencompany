@@ -191,11 +191,17 @@ impl CapabilityPlan {
 /// * `starter` — `shell` + `code` at 200k tokens/day.
 /// * `pro` — `shell` + `code` + `web` at 1M tokens/day.
 /// * `unlimited` — every gateable namespace at `u64::MAX` (effectively
-///   uncapped), including the real-money `media` tier (issue #109) and the
-///   per-tenant `composio` tier (issue #110). `media` / `composio` are absent
-///   from `free` / `starter` / `pro`, so those tiers deny them outright unless
-///   the manifest opts in with an explicit `token_budgets = { media = N }` /
-///   `{ composio = N }`.
+///   uncapped), including the real-money `media` tier (issue #109), the
+///   per-tenant `composio` tier (issue #110) and the metered `search` tier
+///   (issue #238). Those three are absent from `free` / `starter` / `pro`, so
+///   those tiers deny them outright unless the manifest opts in with an explicit
+///   `token_budgets = { media = N }` / `{ composio = N }` / `{ search = N }`.
+///
+/// Note what a `search` *token* budget does and does not do: it sheds the tool
+/// once the company's period **token** spend crosses the threshold, which is a
+/// blunt cross-subsidy gate. The real ceiling on search spend is the per-company
+/// **daily call cap** (`[tools].search_daily_calls`), because a search costs
+/// money per call and no tokens at all.
 ///
 /// Every built-in is daily; the manifest `[plan].period` can widen the window.
 pub fn plan_named(name: &str) -> Option<CapabilityPlan> {
@@ -214,6 +220,7 @@ pub fn plan_named(name: &str) -> Option<CapabilityPlan> {
             ("subagent", u64::MAX),
             ("media", u64::MAX),
             ("composio", u64::MAX),
+            ("search", u64::MAX),
         ],
         _ => return None,
     };
@@ -444,6 +451,31 @@ mod tests {
                     .denied_namespaces(0)
                     .contains("composio"),
                 "{tier} must deny the composio tier by default"
+            );
+        }
+    }
+
+    /// The metered `search` tier (issue #238) follows media/composio: uncapped
+    /// under `unlimited`, denied by every other built-in tier unless the
+    /// manifest opts in with `token_budgets = { search = N }`. Every search is
+    /// a priced request, so a company should not inherit one from a tier it
+    /// chose for its token allowance.
+    #[test]
+    fn search_tier_is_unlimited_only_and_denied_elsewhere() {
+        assert!(
+            !plan_named("unlimited")
+                .unwrap()
+                .denied_namespaces(0)
+                .contains("search"),
+            "unlimited grants search"
+        );
+        for tier in ["free", "starter", "pro"] {
+            assert!(
+                plan_named(tier)
+                    .unwrap()
+                    .denied_namespaces(0)
+                    .contains("search"),
+                "{tier} must deny the metered search tier by default"
             );
         }
     }

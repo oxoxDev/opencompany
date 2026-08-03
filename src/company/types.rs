@@ -62,8 +62,9 @@ pub const CONNECTION_PRIORITIES: &[&str] = &["low", "medium", "high"];
 /// maps individual tools onto these namespaces. A `[plan].token_budgets` key
 /// outside this set is a manifest error. Lives here (not the feature-gated
 /// harness) so manifest validation can see it in the default build.
-pub const GATEABLE_NAMESPACES: [&str; 6] =
-    ["shell", "code", "web", "subagent", "media", "composio"];
+pub const GATEABLE_NAMESPACES: [&str; 7] = [
+    "shell", "code", "web", "subagent", "media", "composio", "search",
+];
 
 /// Whether a tool-grant list **explicitly** grants the real-money `media`
 /// namespace (issue #109).
@@ -95,6 +96,23 @@ pub fn grants_composio_explicit(grants: &[String]) -> bool {
     grants
         .iter()
         .any(|grant| grant == "composio" || grant.starts_with("composio."))
+}
+
+/// Whether a tool-grant list **explicitly** grants the metered `search`
+/// namespace (issue #238).
+///
+/// Like [`grants_media_explicit`] and [`grants_composio_explicit`], the
+/// catch-all `*` does **not** grant it: every `web_search` call is a priced
+/// request on the managed platform, so it must be opted into by name rather
+/// than ridden in on a wildcard a company set for its file and shell tools.
+/// Matches the bare `search` grant or any `search.*` sub-grant. Lives here
+/// (always compiled) so both the feature-gated harness wiring
+/// (`build::build_agent`) and the always-compiled console capability route key
+/// off one source of truth.
+pub fn grants_search_explicit(grants: &[String]) -> bool {
+    grants
+        .iter()
+        .any(|grant| grant == "search" || grant.starts_with("search."))
 }
 
 /// Built-in capability tier names selectable in `[plan].name` (issue #108). The
@@ -438,7 +456,27 @@ pub struct Tools {
     /// it can reach.
     #[serde(default)]
     pub composio: ComposioTools,
+    /// Per-company **daily** ceiling on metered `web_search` calls (issue
+    /// #238), counted per UTC day across every agent of the company.
+    ///
+    /// Absent (the default) uses [`DEFAULT_SEARCH_DAILY_CALLS`]. `0` disables
+    /// searching outright while leaving the grant in place, which is the honest
+    /// way to pause spend without editing `allow`. Reaching the cap makes the
+    /// tool return a loud "search budget exhausted" error, never a silent drop
+    /// — an agent that is told it is out of budget reports the constraint,
+    /// whereas an agent handed an empty result invents citations.
+    #[serde(default)]
+    pub search_daily_calls: Option<u32>,
 }
+
+/// Daily `web_search` call ceiling applied when `[tools].search_daily_calls` is
+/// absent (issue #238).
+///
+/// Sized as a working day of research, not a hard product limit: at the managed
+/// backend's ~$0.01/request list price this bounds an unattended runaway to
+/// roughly $2/day/company while leaving a genuine multi-topic research session
+/// (a handful of searches per question) comfortably inside it.
+pub const DEFAULT_SEARCH_DAILY_CALLS: u32 = 200;
 
 /// `[tools.composio]` — the per-tenant Composio toolkit allowlist (issue #110).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -459,9 +497,15 @@ impl Default for Tools {
             // because the `*` wildcard deliberately excludes those two
             // (real-money + per-tenant-credential) namespaces. A company that
             // wants a narrower belt overrides `[tools].allow` explicitly.
+            //
+            // `search` (issue #238) is deliberately NOT in this list, unlike
+            // `media`/`composio`: the #188 sign-off admitted it **opt-in**, so a
+            // company that never asked for web search never spends on it.
+            // Making it default-on is a one-word change here.
             allow: vec!["*".into(), "media".into(), "composio".into()],
             web_allowed_domains: Vec::new(),
             composio: ComposioTools::default(),
+            search_daily_calls: None,
         }
     }
 }
