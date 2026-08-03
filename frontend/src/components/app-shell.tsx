@@ -150,6 +150,38 @@ const TITLES: Record<View, string> = {
 
 const VIEWS = NAV.flatMap((g) => g.items.map((i) => i.view));
 
+/**
+ * Operator-facing copy for a `connect_error` code from the host's OAuth
+ * callback (issue #300). The host sends a stable code rather than the
+ * provider's own error text — that text is attacker-influenced and may carry
+ * credential material, so it never leaves the host's logs.
+ *
+ * Every message says what to do next: the whole point of the bounce-back is
+ * that a failed handshake is recoverable, not a dead end. An unrecognized code
+ * (an older console against a newer host) still gets a usable message.
+ */
+function connectErrorMessage(code: string, provider: string | null): string {
+  const name = provider ?? "the provider";
+  switch (code) {
+    case "denied":
+      return `${provider ?? "That"} connection was cancelled. You can try again whenever you're ready.`;
+    case "invalid_state":
+      return `That ${name} connection link expired. Start the connection again.`;
+    case "invalid_request":
+      return `That ${name} connection came back incomplete. Start the connection again.`;
+    case "unknown_company":
+      return `That connection didn't match this company. Start the connection again.`;
+    case "provider_disabled":
+      return `${provider ?? "That provider"} isn't configured on this host yet.`;
+    case "exchange_failed":
+      return `Couldn't finish connecting ${name}. Try again in a moment.`;
+    case "store_failed":
+      return `Connected to ${name}, but saving the credentials failed. Try again.`;
+    default:
+      return `Couldn't connect ${name}. Try again.`;
+  }
+}
+
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
@@ -206,15 +238,29 @@ export function AppShell({
   const pending = feed.status.pending_approvals;
 
   // OAuth connect bounce-back: the host's callback redirects the browser to
-  // `…/connections?connected={provider}` after storing the token. Land the
-  // operator on the Connections view, confirm with a toast, then strip the
-  // param so a refresh doesn't re-fire it. Runs once; StrictMode's double
-  // invoke is harmless because the first run clears the param the second reads.
+  // `…/connections?connected={provider}` after storing the token, or to
+  // `…/connections?connect_error={code}[&provider={id}]` when the handshake
+  // failed. Land the operator on the Connections view either way, say what
+  // happened, then strip the params so a refresh doesn't re-fire them. Runs
+  // once; StrictMode's double invoke is harmless because the first run clears
+  // the params the second reads.
+  //
+  // The failure half matters as much as the success half: before issue #300 the
+  // host answered a cancelled or expired handshake with a JSON body, which the
+  // browser rendered as the page — a dead end with no way back into the
+  // console. The host now always redirects, so this is where it becomes
+  // recoverable.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const connected = params.get("connected");
-    if (!connected) return;
+    const failed = params.get("connect_error");
+    if (!connected && !failed) return;
+    // The provider id is advisory — the host omits it on the arms that fire
+    // before the signed state is verified.
+    const providerId = connected ?? params.get("provider");
     params.delete("connected");
+    params.delete("connect_error");
+    params.delete("provider");
     const query = params.toString();
     window.history.replaceState(
       {},
@@ -224,9 +270,11 @@ export function AppShell({
     setView("connections");
     // The callback param carries the raw provider id (e.g. "slack"); show the
     // catalog display name ("Slack") when we know it, falling back to the id.
-    const providerName =
-      CONNECTION_PROVIDERS.find((p) => p.id === connected)?.name ?? connected;
-    toast.success(`Connected ${providerName}.`);
+    const providerName = providerId
+      ? (CONNECTION_PROVIDERS.find((p) => p.id === providerId)?.name ?? providerId)
+      : null;
+    if (failed) toast.error(connectErrorMessage(failed, providerName));
+    else toast.success(`Connected ${providerName}.`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
