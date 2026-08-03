@@ -412,8 +412,18 @@ fn clamp_body(body: &str, max_bytes: usize) -> (&str, usize) {
 /// byte-exact (so a read → write round trip cannot corrupt the note), the
 /// delimiter itself has to be unforgeable: a note written in the past cannot
 /// contain a token minted now.
+///
+/// Drawn from the OS CSPRNG, not [`crate::ports::generate_id`]: that mints
+/// `{millis:012x}-{counter:012x}` with no entropy at all, so an agent that has
+/// seen one fence knows the counter and can store a note containing the exact
+/// terminator a later read will mint — closing the fence early and promoting
+/// stored prose to instructions. Unforgeability is the entire property this
+/// token exists for, so it needs a real random source.
 fn fence_nonce() -> String {
-    crate::ports::generate_id()
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes)
+        .expect("the OS CSPRNG is unavailable; cannot mint a content fence");
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1280,6 +1290,35 @@ mod tests {
                 .count(),
             1,
             "exactly one genuine terminator: {out}"
+        );
+    }
+
+    /// Unguessable, not merely unique. The previous source
+    /// (`ports::generate_id`) minted `{millis}-{counter}` — distinct every
+    /// call, and yet fully derivable by anyone who had seen one fence, who
+    /// could then store a note carrying the terminator a later read would mint.
+    /// "All distinct" does not catch that; mint order does.
+    #[test]
+    fn fence_nonces_are_unguessable_not_just_unique() {
+        let nonces: Vec<String> = (0..64).map(|_| fence_nonce()).collect();
+
+        let unique: std::collections::HashSet<&String> = nonces.iter().collect();
+        assert_eq!(unique.len(), nonces.len(), "fence nonces repeat");
+        for nonce in &nonces {
+            assert_eq!(nonce.len(), 32, "expected 128 bits of hex: {nonce}");
+            assert!(
+                nonce.chars().all(|c| c.is_ascii_hexdigit()),
+                "not hex: {nonce}"
+            );
+        }
+
+        // A counter-derived token mints in ascending order by construction; 64
+        // random ones land sorted with probability 1/64!.
+        let mut ascending = nonces.clone();
+        ascending.sort();
+        assert_ne!(
+            ascending, nonces,
+            "nonces mint in sorted order — that is a counter, not entropy"
         );
     }
 
