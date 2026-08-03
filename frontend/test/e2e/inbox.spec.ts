@@ -16,6 +16,12 @@ import { expect, test } from "@playwright/test";
  *      the real empty state instead of invented correspondence.
  *
  * Runs against the same live host as `wiring.spec.ts` (see that file's header).
+ *
+ * Parked by issue #302: the console no longer lists Inbox, so `/#/inbox` now
+ * canonicalizes to Overview and the assertions below cannot run. The host's
+ * inbox routes and per-agent store are unchanged, so the #173 guarantee still
+ * holds — this stays here verbatim to be un-skipped the day the surface is
+ * relisted, rather than deleted and rewritten from memory.
  */
 
 /** All four senders the deleted fixture invented for every teammate. */
@@ -28,7 +34,7 @@ const FIXTURE_SENDERS = ["Priya Sharma", "Stripe", "Weekly Digest", "Figma"];
  */
 const FIXTURE_SUBJECTS = ["Re: Spring campaign timeline"];
 
-test("Inbox reads the host's per-agent store, not a seeded fixture", async ({ page }) => {
+test.skip("Inbox reads the host's per-agent store, not a seeded fixture", async ({ page }) => {
   // Switch on the first teammate's inbox from the Team page. The toggle writes
   // to the host keyed by agent id — the same key the ingest webhook files under.
   await page.goto("/#/team");

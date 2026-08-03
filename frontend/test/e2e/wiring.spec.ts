@@ -39,7 +39,14 @@ test("operator console renders a mocked backend reply end to end", async ({
   await expect(page.getByText(/^Couldn't send/)).toHaveCount(0);
 });
 
-test("operator adds a Brain memory that persists across reload and can be deleted", async ({
+/**
+ * Parked by issue #302: the console no longer lists Brain, so `/#/memory` now
+ * canonicalizes to Overview and the assertions below cannot run. The host's
+ * `/memory` routes and FactStore are unchanged — this stays here verbatim to be
+ * un-skipped the day the surface is relisted, rather than deleted and rewritten
+ * from memory.
+ */
+test.skip("operator adds a Brain memory that persists across reload and can be deleted", async ({
   page,
 }) => {
   // The Brain tab reads the real FactStore over `…/memory`; adding a note must
