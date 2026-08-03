@@ -75,7 +75,7 @@ pub use fs::{
 };
 pub use fs_ops::FsOps;
 pub use layout::DataLayout;
-pub use paths::{Bundle, default_home};
+pub use paths::{Bundle, DATA_DIR_ENV, home_divergence_warning, resolve_home};
 pub use select::{
     MemoryBackend, MemoryOverlay, StorageHandles, StorageKind, StorageSettings,
     open_memory_overlay, open_storage,

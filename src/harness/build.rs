@@ -27,6 +27,15 @@
 //!   is charged by the backend, so a per-company **daily call cap** is enforced
 //!   before the request and exactly one priced `SearchCall` usage sample is
 //!   recorded after it completes.
+//! * **Company workspace** (issue #237, [`workspace_tools`](crate::harness::workspace_tools)):
+//!   `workspace_list` / `workspace_read` over the operator's shared note tree,
+//!   granted under the ordinary namespace rule (`*` confers them) and hit live
+//!   per call so there is no snapshot to go stale. `workspace_write` is added
+//!   only under an **explicit** `workspace` / `workspace.write` grant — a bare
+//!   `*` does not confer it — and is guarded by a required compare-and-swap
+//!   revision token. Unlike the file tools these are scoped by the store, not
+//!   the filesystem: every call resolves through one company-scoped `tree()`
+//!   read, so no host path is ever built from agent input.
 //! * **Delegation is orchestrator-only.** `query_company` / `spawn_task` /
 //!   `delegate_to_desk` (and the other orchestrator roster/workflow tools) are
 //!   wired only when `is_orchestrator`; a **dispatched** desk/roster agent never
@@ -335,9 +344,56 @@ pub fn build_agent(
         }
     }
 
+    // Company workspace (issue #237) — live read (and optionally write) tools
+    // over the operator-owned note tree, so an agent can ground an answer in
+    // the company's own `Standards/` / `Playbooks/` instead of guessing. Two
+    // independent gates, deliberately asymmetric:
+    //
+    //  1. READS follow the ordinary namespace rule, so a catch-all `*` confers
+    //     them — the whole point of the issue is that shared guidance should be
+    //     reachable by default.
+    //  2. WRITES need an **EXPLICIT** `workspace` (or `workspace.write`) grant
+    //     (`grants_workspace_write_explicit`); `*` does NOT confer them,
+    //     mirroring the media/composio precedent, because a write mutates
+    //     operator-owned guidance every other agent then trusts.
+    //
+    // Unwired-store is fail-closed: with no `deps.workspace` no tool is built
+    // and the agent behaves exactly as it did before this cell. Create, rename
+    // and delete stay operator-only — the write tool's required
+    // `expected_updated_at` means only an existing note can be targeted.
+    //
+    // Not mapped in `toolbelt::namespace_of`, so these stay intrinsic to the
+    // capability filter (the `file_tools` precedent): the reads are free and
+    // correctness-critical, and shedding them under token-budget pressure
+    // would make agents hallucinate company standards to save nothing.
+    let workspace_writes = crate::company::grants_workspace_write_explicit(grants);
+    let workspace_tools = match &deps.workspace {
+        Some(store) if grants_cover(grants, "workspace") => {
+            Some(crate::harness::workspace_tools::workspace_tools(
+                store.clone(),
+                company.clone(),
+                workspace_writes,
+            ))
+        }
+        _ => None,
+    };
+    let workspace_granted = workspace_tools.is_some();
+    if let Some(workspace_tools) = workspace_tools {
+        tools.extend(workspace_tools);
+    }
+
     // Persona over openhuman's own identity: `omit_identity = true` drops the
     // "you are OpenHuman" preamble so the agent speaks as its company role.
     let mut persona = persona_prompt(company_name, manifest_agent);
+
+    // A short, STATIC brief — never a tree snapshot. A snapshot baked into the
+    // system prompt would be stale the moment the operator edits a note, which
+    // is exactly what hitting the store per call avoids.
+    if workspace_granted {
+        persona.push_str(&crate::harness::workspace_tools::workspace_brief(
+            workspace_writes,
+        ));
+    }
 
     // Skill read surface (read-only catalogue slice). Only materializes when the
     // harness is wired to a skills source; otherwise the agent stays skill-less
@@ -752,6 +808,10 @@ mod tests {
             // #238 tool is never built and the pinned belt below is the
             // pre-#238 belt exactly.
             search: None,
+            // Fail-closed default: with no workspace store wired, the #237
+            // tools are never built and the pinned belt below is the
+            // pre-#237 belt exactly.
+            workspace: None,
         }
     }
 
@@ -798,6 +858,40 @@ mod tests {
             crate::company::credentials::Credential::from_value("managed-platform-token"),
             crate::company::DEFAULT_SEARCH_DAILY_CALLS,
         ));
+        let manifest_agent = ManifestAgent {
+            id: "desk".to_string(),
+            role: "Desk Lead".to_string(),
+            description: None,
+            tier: None,
+            tools: Vec::new(),
+            budget_usd_daily: None,
+        };
+        let policy = ApprovalPolicy::new(&Policy::default(), None);
+        let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
+        let agent = build_agent(
+            &CompanyId::new("acme"),
+            "Acme",
+            &manifest_agent,
+            policy,
+            &deps,
+            &grants,
+            &[],
+            false,
+        )
+        .expect("agent builds");
+        let mut names: Vec<String> = agent.tools().iter().map(|t| t.name().to_string()).collect();
+        names.sort();
+        names
+    }
+
+    // --- Company-workspace wiring gates (issue #237) -----------------------
+
+    /// Build one agent with a workspace store wired and return its tool names.
+    /// Mirrors [`built_tool_names`], differing only in `deps.workspace`.
+    fn built_tool_names_with_workspace(grants: &[&str]) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut deps = pin_deps(dir.path().to_path_buf());
+        deps.workspace = Some(Arc::new(crate::store::FsOps::new(dir.path())));
         let manifest_agent = ManifestAgent {
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
@@ -880,6 +974,79 @@ mod tests {
         baseline.push("web_search".to_string());
         baseline.sort();
         assert_eq!(granted, baseline, "the `search` grant widened the belt");
+    }
+
+    /// The four gate states of the workspace surface, in one table.
+    ///
+    /// The load-bearing row is the second: a broad `*` grant yields the READ
+    /// tools but NOT `workspace_write`. Writes mutate operator-owned guidance
+    /// every other agent then trusts, so — like `media` and `composio` — they
+    /// must be opted into by name and can never ride in on a wildcard.
+    #[test]
+    fn workspace_tools_are_wired_by_grant_and_store_presence() {
+        // No store wired → fail closed, nothing built, whatever the grant.
+        let unwired = built_tool_names(&["workspace"], false);
+        for tool in ["workspace_list", "workspace_read", "workspace_write"] {
+            assert!(
+                !unwired.contains(&tool.to_string()),
+                "no store must mean no `{tool}`: {unwired:?}"
+            );
+        }
+
+        // `*` → reads only. This is the whole asymmetry.
+        let wildcard = built_tool_names_with_workspace(&["*"]);
+        assert!(
+            wildcard.contains(&"workspace_list".to_string()),
+            "{wildcard:?}"
+        );
+        assert!(
+            wildcard.contains(&"workspace_read".to_string()),
+            "{wildcard:?}"
+        );
+        assert!(
+            !wildcard.contains(&"workspace_write".to_string()),
+            "a bare `*` must NOT confer workspace writes: {wildcard:?}"
+        );
+
+        // Explicit `workspace` → reads + write.
+        let explicit = built_tool_names_with_workspace(&["workspace"]);
+        assert!(
+            explicit.contains(&"workspace_write".to_string()),
+            "{explicit:?}"
+        );
+
+        // No workspace grant at all → nothing, even with a store wired.
+        let ungranted = built_tool_names_with_workspace(&["web.*"]);
+        for tool in ["workspace_list", "workspace_read", "workspace_write"] {
+            assert!(
+                !ungranted.contains(&tool.to_string()),
+                "an unrelated grant must not confer `{tool}`: {ungranted:?}"
+            );
+        }
+    }
+
+    /// `workspace.read` is a genuinely read-only grant.
+    ///
+    /// A deliberate divergence from the `media` / `composio` helpers, which
+    /// match any `<ns>.` prefix and would therefore let `workspace.read` confer
+    /// writes — a footgun on a destructive surface.
+    #[test]
+    fn a_workspace_read_grant_does_not_confer_writes() {
+        let read_grant = built_tool_names_with_workspace(&["workspace.read"]);
+        assert!(
+            read_grant.contains(&"workspace_read".to_string()),
+            "{read_grant:?}"
+        );
+        assert!(
+            !read_grant.contains(&"workspace_write".to_string()),
+            "`workspace.read` must not confer writes: {read_grant:?}"
+        );
+
+        let write_grant = built_tool_names_with_workspace(&["workspace.write"]);
+        assert!(
+            write_grant.contains(&"workspace_write".to_string()),
+            "{write_grant:?}"
+        );
     }
 
     /// (a) The EXACT tool belt a dispatched desk agent receives with the broad

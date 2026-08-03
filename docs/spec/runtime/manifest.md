@@ -114,6 +114,13 @@ prompt = "Weekly review and operator digest"
   Precedence is **runtime console override > manifest `[inference]` > managed
   default**, and a per-tenant provider re-resolves it every turn — so a console
   switch takes effect on the agents' next turn with **no restart**.
+  That holds only once the company is already on the harness cognition path.
+  *Which brain a company runs* is decided once, when the runtime is built: a
+  company that resolved no inference source at boot gets the offline echo brain
+  and an unwired workflow runner, and a credential saved afterwards reaches
+  neither. The status route reports that state as `restartRequired` — a resolved
+  config next to a non-harness `cognition` — and the console says "restart"
+  instead of "next turn" for it (issue #266).
 - **`[channels.*]`** enables `ChannelAdapter`s. Unknown channels are a
   validation error; disabled OpenHuman means non-operator channels degrade
   with a boot warning, never a failure.
@@ -186,6 +193,28 @@ prompt = "Weekly review and operator digest"
     The Usage view surfaces a `Web searches` KPI plus a search status row
     (active / paused at cap 0 / awaiting credential / not granted / not in this
     build).
+  - **`workspace`** (issue #237) grants the company's shared note tree — the
+    operator-owned `Standards/` / `Playbooks/` / `Product/` documents seeded
+    from `companies/<name>/workspace/**`. It is **split**, unlike every other
+    namespace: *reads* (`workspace_list`, `workspace_read`) follow the ordinary
+    rule, so a catch-all `*` confers them; *writes* (`workspace_write`) need an
+    **explicit** `workspace` or `workspace.write` entry in `[tools].allow`,
+    because a write mutates guidance every other agent then treats as the
+    company's source of truth. `workspace.read` is therefore a genuinely
+    read-only grant. Writes overwrite one **existing** note only and require an
+    `expected_updated_at` revision token taken from a prior read, so a note
+    edited in the console since the agent read it is refused rather than
+    clobbered; creating, renaming and deleting notes stay operator-only. Both
+    sides are capped at 64 KiB, which makes a larger note agent-read-only: the
+    agent sees a truncated body, and a write against it is refused rather than
+    discarding the part it could not see, so only an operator can edit it in the
+    console. Under
+    `[policy].mode = "supervised"` (the default) a write additionally parks for
+    approval, and under `readonly` it is denied — reads stay available in every
+    mode. The namespace is **not** gateable by `[plan].token_budgets`: reads
+    cost nothing and shedding them would only make agents guess at company
+    standards. The tools hit the store per call, so an operator's console edit
+    is visible to the next turn with no restart.
 - **`[[schedule]]`** entries become `ScheduleFired` events; cron syntax is
   standard 5-field, interpreted in UTC. A saved *workflow* schedules itself
   separately, with the same dialect: its `trigger` node carries a `schedule`

@@ -935,6 +935,16 @@ mod tests {
         let first = state.skill_registry(&dir).expect("registry loads");
         assert!(first.iter().any(|skill| skill.slug == "web-research"));
         assert!(first.iter().any(|skill| skill.slug == "weekly-report"));
+        // The post-call half of the meeting pair (#240): its body must carry the
+        // full contract, not just the frontmatter description.
+        let debrief = first
+            .iter()
+            .find(|skill| skill.slug == "call-debrief")
+            .expect("call-debrief is in the shared library");
+        assert_eq!(debrief.name, "Call Debrief");
+        assert_eq!(debrief.category.as_deref(), Some("Ops"));
+        assert!(debrief.body.contains("## Steps"), "{}", debrief.body);
+        assert!(debrief.body.contains("## Output"), "{}", debrief.body);
 
         // A second call returns the same cached allocation, ignoring the path.
         let second = state

@@ -264,6 +264,7 @@ description = "Runs Acme."
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
             search: None,
+            workspace: None,
         }
     }
 

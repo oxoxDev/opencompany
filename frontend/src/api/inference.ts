@@ -53,6 +53,20 @@ export interface InferenceStatus {
   cognition: CognitionPath;
   /** Where this path's inference usage is metered. */
   usageMetering: UsageMetering;
+  /**
+   * Whether a stored config resolves but the *running* brain predates it, so
+   * only a restart puts it to work (issue #266).
+   *
+   * Which brain a company runs is decided once, when the company is built. A
+   * company that started with no inference source is on the offline echo brain
+   * with an unwired workflow runner, and saving a credential afterwards changes
+   * neither — so "agents use it on their next turn" is false for exactly that
+   * transition, which is also the first one a new operator makes.
+   *
+   * `false` covers both "already live" and "a restart would not help either"
+   * (this host has no harness path at all) — tell those apart with `cognition`.
+   */
+  restartRequired: boolean;
 }
 
 /** The set-provider body. `key` is write-only (never returned). */

@@ -65,6 +65,65 @@ the shared subdirectories and — unless `[workspace].clear_tmp_on_startup` is
 own `OPENCOMPANY_DATA_DIR`, this root *is* the per-tenant workspace — no separate
 per-tenant path prefix is needed.
 
+### Choosing the root (`src/store/paths.rs`)
+
+`OPENCOMPANY_DATA_DIR` is the **only** environment knob that places an instance.
+`opencompany serve` (and `export` / `import`) resolve the root every company
+bundle hangs off through `store::resolve_home`, in this order:
+
+| Precedence | Source | Resolves to |
+| --- | --- | --- |
+| 1 | `--home <DIR>` | `<DIR>` verbatim — an explicit flag is never overridden by the environment |
+| 2 | `OPENCOMPANY_DATA_DIR` | its value verbatim, so bundles land at `<root>/companies/<slug>` — exactly the layout above |
+| 3 | neither | `$HOME/.opencompany/companies` (the legacy default; see below) |
+
+An empty `OPENCOMPANY_DATA_DIR` counts as unset — it would otherwise root the
+instance at the process working directory.
+
+Two consequences worth knowing:
+
+- **The legacy default is one level deeper than the layout above.** With neither
+  the flag nor the variable set, the home is `$HOME/.opencompany/companies` and
+  `Bundle` appends a `companies/` of its own, so bundles sit at
+  `~/.opencompany/companies/companies/<slug>` while `DataLayout` materializes
+  `~/.opencompany/{memory,store,files,logs,tmp}`. That extra level is a wart kept
+  for compatibility with existing local installs rather than silently relocating
+  their data. Setting `OPENCOMPANY_DATA_DIR` gives the canonical single-root
+  layout.
+- **`--home` moves the bundles but not the workspace.** It places company
+  bundles only; `memory/`, `store/`, `files/`, `logs/` and `tmp/` always follow
+  `OPENCOMPANY_DATA_DIR`. So two hosts isolated by `--home` alone still share one
+  workspace. `serve` prints an operator-visible warning naming both roots
+  whenever they are not aligned. Prefer `OPENCOMPANY_DATA_DIR`, which moves the
+  whole instance. A hosted tenant sets both to the same value
+  (`docker/entrypoint.sh` passes `--home "$OPENCOMPANY_DATA_DIR"`), so it never
+  warns — nor does the untouched local default.
+
+`OPENCOMPANY_HOME` is **not** a synonym and is **not supported**. It was never
+wired to anything, so setting it used to be ignored silently. The resolver now
+reads it solely to reject it: `serve`, `export`, and `import` abort with an error
+naming `OPENCOMPANY_DATA_DIR` instead. The rejection is checked before `--home`,
+so passing the flag does not suppress it — a stale entrypoint that still exports
+the variable fails loudly rather than half-placing a store.
+
+#### Running two hosts side by side
+
+Because a bundle store is shared by every process that resolves the same root,
+two `serve` processes on different ports with no isolation write to one another's
+companies — teammates and desks created on one appear on the other. Give each its
+own root:
+
+```sh
+OPENCOMPANY_DATA_DIR=/tmp/oc-a opencompany serve \
+  --company companies/e2e_harness --bind 127.0.0.1:8095 &
+OPENCOMPANY_DATA_DIR=/tmp/oc-b opencompany serve \
+  --company companies/e2e_harness --bind 127.0.0.1:8096 &
+```
+
+`--home /tmp/oc-a` places the bundles the same way and takes precedence, but it
+does **not** move the shared workspace — prefer the variable for side-by-side
+hosts.
+
 The `[workspace]` section of `config.toml` (in the data dir) tunes the lifecycle:
 
 ```toml

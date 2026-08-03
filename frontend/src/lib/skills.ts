@@ -27,6 +27,6 @@ export const SKILL_REGISTRY: RegistrySkill[] = [
   { id: "weekly-report", name: "Weekly Report", description: "Compile the week's activity into a short report.", category: "Ops", publisher: "OpenCompany" },
   { id: "competitor-analysis", name: "Competitor Analysis", description: "Track rivals' launches, pricing, and positioning.", category: "Research", publisher: "OpenCompany" },
   { id: "social-scheduler", name: "Social Scheduler", description: "Plan and queue posts across social channels.", category: "Marketing", publisher: "OpenCompany" },
-  { id: "meeting-notes", name: "Meeting Notes", description: "Turn a transcript into decisions and action items.", category: "Content", publisher: "OpenCompany" },
+  { id: "call-debrief", name: "Call Debrief", description: "Distill a call transcript into decisions, action items with owners, and open questions so nothing agreed on the call is lost.", category: "Ops", publisher: "OpenCompany" },
   { id: "invoice-drafting", name: "Invoice Drafting", description: "Draft invoices from a scope and rate card.", category: "Finance", publisher: "OpenCompany" },
 ];

@@ -1175,6 +1175,14 @@ impl RuntimeBuilder {
                                         journal: journal.clone(),
                                     }),
                                 }),
+                                // Issue #237: the SAME workspace handle the
+                                // console's REST/GraphQL surface writes through
+                                // (`ops.workspace`, seeded just above), so an
+                                // operator's edit to `Standards/` is what the
+                                // next agent turn reads. The tools cache
+                                // nothing, so no rebuild is needed for an edit
+                                // to take effect.
+                                workspace: Some(ops.workspace.clone()),
                             };
                             let record = CompanyRecord {
                                 id: id.clone(),

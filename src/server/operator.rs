@@ -1502,6 +1502,7 @@ mod test {
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
             search: None,
+            workspace: None,
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record);
 
@@ -2791,6 +2792,7 @@ mod test {
             target: Some("ada@example.com".into()),
             status,
             detail: "this recipient has never written to the company".into(),
+            reason: crate::ports::DeliveryReason::RecipientNotEstablished,
         }
     }
 

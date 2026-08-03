@@ -40,6 +40,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { TASK_COLUMNS } from "@/lib/tasks-sample";
 import { toast } from "sonner";
+import { AssigneeSelect } from "./AssigneeSelect";
 
 const PRIORITIES = ["low", "medium", "high"] as const;
 
@@ -81,11 +82,44 @@ export function TaskEditDialog({
 
   if (!task) return null;
 
+  /**
+   * The fields the operator actually changed, and only those.
+   *
+   * A `PatchTask` is applied field-by-field on the host, and every field it
+   * *receives* is re-validated — `assignee` included, which re-runs
+   * `assignee::resolve` against the current roster. Sending the whole seeded
+   * draft therefore made a card uneditable the moment its stored assignee left
+   * the roster (a teammate removed, a desk deleted): renaming the title
+   * resubmitted the stale assignee, which came back `Unknown`, and the save
+   * failed with a `400` about a field the operator never touched. Diffing means
+   * an untouched field is never re-validated, so the only assignee the host is
+   * ever asked to resolve is one just picked from the roster.
+   */
+  function changedFields(current: Task): PatchTask {
+    const patch: PatchTask = {};
+    if ((draft.title ?? "") !== current.title) patch.title = draft.title ?? "";
+    if ((draft.note ?? "") !== (current.note ?? "")) patch.note = draft.note ?? "";
+    if (draft.column !== undefined && draft.column !== current.column) patch.column = draft.column;
+    if (draft.priority !== undefined && draft.priority !== current.priority) {
+      patch.priority = draft.priority;
+    }
+    if ((draft.assignee ?? "") !== current.assignee) patch.assignee = draft.assignee ?? "";
+    return patch;
+  }
+
   async function save() {
     if (!task) return;
+    const patch = changedFields(task);
+    if (Object.keys(patch).length === 0) {
+      // Nothing to write. Saying so beats a round-trip that reports "Saved."
+      // for an edit that never happened.
+      toast.success("No changes to save.");
+      onSaved(task);
+      return;
+    }
     setBusy(true);
     try {
-      const saved = await patchTask(client, company, task.id, draft);
+      const saved = await patchTask(client, company, task.id, patch);
       onSaved(saved);
       toast.success("Saved.");
     } catch (e) {
@@ -142,12 +176,25 @@ export function TaskEditDialog({
           <div className="grid grid-cols-3 gap-3">
             <div className="grid gap-1.5">
               <Label htmlFor="task-column">Column</Label>
+              {/* Fall back to the card's own value rather than `undefined`.
+                  `draft` starts empty and is seeded a tick later by the effect
+                  above, so a bare `draft.column` hands Base UI `undefined` on
+                  the first render — which latches the select as *uncontrolled*
+                  and makes it ignore the seeded value, leaving the trigger
+                  blank for the whole life of the dialog. */}
               <Select
-                value={draft.column}
+                value={draft.column ?? task.column}
                 onValueChange={(v) => setDraft((d) => ({ ...d, column: v ?? undefined }))}
               >
                 <SelectTrigger id="task-column">
-                  <SelectValue />
+                  {/* The trigger renders the raw value unless told otherwise,
+                      and a column's id is not its label (`in_progress` vs "In
+                      progress"). */}
+                  <SelectValue>
+                    {(selected) =>
+                      TASK_COLUMNS.find((c) => c.id === selected)?.label ?? String(selected ?? "")
+                    }
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {TASK_COLUMNS.map((c) => (
@@ -160,12 +207,14 @@ export function TaskEditDialog({
             </div>
             <div className="grid gap-1.5">
               <Label htmlFor="task-priority">Priority</Label>
+              {/* Same seeding hazard as Column above. A priority is its own
+                  label, so only the casing the items carry needs restating. */}
               <Select
-                value={draft.priority}
+                value={draft.priority ?? task.priority}
                 onValueChange={(v) => setDraft((d) => ({ ...d, priority: v ?? undefined }))}
               >
                 <SelectTrigger id="task-priority">
-                  <SelectValue />
+                  <SelectValue className="capitalize" />
                 </SelectTrigger>
                 <SelectContent>
                   {PRIORITIES.map((p) => (
@@ -176,13 +225,20 @@ export function TaskEditDialog({
                 </SelectContent>
               </Select>
             </div>
-            <div className="grid gap-1.5">
+            {/* `min-w-0`: a grid item's automatic minimum size is its content's
+                min-content width, so the assignee's long ids would otherwise
+                widen this track and squeeze Column and Priority away. */}
+            <div className="grid min-w-0 gap-1.5">
               <Label htmlFor="task-assignee">Assignee</Label>
-              <Input
+              {/* Issue #263: picked from the roster, not typed. An assignee the
+                  roster no longer carries still renders — flagged — so a save
+                  that does not touch it can never quietly rewrite it. */}
+              <AssigneeSelect
                 id="task-assignee"
+                client={client}
+                company={company}
                 value={draft.assignee ?? ""}
-                placeholder="agent id"
-                onChange={(e) => setDraft((d) => ({ ...d, assignee: e.target.value }))}
+                onChange={(next) => setDraft((d) => ({ ...d, assignee: next }))}
               />
             </div>
           </div>

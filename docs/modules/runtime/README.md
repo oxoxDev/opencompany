@@ -107,3 +107,10 @@ async-graphql wrappers live in `server::graphql`, not here.
 The workspace store seeds a new company from its `companies/<name>/workspace/**`
 template on first use (`WorkspaceStore::is_empty` gates the seed); skills read
 the company's `skills/<id>/SKILL.md` plus the repo-level shared registry.
+
+The builder threads that same `WorkspaceStore` handle onto `HarnessDeps`
+(`workspace`), so agents read the operator's note tree through the tools in
+`harness::workspace_tools` (issue #237) rather than being blind to it. One
+handle, three writers — console REST, GraphQL, and a granted agent — so an
+operator edit is what the next turn reads, with no rebuild. `None` fails
+closed: no workspace tools are wired.

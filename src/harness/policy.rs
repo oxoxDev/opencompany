@@ -384,6 +384,27 @@ fn is_external_effect(tool_name: &str) -> bool {
     ) {
         return false;
     }
+    // The company-workspace read tools (issue #237) only read this company's
+    // own note tree — no state changes and no counterparty is reached — but
+    // their names begin with the namespace rather than a read-only prefix, so
+    // without this arm the fail-safe default would park them under the DEFAULT
+    // `supervised` mode and deny them outright under `readonly`. That would
+    // make the workspace unreadable in exactly the mode whose point is that
+    // reads are fine.
+    //
+    // `workspace_write` is deliberately NOT listed: it overwrites
+    // operator-owned guidance, so it falls through to the external-effect
+    // default and parks under supervised / is denied under readonly. That —
+    // not the tool's declared `PermissionLevel::Write` — is what gates the
+    // write; openhuman's `ToolPolicy` surface never sees a permission level.
+    // The tests below pin all three classifications so renaming a tool cannot
+    // silently move it across the gate.
+    if matches!(
+        tool_name.to_ascii_lowercase().as_str(),
+        "workspace_list" | "workspace_read"
+    ) {
+        return false;
+    }
     // `web_search` (issue #238) is deliberately NOT carved out here. It reaches
     // a third party and the managed backend charges for it, so it must stay on
     // the external side and be DENIED under `readonly`. What keeps it from
@@ -766,6 +787,70 @@ mod tests {
                 serde_json::json!({ "query": "acme" })
             ))
             .await,
+            ToolPolicyDecision::Allow
+        );
+    }
+
+    /// The company workspace (issue #237): the two read tools reach only this
+    /// company's own note tree and must be allowed in every mode, while
+    /// `workspace_write` overwrites operator-owned guidance and must park under
+    /// supervised / be denied under readonly.
+    ///
+    /// This is the ACTUAL gate on a workspace write. Issue #237 proposed that
+    /// declaring `PermissionLevel::Write` would keep the `ApprovalPolicy` as
+    /// the per-call gate; it would not — openhuman's `ToolPolicy` surface hands
+    /// this bridge only the tool name and args, never the tool's permission
+    /// level, so classification is by name alone. Pinning all three names here
+    /// is what stops a later rename (say `get_workspace_note`, which the
+    /// read-only prefix list would silently wave through) from moving a tool
+    /// across the gate unnoticed.
+    #[tokio::test]
+    async fn workspace_reads_are_allowed_but_writes_park_or_deny() {
+        let supervised = policy("supervised", &[], None);
+        for tool in ["workspace_list", "workspace_read"] {
+            assert_eq!(
+                supervised
+                    .check(&request(tool, serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::Allow,
+                "{tool} only reads this company's own workspace and must be allowed"
+            );
+        }
+        assert!(
+            matches!(
+                supervised
+                    .check(&request("workspace_write", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "workspace_write must park under supervised"
+        );
+
+        let readonly = policy("readonly", &[], None);
+        for tool in ["workspace_list", "workspace_read"] {
+            assert_eq!(
+                readonly.check(&request(tool, serde_json::json!({}))).await,
+                ToolPolicyDecision::Allow,
+                "{tool} must stay available to a read-only desk"
+            );
+        }
+        assert!(
+            matches!(
+                readonly
+                    .check(&request("workspace_write", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "workspace_write must be denied under readonly"
+        );
+
+        // Under `full` there is no per-call gate at all — which is precisely
+        // why `workspace_write` carries a required `expected_updated_at`
+        // compare-and-swap token of its own.
+        let full = policy("full", &[], None);
+        assert_eq!(
+            full.check(&request("workspace_write", serde_json::json!({})))
+                .await,
             ToolPolicyDecision::Allow
         );
     }

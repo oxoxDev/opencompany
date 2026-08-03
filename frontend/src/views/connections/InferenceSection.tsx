@@ -8,6 +8,7 @@ import {
   revertInference,
   setInference,
   testInference,
+  type InferenceMutation,
   type InferenceProvider,
   type InferenceStatus,
   type UsageMetering,
@@ -81,7 +82,13 @@ type TestState =
  * provider (with a source badge + tier→model rows + a "key set" indicator), a
  * live "Test" probe, and a switch form with per-provider presets. The key input
  * is **write-only** — it is sent on Save, stored server-side, and never read
- * back. A switch takes effect on the agents' next turn with no restart.
+ * back.
+ *
+ * A switch takes effect on the agents' next turn with no restart — *except* the
+ * not-configured → configured transition, where the running brain was already
+ * chosen without one. The host reports that as `restartRequired`, and this
+ * section says so in the toast and keeps saying it in the status card until the
+ * restart happens (issue #266).
  */
 export function InferenceSection({
   client,
@@ -133,22 +140,35 @@ export function InferenceSection({
     try {
       // "Managed" means "use the platform default" — that's a revert, not a
       // runtime override with an empty credential.
+      let result: InferenceMutation;
       if (provider === "managed") {
-        await revertInference(client, company);
+        result = await revertInference(client, company);
       } else {
         const cleanModels = Object.fromEntries(
           Object.entries(models)
             .map(([t, v]) => [t, (v ?? "").trim()])
             .filter(([, v]) => v.length > 0),
         );
-        await setInference(client, company, {
+        result = await setInference(client, company, {
           provider,
           baseUrl: baseUrl.trim() || undefined,
           models: Object.keys(cleanModels).length ? cleanModels : undefined,
           key: key.trim() || undefined,
         });
       }
-      toast.success("Inference updated. Agents use it on their next turn.");
+      // Issue #266: only the host knows whether the *running* brain can act on
+      // what was just saved. Which brain a company runs is fixed when it is
+      // built, so a company that started with no inference source keeps echoing
+      // no matter what lands here — "agents use it on their next turn" was a
+      // promise the runtime could not keep for exactly the transition an
+      // operator makes first. Follow the response instead of asserting.
+      if (result.status.restartRequired) {
+        toast.warning("Inference saved — restart the company for agents to use it.", {
+          description: result.note,
+        });
+      } else {
+        toast.success("Inference updated. Agents use it on their next turn.");
+      }
       setKey("");
       setTest({ kind: "idle" });
       await refresh();
@@ -211,7 +231,9 @@ export function InferenceSection({
       <p className="text-sm text-muted-foreground">
         Choose which model provider your agents think with. Bring your own key for OpenRouter, a
         custom OpenAI-compatible endpoint, or a local Ollama server — the key is stored securely and
-        never shown again. A switch takes effect on the next turn, no restart.
+        never shown again. Switching provider or model takes effect on the agents' next turn. Giving
+        inference to a company that started without any does not: the brain is chosen at startup, so
+        that first setup needs a restart.
       </p>
 
       {load === "loading" ? (
@@ -252,6 +274,26 @@ export function InferenceSection({
                   Cognition: <span className="font-mono">{status.cognition}</span> ·{" "}
                   {METERING_NOTES[status.usageMetering] ?? "usage metering unknown"}
                 </p>
+                {/* Issue #266: a saved config the running brain cannot act on.
+                    The toast that says so is gone in seconds — and an operator
+                    who reloads the page, or comes back tomorrow, sees only a
+                    correct-looking provider next to agents that still echo. This
+                    is the surface that stays until the restart happens. */}
+                {status.restartRequired && (
+                  <div
+                    className="flex items-start gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400"
+                    data-testid="inference-restart-required"
+                  >
+                    <RotateCcw className="mt-px size-3.5 shrink-0" />
+                    <span>
+                      <span className="font-medium">Restart required.</span> This company started
+                      with no inference source, so it is running the offline echo brain and its
+                      scheduled workflows cannot fire. The brain is chosen at startup — this
+                      configuration is saved, but agents keep echoing until the company is
+                      restarted.
+                    </span>
+                  </div>
+                )}
                 {modelRows.length > 0 && (
                   <ul className="space-y-1 rounded-md bg-muted/40 p-2">
                     {modelRows.map(([tier, model]) => (

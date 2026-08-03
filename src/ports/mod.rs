@@ -55,7 +55,9 @@ pub use tools::ToolProvider;
 pub use types::*;
 pub use usage::{SampleKind, UsageMeter, UsageSample};
 pub use users::{InviteRecord, UserRecord, UserRole, UserStatus, UserStore, normalize_email};
-pub use workflow_runner::{DeliveryReport, DeliveryStatus, WorkflowRun, WorkflowRunner};
+pub use workflow_runner::{
+    DeliveryReason, DeliveryReport, DeliveryStatus, WorkflowRun, WorkflowRunner,
+};
 pub use workspace::{NodeKind, WorkspaceNode, WorkspaceStore};
 
 #[cfg(test)]

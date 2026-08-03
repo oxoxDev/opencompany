@@ -297,6 +297,10 @@ async fn harness(
             Credential::from_value("stub-platform-token"),
             daily_calls,
         )),
+        // Issue #237's workspace tools are off in this fixture: the turn under
+        // test exercises the #238 search path only, and an unwired store is the
+        // fail-closed default everywhere but the runtime builder.
+        workspace: None,
     };
 
     let record = CompanyRecord {

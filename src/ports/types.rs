@@ -2415,6 +2415,7 @@ mod test {
             target: Some("ada@example.com".to_string()),
             status,
             detail: "emailed the company's admin".to_string(),
+            reason: crate::ports::DeliveryReason::OwnerEmailed,
         }
     }
 

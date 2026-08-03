@@ -27,7 +27,7 @@ live cognition is gated.
 | --- | --- |
 | `OPENCOMPANY_COMPANY` | The company to load (used by container images). |
 | `OPENCOMPANY_BIND` | Bind address; the platform harness injects `0.0.0.0:8080`. |
-| `OPENCOMPANY_DATA_DIR` | Where durable state lives; defaults to a local folder. |
+| `OPENCOMPANY_DATA_DIR` | Where durable state lives; defaults to a local folder. Set it to run two hosts side by side without them sharing one company store. The `--home` flag overrides it for company bundles only — the shared workspace directories still follow this variable, so isolating two hosts with `--home` alone only half-works. |
 | `OPENCOMPANY_PUBLIC_URL` | The externally reachable URL, used for discovery. |
 
 The CLI mirrors several of these as flags — see the [CLI reference](cli.md).

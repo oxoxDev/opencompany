@@ -53,6 +53,19 @@
 //! event is the operator's surface. The two answer to different readers, so
 //! neither replaces the other.
 //!
+//! **That split decides what the log lines may say.** Because host stdout is a
+//! platform surface, the undelivered-report warning below carries only fields
+//! that are safe for a reader who is not the tenant: the company, the workflow,
+//! the node, the destination *kind*, whether a target resolved at all, the
+//! status, and a [`DeliveryReason`](crate::ports::DeliveryReason). It does
+//! **not** carry the target, and — since issue #248 — it does not carry
+//! [`DeliveryReport::detail`](crate::ports::DeliveryReport) either: `detail`
+//! interpolates the transport's own text on the failure arms, and a mail
+//! transport quotes the mailbox it refused. `DeliveryReason` is the closed set
+//! that says the same thing about the failure without the ability to carry the
+//! address. The full `detail` still reaches the operator, through the run
+//! response and the journaled event above.
+//!
 //! (A run outcome is deliberately *not* modelled as issue #242's first-class
 //! `RunRecord`. That is a task-attempt record minted at the task dispatch choke
 //! point and keyed to a board task with an attempt ordinal; a workflow run
@@ -338,7 +351,8 @@ impl WorkflowScheduler {
                             let counts = DeliveryCounts::of(&run.deliveries);
                             // One line per undelivered report: a count alone
                             // says something is wrong without saying what to
-                            // fix, and `detail` is the part that names the fix.
+                            // fix, and `reason` is the part that names the
+                            // failure class.
                             for report in &run.deliveries {
                                 if report.status == DeliveryStatus::Sent {
                                     continue;
@@ -373,7 +387,20 @@ impl WorkflowScheduler {
                                     // the part with diagnostic value anyway.
                                     target_configured = report.target.is_some(),
                                     status = ?report.status,
-                                    detail = %report.detail,
+                                    // The classification, NOT `report.detail`.
+                                    // `detail` interpolates the transport's own
+                                    // words on the failure arms, and a mail
+                                    // transport quotes the mailbox it refused —
+                                    // so logging it walks the recipient address
+                                    // onto host stdout through the back door
+                                    // that scrubbing `target` left open (issue
+                                    // #248). `reason` says the same thing about
+                                    // what failed, out of a closed set that
+                                    // cannot carry transport text; the operator
+                                    // still gets the full `detail` on the run
+                                    // response and in the run history their own
+                                    // console reads back.
+                                    reason = %report.reason,
                                     "workflow scheduler: a scheduled run's report was NOT delivered"
                                 );
                             }
@@ -594,7 +621,7 @@ mod test {
     use super::*;
     use crate::company::CompanyManifest;
     use crate::ports::types::{CompanyEvent, CompanyRecord, EventSeq, OverlayWorkflow};
-    use crate::ports::{WorkflowRun, WorkflowRunner};
+    use crate::ports::{DeliveryReason, WorkflowRun, WorkflowRunner};
     use crate::runtime::{FakeClock, RuntimeBuilder};
 
     // --- tracing capture -----------------------------------------------------
@@ -1014,15 +1041,43 @@ to = "done"
 
     // --- report delivery on a scheduled run (issue #170) ---------------------
 
+    /// A row whose classification is the plausible one for its status, so a
+    /// fixture never claims something the two halves would contradict (a `sent`
+    /// row reasoned as a cold recipient, say). Tests that assert on the
+    /// classification itself use [`reported`] and name it.
     fn report(node: &str, status: DeliveryStatus, detail: &str) -> DeliveryReport {
+        let reason = match status {
+            DeliveryStatus::Sent => DeliveryReason::OwnerEmailed,
+            DeliveryStatus::Pending => DeliveryReason::ParkedForApproval,
+            DeliveryStatus::Skipped => DeliveryReason::RecipientNotEstablished,
+            DeliveryStatus::Denied => DeliveryReason::EmailNotGranted,
+            DeliveryStatus::Failed => DeliveryReason::MailTransportRefused,
+        };
+        reported(node, status, reason, detail)
+    }
+
+    /// `report`, with the classification spelled out — for the tests that care
+    /// which half of the row the scheduler logged.
+    fn reported(
+        node: &str,
+        status: DeliveryStatus,
+        reason: DeliveryReason,
+        detail: &str,
+    ) -> DeliveryReport {
         DeliveryReport {
             node: node.to_string(),
             kind: "email".to_string(),
-            target: Some("ada@example.com".to_string()),
+            target: Some(RECIPIENT.to_string()),
             status,
             detail: detail.to_string(),
+            reason,
         }
     }
+
+    /// The recipient address every delivery fixture in this module addresses.
+    /// `.invalid` is reserved by RFC 2606 and can never resolve, so a fixture
+    /// that escapes into a log or a PR body names nobody.
+    const RECIPIENT: &str = "recipient@example.invalid";
 
     /// The fold behind the summary line counts each status separately, because
     /// "policy refused to send" and "something broke" are different problems.
@@ -1059,7 +1114,7 @@ to = "done"
     /// go out must not be silent. There is no HTTP response and no drawer, so
     /// the log line is the whole channel — this reads what the scheduler
     /// actually emitted and asserts the operator-actionable parts are in it:
-    /// which company, which workflow, which node, and the `detail` that says
+    /// which company, which workflow, which node, and the `reason` that says
     /// what to do about it.
     #[tokio::test]
     async fn a_scheduled_run_reports_an_undelivered_report() {
@@ -1117,13 +1172,13 @@ to = "done"
         assert!(line.contains("Skipped"), "names the status: {line}");
         assert!(
             line.contains("never written to the company"),
-            "carries the detail, which is the part that says what to fix: {line}"
+            "carries the reason, which is the part that says what to fix: {line}"
         );
         // …but NOT the recipient's address. This line lands on host stdout,
         // which on a hosted tenant is us rather than the operator, so the
         // address must never ride it — only whether one resolved at all.
         assert!(
-            !line.contains("ada@example.com"),
+            !line.contains(RECIPIENT),
             "must not leak the recipient address to host stdout: {line}"
         );
         assert!(
@@ -1153,6 +1208,129 @@ to = "done"
         assert!(summary.contains("failed=0"), "{summary}");
         assert!(summary.contains("pending_approval=0"), "{summary}");
         assert!(summary.contains("undelivered=1"), "{summary}");
+    }
+
+    /// **Issue #248 — the indirect path.** Scrubbing `report.target` from the
+    /// warning above closed the direct route to host stdout. This is the other
+    /// one: on the transport-failure arms `report.detail` interpolates the
+    /// transport's own words, and a mail transport quotes the mailbox it
+    /// refused — an SMTP `550`/`553` reply is routinely of the form
+    /// `<recipient@…>: Recipient address rejected`. So a row whose `target` is
+    /// scrubbed can still walk the address in through `detail`.
+    ///
+    /// The `detail` here is verbatim what
+    /// [`crate::workflows::delivery`] builds for a refused send, wrapped around
+    /// a realistic SMTP reply, so the fixture fails the way production does
+    /// rather than the way a mock does.
+    ///
+    /// **The assertion is over the emitted event**, not over a string on the way
+    /// to it: it scans the captured `tracing` output for the line the scheduler
+    /// actually wrote. Asserting on `report.reason` alone would prove nothing
+    /// about the log — the whole bug was a field being logged that nobody meant
+    /// to log.
+    #[tokio::test]
+    async fn a_transport_failure_does_not_log_the_address_the_transport_quoted() {
+        let sink = captured_logs();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let company = "transport-refusal-co";
+        // What `delivery::deliver_one`'s `Err(err)` arm produces, with a reply
+        // shaped like a real one.
+        let detail = format!(
+            "the mail transport refused the message: 550 5.1.1 <{RECIPIENT}>: Recipient address \
+             rejected: User unknown in local recipient table"
+        );
+        let (runner, completed) = RecordingRunner::with_deliveries(vec![reported(
+            "owner_summary",
+            DeliveryStatus::Failed,
+            DeliveryReason::MailTransportRefused,
+            &detail,
+        )]);
+        let registry = company_with_overlays(
+            &home,
+            company,
+            vec![overlay("digest", Some("* * * * *"))],
+            Some(runner),
+            "running",
+        )
+        .await;
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry, clock);
+
+        assert_eq!(scheduler.tick().await, 1);
+        wait_for(|| completed.load(Ordering::SeqCst) == 1).await;
+        wait_for(|| {
+            captured_text(&sink)
+                .lines()
+                .any(|l| l.contains(company) && l.contains("was NOT delivered"))
+        })
+        .await;
+
+        let logs = captured_text(&sink);
+        let line = logs
+            .lines()
+            .find(|l| l.contains(company) && l.contains("was NOT delivered"))
+            .unwrap_or_else(|| panic!("no undelivered-report line for {company}: {logs}"));
+
+        // The point of the issue: not through `target`, and not through the
+        // transport's reply either.
+        assert!(
+            !line.contains(RECIPIENT),
+            "the transport's reply must not walk the recipient address onto host stdout: {line}"
+        );
+        // Belt and braces — the address's local part alone is enough to
+        // identify a person, so an over-eager "strip the domain" fix must fail
+        // this too.
+        assert!(
+            !line.contains("recipient@"),
+            "not even a partial address: {line}"
+        );
+        // The whole reply is absent, not merely masked mid-string: nothing of
+        // the transport's own text reaches the line.
+        assert!(
+            !line.contains("Recipient address rejected"),
+            "no transport-supplied text at all: {line}"
+        );
+
+        // …and the line is still worth reading. An operator paged by this needs
+        // to know where to look and what class of thing broke.
+        assert!(line.contains("digest"), "names the workflow: {line}");
+        assert!(line.contains("owner_summary"), "names the node: {line}");
+        assert!(
+            line.contains("kind=email"),
+            "names the destination kind: {line}"
+        );
+        assert!(line.contains("Failed"), "names the status: {line}");
+        assert!(
+            line.contains("target_configured=true"),
+            "says a target resolved, without saying which: {line}"
+        );
+        assert!(
+            line.contains("the mail transport refused the message"),
+            "names the failure class: {line}"
+        );
+    }
+
+    /// The operator's half is deliberately NOT scrubbed. `detail` is what makes
+    /// a refused send fixable, the run response and the journaled
+    /// `WorkflowRunFinished` event are tenant-scoped surfaces, and an operator
+    /// is entitled to their own recipient's address. Pinned so a later "scrub
+    /// it everywhere" sweep has to argue with a test.
+    #[test]
+    fn the_operator_facing_detail_keeps_the_transport_text() {
+        let detail =
+            format!("the mail transport refused the message: 550 5.1.1 <{RECIPIENT}>: rejected");
+        let row = reported(
+            "owner_summary",
+            DeliveryStatus::Failed,
+            DeliveryReason::MailTransportRefused,
+            &detail,
+        );
+        assert!(row.detail.contains(RECIPIENT), "{row:?}");
+        assert_eq!(row.target.as_deref(), Some(RECIPIENT));
+        // The two halves disagree on purpose — that IS the fix.
+        assert!(!row.reason.to_string().contains(RECIPIENT), "{row:?}");
+        assert!(!row.reason.to_string().contains('@'), "{row:?}");
     }
 
     /// Issue #227: a scheduled run whose report was parked for approval is the
@@ -1206,7 +1384,7 @@ to = "done"
         assert!(line.contains("Approvals view"), "says where to go: {line}");
         // Never the recipient's address on host stdout, same as the warn path.
         assert!(
-            !line.contains("ada@example.com"),
+            !line.contains(RECIPIENT),
             "must not leak the recipient address to host stdout: {line}"
         );
         // Not cried wolf about.
@@ -1361,7 +1539,7 @@ to = "done"
         // The journal is operator-scoped — unlike host stdout — so the resolved
         // target rides it. This is the same field the manual run's HTTP response
         // already ships to the console today.
-        assert_eq!(skipped.target.as_deref(), Some("ada@example.com"));
+        assert_eq!(skipped.target.as_deref(), Some(RECIPIENT));
     }
 
     /// The arm that was quietest of all: a scheduled run that failed outright
