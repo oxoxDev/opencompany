@@ -1985,7 +1985,12 @@ mod test {
 
         // The legacy row survives the migration and reports an *unknown* store
         // time — not the epoch, and not a misleading "migrated just now".
-        let metas = store.list(&id, "").await.expect("list after migration");
+        // Fully qualified: `SqliteStore` implements both `ContextStore::list`
+        // and `CompanyStore::list`, and method resolution matches on the name
+        // alone — arity does not disambiguate, so the bare call is `E0034`.
+        let metas = ContextStore::list(&store, &id, "")
+            .await
+            .expect("list after migration");
         assert_eq!(metas.len(), 1, "the legacy row must not be dropped");
         assert_eq!(metas[0].label, "agent/ceo");
         assert_eq!(
@@ -2006,7 +2011,9 @@ mod test {
             .await
             .expect("put into a migrated database");
 
-        let metas = store.list(&id, "").await.expect("list after put");
+        let metas = ContextStore::list(&store, &id, "")
+            .await
+            .expect("list after put");
         assert_eq!(metas.len(), 2);
         let fresh = metas
             .iter()
