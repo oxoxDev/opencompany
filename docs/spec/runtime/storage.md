@@ -99,9 +99,12 @@ Two consequences worth knowing:
   (`docker/entrypoint.sh` passes `--home "$OPENCOMPANY_DATA_DIR"`), so it never
   warns — nor does the untouched local default.
 
-`OPENCOMPANY_HOME` is **not** a synonym and is not read. It was never wired to
-anything, so setting it was silently ignored; `serve` now aborts with an error
-naming `OPENCOMPANY_DATA_DIR` instead.
+`OPENCOMPANY_HOME` is **not** a synonym and is **not supported**. It was never
+wired to anything, so setting it used to be ignored silently. The resolver now
+reads it solely to reject it: `serve`, `export`, and `import` abort with an error
+naming `OPENCOMPANY_DATA_DIR` instead. The rejection is checked before `--home`,
+so passing the flag does not suppress it — a stale entrypoint that still exports
+the variable fails loudly rather than half-placing a store.
 
 #### Running two hosts side by side
 

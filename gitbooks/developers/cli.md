@@ -73,14 +73,16 @@ bundle directory. Both accept `--home <DIR>`, and both fall back to
 Every subcommand that touches company bundles resolves one root, highest
 precedence first:
 
-1. `--home <DIR>` — an explicit flag always wins.
+1. `--home <DIR>` — an explicit flag outranks both entries below.
 2. `OPENCOMPANY_DATA_DIR` — the instance data root. Set it to run two hosts side
    by side; without isolation they share one company store and each one's
    teammates and desks show up in the other.
 3. `$HOME/.opencompany/companies` — the default when neither is set.
 
-`OPENCOMPANY_HOME` is not read. It never was, so setting it used to do nothing
-silently; commands now abort and point at `OPENCOMPANY_DATA_DIR`.
+`OPENCOMPANY_HOME` is not supported. It never was, so setting it used to do
+nothing silently; `serve`, `export`, and `import` now abort and point at
+`OPENCOMPANY_DATA_DIR`. The check runs before `--home`, so passing the flag does
+not silence it.
 
 ## `open-human`
 
