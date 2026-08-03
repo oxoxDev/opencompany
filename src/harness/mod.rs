@@ -55,6 +55,12 @@ pub mod policy;
 pub mod provider;
 pub mod run_turn;
 pub mod search;
+/// End-to-end proof that the #238 `web_search` tool is reachable from a real
+/// turn — the harness, the grant gates, the approval policy, the cap and the
+/// meter are all real; only the model's choices and the search backend's
+/// responses are scripted. Test-only.
+#[cfg(test)]
+mod search_turn_test;
 pub mod skills;
 pub mod steer;
 pub mod steps;
