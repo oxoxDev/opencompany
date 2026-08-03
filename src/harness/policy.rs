@@ -44,6 +44,7 @@ use oh::agent::tool_policy::{ToolPolicy, ToolPolicyDecision, ToolPolicyRequest};
 
 use crate::company::Policy;
 use crate::ports::types::{Effect, EffectGroup};
+use crate::runtime::grants::GrantSet;
 
 /// Most approval requests parked out of a single turn. A model that keeps
 /// re-trying a blocked tool (openhuman feeds it a refusal and lets it continue)
@@ -106,6 +107,21 @@ pub struct ApprovalRequest {
 #[derive(Clone, Default)]
 pub struct ApprovalRequestQueue {
     inner: Arc<Mutex<Vec<ApprovalRequest>>>,
+    /// The live single-use grants (issue #243), riding along so the whole
+    /// approval round-trip travels on one handle.
+    ///
+    /// It lives here rather than as a new `HarnessDeps` field because every one
+    /// of the ~28 `HarnessDeps` literals in this crate (tests, examples, the
+    /// builder) would otherwise have to be widened to carry it — for a value
+    /// only the approval path reads.
+    ///
+    /// **Its own `Arc<Mutex<..>>` is load-bearing**, not incidental
+    /// encapsulation. [`clear`](Self::clear) runs at the top of every cycle and
+    /// empties `inner`; a grant folded into that same allocation would be wiped
+    /// by the very cycle that was dispatched to redeem it, so the feature would
+    /// fail in exactly its own happy path. The test
+    /// `grants_survive_a_queue_clear` pins this.
+    grants: GrantSet,
 }
 
 impl ApprovalRequestQueue {
@@ -139,6 +155,11 @@ impl ApprovalRequestQueue {
         let drained: Vec<ApprovalRequest> = guard.drain(..take).collect();
         guard.clear();
         drained
+    }
+
+    /// The live single-use grant set carried alongside this queue (issue #243).
+    pub fn grants(&self) -> GrantSet {
+        self.grants.clone()
     }
 
     /// The number of queued requests (test/observability).
@@ -1038,6 +1059,45 @@ mod tests {
         let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
         assert_eq!(drained.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
         assert_eq!(queue.queued(), 0, "the overflow is discarded, not carried");
+    }
+
+    /// Issue #243, and the single most fragile thing about riding the grant set
+    /// inside this queue: `HarnessBrain::run_cycle` calls
+    /// [`ApprovalRequestQueue::clear`] at the top of **every** cycle.
+    ///
+    /// A grant is minted by the approve, and redeemed during the follow-up cycle
+    /// that approve kicks off — so if `clear()` reached the grants, the feature
+    /// would be destroyed by its own happy path: the cycle dispatched to redeem
+    /// the grant would wipe it microseconds before the agent's tool call arrived,
+    /// and every approval would fall through and re-park. Separate inner locks
+    /// are what prevent that, and this pins it.
+    #[test]
+    fn grants_survive_a_queue_clear() {
+        let queue = ApprovalRequestQueue::default();
+        let grants = queue.grants();
+        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" });
+        grants.grant(crate::runtime::grants::GrantedCall {
+            approval_id: crate::ports::types::ApprovalId::new("appr-1"),
+            agent: "finance".into(),
+            tool: "composio_execute".into(),
+            args: args.clone(),
+            at_millis: 1_000,
+        });
+
+        queue.clear();
+
+        assert_eq!(
+            grants.live_count(),
+            1,
+            "clearing the request queue must not clear the grants it rides with"
+        );
+        assert!(
+            queue
+                .grants()
+                .consume("finance", "composio_execute", &args)
+                .is_some(),
+            "and the grant is still redeemable through a fresh handle"
+        );
     }
 
     /// A queue nobody installed stays inert — the default policy behaves exactly

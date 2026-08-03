@@ -36,6 +36,11 @@ pub mod delegation;
 /// catalog, and desk-lead resolver shared by BOTH the harness and hosted paths.
 /// Compiled in every build (the hosted brain ships in the default build).
 pub mod delegation_tools;
+/// Single-use grants minted when an operator approves a blocked tool call
+/// (issue #243). Compiled in every build: the journal records and their replay
+/// are feature-independent, so a company that ran under the harness stays
+/// replayable by a build without it.
+pub mod grants;
 pub mod journal;
 pub mod mailbox_poller;
 pub mod registry;
