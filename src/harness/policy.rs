@@ -280,10 +280,16 @@ impl ToolPolicy for ApprovalPolicy {
         }
 
         let external = is_external_effect(tool);
+        // A *metered read* (issue #238) is external — it reaches a third party
+        // and spends real money — but it changes nothing anywhere, so under
+        // `supervised` the consent already given at grant time is enough and
+        // the daily call cap is the boundary. Under `readonly` it is still
+        // denied: that tier's contract is that nothing is spent.
+        let metered_read = is_metered_read(tool);
         match self.mode {
             PolicyMode::Full => ToolPolicyDecision::Allow,
             PolicyMode::Supervised => {
-                if external {
+                if external && !metered_read {
                     self.require_approval(
                         tool,
                         &request.arguments,
@@ -304,6 +310,39 @@ impl ToolPolicy for ApprovalPolicy {
             }
         }
     }
+}
+
+/// Does this tool reach outside and spend money, while changing nothing?
+///
+/// A third bucket the original binary could not express, added for `web_search`
+/// (issue #238). The existing classifier conflates two questions —
+/// *does it change anything / reach a counterparty* and *does it cost money* —
+/// which is fine while every tool answers both the same way. `media_list_models`
+/// is free, so waving it through in every mode is safe.
+/// [`crate::harness::search`]'s `web_search` is not: the backend charges per
+/// request.
+///
+/// The two modes therefore want different answers, and this is what lets them
+/// have them:
+///
+/// * **`supervised`** — allowed. The issue's #188 sign-off is explicit that
+///   individual searches must not park: consent happens once, at grant time (an
+///   explicit `search` grant a `*` cannot confer), and the per-company daily
+///   cap is the boundary. Parking each call would also be *useless* here rather
+///   than merely annoying — openhuman resolves a `RequireApproval` inline and
+///   never re-dispatches the call (see the module docs), so a parked search is
+///   a search that never happens, and an agent with no search does the exact
+///   thing this feature exists to stop: it invents citations.
+/// * **`readonly`** — still denied, via the ordinary external-effect path.
+///   A read-only desk is one that spends nothing, and this spends. That is a
+///   deliberate divergence from the issue text, which would have made a paid
+///   call unstoppable in the one tier whose whole promise is that nothing
+///   moves.
+///
+/// An operator who *does* want a per-call gate has one: `[policy].always_approve
+/// = ["web_search"]` wins over every tier, including `full`.
+fn is_metered_read(tool_name: &str) -> bool {
+    tool_name.eq_ignore_ascii_case(crate::harness::search::WEB_SEARCH_TOOL)
 }
 
 /// Heuristic: does this tool mutate state or reach an external counterparty?
@@ -345,6 +384,13 @@ fn is_external_effect(tool_name: &str) -> bool {
     ) {
         return false;
     }
+    // `web_search` (issue #238) is deliberately NOT carved out here. It reaches
+    // a third party and the managed backend charges for it, so it must stay on
+    // the external side and be DENIED under `readonly`. What keeps it from
+    // parking under `supervised` is `is_metered_read`, which is a narrower claim
+    // ("costs money but changes nothing") than the one this function answers.
+    // Note also that it would not have matched a read-only prefix by accident:
+    // the list below starts `search`, but the tool is `web_search`.
     const READ_ONLY_PREFIXES: &[&str] = &[
         "read",
         "list",
@@ -376,6 +422,12 @@ fn classify_group(tool_name: &str) -> EffectGroup {
         // email, post a message, open a PR) — a send effect. Placed before the
         // generic `contains` heuristics so the slug can't be misclassified.
         EffectGroup::Send
+    } else if name == crate::harness::search::WEB_SEARCH_TOOL {
+        // A metered search is billed by the backend per request (issue #238), so
+        // when it *does* park — an operator listing it in `always_approve` — the
+        // Approvals page must say "spend", not the catch-all "other". An
+        // operator approving a paid call deserves to be told it is one.
+        EffectGroup::Spend
     } else if name.starts_with("media_generate") {
         // Image/video generation is billed by the backend on submit (issue
         // #109), so it is a spend effect — parked for approval before money
@@ -638,6 +690,111 @@ mod tests {
             p.effect_for("composio_execute", &serde_json::json!({}))
                 .group,
             EffectGroup::Send
+        );
+    }
+
+    /// Metered web search (issue #238): allowed under `supervised`, DENIED
+    /// under `readonly`, allowed under `full`.
+    ///
+    /// This is the classification decision the issue got wrong in both
+    /// directions, so it is pinned here rather than left to the heuristic:
+    ///
+    /// * It must **not park** under `supervised`. openhuman resolves a
+    ///   `RequireApproval` inline and never re-dispatches the call (module
+    ///   docs), so parking a search is not "the operator approves it later" —
+    ///   it is "the search never happens", leaving the agent in exactly the
+    ///   no-discovery state that makes it invent citations. Consent is the
+    ///   explicit `search` grant; the boundary is the daily cap.
+    /// * It must **still be denied** under `readonly`. The issue proposed a
+    ///   flat carve-out, which would have made a paid outbound call
+    ///   unstoppable in the one tier whose entire promise is that nothing is
+    ///   spent. `web_fetch`, its sibling in the same research loop, is denied
+    ///   there; a *priced* discovery call has no business being more permissive
+    ///   than the free retrieval call it feeds.
+    #[tokio::test]
+    async fn web_search_never_parks_under_supervised_but_is_denied_read_only() {
+        let supervised = policy("supervised", &[], None);
+        assert_eq!(
+            supervised
+                .check(&request(
+                    "web_search",
+                    serde_json::json!({ "query": "acme pricing" })
+                ))
+                .await,
+            ToolPolicyDecision::Allow,
+            "a search must not park: a parked search is a search that never runs"
+        );
+        assert_eq!(
+            supervised.requests.queued(),
+            0,
+            "an allowed search must not queue an approval request"
+        );
+
+        // Its sibling in the same research loop still parks — searching is
+        // carved out because it is a *read*, not because `web` was relaxed.
+        assert!(
+            matches!(
+                supervised
+                    .check(&request(
+                        "web_fetch",
+                        serde_json::json!({ "url": "https://a.test/" })
+                    ))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "web_fetch must still park under supervised"
+        );
+
+        let readonly = policy("readonly", &[], None);
+        assert!(
+            matches!(
+                readonly
+                    .check(&request(
+                        "web_search",
+                        serde_json::json!({ "query": "acme" })
+                    ))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "a read-only desk spends nothing, and a search spends"
+        );
+
+        let full = policy("full", &[], None);
+        assert_eq!(
+            full.check(&request(
+                "web_search",
+                serde_json::json!({ "query": "acme" })
+            ))
+            .await,
+            ToolPolicyDecision::Allow
+        );
+    }
+
+    /// The operator's escape hatch: `always_approve` wins over every tier, so a
+    /// company that *does* want to eyeball each paid search can have that —
+    /// and the parked request is projected as a **spend**, not the catch-all
+    /// "other", so the Approvals page says what is being approved.
+    #[tokio::test]
+    async fn an_operator_can_still_force_approval_on_each_search() {
+        let policy = policy("supervised", &["web_search"], None);
+        assert!(
+            matches!(
+                policy
+                    .check(&request(
+                        "web_search",
+                        serde_json::json!({ "query": "acme" })
+                    ))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "`always_approve` must override the metered-read carve-out"
+        );
+        assert_eq!(
+            policy
+                .effect_for("web_search", &serde_json::json!({}))
+                .group,
+            EffectGroup::Spend,
+            "a paid call must not park as an unlabelled `Other`"
         );
     }
 
