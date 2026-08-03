@@ -22,18 +22,38 @@ export function useHashView<T extends string>(
 
   const [view, setView] = useState<T>(resolve);
 
-  // Reflect the initial view into the URL if it arrived without a hash.
+  /**
+   * Rewrite the URL so it names the view actually on screen. An empty hash and
+   * an unknown one (`#/finances` after a surface is retired, a typo, a stale
+   * bookmark) both resolve to `fallback`, and without this the address bar
+   * keeps claiming a view that isn't rendered.
+   *
+   * Replace semantics, never push: pushing leaves the unknown hash in the
+   * history stack, so Back returns to it, this rewrite bounces forward again,
+   * and the operator is stuck in a ping-pong they cannot Back out of.
+   */
+  const canonicalize = useCallback((next: T) => {
+    if (readHash() === next) return;
+    window.history.replaceState(null, "", `#/${next}`);
+  }, []);
+
+  // Reflect the resolved view into the URL when the page arrived with no hash
+  // or an unrecognized one.
   useEffect(() => {
-    if (!readHash()) window.location.replace(`#/${view}`);
+    canonicalize(view);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Follow browser back/forward and manual hash edits.
   useEffect(() => {
-    const onHash = () => setView(resolve());
+    const onHash = () => {
+      const next = resolve();
+      setView(next);
+      canonicalize(next);
+    };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
-  }, [resolve]);
+  }, [resolve, canonicalize]);
 
   const navigate = useCallback((next: T) => {
     if (readHash() !== next) window.location.hash = `/${next}`;
