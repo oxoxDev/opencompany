@@ -491,6 +491,14 @@ async fn a_wildcard_grant_turn_can_read_but_is_never_offered_the_write_tool() {
             tool: "workspace_read",
             args: json!({ "path": "Standards/Engineering standards.md" }),
         },
+        // Nothing stops a model naming a tool it was never offered. Under a
+        // bare `*` the write must be *refused*, not merely left unadvertised —
+        // advertisement is a hint, the grant check is the control.
+        Turn::WriteWithObservedRev {
+            path: "Standards/Engineering standards.md",
+            content: "clobbered",
+            delta: 0,
+        },
         Turn::Say("Our standard is to review every PR before merge."),
     ])
     .await;
@@ -525,7 +533,11 @@ async fn a_wildcard_grant_turn_can_read_but_is_never_offered_the_write_tool() {
     );
 
     let (_, body) = store.read(&record.id, "n-eng").await.unwrap().unwrap();
-    assert_eq!(body, "# Engineering\nReview every PR before merge.");
+    assert_eq!(
+        body, "# Engineering\nReview every PR before merge.",
+        "the unadvertised write tool was called anyway and went through — a bare \
+         `*` must refuse it at the grant check, not just omit it from the list"
+    );
 }
 
 /// Freshness through a real turn: an edit landing between two turns changes
