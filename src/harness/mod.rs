@@ -147,8 +147,9 @@ pub struct HarnessDeps {
     /// the console's registry tab browses. Used only to heal pre-fix registry
     /// installs, whose stored snapshot is a one-line stub — see
     /// [`EffectiveSkills::materialize`](crate::harness::skills::EffectiveSkills::materialize).
-    /// Empty in platform-provisioned mode (no repo checkout), where a stub
-    /// simply stays as it is.
+    /// Empty only when the host serves no shared skill library, where a stub
+    /// simply stays as it is; a platform-provisioned runtime otherwise receives
+    /// the library the application state loaded, same as the serve path.
     pub skills_registry: Arc<[crate::company::SkillDoc]>,
     /// The company's effective MCP servers (issue #50), resolved to **data**
     /// (manifest `[[mcp_server]]` ∪ the runtime index, with each server's
