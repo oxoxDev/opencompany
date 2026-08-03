@@ -387,7 +387,32 @@ impl ToolPolicy for ApprovalPolicy {
         //
         // Adding the arm below the grant check would silently invert that.
 
-        // 1. A live single-use grant: the operator already approved exactly this
+        // 1. `readonly` outranks a grant — the brake wins (issue #243).
+        //
+        // A grant can be up to `GRANT_TTL_MILLIS` old when it is redeemed, so a
+        // company can be switched to `readonly` in the window between the
+        // operator approving a call and the agent re-issuing it. Switching to
+        // `readonly` is the emergency stop, and that window is exactly when
+        // someone means it: the tier's contract is that nothing mutates and
+        // nothing reaches outside, and an approval given under a laxer mode is
+        // the older instruction. Consent does not survive the brake.
+        //
+        // Scoped deliberately to `readonly` and to external effects — the same
+        // condition the mode arm below denies on. `supervised` and `full` still
+        // fall through to the grant, because bypassing `supervised`'s re-park is
+        // the entire point of a grant.
+        //
+        // The grant is left UNCONSUMED here: this call never ran, so the
+        // operator's approval stays redeemable if the brake is released inside
+        // the TTL. It expires on its own otherwise.
+        if self.mode == PolicyMode::Readonly && is_external_effect(tool) {
+            return ToolPolicyDecision::deny(format!(
+                "'{tool}' mutates or reaches outside; this desk is read-only, \
+                 so an earlier approval does not apply"
+            ));
+        }
+
+        // 2. A live single-use grant: the operator already approved exactly this
         //    call, so let it through — once (issue #243).
         //
         // ABOVE `always_requires_approval` on purpose. A tool on the
@@ -1329,15 +1354,28 @@ mod tests {
         let args = serde_json::json!({ "to": "a@b.test" });
         grants.grant(granted("finance", "publish_post", args.clone()));
 
-        // The grant IS consumed at the top of `check` — it matched — so this
-        // documents the honest outcome rather than an imagined one: the call is
-        // allowed by the grant it was minted for. The `readonly` tier's guarantee
-        // is upheld at mint time instead: `ManifestApprovalGate` gates what may
-        // park, and the operator is the one who chose to approve it.
-        assert_eq!(
-            p.check(&request("publish_post", args)).await,
-            ToolPolicyDecision::Allow
+        // `readonly` outranks the grant. A grant can be up to its TTL old, so the
+        // company may have been switched to `readonly` between the operator
+        // approving this call and the agent re-issuing it — and that switch is
+        // the emergency stop. The tier's contract wins over the older consent.
+        assert!(
+            matches!(
+                p.check(&request("publish_post", args.clone())).await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "a live grant must not survive the readonly brake"
         );
+
+        // And the grant was NOT consumed by that denial — the call never ran, so
+        // the operator's approval is still redeemable if the brake comes off
+        // inside the TTL.
+        assert!(
+            grants
+                .peek(&crate::ports::types::ApprovalId::new("appr-1"))
+                .is_some(),
+            "a denied call must not burn the grant it never used"
+        );
+
         // Anything the operator did NOT approve is still denied outright.
         assert!(matches!(
             p.check(&request("publish_post", serde_json::json!({ "other": 1 })))
