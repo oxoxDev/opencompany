@@ -97,7 +97,15 @@ test("a key typed for a BYOK provider does reach the host on save", async ({ pag
   await page.locator("#inference-key").fill(`pw-e2e-${Date.now()}`);
   await page.getByTestId("inference-save").click();
 
-  await expect(page.getByText("Inference updated.")).toBeVisible({ timeout: 30_000 });
+  // Either success wording is correct here, and which one shows is not this
+  // spec's business: a company that booted with no inference source is on the
+  // echo brain, so issue #266 makes the host report `restartRequired` for
+  // exactly this not-configured → configured save and the toast says "restart"
+  // instead of "next turn". What #265 asserts is that the save was *accepted*
+  // rather than refused — the stored-credential check below is the real proof.
+  await expect(
+    page.getByText(/Inference updated\.|Inference saved — restart the company/),
+  ).toBeVisible({ timeout: 30_000 });
   const status = await page.request.get("/api/v1/company/inference");
   expect(status.ok()).toBeTruthy();
   const body = await status.json();
