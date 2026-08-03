@@ -45,6 +45,7 @@ import {
   type ConnectionProvider,
 } from "@/lib/connections";
 import { cn } from "@/lib/utils";
+import { armTourResume } from "@/tour/state";
 import { InferenceSection } from "@/views/connections/InferenceSection";
 import { ComposioSection } from "@/views/connections/ComposioSection";
 import { ChannelsSection } from "./connections/ChannelsSection";
@@ -83,6 +84,14 @@ export function ConnectionsView({ client, company }: Props) {
     setBusy(p.id);
     try {
       const { url } = await client.startConnection(p.id, company);
+      // Unlike the MCP sign-in below (which opens a tab and survives), this
+      // navigates the whole document away — taking the product tour's
+      // in-memory step state with it. Arm a resume marker so the operator comes
+      // back to the stop they left instead of the tour restarting from step 1
+      // (issue #300). No-op when no tour is running, and deliberately after the
+      // start call succeeds: a provider that isn't configured 400s here and
+      // never navigates, so it must not leave a marker behind.
+      armTourResume(company);
       window.location.href = url;
     } catch {
       toast.error(`Couldn't start the ${p.name} connection.`);
