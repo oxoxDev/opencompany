@@ -103,9 +103,17 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
   desks from `[[group_chat]]` and page their history; send uses the `chat`
   endpoint. Desk-scoped routing of replies is single-responder in v1 (the full
   desk-member handler is WS3).
+- **Console:** the Desks management screen (`src/views/DesksView.tsx`) is no
+  longer listed in the sidebar as of issue #302 — hidden, not retired. The
+  `/desks` routes and store are unchanged and this thread list still builds from
+  real desks; desk management is manifest-only until a hierarchy/org-tree
+  successor lands.
 
 ### Inbox — `src/views/InboxView.tsx`, `src/api/inbox.ts`
 - Per-agent email inbox; enabled via a Team toggle.
+- **Console:** not listed in the sidebar as of issue #302 — hidden, not retired.
+  Every endpoint below is unchanged and still serving; only the operator entry
+  point is gone. The Team toggle that enables an inbox stays where it was.
 - **Source:** ✅ real — `client.listInboxes()` (`GET …/inboxes`) lists every inbox
   with its unread count and `client.inboxMessages()`
   (`GET …/inboxes/{key}/messages`) reads one teammate's mail, both
@@ -141,8 +149,11 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
   `PATCH`/`DELETE …/workspace/{id}`. New companies seed from
   `companies/<name>/workspace/**` on first use.
 
-### Memory — `src/views/MemoryView.tsx`, `src/lib/memory.ts`
+### Memory (Brain) — `src/views/MemoryView.tsx`, `src/lib/memory.ts`
 - Durable facts (fact/preference/person/project/reference); search + add/delete.
+- **Console:** not listed in the sidebar as of issue #302 — hidden, not retired.
+  The endpoints below are unchanged and agents keep reading and writing memory;
+  only the operator-facing Brain tab is gone.
 - **Source:** ✅ real — `Company.memory` (GraphQL, `FactStore`-backed, with
   query/kind filters); `POST …/memory` adds and `DELETE …/memory/{id}` deletes
   (deletion journals `MemoryFactDeleted` to the EventLog).
@@ -162,6 +173,9 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
 
 ### Finances — `src/views/FinancesView.tsx`, `src/lib/finance-sample.ts`
 - Wallet balance, revenue, spend vs budget, spend-by-category, transactions.
+- **Console:** not listed in the sidebar as of issue #302 — hidden, not retired.
+  The `Company.finances` projection below is unchanged; only the operator entry
+  point is gone.
 - **Source:** ✅ real — `Company.finances` (GraphQL) projects the ledger +
   `[budget]` + optional economy wallet balance (balance, budget vs spend,
   revenue, byCategory, transactions). **Caveat:** the inference-cost component
