@@ -168,7 +168,11 @@ prompt = "Weekly review and operator digest"
     read-only grant. Writes overwrite one **existing** note only and require an
     `expected_updated_at` revision token taken from a prior read, so a note
     edited in the console since the agent read it is refused rather than
-    clobbered; creating, renaming and deleting notes stay operator-only. Under
+    clobbered; creating, renaming and deleting notes stay operator-only. Both
+    sides are capped at 64 KiB, which makes a larger note agent-read-only: the
+    agent sees a truncated body, and a write against it is refused rather than
+    discarding the part it could not see, so only an operator can edit it in the
+    console. Under
     `[policy].mode = "supervised"` (the default) a write additionally parks for
     approval, and under `readonly` it is denied — reads stay available in every
     mode. The namespace is **not** gateable by `[plan].token_budgets`: reads
