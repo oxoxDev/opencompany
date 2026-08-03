@@ -174,11 +174,21 @@ jobs:
 
       # Catches the combination traps no single feature set can: most often a
       # mandatory struct field constructed differently across feature arms.
-      # CHECK-ONLY BY DESIGN — `--all-features` also enables the storage
-      # backends, whose test target does not currently compile (#288), so this
-      # step must not be widened to `--all-targets` or to `cargo test`.
+      #
+      # `--all-targets` is LOAD-BEARING (issue #288). Without it this step
+      # checks the lib and bins only, so test code behind a storage feature is
+      # compiled by NOTHING in CI: the default `rust` job runs `cargo test`
+      # without `sqlite`, and the gated steps above pin `openhuman,tinycortex`.
+      # That gap let two `E0034`s in `src/store/sqlite.rs`'s own tests sit on
+      # `main` unseen — a green check is only evidence for the surface it
+      # actually compiles.
+      #
+      # CHECK-ONLY BY DESIGN — compiling every target is not running any of
+      # them. This step must never become `cargo test`: `--all-features` also
+      # enables `mcp`, which changes what an agent's tool belt *contains*, and
+      # that contract is pinned by the dedicated narrow step below.
       - name: Check (--all-features)
-        run: cargo check --locked --all-features
+        run: cargo check --locked --all-features --all-targets
 
       # The tool belt the SHIPPED tenant image actually builds (issue #297).
       #
