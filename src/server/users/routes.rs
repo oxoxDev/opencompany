@@ -66,6 +66,7 @@ pub fn router() -> Router<AppState> {
         .merge(public_scoped("/auth/login", post(login_password)))
         .merge(public_scoped("/auth/logout", post(logout)))
         .merge(public_scoped("/auth/me", get(me)))
+        .merge(public_scoped("/auth/handoff", post(handoff)))
         .merge(public_scoped("/auth/password", post(set_password)))
 }
 
@@ -93,6 +94,12 @@ struct RequestCodeResult {
 
 #[derive(Debug, Deserialize)]
 struct VerifyCode {
+    code: String,
+}
+
+/// A console handoff code, minted by the hub and carried by the browser.
+#[derive(Debug, Deserialize)]
+struct HandoffCode {
     code: String,
 }
 
@@ -522,6 +529,115 @@ async fn verify_code(
         return Err(invalid_login());
     };
     let user = upsert_from_eligibility(&runtime, &code.email, role, now)
+        .await
+        .map_err(|e| ApiError(e).into_response())?;
+    mint_session(&state, &runtime, &user, &headers).await
+}
+
+/// `403` for a handoff this host cannot or will not honor.
+///
+/// Unlike [`invalid_login`], these say what went wrong. The generic-failure
+/// rule exists so the login routes cannot be used as a membership oracle, and
+/// nothing here leaks membership: "this host has no handoff exchange" and "that
+/// code was minted for another company" are facts about the *deployment*, and
+/// the caller already knew both. `not_a_member` is the one that touches a
+/// person, and it is only ever reached by someone who already redeemed a live,
+/// single-use, sub-minute code minted by the hub for that exact address — they
+/// are not learning anything they did not just prove.
+fn handoff_refused(code: &'static str, message: &'static str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({ "error": message, "code": code })),
+    )
+        .into_response()
+}
+
+/// `POST …/auth/handoff` — turn an ecosystem sign-in into a session here.
+///
+/// The dashboard mints a single-use code against the hub and sends the browser
+/// here carrying it. This route spends the code, learns which address it stands
+/// for, and — if that address is eligible in *this* company by the same rules a
+/// magic link answers to — mints an ordinary human session.
+///
+/// It is deliberately the same three calls the magic-link path makes:
+/// [`eligibility`], [`upsert_from_eligibility`], [`mint_session`]. First login
+/// and Nth login stay one code path, and an ecosystem sign-in gets no privilege
+/// a mailed link would not have given the same person. In particular this does
+/// not touch `platform_auth`: that surface is the hosting layer's machine
+/// credential, and a human arriving from the dashboard must not acquire one.
+async fn handoff(
+    company: PublicCompany,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<HandoffCode>,
+) -> Result<Response, Response> {
+    let runtime = company.runtime.clone();
+
+    // Refuse before spending the code when this host has no basis to judge it.
+    // A host that cannot name its own slug, or cannot reach the hub to redeem,
+    // would otherwise be accepting the code as a bearer credential.
+    let Some(expected_slug) = state.config().tenant_slug.clone() else {
+        return Err(handoff_refused(
+            "handoff_unavailable",
+            "this host is not part of a TinyHumans ecosystem",
+        ));
+    };
+    let Some(exchange) = state.console_handoff().cloned() else {
+        return Err(handoff_refused(
+            "handoff_unavailable",
+            "this host is not part of a TinyHumans ecosystem",
+        ));
+    };
+
+    // Spending the code is what proves it was real. Everything below reasons
+    // about the identity the hub returned, never about the request body.
+    let identity = match exchange.redeem(&body.code).await {
+        Ok(identity) => identity,
+        // A 4xx from the hub means the code is spent, expired, or was never
+        // real — a dead credential, not a broken hub. Surfacing the raw 502 the
+        // error type otherwise maps to would tell the user the ecosystem is
+        // down when all they need to do is click through again.
+        Err(OpenCompanyError::TinyHumans { code, .. }) if code.starts_with("http_4") => {
+            return Err(handoff_refused(
+                "handoff_invalid",
+                "that sign-in has expired — open this company again from your dashboard",
+            ));
+        }
+        // Anything else really is the hub being unreachable or wrong, and keeps
+        // its 502/503 so an operator can tell the two apart.
+        Err(err) => return Err(ApiError(err).into_response()),
+    };
+
+    // The hub binds a code to one slug; this is the tenant *checking* that
+    // binding. Without it a hostile tenant could relay a neighbour's code and
+    // sign that user into itself, which is the whole reason the code carries a
+    // slug at all.
+    if identity.slug != expected_slug {
+        tracing::warn!(
+            company = %runtime.id(),
+            "console handoff code was minted for another company",
+        );
+        return Err(handoff_refused(
+            "handoff_wrong_company",
+            "that sign-in was not meant for this company",
+        ));
+    }
+
+    let email = normalize_email(&identity.email);
+    let now = now_millis();
+    let Some(role) = eligibility(&runtime, &email, now)
+        .await
+        .map_err(|e| ApiError(e).into_response())?
+    else {
+        // Signed in to the ecosystem, but not a person this company knows. A
+        // distinct code so the console can say "ask an admin to invite you"
+        // instead of "that link is dead".
+        return Err(handoff_refused(
+            "not_a_member",
+            "that account has no access to this company",
+        ));
+    };
+    let user = upsert_from_eligibility(&runtime, &email, role, now)
         .await
         .map_err(|e| ApiError(e).into_response())?;
     mint_session(&state, &runtime, &user, &headers).await
