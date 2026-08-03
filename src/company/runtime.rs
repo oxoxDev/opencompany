@@ -40,6 +40,7 @@ fn task_enters_in_progress(prev_column: Option<&str>, next_column: &str) -> bool
     next_column == IN_PROGRESS && prev_column != Some(IN_PROGRESS)
 }
 use crate::runtime::CycleRunner;
+use crate::runtime::grants::GrantSet;
 use crate::runtime::journal::RuntimeJournal;
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
 use crate::server::ops::mailer::MailSender;
@@ -132,6 +133,18 @@ pub struct CompanyRuntime {
     /// [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) wires in the same handle
     /// the harness deps hold via [`set_steer`](Self::set_steer).
     pub(crate) steer: crate::company::steer::InflightRegistry,
+    /// Issue #243: the live single-use grants minted when an operator approves a
+    /// tool call an agent was blocked from making.
+    ///
+    /// Always present, like [`steer`](Self::steer) — [`GrantSet`] is
+    /// openhuman-free and the journal records replay in every build, so a
+    /// company that ran under the harness stays replayable by one without it. On
+    /// the harness path the [`RuntimeBuilder`](crate::runtime::RuntimeBuilder)
+    /// hands the SAME set to the agents' `ApprovalRequestQueue`, which is what
+    /// lets a grant minted here be redeemed there. On the default build nothing
+    /// ever mints, so the set stays empty and every approval keeps its
+    /// pre-#243 native-execute behaviour.
+    pub(crate) grants: GrantSet,
     /// Held for the duration of a cycle so cycles never interleave per company.
     pub(crate) serial: TokioMutex<()>,
     /// Held across a REST board write's read → validate → write, so two
@@ -177,6 +190,7 @@ impl CompanyRuntime {
         ops: OpsStores,
         feedback: Arc<FeedbackStore>,
         filer: Arc<FeedbackFiler>,
+        grants: GrantSet,
     ) -> Self {
         let approvals: Arc<dyn ApprovalGate> = approval_gate.clone();
         Self {
@@ -201,6 +215,7 @@ impl CompanyRuntime {
             source_dir: None,
             workflow_runner: None,
             steer: crate::company::steer::InflightRegistry::new(),
+            grants,
             serial: TokioMutex::new(()),
             task_writes: TokioMutex::new(()),
             #[cfg(feature = "openhuman")]
@@ -518,9 +533,10 @@ impl CompanyRuntime {
         Ok(expired)
     }
 
-    /// Replays the journal to rebuild the executed-key set and approval queue.
+    /// Replays the journal to rebuild the executed-key set, the approval queue,
+    /// and the live single-use grants (issue #243).
     pub async fn recover(&self) -> Result<()> {
-        self.journal.load().await
+        CycleRunner::new(self).recover().await
     }
 
     /// When each approval was parked, keyed by id, including approvals already

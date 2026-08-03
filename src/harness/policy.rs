@@ -157,6 +157,18 @@ impl ApprovalRequestQueue {
         drained
     }
 
+    /// Builds a queue whose grant set is one the caller already holds.
+    ///
+    /// The runtime mints and sweeps grants and the policy redeems them, so both
+    /// sides must share one set. The builder creates the [`GrantSet`] first
+    /// (it is feature-independent, unlike this queue) and hands it in here.
+    pub fn with_grants(grants: GrantSet) -> Self {
+        Self {
+            inner: Arc::default(),
+            grants,
+        }
+    }
+
     /// The live single-use grant set carried alongside this queue (issue #243).
     pub fn grants(&self) -> GrantSet {
         self.grants.clone()

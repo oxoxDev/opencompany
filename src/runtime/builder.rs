@@ -856,6 +856,25 @@ impl RuntimeBuilder {
             gate.rehydrate(pending.id, pending.effect, pending.at_millis);
         }
 
+        // Issue #243: the single-use grant set, seeded from the same replay.
+        //
+        // Built here, with the journal and the gate, because both ends of the
+        // approval round-trip need the SAME set — the runtime mints and sweeps,
+        // the harness policy redeems — and the harness deps are constructed
+        // several scopes deeper inside the brain match below. `GrantSet` is
+        // feature-independent (these journal records replay in every build), so
+        // the binding is unconditional; a build without the harness carries a set
+        // nothing ever mints into.
+        //
+        // The window between "operator approved" and "agent re-issued the call"
+        // spans a model turn, so a restart inside it is ordinary. Without this
+        // seeding the approval would evaporate and the agent would come back
+        // asking for a permission it had just been given. Consumed and expired
+        // grants are folded out during replay, so this can only re-arm one that
+        // never fired.
+        let grants = crate::runtime::grants::GrantSet::default();
+        grants.rehydrate(journal.replayed_grants());
+
         // Brain selection, in precedence order:
         //   1. an explicit brain (test injection) always wins;
         //   2. under the `openhuman` feature, an attached harness pool + a
@@ -1106,8 +1125,13 @@ impl RuntimeBuilder {
                                 // MCP set each turn (MCP-freshness) rather than the
                                 // snapshot frozen here at boot.
                                 mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
+                                // Issue #243: share the runtime's grant set, so a
+                                // grant the runtime mints on approve is the one
+                                // this agent's policy redeems on re-issue.
                                 approval_requests:
-                                    crate::harness::policy::ApprovalRequestQueue::default(),
+                                    crate::harness::policy::ApprovalRequestQueue::with_grants(
+                                        grants.clone(),
+                                    ),
                                 secrets: Some(secrets.clone()),
                                 // Cell A: the `web` toolbelt SSRF allowlist.
                                 // Domains come straight from the manifest.
@@ -1364,6 +1388,7 @@ impl RuntimeBuilder {
             ops,
             feedback,
             filer,
+            grants,
         );
 
         // The seed dir is the company's on-disk source directory
