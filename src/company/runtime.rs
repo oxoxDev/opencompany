@@ -22,7 +22,7 @@ use crate::feedback::store::FeedbackStore;
 use crate::feedback::types::{FeedbackInput, FeedbackItem, FeedbackSummary};
 use crate::policy::ManifestApprovalGate;
 use crate::ports::now_millis;
-use crate::ports::types::{Actor, ApprovalId, CompanyEvent, CompanyId, Verdict};
+use crate::ports::types::{Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, Verdict};
 use crate::ports::{
     AgentEconomy, ApprovalGate, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore,
     EventLog, FactStore, InboxStore, LoginCodeStore, MemoryStore, SecretStore, SessionStore,
@@ -479,11 +479,41 @@ impl CompanyRuntime {
     /// Sweeps every parked approval past its TTL, resolving each to a
     /// default-deny and writing an `ApprovalExpired` audit entry to the journal.
     /// Returns the ids that expired. Driven by the runtime's maintenance timer.
+    ///
+    /// Each expiry also appends a `ApprovalResolved { verdict: Deny }` event
+    /// attributed to the system. Expiry *is* a resolution — a default-deny on
+    /// silence — but before this it wrote only the journal record, so a wait
+    /// that ended in a timeout produced no event at all and was invisible to
+    /// every event-log reader, including the task timeline (issue #305). The
+    /// append is best-effort for the same reason steer's audit is: a sweep that
+    /// already denied the effect must not be undone by a log write, and the
+    /// journal remains the binding audit trail either way.
     pub async fn sweep_expired_approvals(&self) -> Result<Vec<ApprovalId>> {
         let now = now_millis();
         let expired = self.approval_gate.sweep_expired(now);
         for id in &expired {
             self.journal.record_expired(id, now).await?;
+            if let Err(e) = self
+                .events
+                .append(
+                    &self.id,
+                    CompanyEvent::ApprovalResolved {
+                        approval_id: id.clone(),
+                        verdict: Verdict::Deny,
+                        by: Actor {
+                            kind: ActorKind::System,
+                            id: "expiry".into(),
+                        },
+                    },
+                )
+                .await
+            {
+                tracing::warn!(
+                    approval_id = %id,
+                    error = %e,
+                    "approval expiry journaled but its event-log entry failed",
+                );
+            }
         }
         Ok(expired)
     }
@@ -491,6 +521,18 @@ impl CompanyRuntime {
     /// Replays the journal to rebuild the executed-key set and approval queue.
     pub async fn recover(&self) -> Result<()> {
         self.journal.load().await
+    }
+
+    /// When each approval was parked, keyed by id, including approvals already
+    /// resolved or expired.
+    ///
+    /// The Task Detail read joins this against the event log's
+    /// `ApprovalResolved` to recover how long the company was waiting on an
+    /// operator (issue #305). Delegates to the journal so the `pub(crate)`
+    /// field stays encapsulated, mirroring
+    /// [`pending_approvals`](Self::pending_approvals).
+    pub fn approval_park_instants(&self) -> std::collections::HashMap<ApprovalId, u64> {
+        self.journal.park_instants()
     }
 
     /// The approvals currently awaiting the operator.
