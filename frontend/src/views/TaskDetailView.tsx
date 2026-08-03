@@ -1,8 +1,9 @@
 // The Task Detail screen (v1, #184): the epic's capstone read surface. One
 // `GET …/tasks/{id}` (#185/#190) drives a header, the lineage rail, the event
 // timeline, and a controls bar; a 4s visibility-gated poll keeps it live while
-// the card is open. Cost/₹ is intentionally absent everywhere. Several tabs are
-// honest stubs pending their own issues (see the tab bodies).
+// the card is open. Cost/₹ is intentionally absent everywhere. The Artifacts tab is
+// its own self-fetching surface (#306, over #187's routes); Discussion stays an
+// honest stub pending its own backend.
 
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
 import {
@@ -62,6 +63,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { PRIORITY_STYLES, TASK_COLUMNS } from "@/lib/tasks-sample";
 import { toast } from "sonner";
+import { ArtifactsTab } from "./ArtifactsTab";
 import { AssigneeSelect } from "./AssigneeSelect";
 import { TaskEditDialog } from "./TaskEditDialog";
 
@@ -310,12 +312,7 @@ export function TaskDetailView({
               </TabsContent>
 
               <TabsContent value="artifacts" className="mt-4">
-                {/* TODO(#187): render the task's produced artifacts once the
-                    artifacts read plane exists. No fabricated data until then. */}
-                <EmptyState
-                  title="Artifacts land here"
-                  body="Files and outputs a run produces will show once artifacts ship (#187)."
-                />
+                <ArtifactsTab client={client} company={company} taskId={detail.task.id} />
               </TabsContent>
 
               <TabsContent value="discussion" className="mt-4">
