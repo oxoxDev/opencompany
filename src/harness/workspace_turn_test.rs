@@ -66,6 +66,17 @@ struct Script {
     seen: Mutex<Vec<Value>>,
 }
 
+/// Sent as `expected_updated_at` when [`observed_rev`] finds no `rev=` token at
+/// all, i.e. the revision never reached the model's context.
+///
+/// Without it these tests pass for the wrong reason: a missing revision used to
+/// fall back to `0`, and `0` is refused with the very "changed since you read
+/// it" message the stale-write test asserts on — so the test stayed green even
+/// when the read → model → write round trip it exists to prove was broken. No
+/// real note can carry this revision, so asserting it never appears in a tool
+/// result turns that silent pass into a failure.
+const UNOBSERVED_REV: u64 = u64::MAX;
+
 /// Pull the most recent `rev=<digits>` out of the conversation the stub was
 /// sent. This is the model's-eye view: the revision is only available because
 /// `workspace_read`'s result was fed back into the context.
@@ -123,13 +134,16 @@ async fn spawn_script(turns: Vec<Turn>) -> (String, Arc<Script>) {
                         content,
                         delta,
                     } => {
-                        let rev = observed_rev(&body).unwrap_or(0) as i64 + delta;
+                        let rev = match observed_rev(&body) {
+                            Some(rev) => (rev as i64 + delta).max(0) as u64,
+                            None => UNOBSERVED_REV,
+                        };
                         tool_call_message(
                             "workspace_write",
                             &json!({
                                 "path": path,
                                 "content": content,
-                                "expected_updated_at": rev.max(0),
+                                "expected_updated_at": rev,
                             }),
                         )
                     }
@@ -433,20 +447,37 @@ async fn a_real_turn_is_refused_when_it_writes_with_a_stale_revision() {
     let dir = tempfile::tempdir().unwrap();
     let (pool, deps, record, store) = harness(base_url, "\"workspace\"", dir.path()).await;
 
+    let (before, _) = store.read(&record.id, "n-eng").await.unwrap().unwrap();
+
     pool.run(&record.id, "ceo", "Rewrite the standards.", &deps, None)
         .await
         .expect("turn runs");
 
     let joined = tool_results(&script).join("\n---\n");
+    // Before anything else: the write must have been built from a revision the
+    // model actually saw. Otherwise the refusal below proves nothing — a
+    // never-observed revision is refused with the same message.
+    assert!(
+        !joined.contains(&UNOBSERVED_REV.to_string()),
+        "no `rev=` reached the model, so the refusal below is not evidence of a \
+         stale-revision check: {joined}"
+    );
     assert!(
         joined.contains("changed since you read it"),
         "the stale write was not refused: {joined}"
     );
 
-    let (_, body) = store.read(&record.id, "n-eng").await.unwrap().unwrap();
+    let (after, body) = store.read(&record.id, "n-eng").await.unwrap().unwrap();
     assert_eq!(
         body, "# Engineering\nReview every PR before merge.",
         "a stale write clobbered the note"
+    );
+    // A write that failed only after touching metadata would leave the body
+    // intact and still bump the revision, invalidating every other agent's
+    // token for no reason.
+    assert_eq!(
+        after.updated_at_millis, before.updated_at_millis,
+        "a refused write must not bump the revision"
     );
 }
 
