@@ -91,6 +91,16 @@ pub struct PendingApproval {
 struct State {
     executed: HashSet<String>,
     parked: HashMap<ApprovalId, (Effect, u64)>,
+    /// When each approval was *parked*, retained after it leaves `parked`.
+    ///
+    /// This is what makes waiting time readable (issue #305). The park instant
+    /// is journal-only — [`CompanyEvent::ApprovalResolved`](crate::ports::CompanyEvent::ApprovalResolved)
+    /// carries the resolution but no park time — so a resolved approval's wait
+    /// is only recoverable by joining the two on [`ApprovalId`]. Entries are
+    /// therefore **never removed** on resolve or expiry: the index has the same
+    /// append-only lifetime as the file it is replayed from, and costs one
+    /// `(id, u64)` per approval ever parked.
+    park_instants: HashMap<ApprovalId, u64>,
 }
 
 /// A per-company append-only journal backing at-most-once effects and the
@@ -141,6 +151,7 @@ impl RuntimeJournal {
                     effect,
                     at_millis,
                 } => {
+                    state.park_instants.insert(id.clone(), at_millis);
                     state.parked.insert(id, (effect, at_millis));
                 }
                 JournalRecord::ApprovalResolved { id } => {
@@ -189,11 +200,11 @@ impl RuntimeJournal {
         effect: &Effect,
         at_millis: u64,
     ) -> Result<()> {
-        self.state
-            .lock()
-            .expect("journal state poisoned")
-            .parked
-            .insert(id.clone(), (effect.clone(), at_millis));
+        {
+            let mut state = self.state.lock().expect("journal state poisoned");
+            state.park_instants.insert(id.clone(), at_millis);
+            state.parked.insert(id.clone(), (effect.clone(), at_millis));
+        }
         self.append(&JournalRecord::ApprovalParked {
             id: id.clone(),
             effect: effect.clone(),
@@ -244,6 +255,22 @@ impl RuntimeJournal {
             at_millis,
         })
         .await
+    }
+
+    /// A snapshot of when each approval was parked, keyed by [`ApprovalId`],
+    /// including approvals that have since been resolved or expired.
+    ///
+    /// The read side joins this against the event log's
+    /// [`ApprovalResolved`](crate::ports::CompanyEvent::ApprovalResolved) to
+    /// recover how long an approval was actually waiting (issue #305). Taken as
+    /// one snapshot per request rather than per lookup, so a fold never holds
+    /// the state lock while it works.
+    pub fn park_instants(&self) -> HashMap<ApprovalId, u64> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .park_instants
+            .clone()
     }
 
     /// A snapshot of the currently parked approvals, oldest first.
@@ -440,6 +467,50 @@ mod test {
         let raw = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(raw.contains("ApprovalAmended"));
         assert!(raw.contains("\"edited\":true"));
+    }
+
+    /// Issue #305: the park instant outlives the parked entry.
+    ///
+    /// Waiting time is only recoverable by joining a resolved approval back to
+    /// when it parked, and the event log carries no park time. If the index were
+    /// cleared alongside `parked` on resolve — the obvious symmetry — every
+    /// *finished* wait would be unreadable, which is exactly the case the header
+    /// needs. Expiry (the default-deny path) must retain it for the same reason.
+    #[tokio::test]
+    async fn park_instants_outlive_resolution_and_expiry_and_survive_reload() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+        let journal = RuntimeJournal::new(&path);
+
+        let resolved = ApprovalId::new("appr-resolved");
+        let expired = ApprovalId::new("appr-expired");
+        journal
+            .record_parked(&resolved, &effect(), 1_000)
+            .await
+            .unwrap();
+        journal
+            .record_parked(&expired, &effect(), 2_000)
+            .await
+            .unwrap();
+
+        journal.record_resolved(&resolved).await.unwrap();
+        journal.record_expired(&expired, 9_000).await.unwrap();
+
+        // Both left the queue...
+        assert!(journal.pending().is_empty());
+        // ...but their park instants are still joinable.
+        let instants = journal.park_instants();
+        assert_eq!(instants.get(&resolved), Some(&1_000));
+        assert_eq!(instants.get(&expired), Some(&2_000));
+
+        // And a restart replays them out of the file, so history predating this
+        // process is readable too.
+        let reloaded = RuntimeJournal::new(&path);
+        reloaded.load().await.unwrap();
+        let instants = reloaded.park_instants();
+        assert!(reloaded.pending().is_empty());
+        assert_eq!(instants.get(&resolved), Some(&1_000));
+        assert_eq!(instants.get(&expired), Some(&2_000));
     }
 
     #[test]
