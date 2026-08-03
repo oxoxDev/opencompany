@@ -44,7 +44,7 @@ pub use types::{
     Connection, DEFAULT_ALWAYS_APPROVE, GATEABLE_NAMESPACES, INFERENCE_PROVIDERS, INFERENCE_TIERS,
     Inference, KNOWN_CHANNELS, McpServer, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, Place, Plan,
     Policy, Schedule, Skill, TIERS, TOOL_PROVIDERS, Tools, grants_composio_explicit,
-    grants_media_explicit,
+    grants_media_explicit, grants_workspace_write_explicit,
 };
 pub use workflow_file::{
     WORKFLOW_DESTINATION_KINDS, WORKFLOW_NODE_KINDS, WorkflowDestinationDef, WorkflowEdgeDef,
