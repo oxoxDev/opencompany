@@ -60,6 +60,10 @@ pub mod steps;
 pub mod tool_dispatcher;
 pub mod toolbelt;
 pub mod workspace_tools;
+/// End-to-end proof that the #237 workspace tools are reachable from a real
+/// turn, with only the model's choices stubbed. Test-only.
+#[cfg(test)]
+mod workspace_turn_test;
 
 pub use brain::HarnessBrain;
 
