@@ -65,7 +65,9 @@ provider = "openhuman"             # delegate to an OpenHuman channel
 
 [tools]
 provider = "openhuman"             # openhuman (default) | builtin
-allow = ["web.*", "docs.*"]        # company-wide grant; agents intersect
+allow = ["web.*", "docs.*", "search"]  # company-wide grant; agents intersect
+                                   # `search` must be named — `*` never grants it
+search_daily_calls = 200           # per-company daily web_search cap (0 = paused)
 
 [policy]                           # see company-brain/approvals.md
 mode = "supervised"                # readonly | supervised (default) | full
@@ -157,6 +159,33 @@ prompt = "Weekly review and operator digest"
     credential configured, a `media` grant wires no tools (fail-closed). The
     Usage view surfaces a dedicated media status row (active / awaiting
     credential / not granted / not in this build).
+  - **`search`** (issue #238) is a seventh gateable namespace covering the single
+    `web_search` tool — source *discovery* for the research skills, which
+    previously ran on a belt that could read a known URL but never find one. It
+    is **priced and opt-in**: granted only by an **explicit** `search` /
+    `search.*` entry in `[tools].allow` (the `*` wildcard deliberately does
+    **not** grant it, and unlike `media`/`composio` it is **not** in the default
+    grant list either), and it runs exclusively on the **managed platform
+    credential** — the same identity as managed inference, resolved from the
+    environment, never a tenant key. The backend charges per request and reports
+    the amount, which is recorded as one `SearchCall` usage sample and rolls into
+    the window's cost.
+    Three things differ from `media` on purpose:
+    - **Individual searches do not park for approval.** Consent is the explicit
+      grant; the boundary is `[tools].search_daily_calls`, a per-company **daily
+      call cap** (default 200; `0` pauses search without editing `allow`).
+      Over-cap returns a loud "search budget exhausted" tool error, never an
+      empty result set — an agent handed silence invents citations. An operator
+      who does want a per-call gate sets
+      `[policy].always_approve = ["web_search"]`, which overrides every tier.
+    - **`[policy].mode = "readonly"` still denies it.** A search reaches a third
+      party and spends money, so a desk whose contract is that nothing is spent
+      does not get one.
+    - **There is no `search` Cargo feature.** The tool rides the `openhuman`
+      harness feature so CI's gated lane actually compiles and tests it.
+    The Usage view surfaces a `Web searches` KPI plus a search status row
+    (active / paused at cap 0 / awaiting credential / not granted / not in this
+    build).
 - **`[[schedule]]`** entries become `ScheduleFired` events; cron syntax is
   standard 5-field, interpreted in UTC. A saved *workflow* schedules itself
   separately, with the same dialect: its `trigger` node carries a `schedule`
