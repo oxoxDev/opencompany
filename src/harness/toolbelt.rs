@@ -34,10 +34,20 @@
 //! swaps how the filter is constructed. Tools with no mapped namespace
 //! (memory, MCP, orchestrator, skills) are **intrinsic** and always kept.
 //!
-//! **Deferred** (need infrastructure not present in v1): browser automation
-//! (needs a backend), search tools (need engine keys), Node/NPM exec (need a
-//! managed-runtime bootstrap), and OpenHuman's sub-agent spawn tools (global
-//! registry + budget bypass — unsafe under multi-tenancy).
+//! **Admitted since v1** — `search` (issue #238) is no longer deferred. It was
+//! held back for one *infrastructure* reason ("need engine keys"), which the
+//! managed-platform-credential pattern from #109 dissolved: the backend proxies
+//! the search and bills the platform, so there is no engine key to hold. It
+//! lives in [`search`](crate::harness::search) rather than here because it is a
+//! priced backend call rather than a local exec tool, but it is namespaced by
+//! [`namespace_of`] like any other gateable family.
+//!
+//! **Still deferred** (need infrastructure not present in v1): browser
+//! automation (needs a backend), Node/NPM exec (need a managed-runtime
+//! bootstrap), and OpenHuman's sub-agent spawn tools (global registry + budget
+//! bypass — unsafe under multi-tenancy). Those three were excluded for *safety*
+//! reasons that still hold, which is exactly why search could move and they
+//! cannot.
 //!
 //! **Contract — the dispatched company agent is a constrained, metered
 //! derivative of an OpenHuman agent** (pinned by the contract tests in
@@ -53,10 +63,13 @@
 //!   orchestrator; a dispatched agent never receives them, so a dispatched turn
 //!   cannot fan work out further (the "no sub-agent re-delegation in v1"
 //!   invariant, issue #178).
-//! * **Deferred surfaces stay absent.** Raw browser automation, web-search,
-//!   Node/NPM exec, OpenHuman sub-agent spawn tools (the `subagent` namespace is
-//!   reserved but EMPTY in v1), skill *execution*, the raw memory-tree tool
-//!   surface, and `forget` are all out of a dispatched belt.
+//! * **Deferred surfaces stay absent.** Raw browser automation, Node/NPM exec,
+//!   OpenHuman sub-agent spawn tools (the `subagent` namespace is reserved but
+//!   EMPTY in v1), skill *execution*, the raw memory-tree tool surface, and
+//!   `forget` are all out of a dispatched belt. `web_search` (#238) is now
+//!   admitted, but only under an **explicit** `search` grant plus a managed
+//!   credential — so it is still absent from the `*`-granted belt the contract
+//!   test pins.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -92,7 +105,7 @@ const CURL_DEST_SUBDIR: &str = "downloads";
 /// The canonical list lives in [`crate::company::GATEABLE_NAMESPACES`] (always
 /// compiled, so manifest validation can see it in the default build); this is a
 /// re-export for the harness call sites that key off it.
-pub const GATEABLE_NAMESPACES: [&str; 6] = crate::company::GATEABLE_NAMESPACES;
+pub const GATEABLE_NAMESPACES: [&str; 7] = crate::company::GATEABLE_NAMESPACES;
 
 /// Map a tool's runtime `name()` onto its grant namespace, or `None` when the
 /// tool is **intrinsic** (memory / MCP / orchestrator / file / skill tools),
@@ -121,6 +134,15 @@ pub fn namespace_of(tool_name: &str) -> Option<&'static str> {
         | "composio_list_tools"
         | "composio_authorize"
         | "composio_execute" => Some("composio"),
+        // Metered web search (issue #238). Lives in
+        // [`search`](crate::harness::search) rather than this module because it
+        // is a priced backend call, not an exec-grade local tool — but it is
+        // namespaced here for the same reason `media` and `composio` are: the
+        // capability filter and the gateable-coverage invariant must see
+        // `search` in every build. Unlike those two the arm is never inert;
+        // `web_search` compiles under the plain `openhuman` feature, which is
+        // what CI actually builds and tests.
+        "web_search" => Some("search"),
         _ => None,
     }
 }
@@ -571,6 +593,9 @@ mod tests {
         assert_eq!(namespace_of("composio_list_tools"), Some("composio"));
         assert_eq!(namespace_of("composio_authorize"), Some("composio"));
         assert_eq!(namespace_of("composio_execute"), Some("composio"));
+        // Metered web search (issue #238) maps to the `search` namespace, so a
+        // token-budget plan can shed it under spend pressure.
+        assert_eq!(namespace_of("web_search"), Some("search"));
         // Intrinsic tools are unmapped (always kept by the filter).
         assert_eq!(namespace_of("memory_store"), None);
         assert_eq!(namespace_of("memory_recall"), None);
@@ -601,6 +626,7 @@ mod tests {
             "composio_list_tools",
             "composio_authorize",
             "composio_execute",
+            "web_search",
         ];
         for tool in mapped {
             let ns = namespace_of(tool).expect("mapped tool has a namespace");
@@ -620,6 +646,10 @@ mod tests {
         assert!(
             GATEABLE_NAMESPACES.contains(&"composio"),
             "the per-tenant composio namespace must be gateable"
+        );
+        assert!(
+            GATEABLE_NAMESPACES.contains(&"search"),
+            "the metered search namespace must be gateable (issue #238)"
         );
     }
 

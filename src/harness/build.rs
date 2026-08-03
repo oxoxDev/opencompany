@@ -16,8 +16,17 @@
 //!     policy + native runtime + per-workspace audit; `web` (`web_fetch`,
 //!     `http_request`, `curl`, `image_info`) behind the same policy plus a
 //!     per-company SSRF domain allowlist. The `subagent` namespace is reserved
-//!     but empty in v1. Still deferred: browser automation (needs a backend),
-//!     search (needs engine keys), and Node/NPM exec (need a managed bootstrap).
+//!     but empty in v1. Still deferred: browser automation (needs a backend)
+//!     and Node/NPM exec (need a managed bootstrap).
+//! * **Metered web search** (issue #238, [`search`](crate::harness::search)):
+//!   `web_search` over the managed backend, the discovery half the `web` tools
+//!   never had — they read a *known* URL and cannot find one. Two hard gates
+//!   before it is wired: an **explicit** `search` grant (a bare `*` does not
+//!   confer it, the media/composio precedent) and a managed platform
+//!   credential; granted-but-uncredentialed wires nothing and warns. Every call
+//!   is charged by the backend, so a per-company **daily call cap** is enforced
+//!   before the request and exactly one priced `SearchCall` usage sample is
+//!   recorded after it completes.
 //! * **Delegation is orchestrator-only.** `query_company` / `spawn_task` /
 //!   `delegate_to_desk` (and the other orchestrator roster/workflow tools) are
 //!   wired only when `is_orchestrator`; a **dispatched** desk/roster agent never
@@ -286,6 +295,42 @@ pub fn build_agent(
                 company = %company,
                 agent = %manifest_agent.id,
                 "[build] agent explicitly grants `composio` but no per-tenant Composio token is configured; composio tools NOT wired (fail-closed)"
+            ),
+        }
+    }
+
+    // Metered web search (issue #238) — the discovery tool the `web` namespace
+    // never had. `web_fetch` / `http_request` / `curl` read a URL the agent
+    // already has; nothing could find one, while three shipped skills instruct
+    // the agent to "search broadly" and cite sources. Two hard gates:
+    //
+    //  1. an **EXPLICIT** `search` grant (`grants_search_explicit`) — the
+    //     catch-all `*` does NOT confer it, following `media` / `composio`,
+    //     because each call is a priced request on the managed platform.
+    //  2. a MANAGED backend credential on the deps (`deps.search`), resolved
+    //     env-only by the runtime builder — never a tenant secret.
+    //
+    // Granted-but-uncredentialed wires nothing and warns (fail-closed), which
+    // is the state the skills' degradation clause is written for.
+    //
+    // NOT feature-gated, unlike `media` and `composio`: it needs only the
+    // always-compiled `openhuman_core` integrations client, and CI's gated lane
+    // builds `--features openhuman,tinycortex`. Hiding a real-money tool behind
+    // a feature no CI job compiles is how #288 / #281 / #297 each happened.
+    if crate::company::grants_search_explicit(grants) {
+        match &deps.search {
+            Some(backend) => tools.extend(crate::harness::search::search_tools(
+                backend,
+                crate::harness::search::SearchMetering {
+                    company: company.clone(),
+                    agent: manifest_agent.id.clone(),
+                    meter: deps.meter.clone(),
+                },
+            )),
+            None => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `search` but no managed search backend is configured; web_search NOT wired (fail-closed)"
             ),
         }
     }
@@ -703,6 +748,10 @@ mod tests {
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
+            // Fail-closed default: with no managed search backend wired, the
+            // #238 tool is never built and the pinned belt below is the
+            // pre-#238 belt exactly.
+            search: None,
         }
     }
 
@@ -737,11 +786,109 @@ mod tests {
         names
     }
 
+    /// Build one agent under `grants` with a MANAGED search backend wired, and
+    /// return its live tool names. Mirrors [`built_tool_names`], differing only
+    /// in `deps.search` — so the difference between the two is exactly "a
+    /// credential exists", which is one of the three gate states pinned below.
+    fn built_tool_names_with_search(grants: &[&str]) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut deps = pin_deps(dir.path().to_path_buf());
+        deps.search = Some(crate::harness::search::SearchBackend::new(
+            "https://api.example.test".to_string(),
+            crate::company::credentials::Credential::from_value("managed-platform-token"),
+            crate::company::DEFAULT_SEARCH_DAILY_CALLS,
+        ));
+        let manifest_agent = ManifestAgent {
+            id: "desk".to_string(),
+            role: "Desk Lead".to_string(),
+            description: None,
+            tier: None,
+            tools: Vec::new(),
+            budget_usd_daily: None,
+        };
+        let policy = ApprovalPolicy::new(&Policy::default(), None);
+        let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
+        let agent = build_agent(
+            &CompanyId::new("acme"),
+            "Acme",
+            &manifest_agent,
+            policy,
+            &deps,
+            &grants,
+            &[],
+            false,
+        )
+        .expect("agent builds");
+        let mut names: Vec<String> = agent.tools().iter().map(|t| t.name().to_string()).collect();
+        names.sort();
+        names
+    }
+
+    /// The three gate states of the metered `web_search` surface (issue #238),
+    /// in one table.
+    ///
+    /// The load-bearing row is the first: a broad `*` grant does **not** wire
+    /// `web_search` even with a credential present. Every call is a priced
+    /// request on the managed platform, so — like `media` and `composio` — it
+    /// must be opted into by name and can never ride in on the wildcard a
+    /// company set for its file and shell tools.
+    #[test]
+    fn web_search_is_wired_only_by_explicit_grant_and_credential() {
+        // `*` + credential → absent. The wildcard never confers spend.
+        let wildcard = built_tool_names_with_search(&["*"]);
+        assert!(
+            !wildcard.contains(&"web_search".to_string()),
+            "a bare `*` must NOT confer the metered search family: {wildcard:?}"
+        );
+
+        // explicit `search` + credential → present.
+        let granted = built_tool_names_with_search(&["search"]);
+        assert!(
+            granted.contains(&"web_search".to_string()),
+            "an explicit `search` grant with a credential must wire web_search: {granted:?}"
+        );
+        // The sub-grant form works the same way `media.*` / `composio.*` do.
+        let sub_granted = built_tool_names_with_search(&["search.web"]);
+        assert!(
+            sub_granted.contains(&"web_search".to_string()),
+            "{sub_granted:?}"
+        );
+
+        // explicit `search`, NO credential → absent, fail-closed.
+        let uncredentialed = built_tool_names(&["search"], false);
+        assert!(
+            !uncredentialed.contains(&"web_search".to_string()),
+            "a search grant with no managed credential must wire nothing: {uncredentialed:?}"
+        );
+
+        // An unrelated grant confers nothing even with a credential wired.
+        let unrelated = built_tool_names_with_search(&["web.*"]);
+        assert!(
+            !unrelated.contains(&"web_search".to_string()),
+            "an unrelated grant must not confer web_search: {unrelated:?}"
+        );
+    }
+
+    /// Granting `search` must not quietly hand over anything *else*: the
+    /// credentialed `["search"]` belt is the ungranted belt plus exactly one
+    /// tool. A namespace that widens the belt beyond its own family is how a
+    /// grant stops meaning what the operator read.
+    #[test]
+    fn the_search_grant_adds_exactly_one_tool() {
+        let mut baseline = built_tool_names(&[], false);
+        let granted = built_tool_names_with_search(&["search"]);
+        baseline.push("web_search".to_string());
+        baseline.sort();
+        assert_eq!(granted, baseline, "the `search` grant widened the belt");
+    }
+
     /// (a) The EXACT tool belt a dispatched desk agent receives with the broad
     /// `*` grant. Any tool added to or removed from a dispatched agent flips
     /// this snapshot and fails CI — the whole point of the pin. The set is the
     /// curated exec subset (shell / code / web) plus the intrinsic memory + file
-    /// tools; it contains NO delegation tool and NO deferred family.
+    /// tools; it contains NO delegation tool and NO deferred family, and — the
+    /// #238 addition — no `web_search`, because a bare `*` does not confer the
+    /// `search` grant.
     ///
     /// **Feature-aware (issue #297).** The belt genuinely differs by feature
     /// set: `#[cfg(feature = "mcp")]` pushes two `mcp_registry_*` tools
@@ -816,11 +963,25 @@ mod tests {
     }
 
     /// (c) No deferred family leaks into a dispatched belt: raw browser
-    /// automation, web-search, Node/NPM exec, OpenHuman sub-agent spawn tools
-    /// (the `subagent` namespace is reserved but empty in v1), skill *execution*,
+    /// automation, Node/NPM exec, OpenHuman sub-agent spawn tools (the
+    /// `subagent` namespace is reserved but empty in v1), skill *execution*,
     /// the raw memory-tree tool surface, and `forget`. A negative assertion, so
     /// it stays honest even as OpenHuman renames tools upstream — the pin is
     /// "none of these shapes appear".
+    ///
+    /// **`web_search` was removed from this list by issue #238** — and only
+    /// `web_search`. It was deferred for one *infrastructure* reason ("need
+    /// engine keys") that the managed-credential pattern dissolved; the other
+    /// families here were deferred for *safety* reasons that still hold. The
+    /// remaining `search` / `google_search` entries stay pinned, so OpenHuman's
+    /// broader search families cannot arrive on the back of this decision.
+    ///
+    /// That `web_search` is nonetheless absent from a `*`-granted belt is not
+    /// this test's job any more — it is pinned deliberately by
+    /// [`web_search_is_wired_only_by_explicit_grant_and_credential`] and by the
+    /// exact snapshot in
+    /// [`dispatched_desk_agent_tool_belt_is_pinned`], which would both fail if
+    /// the wildcard ever started conferring spend.
     #[test]
     fn dispatched_belt_excludes_every_deferred_family() {
         let names = built_tool_names(&["*"], false);
@@ -830,8 +991,8 @@ mod tests {
             "browser_navigate",
             "browser_click",
             "browser_screenshot",
-            // web search
-            "web_search",
+            // the search families still deferred (`web_search` is admitted
+            // under an explicit `search` grant — issue #238)
             "search",
             "google_search",
             // Node / NPM exec
