@@ -78,6 +78,22 @@ struct CapabilityStatusDto {
     /// Whether a non-empty per-tenant Composio token is stored — never the token
     /// itself. Unlike media's env credential, this is a tenant secret.
     composio_token_configured: bool,
+    /// Metered web search (issue #238): whether this company **explicitly**
+    /// grants the `search` namespace (a `*` wildcard does NOT count).
+    search_granted: bool,
+    /// Whether the harness that carries `web_search` is compiled into this
+    /// build. There is no `search` Cargo feature — the tool rides the plain
+    /// `openhuman` harness feature deliberately, so CI's gated lane compiles and
+    /// tests it rather than a real-money surface shipping untested.
+    search_in_build: bool,
+    /// Whether a MANAGED search credential is resolvable from the environment on
+    /// this build. Never reflects a tenant secret — search runs only on the
+    /// platform identity.
+    search_credential_configured: bool,
+    /// The company's daily `web_search` call ceiling
+    /// (`[tools].search_daily_calls`, else the built-in default). Reaching it
+    /// makes the tool refuse loudly rather than return an empty result set.
+    search_daily_call_cap: u32,
 }
 
 /// One tier's budget row.
@@ -119,6 +135,8 @@ struct OptInFlags {
     media_granted: bool,
     composio_granted: bool,
     composio_token_configured: bool,
+    search_granted: bool,
+    search_daily_call_cap: u32,
 }
 
 impl OptInFlags {
@@ -128,6 +146,8 @@ impl OptInFlags {
             media_granted: false,
             composio_granted: false,
             composio_token_configured: false,
+            search_granted: false,
+            search_daily_call_cap: crate::company::DEFAULT_SEARCH_DAILY_CALLS,
         }
     }
 }
@@ -149,6 +169,26 @@ fn unconfigured(flags: OptInFlags) -> CapabilityStatusDto {
         composio_granted: flags.composio_granted,
         composio_in_build: cfg!(feature = "composio"),
         composio_token_configured: flags.composio_token_configured,
+        search_granted: flags.search_granted,
+        search_in_build: cfg!(feature = "openhuman"),
+        search_credential_configured: search_credential_configured(),
+        search_daily_call_cap: flags.search_daily_call_cap,
+    }
+}
+
+/// Whether a MANAGED search credential (issue #238) is resolvable from the
+/// environment on this build. Env-only, never a tenant secret, matching the
+/// harness's fail-closed resolution. Off the harness feature this is always
+/// `false` — there is no agent to search with.
+fn search_credential_configured() -> bool {
+    #[cfg(feature = "openhuman")]
+    {
+        use crate::app::config::ProcessEnv;
+        crate::harness::provider::search_backend_from_env(&ProcessEnv).is_some()
+    }
+    #[cfg(not(feature = "openhuman"))]
+    {
+        false
     }
 }
 
@@ -188,6 +228,16 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         )
         .await
         .unwrap_or(false),
+        // Issue #238: search is opt-in per tool grant like media/composio, and
+        // its daily cap lives on `[tools]` rather than `[plan]` — a call
+        // ceiling, not a token budget — so both travel with the plan-independent
+        // flags.
+        search_granted: crate::company::grants_search_explicit(&record.manifest.tools.allow),
+        search_daily_call_cap: record
+            .manifest
+            .tools
+            .search_daily_calls
+            .unwrap_or(crate::company::DEFAULT_SEARCH_DAILY_CALLS),
     };
     let manifest_plan = &record.manifest.plan;
     let Some(plan) = CapabilityPlan::from_manifest(manifest_plan) else {
@@ -240,6 +290,10 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         composio_granted: flags.composio_granted,
         composio_in_build: cfg!(feature = "composio"),
         composio_token_configured: flags.composio_token_configured,
+        search_granted: flags.search_granted,
+        search_in_build: cfg!(feature = "openhuman"),
+        search_credential_configured: search_credential_configured(),
+        search_daily_call_cap: flags.search_daily_call_cap,
     })
 }
 
@@ -404,6 +458,48 @@ mod tests {
         assert_eq!(
             dto2["composioGranted"], false,
             "the `*` wildcard must not grant composio: {dto2}"
+        );
+    }
+
+    /// Metered web search (issue #238): the route surfaces `searchGranted` from
+    /// the explicit grant (never `*`) and the company's daily call cap, even
+    /// with no `[plan]` — the cap is a call ceiling on `[tools]`, not a token
+    /// budget on `[plan]`.
+    #[tokio::test]
+    async fn reports_search_flags_from_explicit_grant_only() {
+        let home_a_dir = home();
+        let home_a = home_a_dir.path().to_path_buf();
+        let state = state_with_manifest(
+            &home_a,
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"search\"]\nsearch_daily_calls = 25\n",
+        )
+        .await;
+        let (status, dto) = get_capabilities(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(dto["searchGranted"], true, "{dto}");
+        assert_eq!(dto["searchDailyCallCap"], 25, "{dto}");
+        assert!(dto.get("searchInBuild").is_some(), "{dto}");
+        assert!(dto.get("searchCredentialConfigured").is_some(), "{dto}");
+
+        // A `*` wildcard grant must NOT count as a search grant — every call is
+        // a priced request, so it can never ride in on the wildcard a company
+        // set for its file and shell tools.
+        let home_b_dir = home();
+        let home_b = home_b_dir.path().to_path_buf();
+        let state2 = state_with_manifest(
+            &home_b,
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"*\"]\n",
+        )
+        .await;
+        let (_, dto2) = get_capabilities(&state2).await;
+        assert_eq!(
+            dto2["searchGranted"], false,
+            "the `*` wildcard must not grant metered search: {dto2}"
+        );
+        assert_eq!(
+            dto2["searchDailyCallCap"],
+            crate::company::DEFAULT_SEARCH_DAILY_CALLS,
+            "an unset cap reports the built-in default: {dto2}"
         );
     }
 

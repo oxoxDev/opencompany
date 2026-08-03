@@ -270,6 +270,57 @@ mod tests {
         assert_eq!(by_agent[0]["tokens"], 165.0);
     }
 
+    /// Metered web searches (issue #238) reach the console read: they count in
+    /// their own `searchCalls` field and their cost rolls into the window
+    /// total, while leaving the connected-accounts numbers alone.
+    ///
+    /// That last clause is the point. A search is a priced call on the managed
+    /// platform, not a third-party account the company connected, so folding it
+    /// into `oauthCalls` / `byProvider` (whose row count **is** `connections`)
+    /// would report an integration the operator never set up.
+    #[tokio::test]
+    async fn search_calls_surface_separately_from_connected_accounts() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(
+            &home,
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief Executive\"\n",
+        )
+        .await;
+
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let now = crate::ports::now_millis();
+        for _ in 0..3 {
+            runtime
+                .usage()
+                .record(
+                    &id,
+                    &crate::metering::search_call_sample("ceo", "Exa", 0.01, now),
+                )
+                .await
+                .unwrap();
+        }
+
+        let (status, dto) = get_usage(&state, "?range=7d").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(dto["totals"]["searchCalls"], 3, "{dto}");
+        assert!(
+            (dto["totals"]["costUsd"].as_f64().unwrap() - 0.03).abs() < 1e-9,
+            "search cost must roll into the window total: {dto}"
+        );
+        assert_eq!(
+            dto["totals"]["connections"], 0,
+            "a search is not a connected account: {dto}"
+        );
+        assert_eq!(dto["totals"]["oauthCalls"], 0, "{dto}");
+        assert!(dto["byProvider"].as_array().unwrap().is_empty(), "{dto}");
+        // And no tokens, so the teammate chart stays a token chart.
+        assert_eq!(dto["totals"]["tokens"], 0.0, "{dto}");
+        assert!(dto["byAgent"].as_array().unwrap().is_empty(), "{dto}");
+    }
+
     /// An absent / unknown `?range=` defaults to the 30-day window.
     #[tokio::test]
     async fn range_defaults_to_thirty_days() {

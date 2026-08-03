@@ -839,6 +839,11 @@ type UsageTotals {
 	Number of distinct connections used.
 	"""
 	connections: Int!
+	"""
+	Total metered web searches (issue #238). Their USD cost is already
+	inside `cost_usd`; this is the call count.
+	"""
+	searchCalls: Float!
 }
 
 """

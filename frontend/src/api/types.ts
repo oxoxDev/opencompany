@@ -430,6 +430,22 @@ export interface CapabilityStatusDto {
   composioInBuild?: boolean;
   /** Whether a per-tenant Composio token is stored — never the token itself. */
   composioTokenConfigured?: boolean;
+  /**
+   * Metered web search (issue #238): whether the company **explicitly** grants
+   * the `search` namespace (a `*` wildcard does not count). Every call is a
+   * priced request on the managed platform, so it is opt-in by name.
+   */
+  searchGranted?: boolean;
+  /**
+   * Whether the harness carrying `web_search` is compiled into this build.
+   * There is no `search` Cargo feature — the tool rides the harness feature so
+   * CI actually compiles and tests it.
+   */
+  searchInBuild?: boolean;
+  /** Whether a managed search credential is configured on this build (env-only). */
+  searchCredentialConfigured?: boolean;
+  /** The company's daily `web_search` call ceiling. */
+  searchDailyCallCap?: number;
 }
 
 /** One day's token totals in the usage series (`GET .../usage`). */
@@ -460,6 +476,13 @@ export interface UsageTotalsDto {
   costUsd: number;
   oauthCalls: number;
   connections: number;
+  /**
+   * Metered web searches in the window (issue #238). Their USD cost is already
+   * inside `costUsd`; this is the call count. Deliberately separate from
+   * `oauthCalls` / `connections`, which count connected third-party accounts —
+   * a search is a platform call, not an account the company connected.
+   */
+  searchCalls: number;
 }
 
 /**
