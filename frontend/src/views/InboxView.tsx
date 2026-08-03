@@ -1,3 +1,7 @@
+// Issue #302: unmounted from the console — hidden, not retired. The host's
+// inbox routes, per-agent store and tests are unchanged; re-listing "inbox" in
+// `app-shell.tsx`'s `View`/`NAV` brings this surface straight back. Do not
+// delete it as dead code.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, Inbox as InboxIcon, Mail, Send } from "lucide-react";
 

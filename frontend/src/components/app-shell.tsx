@@ -1,15 +1,12 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
-  Brain,
   ChartColumnBig,
   FolderClosed,
   Flag,
-  Inbox,
   LayoutDashboard,
   type LucideIcon,
   MessageSquareWarning,
   MessagesSquare,
-  PanelsTopLeft,
   Plug,
   Settings2,
   ShieldCheck,
@@ -17,7 +14,6 @@ import {
   SquareKanban,
   UserCog,
   Users,
-  Wallet,
   Workflow,
 } from "lucide-react";
 
@@ -60,11 +56,8 @@ import { Conversation } from "@/views/Conversation";
 import { ApprovalsView } from "@/views/ApprovalsView";
 import { TasksView } from "@/views/TasksView";
 import { TeamView } from "@/views/TeamView";
-import { DesksView } from "@/views/DesksView";
 import { PeopleView } from "@/views/PeopleView";
 import { SkillsView } from "@/views/SkillsView";
-import { InboxView } from "@/views/InboxView";
-import { MemoryView } from "@/views/MemoryView";
 import { ConnectionsView } from "@/views/ConnectionsView";
 import { SettingsView } from "@/views/SettingsView";
 import { FeedbackView } from "@/views/FeedbackView";
@@ -79,26 +72,22 @@ const WorkspaceView = lazy(() =>
 );
 // Recharts is heavy — load the usage dashboard on demand.
 const UsageView = lazy(() => import("@/views/UsageView").then((m) => ({ default: m.UsageView })));
-// Also Recharts-backed — load on demand.
-const FinancesView = lazy(() =>
-  import("@/views/FinancesView").then((m) => ({ default: m.FinancesView })),
-);
 
+// Issue #302: Inbox, Desks, Brain and Finances are hidden from the console, not
+// retired. Their host routes, stores and tests are untouched — only the
+// operator-facing entry points are gone, so re-listing a view here is all it
+// takes to bring one back. The view components stay in `src/views/`.
 export type View =
   | "overview"
   | "people"
   | "conversation"
-  | "inbox"
   | "tasks"
   | "team"
-  | "desks"
   | "skills"
   | "workspace"
-  | "memory"
   | "approvals"
   | "workflows"
   | "usage"
-  | "finances"
   | "connections"
   | "settings"
   | "feedback";
@@ -120,13 +109,10 @@ const NAV: NavGroup[] = [
     items: [
       { view: "overview", label: "Overview", icon: LayoutDashboard },
       { view: "conversation", label: "Conversation", icon: MessagesSquare },
-      { view: "inbox", label: "Inbox", icon: Inbox },
       { view: "tasks", label: "Tasks", icon: SquareKanban },
       { view: "team", label: "Team", icon: Users },
-      { view: "desks", label: "Desks", icon: PanelsTopLeft },
       { view: "skills", label: "Skills", icon: Sparkles },
       { view: "workspace", label: "Workspace", icon: FolderClosed },
-      { view: "memory", label: "Brain", icon: Brain },
       { view: "approvals", label: "Approvals", icon: ShieldCheck },
       { view: "workflows", label: "Workflows", icon: Workflow },
     ],
@@ -135,7 +121,6 @@ const NAV: NavGroup[] = [
     label: "Configure",
     items: [
       { view: "usage", label: "Usage", icon: ChartColumnBig },
-      { view: "finances", label: "Finances", icon: Wallet },
       { view: "connections", label: "Connections", icon: Plug },
       { view: "people", label: "People", icon: UserCog },
       { view: "settings", label: "Settings", icon: Settings2 },
@@ -150,17 +135,13 @@ const NAV: NavGroup[] = [
 const TITLES: Record<View, string> = {
   overview: "Overview",
   conversation: "Conversation",
-  inbox: "Inbox",
   tasks: "Tasks",
   team: "Team",
-  desks: "Desks",
   skills: "Skills",
   workspace: "Workspace",
-  memory: "Brain",
   approvals: "Approvals",
   workflows: "Workflows",
   usage: "Usage",
-  finances: "Finances",
   connections: "Connections",
   people: "People",
   settings: "Settings",
@@ -551,7 +532,6 @@ export function AppShell({
               onSendEnd={onSendEnd}
             />
           )}
-          {view === "inbox" && <InboxView client={client} company={company} />}
           {view === "tasks" && (
             <TasksView
               client={client}
@@ -566,10 +546,8 @@ export function AppShell({
             />
           )}
           {view === "team" && <TeamView client={client} company={company} />}
-          {view === "desks" && <DesksView client={client} company={company} />}
           {view === "people" && <PeopleView client={client} company={company} />}
           {view === "skills" && <SkillsView client={client} company={company} />}
-          {view === "memory" && <MemoryView client={client} company={company} />}
           {view === "workspace" && (
             <Suspense
               fallback={
@@ -614,17 +592,6 @@ export function AppShell({
               }
             >
               <UsageView client={client} company={company} />
-            </Suspense>
-          )}
-          {view === "finances" && (
-            <Suspense
-              fallback={
-                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                  Loading finances…
-                </div>
-              }
-            >
-              <FinancesView client={client} company={company} />
             </Suspense>
           )}
           {view === "connections" && <ConnectionsView client={client} company={company} />}

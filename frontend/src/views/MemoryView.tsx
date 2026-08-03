@@ -1,3 +1,8 @@
+// Issue #302: unmounted from the console — hidden, not retired. The host's
+// `/memory` routes, FactStore and tests are unchanged, and agents keep reading
+// and writing memory; only the operator-facing Brain tab is gone. Re-listing
+// "memory" in `app-shell.tsx`'s `View`/`NAV` brings it back. Do not delete it
+// as dead code.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Brain, Loader2, Plus, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";

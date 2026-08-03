@@ -51,13 +51,6 @@ export const TOUR: TourStop[] = [
     body: "The agents that actually do the work. Each has a role and the tools to match.",
   },
   {
-    view: "desks",
-    target: '[data-tour="nav-desks"]',
-    placement: "right",
-    title: "Desks",
-    body: "Teammates group into desks by function — Engineering, Support, and so on. Work routed to a desk goes to its lead. Spin up your own with New desk anytime.",
-  },
-  {
     view: "workflows",
     target: '[data-tour="nav-workflows"]',
     placement: "right",

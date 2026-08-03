@@ -1,3 +1,7 @@
+// Issue #302: unmounted from the console — hidden, not retired. The host's
+// finances routes, economy state and tests are unchanged; re-listing "finances"
+// in `app-shell.tsx`'s `View`/`NAV` (behind a `lazy()` import, as it was)
+// brings this surface back. Do not delete it as dead code.
 import { useEffect, useState } from "react";
 import { Bar, BarChart, LabelList, XAxis, YAxis } from "recharts";
 import { ArrowDownLeft, ArrowUpRight, Coins, PiggyBank, TrendingUp, Wallet } from "lucide-react";

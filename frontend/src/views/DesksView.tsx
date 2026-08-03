@@ -1,3 +1,9 @@
+// Issue #302: unmounted from the console — hidden, not retired. Desk
+// management is manifest-driven for now, pending a hierarchy/org-tree
+// successor; the host's `/desks` routes, store and tests are unchanged, and
+// Conversation still builds its threads from real desks. Re-listing "desks" in
+// `app-shell.tsx`'s `View`/`NAV` brings this surface back. Do not delete it as
+// dead code.
 import { useCallback, useEffect, useState } from "react";
 import { ChevronDown, ChevronUp, Crown, Plus, Trash2, Users, X } from "lucide-react";
 
