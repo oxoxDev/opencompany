@@ -222,14 +222,17 @@ impl PathIndex {
     /// Entries whose path is under `prefix` (or all of them when `prefix` is
     /// `None`), in path order.
     fn entries_under(&self, prefix: Option<&str>) -> Vec<&Entry> {
+        // Built once rather than per entry — this runs over every node in the
+        // company's tree.
+        let scoped = prefix.map(|prefix| format!("{prefix}/"));
         self.by_path
             .values()
             .flatten()
-            .filter(|entry| match prefix {
-                None => true,
-                Some(prefix) => {
-                    entry.path == prefix || entry.path.starts_with(&format!("{prefix}/"))
+            .filter(|entry| match (prefix, scoped.as_deref()) {
+                (Some(prefix), Some(scoped)) => {
+                    entry.path == prefix || entry.path.starts_with(scoped)
                 }
+                _ => true,
             })
             .collect()
     }
