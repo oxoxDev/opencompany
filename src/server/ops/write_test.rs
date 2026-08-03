@@ -342,13 +342,7 @@ async fn a_task_created_from_a_thread_remembers_and_reads_back_that_thread() {
 
     // …and so does task detail, which is where an operator asks "where did
     // this come from?".
-    let (status, detail) = send(
-        &state,
-        "GET",
-        &format!("/api/v1/company/tasks/{id}"),
-        None,
-    )
-    .await;
+    let (status, detail) = send(&state, "GET", &format!("/api/v1/company/tasks/{id}"), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(detail["task"]["originChatId"], "strategy");
 

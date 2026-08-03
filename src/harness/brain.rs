@@ -2315,7 +2315,14 @@ members = ["eng1", "eng2"]
         assert_eq!(result.channel_responses.len(), 1);
         let bubble = &result.channel_responses[0];
         let reported = bubble.task_id.as_deref().expect("the bubble names a card");
-        let cards = brain.deps.tasks.as_ref().unwrap().list(&brain.record.id).await.unwrap();
+        let cards = brain
+            .deps
+            .tasks
+            .as_ref()
+            .unwrap()
+            .list(&brain.record.id)
+            .await
+            .unwrap();
         assert_eq!(cards.len(), 1);
         assert_eq!(
             reported, cards[0].id,
@@ -2366,7 +2373,14 @@ members = ["eng1", "eng2"]
             .task_id
             .as_deref()
             .expect("the bubble names a card");
-        let cards = brain.deps.tasks.as_ref().unwrap().list(&brain.record.id).await.unwrap();
+        let cards = brain
+            .deps
+            .tasks
+            .as_ref()
+            .unwrap()
+            .list(&brain.record.id)
+            .await
+            .unwrap();
         assert_eq!(cards.len(), 2, "both cards are opened either way");
         let first = cards
             .iter()
