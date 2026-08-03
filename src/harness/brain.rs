@@ -46,7 +46,7 @@ use crate::ports::artifacts::{ArtifactAuthor, ArtifactKind, ArtifactRecord};
 use crate::ports::brain::{Brain, CycleHost};
 use crate::ports::types::{
     CompanyEvent, CompanyRecord, CompressedTrace, CycleRequest, CycleResult, OutboundMessage,
-    TokenUsage, TurnStep, TurnStepKind, TurnStepStatus,
+    TokenUsage, TurnStep, TurnStepKind, TurnStepStatus, Verdict,
 };
 use crate::ports::{Cognition, TaskRecord, UsageMetering, generate_id, now_millis};
 
@@ -94,6 +94,126 @@ impl HarnessBrain {
     /// asynchronously, long after the turn that spawned it has answered, so the
     /// operator had to know to go and look. The note is still written — it stays
     /// the durable record — and the post-back is additive.
+    /// Re-dispatches the agent that holds a single-use grant for `approval_id`,
+    /// instructing it to re-issue the exact call the operator approved
+    /// (issue #243).
+    ///
+    /// Returns the agent's reply as a bubble on its own channel, or `None` when
+    /// there is no grant to redeem — which is the common case and must stay a
+    /// silent no-op:
+    ///
+    /// * a **denied** approval (this arm only runs on `Approve`, but a deny
+    ///   reaching here must not turn into a turn either);
+    /// * a **native** effect the runtime already executed, which mints nothing;
+    /// * a **legacy** parked effect from before `Effect::agent` existed, which
+    ///   replays as `None` and so mints nothing;
+    /// * the **system expiry** `ApprovalResolved { verdict: Deny }` that #309's
+    ///   sweep appends;
+    /// * a grant already consumed or swept.
+    ///
+    /// The turn is registered on the steer registry with the same RAII guard
+    /// `run_task` uses, so an operator can cancel a re-issue mid-flight and a
+    /// crashed turn never strands a ghost row in the in-flight strip.
+    async fn redispatch_granted_call(
+        &self,
+        approval_id: &crate::ports::types::ApprovalId,
+    ) -> Result<Option<OutboundMessage>> {
+        let Some(grant) = self.deps.approval_requests.grants().peek(approval_id) else {
+            return Ok(None);
+        };
+
+        // Re-issue verbatim. The grant admits ONE call matching these arguments
+        // exactly, so any drift the model introduces will simply re-park — the
+        // instruction is emphatic because a re-worded argument silently costs the
+        // operator a second approval round-trip.
+        let args = serde_json::to_string(&grant.args).unwrap_or_else(|_| "{}".to_string());
+        let instruction = format!(
+            "Operator approved your `{tool}` call. Re-issue it now with EXACTLY these \
+             arguments: {args}. Do not modify them.",
+            tool = grant.tool,
+        );
+
+        let guard = self.deps.steer.register(
+            &self.record.id,
+            InflightEntry {
+                key: format!("approval:{approval_id}"),
+                task_id: None,
+                kind: InflightKind::Delegation,
+                title: format!("re-issue {}", grant.tool),
+                agent_id: grant.agent.clone(),
+                started_at_millis: now_millis(),
+                pending_action: None,
+            },
+        );
+        let control = guard.control().clone();
+
+        let run_turn = HarnessRunTurn::new(&self.pool, &self.deps);
+        // Un-streamed, like a dispatched card: this turn is answered by the
+        // bubble returned below, and its transient frames would otherwise
+        // misattribute onto whichever chat thread the console is watching.
+        let outcome = run_turn
+            .run_steered_background(&self.record.id, &grant.agent, &instruction, &control)
+            .await;
+        drop(guard);
+
+        let text = match outcome {
+            Ok(outcome) => outcome.reply,
+            Err(err) => {
+                // The grant stays live: the call did not go through, so the
+                // operator's approval has not been spent and the TTL sweep will
+                // tell them if it never does. Reporting the failure is what stops
+                // this looking like a silent success.
+                tracing::warn!(
+                    approval_id = %approval_id,
+                    tool = %grant.tool,
+                    error = %err,
+                    "[approval] re-issuing an approved tool call failed"
+                );
+                format!(
+                    "re-issuing the approved `{}` call failed: {err}",
+                    grant.tool
+                )
+            }
+        };
+
+        // Journal the reply so the transcript echo survives a console refresh.
+        // The bubble below is live-only — a reader that reloads the page rebuilds
+        // the thread from the event log, and without this the operator would
+        // approve, watch the agent answer, refresh, and find the answer gone.
+        //
+        // `chat_id` is the AGENT id (not the approval id) so `chat_history::owns`
+        // routes it into that desk's thread — the same thread the original
+        // request came from, which is where the operator is looking.
+        if let Some(events) = self.deps.events.as_ref()
+            && let Err(err) = events
+                .append(
+                    &self.record.id,
+                    CompanyEvent::AgentReply {
+                        chat_id: grant.agent.clone(),
+                        agent_id: grant.agent.clone(),
+                        text: text.clone(),
+                        steps: Vec::new(),
+                        task_id: None,
+                    },
+                )
+                .await
+        {
+            tracing::warn!(
+                approval_id = %approval_id,
+                error = %err,
+                "[approval] failed to journal the re-issued call's reply; continuing"
+            );
+        }
+
+        Ok(Some(OutboundMessage {
+            task_id: None,
+            channel: grant.agent.clone(),
+            text,
+            steps: Vec::new(),
+            reply_to: None,
+        }))
+    }
+
     async fn run_task(&self, task_id: &str) -> Result<Option<OutboundMessage>> {
         let Some(tasks) = self.deps.tasks.as_ref() else {
             return Ok(None);
@@ -951,6 +1071,25 @@ impl Brain for HarnessBrain {
                 }
                 CompanyEvent::TaskDispatched { task_id } => {
                     if let Some(message) = self.run_task(task_id).await? {
+                        channel_responses.push(message);
+                    }
+                }
+                // Issue #243: an approval the operator APPROVED that minted a
+                // single-use grant — re-dispatch the granting agent so it
+                // actually makes the call.
+                //
+                // This arm is the reason the feature was invisible before. The
+                // match had exactly two arms and everything else fell into
+                // `_ => {}`, so an `ApprovalResolved` produced no turn, no
+                // response, and the cycle ended on the "Acknowledged." fallback
+                // below. The operator approved, saw "Acknowledged.", and nothing
+                // happened — indistinguishable from the tool having run.
+                CompanyEvent::ApprovalResolved {
+                    approval_id,
+                    verdict: Verdict::Approve,
+                    ..
+                } => {
+                    if let Some(message) = self.redispatch_granted_call(approval_id).await? {
                         channel_responses.push(message);
                     }
                 }
@@ -2775,7 +2914,11 @@ members = ["eng1", "eng2"]
         assert_eq!(steps[0].detail.as_deref(), Some("server rejected the call"));
 
         let logged = events
-            .read_from(&CompanyId::new("acme"), EventSeq::new(0), usize::MAX)
+            .read_from(
+                &CompanyId::new("acme"),
+                crate::ports::EventSeq::new(0),
+                usize::MAX,
+            )
             .await
             .expect("read events");
         assert!(
@@ -3126,6 +3269,235 @@ members = ["eng1", "eng2"]
         assert_eq!(parked.len(), 2, "the batch continued past the failure");
         assert_eq!(parked[0].kind, "second_tool");
         assert_eq!(parked[1].kind, "third_tool");
+    }
+
+    // --- Re-dispatching a granted call (issue #243) --------------------------
+
+    /// A brain over the offline mock provider, wired to a real event log and a
+    /// shared approval queue (whose grant set the runtime would mint into).
+    fn brain_with_queue_and_events(
+        dir: &std::path::Path,
+        requests: crate::harness::policy::ApprovalRequestQueue,
+        events: Arc<dyn crate::ports::EventLog>,
+    ) -> HarnessBrain {
+        let deps = HarnessDeps {
+            provider: Arc::new(MockProvider::new("mock: ")),
+            provider_slug: "mock".to_string(),
+            context: Arc::new(FsContextStore::new(dir)),
+            store: Arc::new(FsCompanyStore::new(dir)),
+            meter: None,
+            workspace_root: dir.to_path_buf(),
+            model_override: None,
+            tasks: None,
+            artifacts: None,
+            skills: None,
+            skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: Some(events),
+            delegations: orchestrator::DelegationQueue::default(),
+            workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
+            approval_requests: requests,
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan: None,
+            media: None,
+            composio: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+            delivery: None,
+            search: None,
+            workspace: None,
+        };
+        HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
+    }
+
+    fn approval_resolved(id: &str, verdict: Verdict) -> CompanyEvent {
+        CompanyEvent::ApprovalResolved {
+            approval_id: ApprovalId::new(id),
+            verdict,
+            by: crate::ports::types::Actor {
+                kind: crate::ports::types::ActorKind::Operator,
+                id: "owner".into(),
+            },
+        }
+    }
+
+    fn cycle_over(events: Vec<CompanyEvent>) -> CycleRequest {
+        CycleRequest {
+            cycle_id: "cyc-1".to_string(),
+            company_id: CompanyId::new("acme"),
+            events,
+            event_seqs: Vec::new(),
+            compressed_history: Vec::new(),
+            roster: vec!["ceo".to_string()],
+            context_index: Vec::new(),
+        }
+    }
+
+    /// The arm that made #243 visible: an approved grant re-dispatches its agent
+    /// with the exact arguments, answers on that agent's channel, and journals
+    /// the reply.
+    ///
+    /// Before this arm existed, `ApprovalResolved` fell into `_ => {}`: no turn,
+    /// no response, and the cycle ended on the "Acknowledged." fallback. The
+    /// operator approved, read "Acknowledged.", and nothing ran — which looks
+    /// exactly like success.
+    ///
+    /// `MockProvider` echoes the user message back, so the reply text IS the
+    /// instruction the agent received — which is what makes argument fidelity
+    /// assertable offline.
+    #[tokio::test]
+    async fn an_approved_grant_redispatches_its_agent_with_the_exact_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let log: Arc<dyn crate::ports::EventLog> =
+            Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf()));
+        let requests = crate::harness::policy::ApprovalRequestQueue::default();
+        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL", "to": "a@b.test" });
+        requests
+            .grants()
+            .grant(crate::runtime::grants::GrantedCall {
+                approval_id: ApprovalId::new("appr-1"),
+                agent: "ceo".into(),
+                tool: "composio_execute".into(),
+                args: args.clone(),
+                at_millis: now_millis(),
+            });
+        let brain = brain_with_queue_and_events(dir.path(), requests, log.clone());
+
+        let result = brain
+            .run_cycle(
+                cycle_over(vec![approval_resolved("appr-1", Verdict::Approve)]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        // A real bubble, on the GRANTING agent's channel — not the generic
+        // "Acknowledged." fallback and not the operator channel.
+        assert_eq!(result.channel_responses.len(), 1);
+        let bubble = &result.channel_responses[0];
+        assert_eq!(bubble.channel, "ceo");
+        assert_ne!(bubble.text, "Acknowledged.");
+
+        // The instruction carried the tool and the arguments VERBATIM. A model
+        // that re-issues with drifted arguments re-parks (see the policy tests),
+        // so the fidelity of this string is what makes the round-trip land.
+        assert!(bubble.text.contains("composio_execute"), "{}", bubble.text);
+        assert!(
+            bubble.text.contains(&serde_json::to_string(&args).unwrap()),
+            "the exact approved arguments must reach the agent: {}",
+            bubble.text
+        );
+        assert!(
+            bubble.text.contains("Do not modify them"),
+            "{}",
+            bubble.text
+        );
+
+        // The reply is journaled under the agent's own chat thread, so the echo
+        // survives a console refresh rather than living only in this response.
+        let stored = log
+            .read_from(&CompanyId::new("acme"), crate::ports::EventSeq::new(0), 100)
+            .await
+            .unwrap();
+        let replies: Vec<_> = stored
+            .iter()
+            .filter_map(|e| match &e.event {
+                CompanyEvent::AgentReply {
+                    chat_id,
+                    agent_id,
+                    text,
+                    ..
+                } => Some((chat_id.clone(), agent_id.clone(), text.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(replies.len(), 1, "the re-issued call's reply is journaled");
+        assert_eq!(
+            replies[0].0, "ceo",
+            "routed into the granting agent's thread"
+        );
+        assert_eq!(replies[0].1, "ceo");
+        assert_eq!(replies[0].2, bubble.text);
+    }
+
+    /// A DENIED approval runs no turn. "No" must never re-dispatch anything.
+    #[tokio::test]
+    async fn a_denied_approval_redispatches_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let log: Arc<dyn crate::ports::EventLog> =
+            Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf()));
+        let requests = crate::harness::policy::ApprovalRequestQueue::default();
+        // A grant for a DIFFERENT approval is live, to prove the arm keys on the
+        // resolved id rather than reaching for whatever is lying around.
+        requests
+            .grants()
+            .grant(crate::runtime::grants::GrantedCall {
+                approval_id: ApprovalId::new("appr-other"),
+                agent: "ceo".into(),
+                tool: "composio_execute".into(),
+                args: serde_json::json!({}),
+                at_millis: now_millis(),
+            });
+        let brain = brain_with_queue_and_events(dir.path(), requests, log.clone());
+
+        let result = brain
+            .run_cycle(
+                cycle_over(vec![approval_resolved("appr-1", Verdict::Deny)]),
+                &NoopHost,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.channel_responses.len(), 1);
+        assert_eq!(
+            result.channel_responses[0].text, "Acknowledged.",
+            "a deny falls through to the fallback, exactly as before #243"
+        );
+        assert!(
+            log.read_from(&CompanyId::new("acme"), crate::ports::EventSeq::new(0), 100)
+                .await
+                .unwrap()
+                .is_empty(),
+            "nothing is journaled for a deny"
+        );
+    }
+
+    /// An approved resolution with NO grant behind it is a silent no-op.
+    ///
+    /// This is the common case, not an edge: a native effect the runtime already
+    /// executed, a legacy parked effect from before `Effect::agent` existed (it
+    /// replays as `None` and mints nothing), a grant already consumed, and a
+    /// grant already swept all land here. Every one of them must keep the exact
+    /// pre-#243 behaviour rather than manufacturing a turn.
+    #[tokio::test]
+    async fn an_approval_with_no_grant_is_a_silent_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let log: Arc<dyn crate::ports::EventLog> =
+            Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf()));
+        let requests = crate::harness::policy::ApprovalRequestQueue::default();
+        let brain = brain_with_queue_and_events(dir.path(), requests, log.clone());
+
+        let result = brain
+            .run_cycle(
+                cycle_over(vec![approval_resolved("appr-native", Verdict::Approve)]),
+                &NoopHost,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.channel_responses.len(), 1);
+        assert_eq!(result.channel_responses[0].text, "Acknowledged.");
+        assert!(
+            log.read_from(&CompanyId::new("acme"), crate::ports::EventSeq::new(0), 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // --- Steer disposition (issue #111) -------------------------------------
