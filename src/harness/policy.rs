@@ -163,11 +163,26 @@ pub struct ApprovalPolicy {
     /// before; `build_roster` installs the shared one off
     /// [`HarnessDeps`](crate::harness::HarnessDeps).
     requests: ApprovalRequestQueue,
+    /// Which roster agent this policy instance is installed on, stamped onto
+    /// every projected [`Effect`] so an approval can be re-dispatched to the
+    /// agent that asked for it (issue #243).
+    ///
+    /// `None` for every non-harness construction site, which is what keeps a
+    /// policy built outside `build_roster` projecting exactly the effect it
+    /// projected before: no agent, so no grant, so the runtime executes it
+    /// natively. Only `build_roster` sets it.
+    agent: Option<String>,
 }
 
 impl ApprovalPolicy {
     /// Builds a policy from the manifest `[policy]` block and an agent's
     /// `budget_usd_daily`.
+    ///
+    /// The signature deliberately does **not** take the agent id: this is the
+    /// constructor `build.rs`-generated tests and every non-harness caller use,
+    /// and widening it would churn them all to pass a `None` they have no
+    /// meaning for. The harness chains [`with_agent`](Self::with_agent) instead,
+    /// the same way it already chains [`with_requests`](Self::with_requests).
     pub fn new(policy: &Policy, budget_usd_daily: Option<f64>) -> Self {
         Self {
             mode: PolicyMode::parse(&policy.mode),
@@ -175,6 +190,7 @@ impl ApprovalPolicy {
             auto_approve_under_usd: policy.auto_approve_under_usd,
             budget_usd_daily,
             requests: ApprovalRequestQueue::default(),
+            agent: None,
         }
     }
 
@@ -182,6 +198,13 @@ impl ApprovalPolicy {
     /// so the brain can park the request after the turn (issue #172).
     pub fn with_requests(mut self, requests: ApprovalRequestQueue) -> Self {
         self.requests = requests;
+        self
+    }
+
+    /// Binds this policy to the roster agent it is installed on, so a parked
+    /// effect knows whose tool call it came from (issue #243).
+    pub fn with_agent(mut self, agent: impl Into<String>) -> Self {
+        self.agent = Some(agent.into());
         self
     }
 
@@ -216,6 +239,11 @@ impl ApprovalPolicy {
     /// can park it on the [`ApprovalGate`](crate::ports::ApprovalGate). The tool
     /// name becomes the dotted effect `kind`; the group and amount are inferred
     /// best-effort.
+    ///
+    /// This is the **only** place [`Effect::agent`] is ever stamped, which is
+    /// what makes `agent.is_some()` mean precisely "projected from a harness
+    /// tool call" everywhere downstream (issue #243). A native effect the
+    /// runtime performs itself is built elsewhere and keeps `None`.
     pub fn effect_for(&self, tool_name: &str, args: &serde_json::Value) -> Effect {
         Effect {
             kind: tool_name.to_string(),
@@ -224,7 +252,7 @@ impl ApprovalPolicy {
             established_thread: false,
             first_time_counterparty: false,
             payload: args.clone(),
-            agent: None,
+            agent: self.agent.clone(),
         }
     }
 

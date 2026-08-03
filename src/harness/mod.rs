@@ -1330,7 +1330,10 @@ pub(crate) fn build_roster(
 
     for manifest_agent in &company.manifest.agents {
         let agent_policy = ApprovalPolicy::new(policy, manifest_agent.budget_usd_daily)
-            .with_requests(deps.approval_requests.clone());
+            .with_requests(deps.approval_requests.clone())
+            // Issue #243: stamp who the parked effect belongs to, so approving it
+            // can hand the grant back to this agent rather than to nobody.
+            .with_agent(manifest_agent.id.clone());
         let is_orchestrator = orchestrator.as_deref() == Some(manifest_agent.id.as_str());
         let grants = agent_effective_grants(allow, &manifest_agent.tools);
         let agent = build::build_agent(
@@ -1367,7 +1370,10 @@ pub(crate) fn build_roster(
         // No per-teammate budget cap or cognition-tier hint in v1 — see
         // `overlay_agent_to_manifest`.
         let agent_policy = ApprovalPolicy::new(policy, manifest_agent.budget_usd_daily)
-            .with_requests(deps.approval_requests.clone());
+            .with_requests(deps.approval_requests.clone())
+            // An overlay teammate is a real roster agent and re-dispatches the
+            // same way a manifest one does (issue #243).
+            .with_agent(manifest_agent.id.clone());
         let grants = agent_effective_grants(allow, &manifest_agent.tools);
         let agent = build::build_agent(
             &company.id,
