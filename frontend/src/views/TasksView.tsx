@@ -14,21 +14,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { ADD_TASK_COLUMN, PRIORITY_STYLES, TASK_COLUMNS } from "@/lib/tasks-sample";
 import { toast } from "sonner";
-import { AssigneeSelect } from "./AssigneeSelect";
 import { TaskDetailView } from "./TaskDetailView";
 
 /**
@@ -47,8 +38,6 @@ function readTaskDetailId(): string | null {
     return null;
   }
 }
-
-const PRIORITIES = ["low", "medium", "high"] as const;
 
 /** How often to re-poll the board, so a dispatched card's result appears. */
 const POLL_MS = 4000;
@@ -86,7 +75,7 @@ export function TasksView({
   // The open card's id, mirrored in `#/tasks/<id>` so the detail survives a
   // refresh and honors back/forward.
   const [detailId, setDetailId] = useState<string | null>(readTaskDetailId);
-  const [creatingIn, setCreatingIn] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
   const mounted = useRef(true);
   // A real HTML5 drag fires a trailing click; suppress it so a drag never also
   // opens the detail dialog.
@@ -207,7 +196,7 @@ export function TasksView({
             size="sm"
             variant="outline"
             className="ml-1 h-7"
-            onClick={() => setCreatingIn(ADD_TASK_COLUMN)}
+            onClick={() => setCreating(true)}
           >
             <Plus className="size-4" />
             Add task
@@ -290,11 +279,11 @@ export function TasksView({
       </div>
 
       <CreateTaskDialog
-        column={creatingIn}
-        onClose={() => setCreatingIn(null)}
+        open={creating}
+        onClose={() => setCreating(false)}
         onCreated={(created) => {
           setTasks((ts) => [created, ...ts]);
-          setCreatingIn(null);
+          setCreating(false);
         }}
         client={client}
         company={company}
@@ -379,47 +368,69 @@ function TaskItem({
   );
 }
 
+/** How long a derived title may run before the full prompt moves to the note. */
+const TITLE_CAP = 80;
+
+/**
+ * Splits a prompt into the card's `{title, note}` (issue #301).
+ *
+ * The dialog asks for one thing — what needs doing — so the card's two text
+ * fields are derived rather than collected. The rule mirrors the host's own
+ * chat task-intent derivation (`src/server/operator.rs`) and `delegate_to_desk`'s
+ * `first_line(…, 80)`: the title is the prompt's first line, capped; the note
+ * carries the **full** prompt only when the title was shortened from it, so a
+ * one-liner does not duplicate itself onto its own card.
+ *
+ * The invariant that matters: the operator's full text always survives on the
+ * card, in the title or the note. Epic #183 §4's planner reads it from there.
+ */
+export function derivePromptCard(prompt: string): { title: string; note?: string } {
+  const full = prompt.trim();
+  const firstLine = full.split("\n")[0].trim();
+  const title =
+    firstLine.length > TITLE_CAP ? `${firstLine.slice(0, TITLE_CAP).trimEnd()}…` : firstLine;
+  return { title, note: title === full ? undefined : full };
+}
+
+/**
+ * New work enters the board through one prompt box (issue #301).
+ *
+ * Title/Note/Priority/Assignee used to be collected up front. They are not gone,
+ * only moved: priority and assignee default on the host (`medium`, unassigned →
+ * orchestrator) and are edited on the card afterwards, where #278 put the
+ * picker. `column` is omitted on purpose so the *server's* intake default
+ * decides where the card lands — the same spend gate the transcript's "Add to
+ * board" relies on, keeping the human drag into In progress the only thing that
+ * spends an agent turn.
+ */
 function CreateTaskDialog({
-  column,
+  open,
   onClose,
   onCreated,
   client,
   company,
 }: {
-  column: string | null;
+  open: boolean;
   onClose: () => void;
   onCreated: (t: Task) => void;
   client: OpenCompanyClient;
   company: string | null;
 }) {
-  const [title, setTitle] = useState("");
-  const [note, setNote] = useState("");
-  const [priority, setPriority] = useState("medium");
-  const [assignee, setAssignee] = useState("");
+  const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (column) {
-      setTitle("");
-      setNote("");
-      setPriority("medium");
-      setAssignee("");
-    }
-  }, [column]);
+    if (open) setPrompt("");
+  }, [open]);
 
-  if (!column) return null;
+  if (!open) return null;
 
   async function create() {
-    if (!title.trim()) return;
+    const { title, note } = derivePromptCard(prompt);
+    if (!title) return;
     setBusy(true);
     try {
-      const created = await createTask(client, company, {
-        title: title.trim(),
-        note: note.trim() || undefined,
-        column: column ?? undefined,
-        priority,
-        assignee: assignee.trim() || undefined,
-      });
+      const created = await createTask(client, company, { title, note });
       onCreated(created);
       toast.success("Task created.");
     } catch (e) {
@@ -429,10 +440,11 @@ function CreateTaskDialog({
     }
   }
 
-  const columnLabel = TASK_COLUMNS.find((c) => c.id === column)?.label ?? column;
+  const columnLabel =
+    TASK_COLUMNS.find((c) => c.id === ADD_TASK_COLUMN)?.label ?? ADD_TASK_COLUMN;
 
   return (
-    <Dialog open={!!column} onOpenChange={(open) => !open && onClose()}>
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       {/* `sm:` — DialogContent's own `sm:max-w-sm` beats an unprefixed width. */}
       <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
@@ -440,67 +452,25 @@ function CreateTaskDialog({
           <DialogDescription>Added to “{columnLabel}”.</DialogDescription>
         </DialogHeader>
 
-        <div className="grid gap-3">
-          <div className="grid gap-1.5">
-            <Label htmlFor="new-title">Title</Label>
-            <Input
-              id="new-title"
-              autoFocus
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="What needs doing?"
-            />
-          </div>
-          <div className="grid gap-1.5">
-            <Label htmlFor="new-note">Note</Label>
-            <Textarea
-              id="new-note"
-              // Textarea is `field-sizing-content`, so `rows` is inert — a
-              // min-height is what actually gives the box room.
-              className="min-h-32 resize-y"
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              placeholder="Any detail the assignee should act on."
-            />
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div className="grid gap-1.5">
-              <Label>Priority</Label>
-              <Select value={priority} onValueChange={(v) => setPriority(v ?? "medium")}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {PRIORITIES.map((p) => (
-                    <SelectItem key={p} value={p} className="capitalize">
-                      {p}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            {/* `min-w-0` so a long teammate id cannot widen this grid track
-                and squeeze the Priority select beside it. */}
-            <div className="grid min-w-0 gap-1.5">
-              <Label htmlFor="new-assignee">Assignee</Label>
-              {/* Issue #263: the roster is a closed set the host enforces, so it
-                  is picked, not typed. Blank is its own labelled row. */}
-              <AssigneeSelect
-                id="new-assignee"
-                client={client}
-                company={company}
-                value={assignee}
-                onChange={setAssignee}
-              />
-            </div>
-          </div>
+        <div className="grid gap-1.5">
+          <Label htmlFor="new-prompt">What needs doing?</Label>
+          <Textarea
+            id="new-prompt"
+            autoFocus
+            // Textarea is `field-sizing-content`, so `rows` is inert — a
+            // min-height is what actually gives the box room.
+            className="min-h-32 resize-y"
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            placeholder="Describe the work. The first line becomes the card's title."
+          />
         </div>
 
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
-          <Button onClick={() => void create()} disabled={busy || !title.trim()}>
+          <Button onClick={() => void create()} disabled={busy || !prompt.trim()}>
             {busy && <Loader2 className="mr-1.5 size-4 animate-spin" />}
             Create
           </Button>

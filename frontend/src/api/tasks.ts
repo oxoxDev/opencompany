@@ -28,7 +28,7 @@ export interface Task {
   originChatId?: string;
 }
 
-/** The create body; the host defaults column→`backlog`, priority→`medium`. */
+/** The create body; the host defaults column→`todo`, priority→`medium`. */
 export interface CreateTask {
   title: string;
   note?: string;

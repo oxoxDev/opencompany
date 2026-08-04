@@ -713,7 +713,10 @@ function ControlBar({
 
       {reassigning && (
         <div className="mt-2 flex items-center gap-2">
-          {/* Issue #263: the same roster picker the create and edit dialogs use.
+          {/* Issue #263: the same roster picker the edit dialog uses. Since
+              #301 this is the *only* place a card gets an assignee — the create
+              box asks for a prompt and nothing else, so the host's default
+              (unassigned → orchestrator) stands until somebody picks here.
               Unassigned is a row here rather than an empty field, so handing the
               card back to the orchestrator is something you can see and choose. */}
           <AssigneeSelect
