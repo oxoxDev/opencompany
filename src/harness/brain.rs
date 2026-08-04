@@ -603,8 +603,13 @@ impl HarnessBrain {
         // Recorded before the #185 journal writes below because those move
         // `result_text` into the completion event; the artifact only borrows it.
         if card.column == lifecycle::success_terminal_column(&card) {
-            self.record_task_artifact(&card, &responder, &result_text)
-                .await?;
+            self.record_task_artifact(
+                &card,
+                &responder,
+                &result_text,
+                sink.as_ref().map(|s| s.run_id()),
+            )
+            .await?;
         }
 
         // Issue #185: correlate this dispatch's journal trail to its card.
@@ -893,11 +898,15 @@ impl HarnessBrain {
     /// A missing artifact store is a silent no-op, exactly like a missing task
     /// store: the note is still written, so the board behaves as it did before
     /// this issue.
+    /// `run_id` is the attempt that produced `body`, stamped onto the revision
+    /// this call writes (issue #242) so a run row can point at what it actually
+    /// wrote. `None` for an untracked dispatch, which behaves exactly as before.
     async fn record_task_artifact(
         &self,
         card: &TaskRecord,
         responder: &str,
         body: &str,
+        run_id: Option<&str>,
     ) -> Result<()> {
         let Some(artifacts) = self.deps.artifacts.as_ref() else {
             return Ok(());
@@ -908,7 +917,7 @@ impl HarnessBrain {
             .into_iter()
             .max_by_key(|a| a.updated_at_millis);
         let at = now_millis();
-        let record = match existing {
+        let mut record = match existing {
             Some(mut found) => {
                 found.push_version(body, ArtifactAuthor::Agent, responder, at, None);
                 found
@@ -923,6 +932,12 @@ impl HarnessBrain {
                 at,
             ),
         };
+        // Only the revision this run wrote. An earlier attempt's version keeps
+        // the attempt that wrote *it*, which is the point of stamping per
+        // version instead of per record.
+        if let Some(run_id) = run_id {
+            record.stamp_run(run_id);
+        }
         artifacts.upsert(&self.record.id, &record).await?;
         Ok(())
     }
