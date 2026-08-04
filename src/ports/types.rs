@@ -343,6 +343,27 @@ pub enum CompanyEvent {
     TaskDispatched {
         /// The id of the dispatched task card.
         task_id: String,
+        /// The [`RunRecord`](crate::ports::runs::RunRecord) this dispatch is an
+        /// attempt under (issue #242), minted at the dispatch choke point
+        /// *before* the cycle is spawned.
+        ///
+        /// Carrying it on the event is what makes the journal self-describing:
+        /// the run row and the durable log line name each other, so a reader
+        /// holding either one can find the other without re-deriving identity
+        /// from timestamps. It also keeps
+        /// [`Brain::run_cycle`](crate::ports::brain::Brain::run_cycle)'s
+        /// signature stable — the id rides the event the brain already reads
+        /// rather than a new argument every brain would have to thread.
+        ///
+        /// `None` for a dispatch whose run row could not be minted (record-keeping
+        /// never fails the work it records) and for every event journaled before
+        /// this field existed. Additive in exactly the way
+        /// [`AgentReply`](Self::AgentReply)'s `task_id` is: `#[serde(default)]`
+        /// lets an already-persisted log load, and `skip_serializing_if` keeps an
+        /// untagged dispatch serializing byte-for-byte as it did before, so no
+        /// stored record needs migrating.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
     },
     /// An agent's MCP tool call failed during a turn, journaled by the harness
     /// so the operator has an audit trail of which server/tool broke and why.
@@ -2706,6 +2727,38 @@ mod test {
             let again = serde_json::to_string(&event).expect("serialize");
             assert_eq!(again, line, "pre-#228 line must re-serialize unchanged");
         }
+    }
+
+    /// Issue #242: the run id rides the dispatch event, and it is additive in
+    /// both directions — a tagged dispatch round-trips it, and an untagged one
+    /// serializes exactly the shape a pre-#242 journal holds (asserted verbatim
+    /// above too, but here against the *writer* rather than the reader).
+    #[test]
+    fn task_dispatched_carries_its_run_id_without_changing_the_untagged_shape() {
+        let untagged = CompanyEvent::TaskDispatched {
+            task_id: "t-1".to_string(),
+            run_id: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&untagged).expect("serialize"),
+            r#"{"kind":"TaskDispatched","task_id":"t-1"}"#
+        );
+
+        let tagged = CompanyEvent::TaskDispatched {
+            task_id: "t-1".to_string(),
+            run_id: Some("run-7".to_string()),
+        };
+        let line = serde_json::to_string(&tagged).expect("serialize");
+        assert!(line.contains(r#""run_id":"run-7""#), "{line}");
+        assert_eq!(
+            tagged,
+            serde_json::from_str::<CompanyEvent>(&line).expect("round trip")
+        );
+
+        // A legacy line loads as an untagged dispatch rather than failing.
+        let legacy: CompanyEvent =
+            serde_json::from_str(r#"{"kind":"TaskDispatched","task_id":"t-1"}"#).expect("legacy");
+        assert_eq!(legacy, untagged);
     }
 
     #[test]

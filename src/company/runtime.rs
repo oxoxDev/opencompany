@@ -386,6 +386,7 @@ impl CompanyRuntime {
                 if let Err(err) = runtime
                     .run_cycle(vec![CompanyEvent::TaskDispatched {
                         task_id: task_id.clone(),
+                        run_id: None,
                     }])
                     .await
                 {

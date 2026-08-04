@@ -1069,7 +1069,7 @@ impl Brain for HarnessBrain {
                     });
                     channel_responses.extend(turn.bubbles);
                 }
-                CompanyEvent::TaskDispatched { task_id } => {
+                CompanyEvent::TaskDispatched { task_id, .. } => {
                     if let Some(message) = self.run_task(task_id).await? {
                         channel_responses.push(message);
                     }
@@ -1634,6 +1634,7 @@ members = ["engineer"]
             .run_cycle(
                 request(vec![CompanyEvent::TaskDispatched {
                     task_id: "t1".into(),
+                    run_id: None,
                 }]),
                 &NoopHost,
             )
@@ -1716,6 +1717,7 @@ members = ["engineer"]
             .run_cycle(
                 request(vec![CompanyEvent::TaskDispatched {
                     task_id: "t-origin".into(),
+                    run_id: None,
                 }]),
                 &NoopHost,
             )
@@ -1758,6 +1760,7 @@ members = ["engineer"]
             .run_cycle(
                 request(vec![CompanyEvent::TaskDispatched {
                     task_id: "t-cancel".into(),
+                    run_id: None,
                 }]),
                 &NoopHost,
             )
@@ -1815,6 +1818,7 @@ members = ["engineer"]
             .run_cycle(
                 request(vec![CompanyEvent::TaskDispatched {
                     task_id: "t1".into(),
+                    run_id: None,
                 }]),
                 &NoopHost,
             )
@@ -1851,6 +1855,7 @@ members = ["engineer"]
             .run_cycle(
                 request(vec![CompanyEvent::TaskDispatched {
                     task_id: "t1".into(),
+                    run_id: None,
                 }]),
                 &NoopHost,
             )
@@ -1881,6 +1886,7 @@ members = ["engineer"]
             .run_cycle(
                 request(vec![CompanyEvent::TaskDispatched {
                     task_id: "t1".into(),
+                    run_id: None,
                 }]),
                 &NoopHost,
             )
@@ -1927,6 +1933,7 @@ members = ["engineer"]
             .run_cycle(
                 request(vec![CompanyEvent::TaskDispatched {
                     task_id: "t1".into(),
+                    run_id: None,
                 }]),
                 &NoopHost,
             )
@@ -1959,6 +1966,7 @@ members = ["engineer"]
             .run_cycle(
                 request(vec![CompanyEvent::TaskDispatched {
                     task_id: "t1".into(),
+                    run_id: None,
                 }]),
                 &NoopHost,
             )
@@ -1998,6 +2006,7 @@ members = ["engineer"]
             .run_cycle(
                 request(vec![CompanyEvent::TaskDispatched {
                     task_id: "t1".into(),
+                    run_id: None,
                 }]),
                 &NoopHost,
             )
@@ -2051,6 +2060,7 @@ members = ["engineer"]
             .run_cycle(
                 request(vec![CompanyEvent::TaskDispatched {
                     task_id: "nope".into(),
+                    run_id: None,
                 }]),
                 &NoopHost,
             )
@@ -3629,6 +3639,7 @@ members = ["eng1", "eng2"]
             .run_cycle(
                 request(vec![CompanyEvent::TaskDispatched {
                     task_id: "t1".into(),
+                    run_id: None,
                 }]),
                 &NoopHost,
             )
@@ -3662,6 +3673,7 @@ members = ["eng1", "eng2"]
             .run_cycle(
                 request(vec![CompanyEvent::TaskDispatched {
                     task_id: "t1".into(),
+                    run_id: None,
                 }]),
                 &NoopHost,
             )
@@ -3702,6 +3714,7 @@ members = ["eng1", "eng2"]
             .run_cycle(
                 request(vec![CompanyEvent::TaskDispatched {
                     task_id: "t1".into(),
+                    run_id: None,
                 }]),
                 &NoopHost,
             )
@@ -4087,6 +4100,7 @@ members = ["eng1", "eng2"]
             .run_cycle(
                 request(vec![CompanyEvent::TaskDispatched {
                     task_id: id.to_string(),
+                    run_id: None,
                 }]),
                 &NoopHost,
             )
