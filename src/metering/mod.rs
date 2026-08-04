@@ -39,6 +39,7 @@ use crate::ports::types::OverlayAgent;
 
 mod calendar;
 pub mod capability;
+pub mod daily_budget;
 mod finances;
 pub mod inference;
 pub mod oauth;
@@ -47,6 +48,7 @@ mod types;
 mod usage;
 
 pub use capability::{BudgetPeriod, CapabilityPlan, TierBudgetStatus, plan_named, tokens_in};
+pub use daily_budget::{AgentBudgetStatus, usd_spent_by_agent, utc_day_start_millis};
 pub use finances::{category_label, finances_from};
 pub use inference::{
     INFERENCE_SPEND_KIND, MEDULLA_PROVIDER, UNATTRIBUTED_AGENT, inference_ledger_entry,
