@@ -462,9 +462,12 @@ mod tests {
             path.display().to_string(),
         )]);
         // An obviously fake host provider application — the self-hosted hatch.
+        // The state signing secret is part of the hatch being *open*: without
+        // one no nonce can be issued, so no handshake can complete (issue #318).
         let hatch = MapEnv::new([
             ("OPENCOMPANY_OAUTH_GITHUB_ID", "fake-client-id"),
             ("OPENCOMPANY_OAUTH_GITHUB_SECRET", "fake-client-secret"),
+            ("OPENCOMPANY_OAUTH_STATE_SECRET", "a-private-value"),
         ]);
 
         // 1. A stored token is the BYO override and outranks everything else,
@@ -539,11 +542,27 @@ mod tests {
                 (crate::company::credentials::API_KEY_ENV, "th_fake_key"),
                 ("OPENCOMPANY_OAUTH_GITHUB_ID", "fake-client-id"),
                 ("OPENCOMPANY_OAUTH_GITHUB_SECRET", "fake-client-secret"),
+                ("OPENCOMPANY_OAUTH_STATE_SECRET", "a-private-value"),
             ]);
             assert_eq!(
                 connect_route("github", false, &with_hatch),
                 CredentialSource::Static,
                 "the self-hosted hatch must keep working when an inference key is also set"
+            );
+
+            // Issue #318: the same operator without a state signing secret. The
+            // provider application is fully registered, and the hatch is still
+            // shut — an unsigned-nonce flow has no CSRF check worth the name, so
+            // the honest answer is that no Connect can succeed here.
+            let no_state_secret = MapEnv::new([
+                (crate::company::credentials::API_KEY_ENV, "th_fake_key"),
+                ("OPENCOMPANY_OAUTH_GITHUB_ID", "fake-client-id"),
+                ("OPENCOMPANY_OAUTH_GITHUB_SECRET", "fake-client-secret"),
+            ]);
+            assert_eq!(
+                connect_route("github", false, &no_state_secret),
+                CredentialSource::None,
+                "a registered provider app with no state signing secret is not connectable"
             );
         }
 
