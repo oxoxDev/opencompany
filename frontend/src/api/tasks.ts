@@ -3,6 +3,7 @@
 // the client-side `tasks-sample` illustrative data.
 
 import type { OpenCompanyClient } from "./client";
+import type { RunSummary } from "./runs";
 
 /** A board card as the host returns it. */
 export interface Task {
@@ -63,8 +64,33 @@ export function listTasks(client: OpenCompanyClient, company: string | null): Pr
 /**
  * A stable wire word for what a {@link TimelineEntry} records (#185). The host
  * emits exactly this set today; re-transcribed here so `tsc` pins the contract.
+ *
+ * Widened **additively** by #242 with the three step kinds a run's trace
+ * produces (`tool_call` | `thinking` | `note`). A task timeline never emits
+ * those and a run trace never emits the journal's five, but both arrive in this
+ * one shape on purpose: the grouped-timeline renderer is then reused for the
+ * run-detail drawer rather than reinvented beside it.
  */
-export type TimelineKind = "dispatched" | "reply" | "tool_failed" | "approval" | "completed";
+export type TimelineKind =
+  | "dispatched"
+  | "reply"
+  | "tool_failed"
+  | "approval"
+  | "completed"
+  | "tool_call"
+  | "thinking"
+  | "note";
+
+/**
+ * How a run-trace step ended (#242). Present only on entries that came from a
+ * run's step trace; a journal-derived task-timeline entry has no such notion.
+ *
+ * `running` is a **real and expected** resting state of a persisted row, not a
+ * glitch: the trace is written *as the turn executes*, so a host killed
+ * mid-tool-call leaves that call recorded exactly as it stood. It means
+ * in-flight-when-the-trace-stopped — render it as such, never as a failure.
+ */
+export type StepStatus = "ok" | "error" | "running";
 
 /**
  * One entry on a task's timeline (#185) — the same scrubbed vocabulary the host
@@ -73,16 +99,34 @@ export type TimelineKind = "dispatched" | "reply" | "tool_failed" | "approval" |
  * arguments, output, or call ids.
  */
 export interface TimelineEntry {
-  /** The journal sequence — the stable render key, and the strict order. */
+  /**
+   * The stable render key, and the strict order.
+   *
+   * On a task timeline this is the company-wide journal sequence. On a run's
+   * step trace (#242) it is the **run-scoped** step ordinal, 0-based and dense
+   * — so two different runs both have a step `0`. Never compare a `seq` across
+   * the two surfaces.
+   */
   seq: number;
-  /** Epoch-millis the event was journaled. */
+  /** Epoch-millis the event was journaled, or the step recorded. */
   atMillis: number;
-  /** What happened: `dispatched` | `reply` | `tool_failed` | `approval` | `completed`. */
+  /** What happened. See {@link TimelineKind} for which surface emits which words. */
   kind: TimelineKind;
   /** A short, past-tense human label rendered verbatim. */
   label: string;
   /** Optional scrubbed detail; expands under the row when present. */
   detail?: string;
+  /**
+   * How a run-trace step ended (#242). Absent on task-timeline entries, which
+   * have no such notion — so `undefined` means "not a step", never "unknown
+   * outcome".
+   */
+  status?: StepStatus;
+  /**
+   * How long a run-trace step took (#242), when known. Tool calls report it;
+   * thinking and note steps do not.
+   */
+  elapsedMs?: number;
   /**
    * On an `approval` entry: how long the company sat waiting on the operator
    * before this resolution landed (#305), clamped to the run window.
@@ -117,6 +161,14 @@ export interface TaskDetail {
   timeline: TimelineEntry[];
   /** Parent and children. */
   lineage: TaskLineage;
+  /**
+   * The card's recorded attempts, newest first (#242).
+   *
+   * Empty is a legitimate answer, not an error: run records were not
+   * backfilled, so a card dispatched before they existed genuinely has none —
+   * synthesising attempts from old reply events would fabricate identity.
+   */
+  runs: RunSummary[];
   /**
    * Epoch-millis this task started waiting on an operator *right now* (#305),
    * or absent when nothing is currently parked for its run.
