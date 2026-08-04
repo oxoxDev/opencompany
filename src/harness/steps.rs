@@ -201,12 +201,22 @@ pub fn fold_steps(events: Vec<AgentProgress>) -> Vec<TurnStep> {
 ///
 /// Materialize every yield in ordinal order and the result is byte-identical to
 /// `fold_steps` over the same event stream (pinned by
-/// `incremental_trace_converges_on_the_folded_timeline`), with one deliberate
-/// exception: a start whose completion never arrives — because the process died
-/// mid-tool-call — stays persisted as `Running`. That is not a divergence to
-/// paper over, it is the whole point: the persisted trace records what was
-/// actually observed, and "this tool call was still in flight" is the truth
-/// about a killed run.
+/// `incremental_trace_converges_on_the_folded_timeline`), with **two** deliberate
+/// exceptions:
+///
+/// * **An unfinished call.** A start whose completion never arrives — because
+///   the process died mid-tool-call — stays persisted as `Running`. That is not
+///   a divergence to paper over, it is the whole point: the persisted trace
+///   records what was actually observed, and "this tool call was still in
+///   flight" is the truth about a killed run.
+/// * **Past 50 steps, the two lengths part.** `fold_steps` truncates at
+///   [`MAX_STEPS`] and appends an omission note, because it builds a chat bubble
+///   and a bubble that scrolls forever is unreadable. The trace has no such
+///   limit here; [`run_trace::MAX_RUN_STEPS`](super::run_trace::MAX_RUN_STEPS)
+///   bounds what is persisted, an order of magnitude higher. A record of what an
+///   attempt did should not be truncated at the length a *message* wants to be.
+///   Note that the convergence test runs a handful of events, so it pins the
+///   shared prefix, not this boundary.
 ///
 /// **Run-scoped, not turn-scoped.** One instance spans every turn of an
 /// attempt — the redirect re-runs and a delegate's turn — so ordinals stay
