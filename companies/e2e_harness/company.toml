@@ -61,6 +61,12 @@ description = "Turns rough notes into short, clear written drafts."
 # The one agent that may edit a note, so the "an agent wrote it, the operator
 # sees it" round trip is demonstrable out of the box.
 tools = ["mcp:*", "composio", "workspace"]
+# Issue #304 — one capped teammate so the Team page has a live per-agent budget
+# to render, and `team-budget.spec.ts` can assert the capped/uncapped split for
+# real rather than against a fixture. Deliberately generous: the harness runs on
+# the offline echo brain, which meters no cost, so spend stays $0.00 and this
+# cap never trips during a suite run.
+budget_usd_daily = 5.0
 
 [[group_chat]]
 id = "engineering"
