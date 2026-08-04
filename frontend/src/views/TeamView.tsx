@@ -251,6 +251,7 @@ function MemberCard({
         {member.description && (
           <p className="line-clamp-3 text-sm text-muted-foreground">{member.description}</p>
         )}
+        <DailyBudgetLine member={member} />
         <div className="mt-auto flex items-center justify-between gap-2 border-t pt-3">
           <Badge variant="secondary" className="gap-1">
             <Sparkles className="size-3" /> Agent
@@ -268,6 +269,32 @@ function MemberCard({
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * The teammate's daily spend cap and what it has spent against it today.
+ *
+ * Renders nothing at all for an uncapped teammate: the host omits the fields
+ * entirely rather than sending zeros, so absence means "spends freely" and must
+ * not be drawn as "$0.00/day". Once spend reaches the cap the line turns
+ * destructive — that teammate's dispatch is paused until 00:00 UTC, and the
+ * card is where an operator will look to find out why it went quiet.
+ */
+function DailyBudgetLine({ member }: { member: TeamMember }) {
+  const cap = member.budgetUsdDaily;
+  if (cap === undefined) return null;
+  const spent = member.spentTodayUsd ?? 0;
+  const overBudget = spent >= cap;
+  const usd = (n: number) => `$${n.toFixed(2)}`;
+  return (
+    <p
+      data-testid="team-budget"
+      className={cn("text-xs", overBudget ? "text-destructive" : "text-muted-foreground")}
+    >
+      {usd(cap)}/day · {usd(spent)} spent today
+      {overBudget && " · paused until 00:00 UTC"}
+    </p>
   );
 }
 
