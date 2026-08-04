@@ -34,7 +34,7 @@
 //!   lifecycle. `assign_task` sets or changes who owns an existing card;
 //!   `review_task` records the orchestrator's verdict on one awaiting review
 //!   (`approve` completes it to `done` — #171's transition, PR #179 — and
-//!   `revise` returns it to the backlog). Both enqueue a [`Delegation`] drained
+//!   `revise` returns it to To-do). Both enqueue a [`Delegation`] drained
 //!   by the brain, like the other delegation tools.
 //! * [`AddAgentTool`] (issue #71) — writes a new [`OverlayAgent`] through the
 //!   same store path the console `POST .../team` route uses, so the
@@ -148,7 +148,7 @@ the team starting next turn. \
 You also own the board's lifecycle: `assign_task` to set or change who owns an existing card (this \
 records ownership only — moving the card to In Progress is what starts the work), and \
 `review_task` to record your verdict on a card awaiting review, either `approve` when the work is \
-accepted or `revise` to send it back to the backlog for another pass. \
+accepted or `revise` to send it back to To-do for another pass. \
 Delegate, run or create a workflow, add a teammate, or act on the board only when it genuinely \
 helps — otherwise answer directly and concisely."
         .to_string()
@@ -834,7 +834,8 @@ impl Tool for AssignTaskTool {
 /// one card shape #179's own rule cannot reach: a board-created card, which has
 /// no `origin_chat_id` and so never completes on its own. The verdict is
 /// recorded on the card's note either way; `revise` returns the card to
-/// `backlog` so it can be picked up again. See
+/// `todo` so it can be picked up again, with the verdict readable on it —
+/// issue #301 collapsed the old `backlog` pool into To-do. See
 /// [`crate::harness::lifecycle::review_landing_column`].
 pub struct ReviewTaskTool {
     queue: DelegationQueue,
@@ -854,7 +855,7 @@ impl Tool for ReviewTaskTool {
     }
 
     fn description(&self) -> &str {
-        "Record your review of a task card that is awaiting review. Provide the card's `task_id` and a `decision` of `approve` (the work is accepted) or `revise` (it needs another pass, which returns the card to the backlog), plus an optional `note` with your feedback."
+        "Record your review of a task card that is awaiting review. Provide the card's `task_id` and a `decision` of `approve` (the work is accepted) or `revise` (it needs another pass, which returns the card to To-do), plus an optional `note` with your feedback."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -898,7 +899,7 @@ impl Tool for ReviewTaskTool {
                 "Approved card {task_id}; it is complete and has moved to done."
             )),
             ReviewDecision::Revise => ToolResult::success(format!(
-                "Sent card {task_id} back to the backlog for another pass."
+                "Sent card {task_id} back to To-do for another pass."
             )),
         })
     }
