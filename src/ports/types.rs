@@ -1309,6 +1309,32 @@ pub struct BudgetOverride {
     pub at_millis: u64,
 }
 
+impl BudgetOverride {
+    /// The first `agent_id` appearing more than once in `entries`, if any.
+    ///
+    /// For validating a set of overrides this process did not write — an
+    /// imported bundle, principally. [`CompanyRecord::budget_override`] reads the
+    /// *first* match, so a second row for one teammate is not a harmless
+    /// duplicate: it makes the applied cap a function of serialization order.
+    /// The two rows can differ in cap *and* in attribution, so there is no
+    /// answer to pick — one choice over-restricts a teammate, the other hands
+    /// back an allowance an admin revoked, and both name someone in the console
+    /// who may not have set it. Callers reject rather than guess.
+    ///
+    /// Linear scan: an override set is one row per capped teammate, so it is
+    /// bounded by roster size.
+    pub fn duplicate_agent_id(entries: &[BudgetOverride]) -> Option<&str> {
+        let mut seen: Vec<&str> = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if seen.contains(&entry.agent_id.as_str()) {
+                return Some(&entry.agent_id);
+            }
+            seen.push(&entry.agent_id);
+        }
+        None
+    }
+}
+
 /// The operator overlays persisted as a single JSON blob by the string-column
 /// stores (sqlite + mongodb `overlay_json`). The filesystem store keeps the two
 /// collections as typed fields on its own `Meta` instead.
@@ -1431,6 +1457,13 @@ pub struct CompanyRecord {
     /// manifest decides, which is byte-for-byte the pre-#343 behaviour; the
     /// `#[serde(default)]` keeps records written before console budget writes
     /// existed loading without a migration.
+    ///
+    /// **At most one entry per `agent_id`.** [`Self::effective_budget`] reads the
+    /// first match, so a second entry for the same teammate is not a harmless
+    /// duplicate — it is a silently unreachable cap, and which of the two wins
+    /// depends on insertion order rather than on what an admin last decided.
+    /// Mutate through [`Self::upsert_budget_override`] rather than pushing, and
+    /// check untrusted input with [`Self::duplicate_budget_agent_id`].
     #[serde(default)]
     pub overlay_budgets: Vec<BudgetOverride>,
     /// Where this company's manifest was seeded from — the source template's
@@ -1628,6 +1661,27 @@ impl CompanyRecord {
                 .find(|a| a.id == agent_id)
                 .and_then(|a| a.budget_usd_daily),
         }
+    }
+
+    /// Stores `entry` as **the** override for its teammate, replacing any entry
+    /// already held for that `agent_id`.
+    ///
+    /// The one way a write path should add to [`Self::overlay_budgets`]. Pushing
+    /// directly is what lets a record accumulate two rows for one teammate, and
+    /// [`Self::budget_override`] reads the *first* — so the stale row would keep
+    /// winning and every surface would agree on a cap no admin last set. Making
+    /// the replacement part of the type rather than a convention each caller
+    /// remembers is the point: there is no correct way to append.
+    pub fn upsert_budget_override(&mut self, entry: BudgetOverride) {
+        self.overlay_budgets
+            .retain(|held| held.agent_id != entry.agent_id);
+        self.overlay_budgets.push(entry);
+    }
+
+    /// The first `agent_id` on this record carrying more than one override, if
+    /// any. See [`BudgetOverride::duplicate_agent_id`].
+    pub fn duplicate_budget_agent_id(&self) -> Option<&str> {
+        BudgetOverride::duplicate_agent_id(&self.overlay_budgets)
     }
 }
 
@@ -2723,6 +2777,62 @@ mod test {
 
         record.overlay_budgets.clear();
         assert_eq!(record.effective_budget("shane"), None);
+    }
+
+    /// Issue #343: one override per teammate. `upsert_budget_override` replaces
+    /// the held row instead of appending a second, so the cap an admin last set
+    /// is the cap every surface reads.
+    ///
+    /// Appending would leave the *first* row winning `budget_override`'s
+    /// find-first read — meaning a raise or a revocation would persist happily
+    /// and change nothing, the failure mode hardest to notice from the console.
+    #[test]
+    fn upserting_an_override_replaces_rather_than_appends() {
+        let mut record = desk_record(BUDGET_ROSTER, Vec::new());
+        record.upsert_budget_override(budget_entry("analyst", Some(50.0)));
+        record.upsert_budget_override(budget_entry("writer", Some(3.0)));
+        record.upsert_budget_override(budget_entry("analyst", None));
+
+        assert_eq!(
+            record.overlay_budgets.len(),
+            2,
+            "a second write for one teammate must replace, not accumulate: {:?}",
+            record.overlay_budgets
+        );
+        assert_eq!(
+            record.effective_budget("analyst"),
+            None,
+            "the latest write must win over the manifest's $5"
+        );
+        assert_eq!(record.effective_budget("writer"), Some(3.0));
+    }
+
+    /// Issue #343: duplicates are detectable, so a caller holding overrides it
+    /// did not write (a bundle import) can refuse them instead of silently
+    /// applying whichever row happens to sort first.
+    #[test]
+    fn duplicate_overrides_are_detected() {
+        let mut record = desk_record(BUDGET_ROSTER, Vec::new());
+        assert_eq!(record.duplicate_budget_agent_id(), None);
+
+        record.overlay_budgets = vec![
+            budget_entry("analyst", Some(9.0)),
+            budget_entry("writer", None),
+        ];
+        assert_eq!(
+            record.duplicate_budget_agent_id(),
+            None,
+            "distinct teammates are not a duplicate"
+        );
+
+        // Two rows for one teammate that disagree about the cap — the case where
+        // guessing would either over-restrict or hand back a revoked allowance.
+        record.overlay_budgets = vec![
+            budget_entry("analyst", Some(9.0)),
+            budget_entry("writer", None),
+            budget_entry("analyst", Some(0.0)),
+        ];
+        assert_eq!(record.duplicate_budget_agent_id(), Some("analyst"));
     }
 
     /// Issue #343: the budget overrides round-trip through the `OverlayBlob` the
