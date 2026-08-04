@@ -218,6 +218,70 @@ async fn team_lists_manifest_teammates() {
     assert!(team[0]["name"].is_null());
 }
 
+/// Issue #343: the GraphQL roster resolves the **effective** cap and its
+/// attribution, so the two reads of the same roster cannot drift.
+///
+/// The REST handler is the console's consumer, but this resolver reads the same
+/// record and has its own copy of the merge — which is exactly how a surface
+/// ends up reporting a manifest cap the dispatch gate stopped enforcing. Both
+/// halves are asserted here: a manifest teammate whose cap was overridden, and
+/// an overlay teammate that the pre-#343 arm hardcoded to `null`.
+#[tokio::test]
+async fn team_reports_the_effective_cap_and_its_attribution() {
+    use crate::ports::types::{Actor, ActorKind, BudgetOverride, OverlayAgent};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_rich_company(&home).await;
+
+    let id = CompanyId::new("acme");
+    let store = FsCompanyStore::new(home.clone());
+    let mut record = store.load(&id).await.unwrap().unwrap();
+    record.overlay_agents.push(OverlayAgent {
+        id: "jamie".to_string(),
+        name: "Jamie".to_string(),
+        role: "Growth".to_string(),
+        description: None,
+    });
+    let admin = Actor {
+        kind: ActorKind::User,
+        id: "user-admin".to_string(),
+    };
+    record.overlay_budgets = vec![
+        BudgetOverride {
+            agent_id: "maya".to_string(),
+            budget_usd_daily: Some(7.5),
+            set_by: admin.clone(),
+            at_millis: 1_700_000_000_000,
+        },
+        BudgetOverride {
+            agent_id: "jamie".to_string(),
+            budget_usd_daily: Some(2.0),
+            set_by: admin,
+            at_millis: 1_700_000_000_001,
+        },
+    ];
+    store.save(&record).await.unwrap();
+
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id:\"acme\"){ team { id budgetUsdDaily budgetSetBy budgetSetAtMillis } } }"}"#,
+    )
+    .await;
+    let team = value["data"]["company"]["team"].as_array().unwrap();
+
+    let maya = team.iter().find(|m| m["id"] == "maya").unwrap();
+    assert_eq!(maya["budgetUsdDaily"], 7.5, "{maya}");
+    assert_eq!(maya["budgetSetBy"], "user-admin", "{maya}");
+    assert_eq!(maya["budgetSetAtMillis"], 1_700_000_000_000f64, "{maya}");
+
+    let jamie = team.iter().find(|m| m["id"] == "jamie").unwrap();
+    assert_eq!(
+        jamie["budgetUsdDaily"], 2.0,
+        "an overlay teammate is no longer hardcoded uncapped: {jamie}"
+    );
+}
+
 #[tokio::test]
 async fn chats_list_the_manifest_desks() {
     let home_dir = home();
