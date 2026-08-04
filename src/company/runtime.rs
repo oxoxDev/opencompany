@@ -759,13 +759,17 @@ mod tests {
     fn dispatch_only_on_entering_in_progress() {
         // Fresh card created straight into `in_progress` → dispatch.
         assert!(task_enters_in_progress(None, "in_progress"));
-        // The drag: backlog → in_progress → dispatch.
-        assert!(task_enters_in_progress(Some("backlog"), "in_progress"));
+        // The drag: todo → in_progress → dispatch.
+        assert!(task_enters_in_progress(Some("todo"), "in_progress"));
+        // Issue #301: planning sits before dispatch, so entering it must not
+        // fire one — and leaving it for `in_progress` must.
+        assert!(!task_enters_in_progress(Some("todo"), "planning"));
+        assert!(task_enters_in_progress(Some("planning"), "in_progress"));
         // Already in_progress, re-saved (e.g. an edit) → no re-dispatch.
         assert!(!task_enters_in_progress(Some("in_progress"), "in_progress"));
         // Any non-in_progress target → no dispatch.
         assert!(!task_enters_in_progress(Some("in_progress"), "in_review"));
-        assert!(!task_enters_in_progress(None, "backlog"));
+        assert!(!task_enters_in_progress(None, "todo"));
         assert!(!task_enters_in_progress(Some("in_review"), "done"));
     }
 

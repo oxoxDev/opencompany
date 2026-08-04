@@ -148,7 +148,7 @@ async fn tasks_crud_round_trips_under_both_scopes() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(task["title"], "Q2 brief");
-    // Issue #206: manual entry lands in To-do, not the backlog pool.
+    // Issue #206/#301: manual entry lands in To-do, the board's one intake lane.
     assert_eq!(task["column"], "todo");
     let id = task["id"].as_str().unwrap().to_string();
 
@@ -310,6 +310,10 @@ async fn task_writes_reject_a_column_the_board_cannot_render() {
 /// Issue #206: `POST …/tasks` defaults a new card to To-do — the board's one
 /// manual-entry column — while an explicit `column` still wins, so the
 /// lifecycle paths that place a card themselves are untouched.
+///
+/// Issue #301 kept the default and reshaped what "explicit" may say: `planning`
+/// is now a column (inert, but the write boundary must accept it before §4's
+/// auto-advance starts writing it), and the removed `backlog` pool is refused.
 #[tokio::test]
 async fn created_tasks_default_to_the_todo_column() {
     let home_dir = home();
@@ -327,14 +331,44 @@ async fn created_tasks_default_to_the_todo_column() {
 
     // An explicit column is still honored verbatim — `spawn_task`, the
     // orchestrator's `revise`, and a failed run all place their own card.
-    let (_, explicit) = send(
+    let (status, explicit) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "being planned", "column": "planning"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(explicit["column"], crate::ports::tasks::COLUMN_PLANNING);
+
+    // Issue #301: `backlog` is gone from the board, so a client still writing
+    // it is refused rather than persisting a card nothing renders. Legacy data
+    // heals silently on read (`ports::tasks`), but a *write* fails loudly — the
+    // error names the set that replaced it.
+    let (status, refused) = send(
         &state,
         "POST",
         "/api/v1/company/tasks",
         Some(json!({"title": "parked", "column": "backlog"})),
     )
     .await;
-    assert_eq!(explicit["column"], crate::ports::tasks::COLUMN_BACKLOG);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        refused.to_string().contains("todo"),
+        "the refusal must name the columns that replaced it: {refused}"
+    );
+
+    // …and the same on a drag, so a stale console cannot move a card into the
+    // removed column either.
+    let id = defaulted["id"].as_str().unwrap().to_string();
+    let (status, _) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/tasks/{id}"),
+        Some(json!({"column": "backlog"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 /// Issue #246: `POST …/tasks` carries the thread a card was opened from.
@@ -434,6 +468,21 @@ async fn a_chat_created_card_lands_off_the_dispatch_trigger() {
         "it lands in the board's intake lane, where the human drag is the gate"
     );
 
+    // Issue #301 added a second pre-dispatch column and made To-do the only
+    // intake lane, so the spend gate is re-checked across every creation shape
+    // the board can produce: the bare board `+` (which now sends nothing but a
+    // prompt-derived title) and an explicit `planning`. Neither may dispatch —
+    // `planning` in particular is *not* a dispatch trigger, which is the whole
+    // reason it can ship inert ahead of §4's auto-advance.
+    for body in [
+        json!({"title": "Typed on the board"}),
+        json!({"title": "Being planned", "column": "planning"}),
+    ] {
+        let (status, created) = send(&state, "POST", "/api/v1/company/tasks", Some(body)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_ne!(created["column"], COLUMN_IN_PROGRESS, "{created}");
+    }
+
     let journal = runtime
         .events()
         .read_from(
@@ -447,7 +496,7 @@ async fn a_chat_created_card_lands_off_the_dispatch_trigger() {
         !journal
             .iter()
             .any(|e| matches!(e.event, CompanyEvent::TaskDispatched { .. })),
-        "creating a card from chat must not dispatch it"
+        "creating a card must not dispatch it, whichever pre-dispatch column it lands in"
     );
 }
 
@@ -477,7 +526,7 @@ async fn steer_task_validates_statuses_and_journals_acceptance() {
                 id: "idle".into(),
                 title: "Idle".into(),
                 note: None,
-                column: "backlog".into(),
+                column: crate::ports::tasks::COLUMN_TODO.into(),
                 priority: "medium".into(),
                 assignee: String::new(),
                 updated_at_millis: 1,
