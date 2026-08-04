@@ -400,8 +400,8 @@ deserialize `column` as a plain string and validate it separately, so a client
 still sending `backlog` gets a `400` naming the valid set.
 
 `planning` sits between intake and dispatch: the card is being turned into a
-plan. It is **accepted but inert** — nothing writes it automatically yet. Epic
-#183 §4's auto-advance owns it and is blocked on #242/#243; the vocabulary lands
+plan. It is **accepted but inert** — nothing writes it automatically yet.
+Epic #183 §4's auto-advance owns it and is blocked on #242/#243; the vocabulary lands
 first so §4's code can write the column through a boundary that already accepts
 it, rather than having #242-dependent code write a column the host rejects. An
 operator may drag a card into it manually and nothing happens, which is correct:
