@@ -2802,6 +2802,9 @@ mod test {
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].title, "Ship it");
         assert_eq!(cards[0].assignee, "eng");
+        // Intake lands in To-do, never on the dispatch edge: a spawned card
+        // must not spend an agent turn before an operator has seen it.
+        assert_eq!(cards[0].column, COLUMN_TODO);
 
         // A blank title is a clean tool error, no card.
         let bad = host
@@ -2844,6 +2847,8 @@ mod test {
         let cards = rt.tasks().list(rt.id()).await.unwrap();
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].assignee, "eng");
+        // Same as the spawn path: a handoff opens a card, it does not dispatch.
+        assert_eq!(cards[0].column, COLUMN_TODO);
     }
 
     #[tokio::test]
