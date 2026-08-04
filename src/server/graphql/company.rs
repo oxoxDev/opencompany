@@ -228,6 +228,27 @@ impl CompanyGql {
             .collect();
         let enabled = |id: &str| inbox_enabled.get(id).copied().unwrap_or(false);
 
+        // Issue #304 — mirrored from the REST `list_team` deliberately: the two
+        // reads of the same roster must not drift, so the cap columns are
+        // resolved here by the same rule (one meter read, only when somebody is
+        // capped; spend paired with the cap).
+        let any_capped = record
+            .manifest
+            .agents
+            .iter()
+            .any(|agent| agent.budget_usd_daily.is_some());
+        let spend_today = if any_capped {
+            let since = crate::metering::utc_day_start_millis(crate::ports::now_millis());
+            Some(self.runtime.usage().query(&self.id, since).await?)
+        } else {
+            None
+        };
+        let spent = |id: &str| {
+            spend_today
+                .as_ref()
+                .map(|samples| crate::metering::usd_spent_by_agent(samples, id))
+        };
+
         let mut out: Vec<TeamMemberGql> = record
             .manifest
             .agents
@@ -238,6 +259,8 @@ impl CompanyGql {
                 role: agent.role.clone(),
                 description: agent.description.clone(),
                 inbox_enabled: enabled(&agent.id),
+                budget_usd_daily: agent.budget_usd_daily,
+                spent_today_usd: agent.budget_usd_daily.and_then(|_| spent(&agent.id)),
             })
             .collect();
         out.extend(record.overlay_agents.iter().map(|agent| TeamMemberGql {
@@ -246,6 +269,9 @@ impl CompanyGql {
             role: agent.role.clone(),
             description: agent.description.clone(),
             inbox_enabled: enabled(&agent.id),
+            // Overlay teammates are uncapped in v1.
+            budget_usd_daily: None,
+            spent_today_usd: None,
         }));
         Ok(out)
     }
@@ -310,6 +336,13 @@ pub struct TeamMemberGql {
     pub description: Option<String>,
     /// Whether this teammate has an enabled inbox.
     pub inbox_enabled: bool,
+    /// This teammate's manifest `budget_usd_daily` cap (issue #304), or null
+    /// when it has none. Null-vs-set is the capped/uncapped distinction — `0`
+    /// would mean "capped at nothing".
+    pub budget_usd_daily: Option<f64>,
+    /// What this teammate has spent since 00:00 UTC; non-null only alongside a
+    /// cap.
+    pub spent_today_usd: Option<f64>,
 }
 
 /// Internal desk projection shared between `chats` and `chat`.
