@@ -10,6 +10,7 @@ import {
   AlertCircle,
   ArrowLeft,
   Ban,
+  Brain,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -18,6 +19,7 @@ import {
   CornerUpLeft,
   CornerUpRight,
   Hourglass,
+  Layers,
   Loader2,
   MessageSquare,
   MessagesSquare,
@@ -26,7 +28,9 @@ import {
   Send,
   ShieldCheck,
   Square,
+  StickyNote,
   UserCog,
+  Wrench,
 } from "lucide-react";
 
 import {
@@ -35,12 +39,22 @@ import {
   patchTask,
   steerTask,
   type InflightRun,
+  type StepStatus,
   type SteerAction,
   type Task,
   type TaskDetail,
   type TimelineEntry,
   type TimelineKind,
 } from "@/api/tasks";
+import {
+  getRun,
+  isRunOpen,
+  runElapsedMillis,
+  RUN_STATUS_LABEL,
+  type RunDetail,
+  type RunStatus,
+  type RunSummary,
+} from "@/api/runs";
 import { ApiError } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import {
@@ -60,6 +74,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { PRIORITY_STYLES, TASK_COLUMNS } from "@/lib/tasks-sample";
@@ -293,8 +314,13 @@ export function TaskDetailView({
   );
 
   // Only tick the 1s clock while something is actually running: a dispatch
-  // window is open, or the task is parked on an operator right now.
-  const ticking = Boolean(worked?.live) || Boolean(waiting?.live);
+  // window is open, the task is parked on an operator right now, or an attempt
+  // has not settled (#242 — a parked attempt's clock is still running, which is
+  // why this asks the run's phase and not its finish time).
+  const ticking =
+    Boolean(worked?.live) ||
+    Boolean(waiting?.live) ||
+    Boolean(detail?.runs.some(isRunOpen));
   useEffect(() => {
     if (!ticking) return;
     const timer = window.setInterval(() => {
@@ -367,6 +393,14 @@ export function TaskDetailView({
             <Tabs defaultValue="timeline">
               <TabsList>
                 <TabsTrigger value="timeline">Timeline</TabsTrigger>
+                <TabsTrigger value="attempts">
+                  Attempts
+                  {detail.runs.length > 0 && (
+                    <span className="ml-1.5 tabular-nums text-muted-foreground">
+                      {detail.runs.length}
+                    </span>
+                  )}
+                </TabsTrigger>
                 <TabsTrigger value="approvals">Approvals</TabsTrigger>
                 <TabsTrigger value="artifacts">Artifacts</TabsTrigger>
                 <TabsTrigger value="discussion">Discussion</TabsTrigger>
@@ -376,6 +410,15 @@ export function TaskDetailView({
                 <TimelineList
                   entries={detail.timeline}
                   waitingSince={detail.waitingSince}
+                  now={now}
+                />
+              </TabsContent>
+
+              <TabsContent value="attempts" className="mt-4">
+                <AttemptsTab
+                  client={client}
+                  company={company}
+                  runs={detail.runs}
                   now={now}
                 />
               </TabsContent>
@@ -826,6 +869,8 @@ function LineageRail({
 interface TimelineGroup {
   key: string;
   kind: TimelineKind;
+  /** A run step's outcome (#242); absent for journal-derived entries. */
+  status?: StepStatus;
   label: string;
   count: number;
   entries: TimelineEntry[];
@@ -860,11 +905,24 @@ function groupTimeline(
   const groups: TimelineGroup[] = [];
   for (const e of entries) {
     const last = groups[groups.length - 1];
-    if (e.kind === "tool_failed" && last && last.kind === "tool_failed" && last.label === e.label) {
+    if (
+      isFailureRow(e) &&
+      last &&
+      last.kind === e.kind &&
+      last.label === e.label &&
+      isFailureRow(last.entries[last.entries.length - 1])
+    ) {
       last.count += 1;
       last.entries.push(e);
     } else {
-      groups.push({ key: String(e.seq), kind: e.kind, label: e.label, count: 1, entries: [e] });
+      groups.push({
+        key: String(e.seq),
+        kind: e.kind,
+        status: e.status,
+        label: e.label,
+        count: 1,
+        entries: [e],
+      });
     }
   }
 
@@ -895,9 +953,31 @@ const KIND_ICON: Record<TimelineKind, ReactElement> = {
   tool_failed: <AlertCircle className="size-3.5" />,
   approval: <ShieldCheck className="size-3.5" />,
   completed: <CheckCircle2 className="size-3.5" />,
+  // The run-trace kinds (#242). Same renderer, three more icon rows.
+  tool_call: <Wrench className="size-3.5" />,
+  thinking: <Brain className="size-3.5" />,
+  note: <StickyNote className="size-3.5" />,
 };
 
-function kindTone(kind: TimelineKind): string {
+/**
+ * The icon for a row. A run step's **outcome** outranks its kind (#242): a
+ * failed tool call reads as a failure, and one still in flight reads as a
+ * spinner — which is the honest render of a step the trace recorded as
+ * `running` because the host died mid-call, not an error.
+ *
+ * Task-timeline entries carry no `status`, so they fall through to the kind
+ * icon exactly as before.
+ */
+function rowIcon(kind: TimelineKind, status?: StepStatus): ReactElement {
+  if (status === "running") return <Loader2 className="size-3.5 animate-spin" />;
+  if (status === "error") return <AlertCircle className="size-3.5" />;
+  return KIND_ICON[kind];
+}
+
+function kindTone(kind: TimelineKind, status?: StepStatus): string {
+  // Outcome first, for the same reason `rowIcon` reads it first.
+  if (status === "running") return "text-sky-600 dark:text-sky-400";
+  if (status === "error") return "text-rose-600 dark:text-rose-400";
   switch (kind) {
     case "completed":
       return "text-emerald-600 dark:text-emerald-400";
@@ -908,6 +988,16 @@ function kindTone(kind: TimelineKind): string {
     default:
       return "text-muted-foreground";
   }
+}
+
+/**
+ * Whether a row is a failure, from either surface: the journal's `tool_failed`
+ * kind, or a run step whose recorded outcome was an error (#242). This is what
+ * the `×N` coalescing keys on, so a tool that failed six times in a row reads
+ * the same in a run's trace as it does on the task timeline.
+ */
+function isFailureRow(entry: TimelineEntry): boolean {
+  return entry.kind === "tool_failed" || entry.status === "error";
 }
 
 function TimelineList({
@@ -991,12 +1081,20 @@ function TimelineRow({ group }: { group: TimelineGroup }) {
         disabled={!expandable}
         onClick={() => expandable && setOpen((o) => !o)}
       >
-        <span className={cn("shrink-0", kindTone(group.kind))}>{KIND_ICON[group.kind]}</span>
+        <span className={cn("shrink-0", kindTone(group.kind, group.status))}>
+          {rowIcon(group.kind, group.status)}
+        </span>
         <span className="min-w-0 flex-1 truncate font-medium">{group.label}</span>
         {group.count > 1 && (
           <Badge variant="outline" className="shrink-0 font-normal">
             ×{group.count}
           </Badge>
+        )}
+        {/* A run step's own duration (#242); journal entries carry none. */}
+        {group.count === 1 && first.elapsedMs !== undefined && (
+          <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+            {first.elapsedMs < 1000 ? `${first.elapsedMs}ms` : formatDuration(first.elapsedMs)}
+          </span>
         )}
         <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
           {timeOf(first.atMillis)}
@@ -1032,6 +1130,288 @@ function TimelineRow({ group }: { group: TimelineGroup }) {
         </div>
       )}
     </li>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Attempts (#242)
+// ---------------------------------------------------------------------------
+
+/**
+ * The tone of a run's status chip. `waiting_approval` and `paused` share the
+ * amber "parked" tone the waiting band already uses — they differ in *who*
+ * unblocks them, not in whether the company is stuck.
+ */
+function runStatusTone(status: RunStatus): string {
+  switch (status) {
+    case "succeeded":
+      return "border-emerald-500/40 text-emerald-700 dark:text-emerald-400";
+    case "failed":
+      return "border-rose-500/40 text-rose-700 dark:text-rose-400";
+    case "cancelled":
+      return "border-muted-foreground/30 text-muted-foreground";
+    case "waiting_approval":
+    case "paused":
+      return "border-amber-500/40 text-amber-700 dark:text-amber-400";
+    default:
+      return "border-sky-500/40 text-sky-700 dark:text-sky-400";
+  }
+}
+
+/**
+ * The card's recorded attempts (#242) — the thing that makes a task which
+ * failed twice and succeeded on the third try look different from one that
+ * succeeded immediately.
+ *
+ * Cost is deliberately absent: epic #184 scopes this screen with the
+ * cost/currency dimension removed (no per-line cost, no total-cost header), and
+ * a per-attempt USD figure is exactly a per-line cost. The usage totals are on
+ * the wire for the surfaces that own them.
+ */
+function AttemptsTab({
+  client,
+  company,
+  runs,
+  now,
+}: {
+  client: OpenCompanyClient;
+  company: string | null;
+  runs: RunSummary[];
+  now: number;
+}) {
+  const [openId, setOpenId] = useState<string | null>(null);
+  const open = useMemo(() => runs.find((r) => r.id === openId) ?? null, [runs, openId]);
+
+  if (runs.length === 0) {
+    return (
+      <EmptyState
+        title="No recorded attempts"
+        body="Dispatch this card to record one. Cards dispatched before attempts were recorded show none — they were never backfilled, because inventing them would fabricate a record."
+      />
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-muted-foreground">
+        Every dispatch of this card, newest first. A card can enter review more than once, so
+        several waits on one attempt is the expected record, not a fault.
+      </p>
+      <ol className="space-y-1.5">
+        {runs.map((run) => (
+          <AttemptRow key={run.id} run={run} now={now} onOpen={() => setOpenId(run.id)} />
+        ))}
+      </ol>
+      <RunDrawer
+        client={client}
+        company={company}
+        run={open}
+        now={now}
+        onClose={() => setOpenId(null)}
+      />
+    </div>
+  );
+}
+
+/**
+ * What to say about an attempt's step count, which is **written on the settle**
+ * and so reads `0` for the whole of a live run.
+ *
+ * Three honest cases rather than one misleading number:
+ * - never started (`pending`) — nothing has been traced, and nothing is being
+ *   traced either, so it does not claim to be recording;
+ * - open but unsettled — steps *are* landing incrementally (the drawer shows
+ *   them), the count just has not been written yet;
+ * - settled — the real figure, marked `+` when it is a capped high-water
+ *   ordinal rather than a total.
+ */
+function stepSummary(run: RunSummary): string {
+  if (run.startedAtMillis === undefined) return "not started";
+  if (isRunOpen(run) && run.stepCount === 0) return "recording…";
+  const n = run.stepCount;
+  return `${n}${run.stepCountCapped ? "+" : ""} step${n === 1 ? "" : "s"}`;
+}
+
+function AttemptRow({
+  run,
+  now,
+  onOpen,
+}: {
+  run: RunSummary;
+  now: number;
+  onOpen: () => void;
+}) {
+  const elapsed = runElapsedMillis(run, now);
+  return (
+    <li className="rounded-lg border bg-card">
+      <button
+        className="flex w-full cursor-pointer flex-col gap-1 px-3 py-2 text-left"
+        onClick={onOpen}
+      >
+        <div className="flex w-full items-center gap-2 text-xs">
+          <Layers className="size-3.5 shrink-0 text-muted-foreground" />
+          <span className="shrink-0 font-medium">Attempt {run.attempt}</span>
+          <Badge variant="outline" className={cn("shrink-0 font-normal", runStatusTone(run.status))}>
+            {RUN_STATUS_LABEL[run.status]}
+          </Badge>
+          <span className="min-w-0 flex-1 truncate text-muted-foreground">{run.agentId}</span>
+          {elapsed !== null && (
+            <span
+              className={cn(
+                "shrink-0 tabular-nums text-[11px] text-muted-foreground",
+                isRunOpen(run) && "text-foreground",
+              )}
+            >
+              {formatDuration(elapsed)}
+              {isRunOpen(run) && " …"}
+            </span>
+          )}
+          <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+        </div>
+        <div className="flex w-full items-center gap-2 pl-5 text-[11px] text-muted-foreground">
+          <span className="tabular-nums">{timeOf(run.createdAtMillis)}</span>
+          <span aria-hidden>·</span>
+          <span>{stepSummary(run)}</span>
+          {run.stepCountCapped && <span>(trace capped)</span>}
+        </div>
+        {run.error && (
+          <p className="w-full truncate pl-5 text-[11px] text-rose-600 dark:text-rose-400">
+            {run.error}
+          </p>
+        )}
+      </button>
+    </li>
+  );
+}
+
+/**
+ * One attempt's persisted step trace, in a side drawer (#242).
+ *
+ * **Refresh-on-read.** Steps land in the store *as the turn executes*, so
+ * re-reading an open attempt shows the progress made since — which is why this
+ * re-fetches on the same cadence as the screen while the run has not settled,
+ * and stops once it has. A live stream would mean widening the harness turn
+ * stream for something a re-read already answers.
+ */
+function RunDrawer({
+  client,
+  company,
+  run,
+  now,
+  onClose,
+}: {
+  client: OpenCompanyClient;
+  company: string | null;
+  run: RunSummary | null;
+  now: number;
+  onClose: () => void;
+}) {
+  const [detail, setDetail] = useState<RunDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const runId = run?.id ?? null;
+  // Re-fetch while the attempt is unsettled. Read from the *summary* the parent
+  // poll refreshes, so the drawer stops polling as soon as the run settles even
+  // if its own last read still showed it open.
+  const live = run !== null && isRunOpen(run);
+
+  useEffect(() => {
+    if (runId === null) {
+      setDetail(null);
+      setError(null);
+      return;
+    }
+    let cancelled = false;
+    const read = async () => {
+      try {
+        const next = await getRun(client, company, runId);
+        if (!cancelled) {
+          setDetail(next);
+          setError(null);
+        }
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : "could not load the attempt");
+      }
+    };
+    void read();
+    if (!live) return () => void (cancelled = true);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== "hidden") void read();
+    }, POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [client, company, runId, live]);
+
+  const elapsed = run ? runElapsedMillis(run, now) : null;
+
+  return (
+    <Sheet open={run !== null} onOpenChange={(next) => !next && onClose()}>
+      <SheetContent side="right" className="w-full sm:max-w-md">
+        {run && (
+          <>
+            <SheetHeader className="border-b">
+              <SheetTitle>Attempt {run.attempt}</SheetTitle>
+              <SheetDescription className="flex flex-wrap items-center gap-1.5 text-xs">
+                <Badge
+                  variant="outline"
+                  className={cn("font-normal", runStatusTone(run.status))}
+                >
+                  {RUN_STATUS_LABEL[run.status]}
+                </Badge>
+                <span>{run.agentId}</span>
+                {elapsed !== null && (
+                  <>
+                    <span aria-hidden>·</span>
+                    <span className="tabular-nums">{formatDuration(elapsed)}</span>
+                  </>
+                )}
+              </SheetDescription>
+            </SheetHeader>
+            <ScrollArea className="min-h-0 flex-1">
+              <div className="space-y-3 px-4 pb-4">
+                {run.error && (
+                  <Alert variant="destructive">
+                    <AlertDescription className="text-xs">{run.error}</AlertDescription>
+                  </Alert>
+                )}
+                {error && (
+                  <Alert variant="destructive">
+                    <AlertDescription className="text-xs">{error}</AlertDescription>
+                  </Alert>
+                )}
+                {run.stepCountCapped && (
+                  <p className="text-[11px] text-muted-foreground">
+                    This attempt hit the per-run trace ceiling, so what follows is the start of
+                    the run, not all of it.
+                  </p>
+                )}
+                {detail === null && error === null ? (
+                  <div className="space-y-1.5 pt-1">
+                    <Skeleton className="h-9 rounded-lg" />
+                    <Skeleton className="h-9 rounded-lg" />
+                    <Skeleton className="h-9 rounded-lg" />
+                  </div>
+                ) : detail && detail.steps.length === 0 ? (
+                  <EmptyState
+                    title="No steps recorded"
+                    body={
+                      isRunOpen(run)
+                        ? "Steps appear here as the attempt runs."
+                        : "This attempt settled without producing a traceable step."
+                    }
+                  />
+                ) : detail ? (
+                  /* The same grouped-timeline renderer the task timeline uses —
+                     `kind` simply widens to the three step words. */
+                  <TimelineList entries={detail.steps} now={now} />
+                ) : null}
+              </div>
+            </ScrollArea>
+          </>
+        )}
+      </SheetContent>
+    </Sheet>
   );
 }
 
