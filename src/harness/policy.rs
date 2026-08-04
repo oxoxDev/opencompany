@@ -52,7 +52,24 @@
 //! ([`GRANT_TTL_MILLIS`](crate::runtime::grants::GRANT_TTL_MILLIS)) and the
 //! operator is told the agent did not act, rather than the permission sitting
 //! live indefinitely.
+//!
+//! ## The per-agent daily spend cap (issue #304)
+//!
+//! The manifest's per-agent `budget_usd_daily` was validated, persisted and
+//! passed all the way down to a field on this struct whose getter had no call
+//! sites. It was documentation. The company-wide `[budget].monthly_usd` **is**
+//! enforced on the economy path, so the two knobs presented identically while
+//! only one of them was real.
+//!
+//! Spend arrives through two doors, so enforcement is two layers. Inference —
+//! the dominant stream — is gated at dispatch in
+//! [`HarnessPool::run`](crate::harness::HarnessPool::run), before any model
+//! call. Priced *tool* calls are gated here, by the arm below `always_approve`.
+//! See [`ApprovalPolicy::daily_budget_verdict`] for why the arm sits exactly
+//! where it does, why an at-cap call **parks** rather than being denied, and
+//! what the cap does not see.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -61,7 +78,9 @@ use openhuman_core::openhuman as oh;
 use oh::agent::tool_policy::{ToolPolicy, ToolPolicyDecision, ToolPolicyRequest};
 
 use crate::company::Policy;
-use crate::ports::types::{Effect, EffectGroup};
+use crate::metering::{usd_spent_by_agent, utc_day_start_millis};
+use crate::ports::UsageMeter;
+use crate::ports::types::{CompanyId, Effect, EffectGroup};
 use crate::runtime::grants::{GrantSet, GrantedCall};
 
 /// Most approval requests parked out of a single turn. A model that keeps
@@ -205,9 +224,34 @@ pub struct ApprovalPolicy {
     mode: PolicyMode,
     always_approve: Vec<String>,
     auto_approve_under_usd: Option<f64>,
-    /// Per-agent daily spend cap; retained for the runtime budget gate. `None`
-    /// leaves budget enforcement to the company-wide `[budget]` ceiling.
+    /// Per-agent daily spend cap (issue #304). `None` leaves budget enforcement
+    /// to the company-wide `[budget]` ceiling.
+    ///
+    /// Enforced by [`daily_budget_verdict`](Self::daily_budget_verdict) for
+    /// priced tool calls, and by the dispatch gate in
+    /// [`HarnessPool::run`](crate::harness::HarnessPool::run) for inference. The
+    /// cap is only *readable* when a [`spend`](Self::with_spend) reader is
+    /// chained on, which only `build_roster` does.
     budget_usd_daily: Option<f64>,
+    /// Where "what has this agent spent since UTC midnight" is read from
+    /// (issue #304): the company's [`UsageMeter`] plus the company the cap is
+    /// scoped to.
+    ///
+    /// `None` at every non-harness construction site — and, deliberately, on a
+    /// host with no meter wired — which makes the budget arm **inert**, so every
+    /// existing construction site and test decides exactly as it did before.
+    /// Chained by `build_roster` alongside [`with_requests`](Self::with_requests)
+    /// / [`with_agent`](Self::with_agent) rather than widening
+    /// [`new`](Self::new), for the same reason those are.
+    spend: Option<SpendReader>,
+    /// Whether the "cap set but no meter to read it with" warning has already
+    /// been emitted by this policy instance.
+    ///
+    /// That condition is a permanent deployment fact, not a transient one, so
+    /// warning per priced call would emit a line per tool call for the life of
+    /// the process and bury everything else. Once per policy is the useful
+    /// signal.
+    no_meter_warned: AtomicBool,
     /// Where a `RequireApproval` decision is recorded so the runtime can park it
     /// (issue #172). The default is a private queue nobody drains, which keeps
     /// every non-harness construction site (and every test) behaving exactly as
@@ -223,6 +267,22 @@ pub struct ApprovalPolicy {
     /// projected before: no agent, so no grant, so the runtime executes it
     /// natively. Only `build_roster` sets it.
     agent: Option<String>,
+}
+
+/// Where the per-agent daily spend cap reads today's spend from (issue #304):
+/// the company's durable [`UsageMeter`] and the company id to scope the query
+/// to.
+///
+/// Durable on purpose — spend is re-read from the meter (jsonl / sqlite /
+/// mongo) on every priced call rather than accumulated in memory, so a restart
+/// mid-day resumes against the real figure instead of resetting the cap to
+/// zero. A per-turn snapshot cell was considered and rejected: it is stale
+/// within the turn it is taken for, and it would share the
+/// [`ApprovalRequestQueue::clear`] lifecycle that
+/// `grants_survive_a_queue_clear` exists to warn about.
+struct SpendReader {
+    meter: Arc<dyn UsageMeter>,
+    company: CompanyId,
 }
 
 impl ApprovalPolicy {
@@ -242,6 +302,8 @@ impl ApprovalPolicy {
             budget_usd_daily,
             requests: ApprovalRequestQueue::default(),
             agent: None,
+            spend: None,
+            no_meter_warned: AtomicBool::new(false),
         }
     }
 
@@ -249,6 +311,16 @@ impl ApprovalPolicy {
     /// so the brain can park the request after the turn (issue #172).
     pub fn with_requests(mut self, requests: ApprovalRequestQueue) -> Self {
         self.requests = requests;
+        self
+    }
+
+    /// Installs the meter the per-agent daily spend cap is measured against
+    /// (issue #304).
+    ///
+    /// Without this the cap is inert — which is exactly what every non-harness
+    /// construction site wants, and what a host with no meter gets.
+    pub fn with_spend(mut self, meter: Arc<dyn UsageMeter>, company: CompanyId) -> Self {
+        self.spend = Some(SpendReader { meter, company });
         self
     }
 
@@ -334,6 +406,153 @@ impl ApprovalPolicy {
             top_level_keys(args)
         );
         None
+    }
+
+    /// Does this tool call **spend money**? The predicate the daily budget arm
+    /// gates on (issue #304).
+    ///
+    /// Three signals, any of which is enough:
+    ///
+    /// * the call **declares** an amount (`amount_usd` / `amount`) — the only
+    ///   pre-flight signal there is for an x402 payment;
+    /// * it is a [metered read](is_metered_read) — `web_search` changes nothing
+    ///   but the backend charges per request;
+    /// * it projects onto [`EffectGroup::Spend`] — `media_generate_*`,
+    ///   `pay_*`/`transfer_*`, and anything else the group classifier already
+    ///   calls spend.
+    ///
+    /// Everything else — a read, a send, a publish, a workspace write — is
+    /// **untouched at cap**. A spend cap caps spend; making a teammate unable to
+    /// answer a question because it spent its budget this morning would be a
+    /// different feature, and a worse one.
+    fn is_priced_call(tool: &str, declared_amount: Option<f64>) -> bool {
+        declared_amount.is_some()
+            || is_metered_read(tool)
+            || classify_group(tool) == EffectGroup::Spend
+    }
+
+    /// The per-agent daily spend cap (issue #304): `Some(decision)` when this
+    /// priced call must not proceed on today's budget, `None` to fall through.
+    ///
+    /// ## Where this sits, and why
+    ///
+    /// Below the reserved `never_do` slot, below the `readonly` brake, **below
+    /// grant consumption**, below `always_approve` — and **above**
+    /// `auto_approve_under_usd` and the mode dispatch.
+    ///
+    /// Below the grant is the one placement that is not obvious, and it is the
+    /// same argument #243 made for putting grants above `always_approve`. A
+    /// budget park exists *to ask the operator a question*; the grant is the
+    /// operator's answer. Ranking the budget above the grant would mean
+    /// approving an at-cap call re-parks it, forever — approval would authorise
+    /// nothing for precisely the calls the operator most wants to authorise
+    /// deliberately. `readonly` is different and stays on top: it is the
+    /// emergency brake, not a question, and consent does not survive it.
+    ///
+    /// Above `auto_approve_under_usd` because that threshold is a
+    /// *per-call* convenience ("don't bother me about anything under $5") and
+    /// this is a *per-day* ceiling. Below it, an agent with a $5 cap and a $5
+    /// auto-approve threshold could spend $4.99 at a time without limit — the
+    /// cap would be unreachable by construction. Above `Full` for the same
+    /// reason: full autonomy means "no per-call gate", not "no budget".
+    ///
+    /// ## At cap it PARKS — never denies, never downgrades
+    ///
+    /// A hard deny recreates the pre-#172 silent dead-end: openhuman resolves
+    /// the refusal inline, the model is told no, and the operator never learns
+    /// the company stopped working because one teammate hit its cap. A silent
+    /// downgrade to a cheaper path would be worse still — the suppression-shaped
+    /// "fix" where monitoring goes quiet and the defect keeps running. Parking
+    /// puts the decision in front of the operator, who can approve it (minting a
+    /// #243 single-use grant that re-dispatches the call) or leave it.
+    ///
+    /// ## Failure semantics
+    ///
+    /// * **No meter wired** — inert, with a one-shot warning. This is a
+    ///   permanent deployment fact, not a transient read failure; parking every
+    ///   priced call forever would brick every spend tool on a host that simply
+    ///   has no meter, and no operator approval would ever clear it.
+    /// * **Meter query errored** — **park**, naming the uncertainty. Transient
+    ///   uncertainty about money reads as *ask*, not *allow*. This is the
+    ///   deliberate opposite of the dispatch gate's fail-open, and the asymmetry
+    ///   is the point: there the alternative is bricking the company's cognition
+    ///   with no recourse, here the alternative is one call waiting on a human
+    ///   who can wave it through.
+    ///
+    /// ## What the cap does not see
+    ///
+    /// An **executed** x402 payment. The ledger carries no agent, so there is
+    /// nothing to attribute; the pre-flight `declared_amount` check below covers
+    /// the call *before* the money moves, and that is the whole of the coverage.
+    /// Closing the gap is a store-shape change across three persistence
+    /// backends. Documented in `docs/spec/runtime/manifest.md` rather than
+    /// papered over here.
+    ///
+    /// There is also a turn-boundary TOCTOU window: a call that starts under the
+    /// cap can finish over it, bounded by one call's cost. The same documented
+    /// window `capability_budget` carries; v1 has no reservation ledger.
+    async fn daily_budget_verdict(
+        &self,
+        tool: &str,
+        args: &serde_json::Value,
+        declared_amount: Option<f64>,
+    ) -> Option<ToolPolicyDecision> {
+        let cap = self.budget_usd_daily?;
+        let agent = self.agent.as_deref()?;
+        if !Self::is_priced_call(tool, declared_amount) {
+            return None;
+        }
+        let Some(spend) = self.spend.as_ref() else {
+            if !self.no_meter_warned.swap(true, Ordering::Relaxed) {
+                log::warn!(
+                    "[approval] agent '{agent}' has a daily budget of ${cap:.2} but no usage \
+                     meter is wired; the per-agent spend cap cannot be enforced on this host"
+                );
+            }
+            return None;
+        };
+
+        let since = utc_day_start_millis(crate::ports::now_millis());
+        let samples = match spend.meter.query(&spend.company, since).await {
+            Ok(samples) => samples,
+            Err(error) => {
+                log::warn!(
+                    "[approval] could not read agent '{agent}' spend for the daily budget \
+                     ({error}); parking '{tool}' rather than spending against an unknown balance"
+                );
+                return Some(self.require_approval(
+                    tool,
+                    args,
+                    format!(
+                        "'{tool}' spends money and {agent}'s daily budget could not be verified \
+                         right now"
+                    ),
+                ));
+            }
+        };
+
+        let spent = usd_spent_by_agent(&samples, agent);
+        let amount = declared_amount.unwrap_or(0.0);
+        // Two boundaries: already at/over the cap (`>=`, matching every other
+        // budget gate in the crate), or a declared amount that would carry this
+        // agent past it. A call with no declared amount only trips the first —
+        // its cost is unknowable until it runs.
+        if spent < cap && spent + amount <= cap {
+            return None;
+        }
+
+        let reason = if spent >= cap {
+            format!(
+                "'{tool}' spends money and {agent} has used ${spent:.2} of its ${cap:.2} daily \
+                 budget; approve to let this one call through"
+            )
+        } else {
+            format!(
+                "'{tool}' would spend ${amount:.2}, carrying {agent} past its ${cap:.2} daily \
+                 budget (${spent:.2} used so far); approve to let this one call through"
+            )
+        };
+        Some(self.require_approval(tool, args, reason))
     }
 
     /// The one construction site for a `RequireApproval` decision (issue #172):
@@ -440,11 +659,23 @@ impl ToolPolicy for ApprovalPolicy {
             );
         }
 
+        let declared_amount = Self::amount_usd(&request.arguments);
+
+        // 3. The per-agent daily spend cap (issue #304). ABOVE
+        //    `auto_approve_under_usd` and the mode dispatch, so neither a
+        //    sub-threshold trickle nor `full` autonomy can spend past a cap the
+        //    manifest set. See `daily_budget_verdict` for the full ordering
+        //    argument and the park-don't-deny reasoning.
+        if let Some(decision) = self
+            .daily_budget_verdict(tool, &request.arguments, declared_amount)
+            .await
+        {
+            return decision;
+        }
+
         // Auto-approve small spends under the configured threshold.
-        if let (Some(threshold), Some(amount)) = (
-            self.auto_approve_under_usd,
-            Self::amount_usd(&request.arguments),
-        ) && amount < threshold
+        if let (Some(threshold), Some(amount)) = (self.auto_approve_under_usd, declared_amount)
+            && amount < threshold
         {
             return ToolPolicyDecision::Allow;
         }
@@ -1450,5 +1681,454 @@ mod tests {
             p.check(&request("send_email", serde_json::json!({}))).await,
             ToolPolicyDecision::RequireApproval { .. }
         ));
+    }
+
+    // --- The per-agent daily spend cap (issue #304) ---------------------------
+
+    use crate::ports::usage::{SampleKind, UsageMeter, UsageSample};
+    use std::sync::atomic::AtomicUsize;
+
+    /// A meter over a fixed sample set that **respects `since_millis`**.
+    ///
+    /// The respecting is the whole point of the double. A meter that ignored
+    /// `since` — which the crate's other test meters do, harmlessly, because
+    /// nothing they back reads a window — would make the day-boundary tests
+    /// pass no matter what boundary the code computed, including no boundary at
+    /// all. It also counts queries, so "a policy with no cap never asks the
+    /// meter" is an assertion rather than an assumption.
+    #[derive(Default)]
+    struct FixedMeter {
+        samples: Vec<UsageSample>,
+        queries: AtomicUsize,
+    }
+
+    impl FixedMeter {
+        fn with(samples: Vec<UsageSample>) -> Arc<Self> {
+            Arc::new(Self {
+                samples,
+                queries: AtomicUsize::new(0),
+            })
+        }
+
+        fn query_count(&self) -> usize {
+            self.queries.load(Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait]
+    impl UsageMeter for FixedMeter {
+        async fn record(&self, _company: &CompanyId, _sample: &UsageSample) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn query(&self, _company: &CompanyId, since: u64) -> crate::Result<Vec<UsageSample>> {
+            self.queries.fetch_add(1, Ordering::Relaxed);
+            Ok(self
+                .samples
+                .iter()
+                .filter(|sample| sample.at_millis >= since)
+                .cloned()
+                .collect())
+        }
+    }
+
+    /// A meter whose reads fail — the transient-uncertainty case.
+    struct FailingMeter;
+
+    #[async_trait]
+    impl UsageMeter for FailingMeter {
+        async fn record(&self, _company: &CompanyId, _sample: &UsageSample) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn query(
+            &self,
+            _company: &CompanyId,
+            _since: u64,
+        ) -> crate::Result<Vec<UsageSample>> {
+            Err(crate::error::OpenCompanyError::Store(
+                "meter unavailable".into(),
+            ))
+        }
+    }
+
+    /// An inference sample costing `usd`, stamped at `at_millis`.
+    fn spend_sample(agent: &str, usd: f64, at_millis: u64) -> UsageSample {
+        UsageSample {
+            at_millis,
+            agent: agent.into(),
+            provider: "managed".into(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_input_tokens: 0,
+            cost_usd: usd,
+            kind: SampleKind::Inference,
+        }
+    }
+
+    /// Some instant today, comfortably after UTC midnight.
+    fn today() -> u64 {
+        crate::ports::now_millis()
+    }
+
+    /// The last millisecond of yesterday, UTC.
+    fn yesterday() -> u64 {
+        crate::metering::utc_day_start_millis(today()).saturating_sub(1)
+    }
+
+    /// A cap-bearing policy bound to `agent`, reading spend from `meter`, plus
+    /// the grant set its queue carries.
+    fn capped_policy(
+        mode: &str,
+        auto_under: Option<f64>,
+        cap: f64,
+        agent: &str,
+        meter: Arc<dyn UsageMeter>,
+    ) -> (ApprovalPolicy, crate::runtime::grants::GrantSet) {
+        let p = Policy {
+            mode: mode.to_string(),
+            always_approve: Vec::new(),
+            auto_approve_under_usd: auto_under,
+        };
+        let queue = ApprovalRequestQueue::default();
+        let grants = queue.grants();
+        (
+            ApprovalPolicy::new(&p, Some(cap))
+                .with_requests(queue)
+                .with_agent(agent)
+                .with_spend(meter, CompanyId::new("acme")),
+            grants,
+        )
+    }
+
+    /// The core of #304: at cap, a **priced** call parks — and it parks through
+    /// the two carve-outs that would otherwise wave it straight through.
+    ///
+    /// * `web_search` under `supervised` is the #238 metered-read carve-out: it
+    ///   never parks, precisely *because* it spends money and the daily call cap
+    ///   was the boundary. A per-agent spend cap is a second, tighter boundary,
+    ///   and it has to outrank the carve-out or the tightest limit in the
+    ///   manifest would be the one that does nothing.
+    /// * Under `full` there is no per-call gate at all. "Full autonomy" means
+    ///   the operator is not asked about each action; it does not mean the
+    ///   budget they wrote down is advisory.
+    #[tokio::test]
+    async fn at_cap_a_priced_call_parks_through_the_metered_read_and_full_carve_outs() {
+        let meter = FixedMeter::with(vec![spend_sample("analyst", 5.00, today())]);
+
+        let (supervised, _) = capped_policy(
+            "supervised",
+            None,
+            5.0,
+            "analyst",
+            meter.clone() as Arc<dyn UsageMeter>,
+        );
+        let decision = supervised
+            .check(&request(
+                "web_search",
+                serde_json::json!({ "query": "acme pricing" }),
+            ))
+            .await;
+        assert!(
+            matches!(decision, ToolPolicyDecision::RequireApproval { .. }),
+            "a metered read must park once the agent is out of budget: {decision:?}"
+        );
+
+        let (full, _) = capped_policy(
+            "full",
+            None,
+            5.0,
+            "analyst",
+            meter.clone() as Arc<dyn UsageMeter>,
+        );
+        assert!(
+            matches!(
+                full.check(&request("media_generate_image", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "full autonomy is not a budget exemption"
+        );
+        assert!(
+            matches!(
+                full.check(&request(
+                    "pay_invoice",
+                    serde_json::json!({ "amount_usd": 1.0 })
+                ))
+                .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "an amount-bearing call must park at cap under full autonomy too"
+        );
+    }
+
+    /// The remaining-budget boundary, and why the arm sits **above**
+    /// `auto_approve_under_usd`: a declared amount that would carry the agent
+    /// past its cap parks even though it is under the auto-approve threshold,
+    /// while an amount that still fits is waved through as before.
+    ///
+    /// Below the threshold instead, an agent with a $5 cap and a $5 auto-approve
+    /// threshold could spend $4.99 at a time forever and the cap would be
+    /// unreachable by construction.
+    #[tokio::test]
+    async fn a_declared_amount_that_breaches_the_remaining_budget_parks() {
+        let meter = FixedMeter::with(vec![spend_sample("analyst", 4.20, today())]);
+        let (p, _) = capped_policy(
+            "supervised",
+            Some(5.0),
+            5.0,
+            "analyst",
+            meter.clone() as Arc<dyn UsageMeter>,
+        );
+
+        // $4.20 spent + $3.00 = $7.20 > $5.00 cap — parks despite being under
+        // the $5 auto-approve threshold.
+        assert!(
+            matches!(
+                p.check(&request(
+                    "pay_invoice",
+                    serde_json::json!({ "amount_usd": 3.0 })
+                ))
+                .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "a sub-threshold spend that breaches the day's remaining budget must park"
+        );
+
+        // $4.20 + $0.50 = $4.70 <= $5.00 — still fits, so auto-approve applies.
+        assert_eq!(
+            p.check(&request(
+                "pay_invoice",
+                serde_json::json!({ "amount_usd": 0.5 })
+            ))
+            .await,
+            ToolPolicyDecision::Allow,
+            "a spend that fits inside the remaining budget is unaffected"
+        );
+    }
+
+    /// A spend cap caps **spend**. At cap a teammate can still read and can
+    /// still park a send for the ordinary supervised reason — it has not been
+    /// muted, it has been defunded.
+    ///
+    /// The send assertion checks the *reason text*, not just the decision:
+    /// `send_email` parks under supervised either way, so only the wording
+    /// distinguishes "parked because it reaches outside" from "parked because
+    /// the budget arm swallowed a free call".
+    #[tokio::test]
+    async fn free_reads_and_sends_are_untouched_at_cap() {
+        let meter = FixedMeter::with(vec![spend_sample("analyst", 9.99, today())]);
+        let (p, _) = capped_policy(
+            "supervised",
+            None,
+            5.0,
+            "analyst",
+            meter.clone() as Arc<dyn UsageMeter>,
+        );
+
+        assert_eq!(
+            p.check(&request("read_file", serde_json::json!({}))).await,
+            ToolPolicyDecision::Allow,
+            "a free read costs nothing and must survive the cap"
+        );
+
+        let decision = p
+            .check(&request(
+                "send_email",
+                serde_json::json!({ "to": "a@b.test" }),
+            ))
+            .await;
+        match decision {
+            ToolPolicyDecision::RequireApproval { reason, .. } => assert!(
+                reason.contains("supervised"),
+                "a free send parks for the ordinary tier reason, not the budget: {reason}"
+            ),
+            other => panic!("send_email must still park under supervised: {other:?}"),
+        }
+    }
+
+    /// The ordering pin, mirroring `a_grant_beats_always_approve`: the operator's
+    /// approval of a budget-parked call actually **runs** it, once.
+    ///
+    /// If the budget arm sat above grant consumption, approving an at-cap call
+    /// would re-park it forever — the park exists to ask the operator a
+    /// question, and the grant is their answer. Ranking the question above the
+    /// answer makes approval mean nothing.
+    #[tokio::test]
+    async fn a_grant_releases_a_budget_parked_call_once_then_it_re_parks() {
+        let meter = FixedMeter::with(vec![spend_sample("analyst", 5.00, today())]);
+        let (p, grants) = capped_policy(
+            "supervised",
+            None,
+            5.0,
+            "analyst",
+            meter.clone() as Arc<dyn UsageMeter>,
+        );
+        let args = serde_json::json!({ "query": "acme pricing" });
+
+        // Out of budget: parks.
+        assert!(matches!(
+            p.check(&request("web_search", args.clone())).await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+
+        // The operator approves that exact call.
+        grants.grant(granted("analyst", "web_search", args.clone()));
+        assert_eq!(
+            p.check(&request("web_search", args.clone())).await,
+            ToolPolicyDecision::Allow,
+            "an approved at-cap call must run; otherwise approval authorises nothing"
+        );
+
+        // Single-use: the budget is still exhausted, so the next one re-parks.
+        assert!(
+            matches!(
+                p.check(&request("web_search", args)).await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "one approval buys one over-budget call, not a raised cap"
+        );
+    }
+
+    /// `readonly` outranks the budget arm, as it outranks the grant: the brake
+    /// denies outright rather than offering the operator something to approve.
+    #[tokio::test]
+    async fn the_readonly_brake_still_denies_before_the_budget_arm() {
+        let meter = FixedMeter::with(vec![spend_sample("analyst", 9.99, today())]);
+        let (p, _) = capped_policy(
+            "readonly",
+            None,
+            5.0,
+            "analyst",
+            meter.clone() as Arc<dyn UsageMeter>,
+        );
+        assert!(
+            matches!(
+                p.check(&request(
+                    "pay_invoice",
+                    serde_json::json!({ "amount_usd": 1.0 })
+                ))
+                .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "a read-only desk denies a spend; it does not offer it for approval"
+        );
+    }
+
+    /// "Daily" is the UTC calendar day: yesterday's $9 does not hold today's
+    /// budget hostage. This is what the `since`-respecting double buys.
+    #[tokio::test]
+    async fn yesterdays_spend_does_not_count_against_todays_cap() {
+        let meter = FixedMeter::with(vec![spend_sample("analyst", 9.00, yesterday())]);
+        let (p, _) = capped_policy(
+            "supervised",
+            None,
+            5.0,
+            "analyst",
+            meter.clone() as Arc<dyn UsageMeter>,
+        );
+        assert_eq!(
+            p.check(&request(
+                "web_search",
+                serde_json::json!({ "query": "acme" })
+            ))
+            .await,
+            ToolPolicyDecision::Allow,
+            "the cap resets at 00:00Z; yesterday's spend is spent"
+        );
+    }
+
+    /// An uncapped agent never pays for a meter round-trip — the arm
+    /// short-circuits on the cap before anything else.
+    #[tokio::test]
+    async fn an_uncapped_agent_never_queries_the_meter() {
+        let meter = FixedMeter::with(vec![spend_sample("analyst", 99.0, today())]);
+        let p = Policy {
+            mode: "full".to_string(),
+            always_approve: Vec::new(),
+            auto_approve_under_usd: None,
+        };
+        let uncapped = ApprovalPolicy::new(&p, None)
+            .with_requests(ApprovalRequestQueue::default())
+            .with_agent("analyst")
+            .with_spend(meter.clone() as Arc<dyn UsageMeter>, CompanyId::new("acme"));
+
+        assert_eq!(
+            uncapped
+                .check(&request(
+                    "pay_invoice",
+                    serde_json::json!({ "amount_usd": 400.0 })
+                ))
+                .await,
+            ToolPolicyDecision::Allow
+        );
+        assert_eq!(
+            meter.query_count(),
+            0,
+            "no cap means no question to ask the meter"
+        );
+    }
+
+    /// No meter wired — every non-harness construction site, and a host without
+    /// one — leaves the cap inert rather than parking every priced call forever.
+    /// A permanent deployment fact must not brick spend tools with a park no
+    /// approval can clear.
+    #[tokio::test]
+    async fn a_cap_with_no_meter_is_inert() {
+        let p = Policy {
+            mode: "full".to_string(),
+            always_approve: Vec::new(),
+            auto_approve_under_usd: None,
+        };
+        let no_meter = ApprovalPolicy::new(&p, Some(5.0))
+            .with_requests(ApprovalRequestQueue::default())
+            .with_agent("analyst");
+
+        assert_eq!(
+            no_meter
+                .check(&request(
+                    "pay_invoice",
+                    serde_json::json!({ "amount_usd": 400.0 })
+                ))
+                .await,
+            ToolPolicyDecision::Allow,
+            "an unenforceable cap must not park what it can never release"
+        );
+    }
+
+    /// A meter read that **errors** is transient uncertainty about money, and
+    /// reads as *ask*, not *allow*: the priced call parks, naming the
+    /// uncertainty. A free call is untouched — the arm never saw it.
+    ///
+    /// The deliberate opposite of the dispatch gate's fail-open. There the
+    /// alternative is bricking the company's cognition with no recourse; here it
+    /// is one call waiting on a human who can wave it through.
+    #[tokio::test]
+    async fn a_failing_meter_parks_priced_calls_and_leaves_free_ones_alone() {
+        let (p, _) = capped_policy(
+            "full",
+            None,
+            5.0,
+            "analyst",
+            Arc::new(FailingMeter) as Arc<dyn UsageMeter>,
+        );
+
+        let decision = p
+            .check(&request(
+                "pay_invoice",
+                serde_json::json!({ "amount_usd": 1.0 }),
+            ))
+            .await;
+        match decision {
+            ToolPolicyDecision::RequireApproval { reason, .. } => assert!(
+                reason.contains("could not be verified"),
+                "the park must say the budget is unknown, not that it is exceeded: {reason}"
+            ),
+            other => panic!("an unreadable budget must park a spend: {other:?}"),
+        }
+
+        assert_eq!(
+            p.check(&request("read_file", serde_json::json!({}))).await,
+            ToolPolicyDecision::Allow,
+            "a free call never reaches the budget arm, so a meter outage cannot gate it"
+        );
     }
 }
