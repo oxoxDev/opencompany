@@ -340,10 +340,10 @@ pub trait SecretStore: Send + Sync {
 
 ## Console-surface stores (WS3)
 
-Six additional ports back the operator console's durable surfaces. They follow
+Seven additional ports back the operator console's durable surfaces. They follow
 the same one-trait-per-file convention (`src/ports/{tasks,workspace,facts,
-usage,skills_state,inbox}.rs`), key everything on `CompanyId`, return the crate
-`Result<T>`, and are covered by the conformance suite
+usage,skills_state,inbox,runs}.rs`), key everything on `CompanyId`, return the
+crate `Result<T>`, and are covered by the conformance suite
 ([storage.md](storage.md)). Their fs/sqlite/mongodb backends live alongside the
 five core ports.
 
@@ -562,6 +562,63 @@ pub trait InboxStore: Send + Sync {
 
 Real send/receive depends on the domain/SMTP transport and the HMAC-signed
 inbound ingest webhook ([api.md](api.md)); the store itself is transport-blind.
+
+### RunStore
+
+One attempt at a task, and its trace (`src/ports/runs.rs`). A `RunRecord`
+carries the task and agent it belongs to, its 1-based `attempt` ordinal, a
+status, the cost it accrued, and — on failure — why. A `RunStepRecord` is one
+entry of its trace, keyed `(run_id, step_seq)` on a run-scoped dense counter
+rather than an `EventSeq`.
+
+```rust
+pub trait RunStore: Send + Sync {
+    // storage verbs
+    async fn create_run(&self, company: &CompanyId, spec: NewRun) -> Result<RunRecord>;
+    async fn get_run(&self, company: &CompanyId, id: &str) -> Result<Option<RunRecord>>;
+    async fn put_run(&self, company: &CompanyId, run: &RunRecord) -> Result<()>;
+    async fn list_runs(&self, company: &CompanyId, filter: &RunFilter)
+        -> Result<Vec<RunRecord>>;
+    async fn append_run_step(&self, company: &CompanyId, step: &RunStepRecord) -> Result<()>;
+    async fn list_run_steps(&self, company: &CompanyId, run_id: &str)
+        -> Result<Vec<RunStepRecord>>;
+
+    // transitions — provided methods; legality is enforced here, not per backend
+    async fn begin_run(&self, /* company, id, trigger_event_seq */) -> Result<RunRecord>;
+    async fn finish_run(&self, /* company, id, outcome */) -> Result<RunRecord>;
+}
+```
+
+**The transitions are the API; the storage verbs are the seam.** `create_run`
+mints `Pending` and allocates the attempt ordinal, `begin_run` moves
+`Pending → Running`, and `finish_run` settles a run into a parked or terminal
+status. Legality lives in the provided methods, so no backend can re-derive the
+state machine and drift from the others. `put_run` writes a row verbatim with no
+check at all — it exists because Rust cannot hide a trait method from a `dyn`
+caller, and it is documented as the backend seam rather than something to call.
+
+`RunStatus` is `pending · running · waiting_approval · paused · succeeded ·
+failed · cancelled`. The two parked statuses are separated by **who unblocks
+them**: `waiting_approval` means a *person* must act; `paused` means anything
+else must — a dependency, a rate limit, a missing credential, a retry, an
+operator steer. Defining the split by who resolves it, rather than by cause,
+keeps it correct as new blocking reasons appear. `waiting_approval` is
+re-enterable: approval grants are single-use and argument-exact, so a run that
+could only stop once would force approvals to be batched into one prompt.
+
+**Boot reaping.** `reap_orphaned_runs` runs at startup, before dispatch and the
+scheduler spawn, and settles every `pending`/`running` row as `failed` with an
+orphan reason. This is a proof rather than a timeout heuristic, resting on three
+invariants held elsewhere in the runtime: cycles are process-local
+`tokio::spawn`s, exactly one process may write a given company's journal, and
+cycles serialise on a per-company mutex. Any active row present at boot is
+therefore necessarily dead. The two parked statuses are never reaped — parked is
+not orphaned.
+
+The fs backend stores runs in `runs.jsonl` (last-write-wins per id) and steps in
+`run-steps.jsonl` (a true append, folded per `(run_id, step_seq)` on read).
+Deliberately not one file per run: that would make a run id a path component,
+and a store must never let an id it did not mint address the filesystem.
 
 ## Assembly
 
