@@ -18,6 +18,13 @@ export interface TeamMember {
    * page and this toggle agree on the same `InboxStore` state (issue #173).
    */
   inboxEnabled: boolean;
+  /**
+   * The teammate's daily spend cap in USD, when the company sets one. Undefined
+   * means uncapped — the card shows no budget line at all rather than "$0".
+   */
+  budgetUsdDaily?: number;
+  /** What this teammate has spent since 00:00 UTC; only meaningful with a cap. */
+  spentTodayUsd?: number;
 }
 
 const TONE_KEYS = ["sky", "violet", "amber", "emerald", "rose", "cyan", "indigo", "teal"];
@@ -49,6 +56,10 @@ export function fromDto(dto: TeamMemberDto): TeamMember {
     description: dto.description ?? "",
     tone: toneFor(dto.id || name),
     inboxEnabled: dto.inboxEnabled ?? false,
+    // Carried through as-is: `undefined` means uncapped and must stay
+    // `undefined`, never coalesced to `0`.
+    budgetUsdDaily: dto.budgetUsdDaily,
+    spentTodayUsd: dto.spentTodayUsd,
   };
 }
 

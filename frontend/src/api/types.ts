@@ -256,6 +256,19 @@ export interface TeamMemberDto {
    * it. Absent on hosts predating the field; the console reads that as `false`.
    */
   inboxEnabled?: boolean;
+  /**
+   * This teammate's daily spend cap in USD (manifest `budget_usd_daily`).
+   * Absent when the teammate is uncapped — absence IS the uncapped signal, so
+   * never default it to `0`, which would render a permanently exhausted
+   * teammate.
+   */
+  budgetUsdDaily?: number;
+  /**
+   * What this teammate has spent since 00:00 UTC. Sent only alongside
+   * `budgetUsdDaily`; absent for an uncapped teammate and on hosts predating
+   * the field.
+   */
+  spentTodayUsd?: number;
 }
 
 /**
