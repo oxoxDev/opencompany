@@ -640,14 +640,8 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
         parent_task_id: None,
     };
 
-    tasks
-        .upsert(&alpha, &task("t1", "backlog", 1))
-        .await
-        .unwrap();
-    tasks
-        .upsert(&alpha, &task("t2", "backlog", 2))
-        .await
-        .unwrap();
+    tasks.upsert(&alpha, &task("t1", "todo", 1)).await.unwrap();
+    tasks.upsert(&alpha, &task("t2", "todo", 2)).await.unwrap();
     tasks.upsert(&beta, &task("b1", "done", 3)).await.unwrap();
 
     // Isolation + newest-first ordering.

@@ -87,7 +87,7 @@ impl HarnessBrain {
     /// a single turn, and writes the outcome back onto the board — moved to its
     /// success terminal column on success (see
     /// [`lifecycle::success_terminal_column`]),
-    /// back to `backlog` with the error noted on failure. A missing task store
+    /// back to `todo` with the error noted on failure. A missing task store
     /// or a card that has since vanished is a silent no-op.
     ///
     /// Before this the answer only ever reached `card.note`: the card runs
@@ -236,7 +236,7 @@ impl HarnessBrain {
             // invalid name, so the only trace was a timeline that read "reply
             // from ceo" on a card assigned to somebody else. Refuse instead: no
             // turn is run (nothing was asked of the orchestrator), the card
-            // returns to `backlog` carrying the reason, and the operator is
+            // returns to `todo` carrying the reason, and the operator is
             // told — on the board, on the timeline, and in the thread the card
             // came from.
             tracing::warn!(
@@ -355,7 +355,7 @@ impl HarnessBrain {
                             // this fix exists to eliminate.
                             //
                             // The card keeps the delegate as its assignee on the
-                            // way to `backlog` — the hand-off did happen, and a
+                            // way to `todo` — the hand-off did happen, and a
                             // re-dispatch should start from who it was given to.
                             let handoff = match self
                                 .delegation_runner(&run_turn)
@@ -402,7 +402,7 @@ impl HarnessBrain {
                                         // #213 review).
                                         //
                                         // Partial work is discarded and the card
-                                        // returns to the backlog, exactly as a
+                                        // returns to To-do, exactly as a
                                         // cancelled dispatch does — it must not
                                         // read as finished, and it must not
                                         // strand in `in_progress` either.
@@ -440,7 +440,7 @@ impl HarnessBrain {
                 }
                 Some(SteerAction::Cancel) => {
                     // Partial work is DISCARDED — only a cancellation note lands,
-                    // and the card returns to `backlog`. The note is attributed to
+                    // and the card returns to `todo`. The note is attributed to
                     // the operator, not the assignee (the lifecycle seam decides
                     // that). The loop still yields the text for #185/#190.
                     let result = "cancelled while in flight".to_string();
@@ -591,7 +591,7 @@ impl HarnessBrain {
     /// this issue is about. It deliberately skips the three things that belong
     /// to a run that happened: no in-flight registration (nothing is in flight),
     /// no MCP drain (no turn queued anything), and no artifact (`Failed` lands
-    /// in `backlog`, never a success terminal).
+    /// in `todo`, never a success terminal).
     ///
     /// Attributed to the **orchestrator**: it is the company answering for its
     /// own roster, and the named assignee does not exist to speak.
@@ -920,7 +920,7 @@ impl HarnessBrain {
 
     /// Executes one drained delegation from the orchestrator's turn.
     ///
-    /// `spawn_task` opens a backlog card through the same
+    /// `spawn_task` opens a To-do card through the same
     /// [`TaskStore::upsert`](crate::ports::TaskStore) path the console uses and
     /// reports the card's id (issue #246); it surfaces no bubble of its own. A
     /// missing task store is a silent no-op.
@@ -1154,6 +1154,9 @@ mod tests {
     use crate::company::CompanyManifest;
     use crate::harness::provider::{HarnessModel, MockProvider};
     use crate::ports::brain::CycleHost;
+    // Issue #301: every lifecycle return now lands in To-do (the `backlog` pool
+    // is gone), so these assertions read the const rather than a literal.
+    use crate::ports::tasks::COLUMN_TODO;
     use crate::ports::types::{
         ApprovalId, CompanyId, ContextOp, ContextOpResult, Effect, EffectDisposition, OverlayAgent,
         ToolCall, ToolResult,
@@ -1656,7 +1659,7 @@ members = ["engineer"]
         let dir = tempfile::tempdir().unwrap();
         let (brain, tasks) = brain_with_tasks(dir.path());
         // A roster assignee: since #205 an off-roster one never runs a turn, so
-        // it would settle to `backlog` and prove nothing about the terminal.
+        // it would settle to `todo` and prove nothing about the terminal.
         let mut c = card("t-origin", "engineer");
         c.origin_chat_id = Some("strategy".to_string());
         tasks
@@ -1666,7 +1669,7 @@ members = ["engineer"]
         // `run_task` is driven directly here rather than through `run_cycle`,
         // so the roster the turn runs on has to be built explicitly. Without it
         // every dispatch fails with "company not found" and settles to
-        // `backlog` — which still satisfies this test's post-back assertions
+        // `todo` — which still satisfies this test's post-back assertions
         // while proving nothing about the terminal column.
         brain
             .pool
@@ -1761,7 +1764,7 @@ members = ["engineer"]
             .await
             .expect("cycle runs");
 
-        assert_eq!(only_card(&ops).await.column, "backlog");
+        assert_eq!(only_card(&ops).await.column, COLUMN_TODO);
         let artifacts = crate::ports::artifacts::ArtifactStore::list(
             &*ops,
             &CompanyId::new("acme"),
@@ -1863,7 +1866,7 @@ members = ["engineer"]
     /// The reported bug. A card assigned to "Shane" — nobody this company has —
     /// used to dispatch to the orchestrator anyway, keeping `assignee = "Shane"`
     /// while the timeline read "reply from ceo" and nothing said the name was
-    /// invalid. It must now be **refused**: the card goes back to `backlog`
+    /// invalid. It must now be **refused**: the card goes back to `todo`
     /// carrying the reason, and the orchestrator runs no turn on its behalf.
     #[tokio::test]
     async fn task_dispatch_off_roster_assignee_is_refused_not_silently_reassigned() {
@@ -1886,7 +1889,7 @@ members = ["engineer"]
 
         let refused = only_card(&tasks).await;
         assert_eq!(
-            refused.column, "backlog",
+            refused.column, COLUMN_TODO,
             "a card nobody can work must not sit in in_progress"
         );
         assert_eq!(
@@ -2399,9 +2402,9 @@ members = ["eng1", "eng2"]
         );
     }
 
-    /// A `spawn_task` delegation opens a backlog card and surfaces no bubble.
+    /// A `spawn_task` delegation opens a To-do card and surfaces no bubble.
     #[tokio::test]
-    async fn spawn_task_delegation_opens_a_backlog_card() {
+    async fn spawn_task_delegation_opens_a_todo_card() {
         let dir = tempfile::tempdir().unwrap();
         let (brain, tasks) = brain_with_desk(dir.path());
         let out = brain
@@ -2423,7 +2426,7 @@ members = ["eng1", "eng2"]
         let cards = tasks.list(&CompanyId::new("acme")).await.unwrap();
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].title, "Draft the plan");
-        assert_eq!(cards[0].column, "backlog");
+        assert_eq!(cards[0].column, COLUMN_TODO);
         assert_eq!(cards[0].assignee, "engineer");
         // Issue #246: it surfaces no *bubble*, but it no longer surfaces
         // *nothing* — the card it opened is reported, which is what lets the
@@ -2581,7 +2584,7 @@ members = ["eng1", "eng2"]
         let dir = tempfile::tempdir().unwrap();
         let (brain, tasks) = brain_with_tasks(dir.path());
         let mut c = card("t-assign", "engineer");
-        c.column = "backlog".to_string();
+        c.column = COLUMN_TODO.to_string();
         tasks.upsert(&CompanyId::new("acme"), &c).await.unwrap();
 
         let out = brain
@@ -2603,7 +2606,7 @@ members = ["eng1", "eng2"]
         let after = only_card(&tasks).await;
         assert_eq!(after.assignee, "ceo");
         assert_eq!(
-            after.column, "backlog",
+            after.column, COLUMN_TODO,
             "assignment records ownership; it must not start the work"
         );
         let note = after.note.expect("note");
@@ -2624,7 +2627,7 @@ members = ["eng1", "eng2"]
         let dir = tempfile::tempdir().unwrap();
         let (brain, tasks) = brain_with_tasks(dir.path());
         let mut c = card("t-assign", "engineer");
-        c.column = "backlog".to_string();
+        c.column = COLUMN_TODO.to_string();
         tasks.upsert(&CompanyId::new("acme"), &c).await.unwrap();
 
         brain
@@ -2657,7 +2660,7 @@ members = ["eng1", "eng2"]
         let dir = tempfile::tempdir().unwrap();
         let (brain, tasks) = brain_with_tasks(dir.path());
         let mut c = card("t-assign", "engineer");
-        c.column = "backlog".to_string();
+        c.column = COLUMN_TODO.to_string();
         tasks.upsert(&CompanyId::new("acme"), &c).await.unwrap();
 
         brain
@@ -2722,9 +2725,9 @@ members = ["eng1", "eng2"]
     }
 
     /// `revise` is a transition #186 does own: the card goes back to the
-    /// backlog so it can be picked up and re-dispatched.
+    /// To-do so it can be picked up and re-dispatched.
     #[tokio::test]
-    async fn review_revise_sends_the_card_back_to_the_backlog() {
+    async fn review_revise_sends_the_card_back_to_todo() {
         let dir = tempfile::tempdir().unwrap();
         let (brain, tasks) = brain_with_tasks(dir.path());
         let mut c = card("t-revise", "engineer");
@@ -2744,7 +2747,7 @@ members = ["eng1", "eng2"]
             .expect("delegation runs");
 
         let after = only_card(&tasks).await;
-        assert_eq!(after.column, "backlog");
+        assert_eq!(after.column, COLUMN_TODO);
         assert!(
             after.note.expect("note").contains("needs another pass"),
             "the verdict must be recorded even without a reviewer comment"
@@ -3610,10 +3613,10 @@ members = ["eng1", "eng2"]
         )
     }
 
-    /// Cancel mid-flight → the card returns to `backlog`, the partial reply is
+    /// Cancel mid-flight → the card returns to `todo`, the partial reply is
     /// DISCARDED, and only the operator cancellation note lands.
     #[tokio::test]
-    async fn steer_cancel_returns_to_backlog_and_discards_partial() {
+    async fn steer_cancel_returns_to_todo_and_discards_partial() {
         let dir = tempfile::tempdir().unwrap();
         let (brain, tasks, _) =
             brain_that_steers_itself(dir.path(), "t1", vec![SteerAction::Cancel]);
@@ -3633,7 +3636,7 @@ members = ["eng1", "eng2"]
             .expect("cycle runs");
 
         let moved = only_card(&tasks).await;
-        assert_eq!(moved.column, "backlog");
+        assert_eq!(moved.column, COLUMN_TODO);
         let note = moved.note.expect("note");
         assert!(note.contains("cancelled while in flight"), "{note:?}");
         // The agent's partial reply must NOT be preserved on a cancel.
@@ -4161,9 +4164,9 @@ members = ["eng1", "eng2"]
     /// to eliminate, reintroduced through the error path.
     ///
     /// So an errored hand-off takes the same arm an errored turn does: settle
-    /// `Failed` → `backlog`, with the reason on the note.
+    /// `Failed` → `todo`, with the reason on the note.
     #[tokio::test]
-    async fn a_hand_off_whose_delegate_errors_lands_in_backlog_not_stranded_in_progress() {
+    async fn a_hand_off_whose_delegate_errors_lands_in_todo_not_stranded_in_progress() {
         let dir = tempfile::tempdir().unwrap();
         // Invoke 1 is the dispatched orchestrator turn (queues the hand-off);
         // invoke 2 is the delegate's own turn, which errors.
@@ -4182,8 +4185,8 @@ members = ["eng1", "eng2"]
 
         let after = only_card(&provider.tasks).await;
         assert_eq!(
-            after.column, "backlog",
-            "an errored hand-off must return the card to the backlog, never leave it stranded in \
+            after.column, COLUMN_TODO,
+            "an errored hand-off must return the card to To-do, never leave it stranded in \
              progress where nothing will re-dispatch it"
         );
         let note = after.note.expect("note");
@@ -4204,14 +4207,14 @@ members = ["eng1", "eng2"]
     }
 
     /// A hand-off an operator cancels mid-flight produced nothing, so the card
-    /// returns to the `backlog` reported as the cancellation it actually was.
+    /// returns to `todo` reported as the cancellation it actually was.
     ///
     /// The claim is only made because `run_delegation` reports the cancellation
     /// as a fact (`DelegationOutcome::cancelled`); a hand-off that ends empty
     /// for any other reason no longer reaches this arm at all (issue #213
     /// review finding 2).
     #[tokio::test]
-    async fn a_cancelled_hand_off_returns_the_card_to_the_backlog_as_a_cancellation() {
+    async fn a_cancelled_hand_off_returns_the_card_to_todo_as_a_cancellation() {
         let dir = tempfile::tempdir().unwrap();
         // Invoke 1 is the dispatched orchestrator turn (queues the hand-off);
         // invoke 2 is the delegate's turn, which cancels itself mid-run.
@@ -4230,7 +4233,7 @@ members = ["eng1", "eng2"]
 
         let after = only_card(&provider.tasks).await;
         assert_eq!(
-            after.column, "backlog",
+            after.column, COLUMN_TODO,
             "a cancelled hand-off must not read as finished, and must not strand in progress"
         );
         let note = after.note.expect("note");
@@ -4253,7 +4256,7 @@ members = ["eng1", "eng2"]
     /// hand-off cancelled mid-flight still produced a `TaskHandoff`, so a second
     /// hand-off in the same drain took the "does not own the card" arm: its
     /// answer was appended to the note, but the card still settled `Cancelled`
-    /// -> `backlog` off the first. Work that ran and produced output ended up
+    /// -> `todo` off the first. Work that ran and produced output ended up
     /// filed under a card marked cancelled.
     #[tokio::test]
     async fn a_later_answering_hand_off_takes_the_card_over_from_an_earlier_empty_one() {
@@ -4473,7 +4476,7 @@ members = ["eng1", "eng2"]
             .iter()
             .find(|c| c.title == "Follow up next week")
             .expect("the spawned card must actually be opened");
-        assert_eq!(spawned.column, "backlog");
+        assert_eq!(spawned.column, COLUMN_TODO);
         assert_eq!(
             spawned.parent_task_id.as_deref(),
             Some("t-parent"),

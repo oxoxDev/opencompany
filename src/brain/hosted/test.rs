@@ -783,7 +783,7 @@ async fn e2e_spawn_task_tool_call_opens_a_board_card() {
     assert_eq!(cards.len(), 1, "one card opened: {cards:?}");
     assert_eq!(cards[0].title, "Ship the invoice flow");
     assert_eq!(cards[0].assignee, "eng");
-    assert_eq!(cards[0].column, "backlog");
+    assert_eq!(cards[0].column, "todo");
 }
 
 /// Medulla emitting a `delegate_to_desk` tool-call resolves the desk and records

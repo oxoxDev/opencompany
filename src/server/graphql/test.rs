@@ -445,7 +445,7 @@ async fn tasks_page_reflects_upserts_and_column_filter() {
                 id: "t1".into(),
                 title: "Launch".into(),
                 note: None,
-                column: "backlog".into(),
+                column: "todo".into(),
                 priority: "high".into(),
                 assignee: "maya".into(),
                 updated_at_millis: 1_700_000_000_000,
@@ -458,7 +458,7 @@ async fn tasks_page_reflects_upserts_and_column_filter() {
     let app = router(state);
     let value = query(
         app.clone(),
-        r#"{"query":"{ company(id:\"acme\"){ tasks(column:\"backlog\"){ total items { id title column } } } }"}"#,
+        r#"{"query":"{ company(id:\"acme\"){ tasks(column:\"todo\"){ total items { id title column } } } }"}"#,
     )
     .await;
     assert_eq!(value["data"]["company"]["tasks"]["total"], 1);
