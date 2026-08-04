@@ -727,6 +727,17 @@ type TeamMember {
 	Whether this teammate has an enabled inbox.
 	"""
 	inboxEnabled: Boolean!
+	"""
+	This teammate's manifest `budget_usd_daily` cap (issue #304), or null
+	when it has none. Null-vs-set is the capped/uncapped distinction — `0`
+	would mean "capped at nothing".
+	"""
+	budgetUsdDaily: Float
+	"""
+	What this teammate has spent since 00:00 UTC; non-null only alongside a
+	cap.
+	"""
+	spentTodayUsd: Float
 }
 
 """
