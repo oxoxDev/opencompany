@@ -40,6 +40,7 @@ pub(crate) async fn state_with_company(home: &std::path::Path) -> AppState {
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -182,6 +183,7 @@ async fn state_with_rich_company(home: &std::path::Path) -> AppState {
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -707,6 +709,7 @@ async fn skills_and_workflows_resolve_from_source_dir() {
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -778,6 +781,7 @@ async fn company_skills_project_the_pinned_snapshot_of_a_registry_install() {
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -890,6 +894,7 @@ async fn workflows_resolve_from_the_record_overlay_with_no_source_dir() {
                        [[edge]]\nfrom = \"n1\"\nto = \"n2\"\n"
                     .to_string(),
             }],
+            overlay_budgets: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -981,6 +986,7 @@ async fn workflows_summary_lists_an_overlay_workflow_with_no_enabled_entry() {
                        [[node]]\nid = \"n1\"\nkind = \"trigger\"\nname = \"Start\"\n"
                     .to_string(),
             }],
+            overlay_budgets: Vec::new(),
             template_provenance: None,
         })
         .await

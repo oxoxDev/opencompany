@@ -969,6 +969,16 @@ impl RuntimeBuilder {
             .as_ref()
             .map(|r| r.overlay_workflows.clone())
             .unwrap_or_default();
+        // Issue #343: the operator-set daily spend caps. Carried across the
+        // rebuild for the same reason as the workflow bodies — the manifest is a
+        // read-only boot snapshot on a hosted tenant, so dropping these would
+        // silently revert every console-set cap to the number baked into the
+        // image on the next restart, which is the exact failure #343 exists to
+        // end.
+        let overlay_budgets = existing
+            .as_ref()
+            .map(|r| r.overlay_budgets.clone())
+            .unwrap_or_default();
         // Issue #208: `[workflows].enabled` is the one manifest field a runtime
         // write mutates (`create_company_workflow` pushes the new id alongside
         // the overlay body, in the same save). Rebuilding the record from the
@@ -1272,6 +1282,7 @@ impl RuntimeBuilder {
                                 overlay_desk_order: overlay_desk_order.clone(),
                                 overlay_desks: overlay_desks.clone(),
                                 overlay_workflows: overlay_workflows.clone(),
+                                overlay_budgets: overlay_budgets.clone(),
                                 template_provenance: template_provenance.clone(),
                             };
                             // Workflow agent nodes execute on the same pool as the
@@ -1387,6 +1398,7 @@ impl RuntimeBuilder {
                 overlay_desk_order,
                 overlay_desks,
                 overlay_workflows,
+                overlay_budgets,
                 template_provenance,
             })
             .await?;
@@ -2766,6 +2778,7 @@ mod test {
                 }],
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
                 template_provenance: None,
             })
             .await

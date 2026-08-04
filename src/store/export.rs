@@ -31,8 +31,8 @@ use crate::ports::events::EventLog;
 use crate::ports::memory::MemoryStore;
 use crate::ports::store::CompanyStore;
 use crate::ports::types::{
-    CompanyId, CompanyRecord, CompressedTrace, ContextChunk, EventSeq, LedgerEntry, OverlayAgent,
-    OverlayDesk, OverlayDeskMember, OverlayDeskOrder, OverlayWorkflow, StoredEvent,
+    BudgetOverride, CompanyId, CompanyRecord, CompressedTrace, ContextChunk, EventSeq, LedgerEntry,
+    OverlayAgent, OverlayDesk, OverlayDeskMember, OverlayDeskOrder, OverlayWorkflow, StoredEvent,
     TemplateProvenance,
 };
 
@@ -118,6 +118,12 @@ struct BundleMeta {
     /// back-compat with older bundles.
     #[serde(default)]
     overlay_workflows: Vec<OverlayWorkflow>,
+    /// The operator-set per-teammate daily spend caps (issue #343). Preserved so
+    /// an export→import keeps the caps an operator set from the console, rather
+    /// than silently reverting every teammate to its manifest default.
+    /// `#[serde(default)]` for back-compat with older bundles.
+    #[serde(default)]
+    overlay_budgets: Vec<BudgetOverride>,
     /// The source-template provenance, when the exported company carried one.
     /// `#[serde(default)]` keeps older bundles written before provenance existed
     /// importing cleanly (they decode to `None` — no migration).
@@ -166,6 +172,9 @@ struct BundleContents {
     /// The operator workflow-authoring overlay, carried through the bundle so
     /// export→import preserves console-created workflow graphs.
     overlay_workflows: Vec<OverlayWorkflow>,
+    /// The operator-set per-teammate daily spend caps, carried through the
+    /// bundle so export→import preserves console-set budgets (issue #343).
+    overlay_budgets: Vec<BudgetOverride>,
 }
 
 impl BundleContents {
@@ -210,6 +219,7 @@ impl BundleContents {
             overlay_desk_order: record.overlay_desk_order,
             overlay_desks: record.overlay_desks,
             overlay_workflows: record.overlay_workflows,
+            overlay_budgets: record.overlay_budgets,
         })
     }
 
@@ -237,6 +247,7 @@ impl BundleContents {
                 overlay_desk_order: self.overlay_desk_order.clone(),
                 overlay_desks: self.overlay_desks.clone(),
                 overlay_workflows: self.overlay_workflows.clone(),
+                overlay_budgets: self.overlay_budgets.clone(),
                 template_provenance: self.template_provenance.clone(),
             })
             .await?;
@@ -279,6 +290,7 @@ impl BundleContents {
             overlay_desk_order: self.overlay_desk_order.clone(),
             overlay_desks: self.overlay_desks.clone(),
             overlay_workflows: self.overlay_workflows.clone(),
+            overlay_budgets: self.overlay_budgets.clone(),
             template_provenance: self.template_provenance.clone(),
         };
         write_file(
@@ -362,6 +374,7 @@ impl BundleContents {
             overlay_desk_order: meta.overlay_desk_order,
             overlay_desks: meta.overlay_desks,
             overlay_workflows: meta.overlay_workflows,
+            overlay_budgets: meta.overlay_budgets,
         })
     }
 }
@@ -809,6 +822,7 @@ mod test {
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -880,6 +894,7 @@ mod test {
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
             template_provenance: Some(provenance.clone()),
         })
         .await
@@ -989,6 +1004,7 @@ mod test {
             overlay_desk_order: order.clone(),
             overlay_desks: desks.clone(),
             overlay_workflows: workflows.clone(),
+            overlay_budgets: Vec::new(),
             template_provenance: None,
         })
         .await
