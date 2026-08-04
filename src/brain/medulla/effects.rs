@@ -244,6 +244,7 @@ pub(crate) fn effect_from_frame(frame: &EffectFrame) -> Effect {
             .unwrap_or(false),
         payload: frame.payload.clone(),
         agent: None,
+        run_id: None,
     }
 }
 

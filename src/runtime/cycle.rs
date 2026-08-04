@@ -911,6 +911,7 @@ impl<'a> CycleHostImpl<'a> {
             first_time_counterparty: !established,
             payload: serde_json::json!({ "to": to, "subject": subject, "body": body }),
             agent: None,
+            run_id: None,
         };
         match self.gate_effect(effect).await? {
             EffectDisposition::Executed => Ok(ToolResult {
@@ -1549,6 +1550,7 @@ mod test {
             first_time_counterparty: false,
             payload: serde_json::Value::Null,
             agent: None,
+            run_id: None,
         };
 
         execute_effect_once(&rt, "k1", &effect).await.unwrap();
@@ -1581,6 +1583,7 @@ mod test {
             first_time_counterparty: false,
             payload: serde_json::Value::Null,
             agent: None,
+            run_id: None,
         };
         let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
             .with_brain(Arc::new(EffectBrain {
@@ -1630,6 +1633,7 @@ mod test {
             first_time_counterparty: false,
             payload: args,
             agent: Some(agent.to_string()),
+            run_id: None,
         }
     }
 
@@ -1918,6 +1922,7 @@ mod test {
             first_time_counterparty: false,
             payload: serde_json::Value::Null,
             agent: None,
+            run_id: None,
         };
         let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
             .with_brain(Arc::new(EffectBrain {
@@ -1995,6 +2000,7 @@ mod test {
             first_time_counterparty: false,
             payload: serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" }),
             agent: None,
+            run_id: None,
         };
         let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
             .with_brain(Arc::new(ParkingBrain {
@@ -2049,6 +2055,7 @@ mod test {
             first_time_counterparty: false,
             payload: serde_json::Value::Null,
             agent: None,
+            run_id: None,
         };
         let approval_id = {
             let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
@@ -2099,6 +2106,7 @@ mod test {
             first_time_counterparty: false,
             payload: serde_json::json!({ "channel": "operator", "text": "ORIGINAL" }),
             agent: None,
+            run_id: None,
         };
         // A recording operator channel we keep a handle to (Arc-shared buffer).
         let operator_channel = OperatorChannel::new();
@@ -2164,6 +2172,7 @@ mod test {
             first_time_counterparty: false,
             payload: serde_json::Value::Null,
             agent: None,
+            run_id: None,
         };
         // A zero-TTL gate: anything parked is immediately past its deadline.
         let gate = Arc::new(
@@ -2525,6 +2534,7 @@ mod test {
             first_time_counterparty: false,
             payload: serde_json::json!({ "to": "x@ext.com", "subject": "Hi", "body": "yo" }),
             agent: None,
+            run_id: None,
         };
         let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
             .with_brain(Arc::new(EffectBrain {
@@ -2594,6 +2604,7 @@ mod test {
                 "body": "Q3 is up 12%.",
             }),
             agent: None,
+            run_id: None,
         };
         let approval_id = rt.approvals.park(rt.id(), effect.clone()).await.unwrap();
         rt.journal
@@ -2658,6 +2669,7 @@ mod test {
                 "body": "Q3 is up 12%.",
             }),
             agent: None,
+            run_id: None,
         };
         let approval_id = rt.approvals.park(rt.id(), effect.clone()).await.unwrap();
         rt.journal
@@ -2702,6 +2714,7 @@ mod test {
                 "body": "Q3 is up 12%.",
             }),
             agent: None,
+            run_id: None,
         };
         let approval_id = {
             let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
@@ -2754,6 +2767,7 @@ mod test {
             first_time_counterparty: false,
             payload: serde_json::json!({ "to": "x@ext.com", "subject": "Hi", "body": "yo" }),
             agent: None,
+            run_id: None,
         };
         let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
             .with_brain(Arc::new(EffectBrain {
@@ -2773,6 +2787,7 @@ mod test {
                 first_time_counterparty: false,
                 payload: serde_json::json!({ "to": "x@ext.com", "subject": "Hi", "body": "yo" }),
                 agent: None,
+                run_id: None,
             },
         )
         .await

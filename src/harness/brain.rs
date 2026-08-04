@@ -349,6 +349,11 @@ impl HarnessBrain {
         // Route the background turn through the brain-agnostic `RunTurn` seam
         // (issue #176), re-attaching `HarnessDeps` behind `HarnessRunTurn`.
         let run_turn = HarnessRunTurn::new(&self.pool, &self.deps);
+        // Issue #242: where this attempt's own approval requests begin. The
+        // queue is shared with any chat turn earlier in the same cycle and is
+        // append-only until the cycle-end drain, so a position taken here stays
+        // the boundary between "somebody else parked that" and "this run did".
+        let approvals_before = self.deps.approval_requests.queued();
 
         // The loop yields how the run ended plus its operator-facing result on
         // whichever path ends it, so the artifact (#187), the completion event
@@ -562,7 +567,18 @@ impl HarnessBrain {
         // terminality backstop finds this row already settled and no-ops — the
         // rich settle always wins the race, because `run_task` returns before
         // `run_locked` reaches the backstop.
-        self.settle_run_end(sink.as_deref(), run_end, &result_text)
+        // Issue #242 / #333: tag every approval this attempt's turns parked with
+        // the run that produced it, and count them — a run that finished its
+        // work but left a person something to act on has not succeeded, it is in
+        // review.
+        let parked = match sink.as_ref() {
+            Some(sink) => self
+                .deps
+                .approval_requests
+                .stamp_run(approvals_before, sink.run_id()),
+            None => 0,
+        };
+        self.settle_run_end(sink.as_deref(), run_end, &result_text, parked)
             .await;
 
         // Issue #187: record the run's output as a versioned artifact so the
@@ -682,7 +698,8 @@ impl HarnessBrain {
         // A refusal is a real, terminal attempt — one that spent nothing. It
         // settles like any other ending (#242), so the card's run history shows
         // "this was tried and refused, and why" rather than a gap.
-        self.settle_run_end(sink, TaskRunEnd::Failed, &text).await;
+        self.settle_run_end(sink, TaskRunEnd::Failed, &text, 0)
+            .await;
 
         self.journal_task_outcome(&card, &orchestrator, text).await;
 
@@ -717,8 +734,28 @@ impl HarnessBrain {
 
     /// Settles the attempt row from how its run ended, folding in the trace's
     /// step count and cost (issue #242).
-    async fn settle_run_end(&self, sink: Option<&RunTraceSink>, end: TaskRunEnd, result: &str) {
-        let status = lifecycle::run_status_for(end);
+    ///
+    /// `parked_approvals` is how many approval requests **this attempt's own
+    /// turns** left for a person to act on. A run that otherwise succeeded while
+    /// parking at least one finishes [`RunStatus::WaitingApproval`] rather than
+    /// [`RunStatus::Succeeded`] — epic #183 decision 2: a person must act, so
+    /// the attempt is in review, not done. A run that failed, was cancelled or
+    /// was paused keeps its own status; the operator has a bigger problem than a
+    /// pending approval, and overwriting the reason it stopped would hide it.
+    ///
+    /// `WaitingApproval` is terminal-in-v1 (resuming an approved attempt is its
+    /// own issue) and deliberately **re-enterable across attempts**: the
+    /// re-dispatch after an approval is a new run that can wait again, which is
+    /// what keeps #243's single-use, argument-exact grants coherent instead of
+    /// forcing an operator to batch several approvals into one.
+    async fn settle_run_end(
+        &self,
+        sink: Option<&RunTraceSink>,
+        end: TaskRunEnd,
+        result: &str,
+        parked_approvals: usize,
+    ) {
+        let status = lifecycle::settled_run_status(end, parked_approvals);
         // Only a failure carries a reason: `error` is "why this went wrong", not
         // "what the agent said". Stamping a success's reply here would put the
         // deliverable in a field every reader renders as a fault.
@@ -3491,6 +3528,7 @@ members = ["eng1", "eng2"]
                 first_time_counterparty: false,
                 payload: serde_json::json!({ "prompt": "a logo" }),
                 agent: None,
+                run_id: None,
             },
         });
 
@@ -3568,6 +3606,7 @@ members = ["eng1", "eng2"]
                     first_time_counterparty: false,
                     payload: serde_json::json!({ "tool": tool }),
                     agent: None,
+                    run_id: None,
                 },
             });
         }

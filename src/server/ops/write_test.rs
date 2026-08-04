@@ -3402,6 +3402,7 @@ fn parked_effect() -> crate::ports::types::Effect {
         first_time_counterparty: false,
         payload: serde_json::Value::Null,
         agent: None,
+        run_id: None,
     }
 }
 
