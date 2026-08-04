@@ -319,6 +319,13 @@ pub struct CompanyAgent {
     pub agent_id: String,
     /// The manifest agent's human-readable role.
     pub role: String,
+    /// This teammate's manifest `budget_usd_daily` cap, carried onto the roster
+    /// so the dispatch gate in [`HarnessPool::run_inner`] can read it without
+    /// re-loading the manifest per turn (issue #304).
+    ///
+    /// `None` for an uncapped teammate — and for every overlay teammate, which
+    /// carries no per-agent cap in v1.
+    pub budget_usd_daily: Option<f64>,
     /// The embedded openhuman session. A [`Mutex`] because a `turn` takes
     /// `&mut self` and one agent must serialise its own turns.
     agent: Mutex<Agent>,
@@ -335,6 +342,23 @@ const GRACEFUL_EMPTY_REPLY: &str = "Sorry — I hit a temporary model hiccup and
 /// [`HarnessPool::run_inner`](HarnessPool::run_inner).
 const TOTAL_BUDGET_EXHAUSTED_NOTICE: &str =
     "Token budget for this period is exhausted — dispatch paused until the period resets.";
+
+/// The operator-facing notice returned when one teammate has spent its manifest
+/// `budget_usd_daily` (issue #304) — a hard dispatch refusal for that teammate
+/// only, made before any model call.
+///
+/// Deliberately a *visible refusal* rather than a silent no-op, and deliberately
+/// per-teammate: the rest of the company keeps running, and the operator is told
+/// which desk stopped, what its cap is, and when it comes back. There is no
+/// per-call unit to park at turn level — an inference turn is not a tool call —
+/// so a notice is the honest answer, mirroring
+/// [`TOTAL_BUDGET_EXHAUSTED_NOTICE`].
+fn agent_budget_exhausted_notice(agent_id: &str, cap_usd: f64) -> String {
+    format!(
+        "{agent_id} has reached its daily spend cap of ${cap_usd:.2} — dispatch to this teammate \
+         is paused until the cap resets at 00:00 UTC. Other teammates are unaffected."
+    )
+}
 
 /// The classification of a single `agent.turn` attempt, for the retry wrapper.
 enum AttemptOutcome {
@@ -1086,6 +1110,70 @@ impl HarnessPool {
             }
         }
 
+        // Per-agent daily spend cap (issue #304): the same HARD, pre-model-call
+        // refusal as the ceiling above, scoped to ONE teammate.
+        //
+        // This is the layer that matters most in practice. The manifest's
+        // `budget_usd_daily` was validated, persisted and passed to
+        // `ApprovalPolicy` — where it sat on a field with no reader. But the
+        // dominant spend stream is not tool calls at all, it is inference, and
+        // inference never reaches a `ToolPolicy`. Gating only priced tool calls
+        // (the policy arm) would leave a capped teammate free to burn its budget
+        // many times over on model turns alone, which is how the cap came to be
+        // decorative in the first place.
+        //
+        // Refused BEFORE retrieve→inject and the memory writeback, exactly like
+        // the total ceiling, so a refused turn costs nothing and leaves no
+        // fabricated outcome in the store. The reply names the teammate, the cap
+        // and the reset — never a bare failure.
+        //
+        // FAIL-OPEN, mirroring #188's documented tradeoff: with no meter, or a
+        // meter whose query errors, we warn and run the turn. Bricking a
+        // company's cognition on a flaky read would be a strictly worse failure
+        // mode than one day of overspend, and there is no operator recourse at
+        // turn level (unlike the policy arm, whose park a human can approve —
+        // which is why THAT layer fails closed and this one does not).
+        if let Some(cap) = agent.budget_usd_daily {
+            match deps.meter.as_deref() {
+                Some(meter) => {
+                    let since = crate::metering::utc_day_start_millis(crate::ports::now_millis());
+                    match meter.query(company, since).await {
+                        Ok(samples) => {
+                            let spent = crate::metering::usd_spent_by_agent(&samples, agent_id);
+                            if spent >= cap {
+                                tracing::info!(
+                                    company = %company,
+                                    agent = agent_id,
+                                    spent,
+                                    cap,
+                                    "[agent-budget] daily spend cap reached; refusing dispatch (no model call) until 00:00 UTC"
+                                );
+                                return Ok(TurnOutcome {
+                                    reply: agent_budget_exhausted_notice(agent_id, cap),
+                                    steps: Vec::new(),
+                                });
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                company = %company,
+                                agent = agent_id,
+                                %error,
+                                "[agent-budget] daily-spend query failed; running the turn rather than bricking this teammate"
+                            );
+                        }
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        company = %company,
+                        agent = agent_id,
+                        "[agent-budget] no usage meter; the per-agent daily spend cap cannot be enforced on this host"
+                    );
+                }
+            }
+        }
+
         // Retrieve→inject: pull the top-K prior task outcomes relevant to this
         // message and prepend them as context. On a cold store this yields no
         // hits and the message is passed through unchanged.
@@ -1329,11 +1417,18 @@ pub(crate) fn build_roster(
         Vec::with_capacity(company.manifest.agents.len() + company.overlay_agents.len());
 
     for manifest_agent in &company.manifest.agents {
-        let agent_policy = ApprovalPolicy::new(policy, manifest_agent.budget_usd_daily)
+        let mut agent_policy = ApprovalPolicy::new(policy, manifest_agent.budget_usd_daily)
             .with_requests(deps.approval_requests.clone())
             // Issue #243: stamp who the parked effect belongs to, so approving it
             // can hand the grant back to this agent rather than to nobody.
             .with_agent(manifest_agent.id.clone());
+        // Issue #304: give the policy something to measure `budget_usd_daily`
+        // against. Only wired when the host has a meter — without one the cap
+        // arm stays inert and warns once, rather than parking every priced call
+        // on a host that can never answer the question.
+        if let Some(meter) = deps.meter.as_ref() {
+            agent_policy = agent_policy.with_spend(meter.clone(), company.id.clone());
+        }
         let is_orchestrator = orchestrator.as_deref() == Some(manifest_agent.id.as_str());
         let grants = agent_effective_grants(allow, &manifest_agent.tools);
         let agent = build::build_agent(
@@ -1349,6 +1444,7 @@ pub(crate) fn build_roster(
         roster.push(Arc::new(CompanyAgent {
             agent_id: manifest_agent.id.clone(),
             role: manifest_agent.role.clone(),
+            budget_usd_daily: manifest_agent.budget_usd_daily,
             agent: Mutex::new(agent),
         }));
     }
@@ -1368,12 +1464,17 @@ pub(crate) fn build_roster(
         }
         let manifest_agent = overlay_agent_to_manifest(overlay);
         // No per-teammate budget cap or cognition-tier hint in v1 — see
-        // `overlay_agent_to_manifest`.
-        let agent_policy = ApprovalPolicy::new(policy, manifest_agent.budget_usd_daily)
+        // `overlay_agent_to_manifest`. The spend reader is still wired: the cap
+        // is `None`, so the arm is inert, but an overlay teammate that grows a
+        // cap later needs no second wiring site.
+        let mut agent_policy = ApprovalPolicy::new(policy, manifest_agent.budget_usd_daily)
             .with_requests(deps.approval_requests.clone())
             // An overlay teammate is a real roster agent and re-dispatches the
             // same way a manifest one does (issue #243).
             .with_agent(manifest_agent.id.clone());
+        if let Some(meter) = deps.meter.as_ref() {
+            agent_policy = agent_policy.with_spend(meter.clone(), company.id.clone());
+        }
         let grants = agent_effective_grants(allow, &manifest_agent.tools);
         let agent = build::build_agent(
             &company.id,
@@ -1388,6 +1489,8 @@ pub(crate) fn build_roster(
         roster.push(Arc::new(CompanyAgent {
             agent_id: manifest_agent.id.clone(),
             role: manifest_agent.role.clone(),
+            // Overlay teammates are uncapped in v1 (`overlay_agent_to_manifest`).
+            budget_usd_daily: manifest_agent.budget_usd_daily,
             agent: Mutex::new(agent),
         }));
     }
@@ -1527,12 +1630,37 @@ mod tests {
             self.samples.lock().unwrap().push(sample.clone());
             Ok(())
         }
+        /// Honours `since_millis`, per the port contract ("every sample at or
+        /// after `since_millis`"). The per-agent daily cap (issue #304) is a
+        /// windowed read, so a double that returned everything regardless would
+        /// make the day-rollover test pass against any boundary the code
+        /// computed — including none at all.
+        async fn query(&self, _company: &CompanyId, since: u64) -> crate::Result<Vec<UsageSample>> {
+            Ok(self
+                .samples
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|sample| sample.at_millis >= since)
+                .cloned()
+                .collect())
+        }
+    }
+
+    /// A meter whose reads always fail — for the dispatch gate's fail-open pin.
+    struct FailingMeter;
+
+    #[async_trait]
+    impl UsageMeter for FailingMeter {
+        async fn record(&self, _company: &CompanyId, _sample: &UsageSample) -> crate::Result<()> {
+            Ok(())
+        }
         async fn query(
             &self,
             _company: &CompanyId,
             _since: u64,
         ) -> crate::Result<Vec<UsageSample>> {
-            Ok(self.samples.lock().unwrap().clone())
+            Err(OpenCompanyError::Store("meter unavailable".into()))
         }
     }
 
@@ -2703,7 +2831,7 @@ description = "Sets direction."
     fn deps_with_plan(
         dir: &std::path::Path,
         context: Arc<MockContext>,
-        meter: Option<Arc<RecordingMeter>>,
+        meter: Option<Arc<dyn UsageMeter>>,
         plan: Option<crate::harness::capability_budget::CapabilityPlan>,
     ) -> HarnessDeps {
         HarnessDeps {
@@ -2711,7 +2839,7 @@ description = "Sets direction."
             provider_slug: "mock".to_string(),
             context,
             store: Arc::new(RecordingStore::default()),
-            meter: meter.map(|m| m as Arc<dyn UsageMeter>),
+            meter,
             workspace_root: dir.to_path_buf(),
             model_override: None,
             tasks: None,
@@ -2755,7 +2883,12 @@ description = "Sets direction."
             budgets: std::collections::BTreeMap::new(),
             total_budget: Some(100),
         };
-        let deps = deps_with_plan(dir.path(), context.clone(), Some(meter.clone()), Some(plan));
+        let deps = deps_with_plan(
+            dir.path(),
+            context.clone(),
+            Some(meter.clone() as Arc<dyn UsageMeter>),
+            Some(plan),
+        );
         let pool = HarnessPool::new();
         let rec = record();
         pool.ensure(&rec, &deps).await.expect("ensure");
@@ -2851,6 +2984,234 @@ description = "Sets direction."
         assert_ne!(
             reply, TOTAL_BUDGET_EXHAUSTED_NOTICE,
             "the hard refusal must not fire without a spend read"
+        );
+    }
+
+    // --- The per-agent daily spend cap at dispatch (issue #304) --------------
+
+    /// A company whose `ceo` carries a $5/day cap and whose `engineer` carries
+    /// none — the pair that proves the gate is per-teammate, not per-company.
+    fn capped_record() -> CompanyRecord {
+        let manifest: CompanyManifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[policy]
+mode = "full"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+description = "Sets direction."
+budget_usd_daily = 5.0
+
+[[agent]]
+id = "engineer"
+role = "Engineer"
+description = "Builds the product."
+"#,
+        )
+        .expect("valid manifest");
+        CompanyRecord {
+            manifest,
+            ..record()
+        }
+    }
+
+    /// A `$usd` inference sample for `agent`, stamped at `at_millis`.
+    fn spend_sample(agent: &str, usd: f64, at_millis: u64) -> UsageSample {
+        UsageSample {
+            at_millis,
+            agent: agent.into(),
+            provider: "managed".into(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_input_tokens: 0,
+            cost_usd: usd,
+            kind: crate::ports::SampleKind::Inference,
+        }
+    }
+
+    /// The heart of #304 at the layer that carries the money: once a teammate
+    /// has spent its manifest `budget_usd_daily`, its next dispatch is refused
+    /// **before any model call** — while its uncapped colleague keeps working.
+    ///
+    /// This is the layer that matters, because the dominant spend stream is
+    /// inference and inference never reaches a `ToolPolicy`. Gating only priced
+    /// tool calls would leave a capped teammate free to burn its budget many
+    /// times over on model turns alone.
+    #[tokio::test]
+    async fn run_refuses_dispatch_for_a_teammate_over_its_daily_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        let meter = Arc::new(RecordingMeter::default());
+        let rec = capped_record();
+
+        // The CEO has spent its whole $5 today. The engineer has spent nothing.
+        meter
+            .record(
+                &rec.id,
+                &spend_sample("ceo", 5.00, crate::ports::now_millis()),
+            )
+            .await
+            .unwrap();
+
+        let deps = deps_with_plan(
+            dir.path(),
+            context.clone(),
+            Some(meter.clone() as Arc<dyn UsageMeter>),
+            None,
+        );
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("ensure");
+
+        let samples_before = meter.samples.lock().unwrap().len();
+        let memory_before = context
+            .list(&rec.id, memory_loop::OUTCOME_LABEL_PREFIX)
+            .await
+            .unwrap()
+            .len();
+
+        let refused = pool
+            .run(&rec.id, "ceo", "should-not-echo", &deps, None)
+            .await
+            .expect("a refusal is a benign outcome, not a hard error")
+            .reply;
+        assert_eq!(
+            refused,
+            agent_budget_exhausted_notice("ceo", 5.0),
+            "the refusal names the teammate, its cap and the reset"
+        );
+        assert!(
+            !refused.contains("should-not-echo"),
+            "the model was never called, so the prompt is not echoed: {refused:?}"
+        );
+        assert_eq!(
+            meter.samples.lock().unwrap().len(),
+            samples_before,
+            "a pre-model-call refusal meters nothing"
+        );
+        assert_eq!(
+            context
+                .list(&rec.id, memory_loop::OUTCOME_LABEL_PREFIX)
+                .await
+                .unwrap()
+                .len(),
+            memory_before,
+            "a refused turn stores no fabricated outcome"
+        );
+
+        // The cap is per-teammate: the uncapped engineer is untouched, and the
+        // CEO's spend does not count against it.
+        let ok = pool
+            .run(&rec.id, "engineer", "hello-marker", &deps, None)
+            .await
+            .expect("an uncapped teammate keeps working")
+            .reply;
+        assert!(
+            ok.contains("hello-marker"),
+            "one teammate's exhausted budget must not stop the company: {ok:?}"
+        );
+    }
+
+    /// Fail-open pin, mirroring #188's documented tradeoff exactly: with a cap
+    /// set but spend unreadable, the turn RUNS.
+    ///
+    /// A `$0` cap would refuse from the first cent if spend were readable, so a
+    /// meter that errors is the only reason this turn can proceed. Bricking a
+    /// teammate's cognition on a flaky read is a strictly worse failure mode
+    /// than one day of overspend — and unlike the policy arm's park, a turn-level
+    /// refusal offers the operator nothing to approve.
+    #[tokio::test]
+    async fn run_does_not_refuse_a_capped_teammate_when_spend_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        let manifest: CompanyManifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[policy]
+mode = "full"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+description = "Sets direction."
+budget_usd_daily = 0.0
+"#,
+        )
+        .expect("valid manifest");
+        let rec = CompanyRecord {
+            manifest,
+            ..record()
+        };
+
+        let deps = deps_with_plan(
+            dir.path(),
+            context.clone(),
+            Some(Arc::new(FailingMeter) as Arc<dyn UsageMeter>),
+            None,
+        );
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("ensure");
+
+        let reply = pool
+            .run(&rec.id, "ceo", "hello-marker", &deps, None)
+            .await
+            .expect("an unreadable budget must not brick the teammate")
+            .reply;
+        assert!(
+            reply.contains("hello-marker"),
+            "an unreadable cap defers to running the turn: {reply:?}"
+        );
+
+        // ...and with no meter at all, the same deferral.
+        let no_meter = deps_with_plan(dir.path(), context.clone(), None, None);
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &no_meter).await.expect("ensure");
+        let reply = pool
+            .run(&rec.id, "ceo", "hello-marker", &no_meter, None)
+            .await
+            .expect("no meter must not brick the teammate")
+            .reply;
+        assert!(reply.contains("hello-marker"), "no meter defers: {reply:?}");
+    }
+
+    /// The cap is the UTC calendar day: yesterday's $9 does not refuse today's
+    /// first turn. Depends on `RecordingMeter` honouring `since_millis`.
+    #[tokio::test]
+    async fn a_yesterday_stamped_spend_does_not_refuse_todays_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        let meter = Arc::new(RecordingMeter::default());
+        let rec = capped_record();
+
+        let yesterday =
+            crate::metering::utc_day_start_millis(crate::ports::now_millis()).saturating_sub(1);
+        meter
+            .record(&rec.id, &spend_sample("ceo", 9.00, yesterday))
+            .await
+            .unwrap();
+
+        let deps = deps_with_plan(
+            dir.path(),
+            context.clone(),
+            Some(meter.clone() as Arc<dyn UsageMeter>),
+            None,
+        );
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("ensure");
+
+        let reply = pool
+            .run(&rec.id, "ceo", "hello-marker", &deps, None)
+            .await
+            .expect("a new day admits the turn")
+            .reply;
+        assert!(
+            reply.contains("hello-marker"),
+            "the cap resets at 00:00Z; yesterday's spend is spent: {reply:?}"
         );
     }
 }
