@@ -33,7 +33,7 @@ description = "Write ads, pages, and campaign copy."
 # NEW optional per-agent keys:
 tier = "reasoning"                 # cognition tier hint (see glossary)
 tools = ["docs.*", "email.send"]   # tool grant globs
-budget_usd_daily = 5.0             # per-agent daily spend cap
+budget_usd_daily = 5.0             # per-agent daily spend cap (UTC day)
 
 # ── new tables (all optional) ──────────────────────────────────────────
 [users]
@@ -101,6 +101,41 @@ prompt = "Weekly review and operator digest"
   use when delegating; it never selects a model (the backend maps tiers to
   SKUs). `tools` and `budget_usd_daily` intersect with the company-wide
   `[tools].allow` and `[budget]` — the most restrictive wins.
+
+  **`budget_usd_daily`** (enforced since issue #304 — before that it was
+  validated, stored and displayed, but nothing read it) caps one teammate's
+  spend over the **UTC calendar day**, resetting at `00:00Z` — the same
+  boundary `[plan]`'s daily token budget uses. Spend is re-read from the usage
+  meter on every check, so a restart mid-day resumes against the real figure
+  rather than a fresh zero.
+
+  It covers **metered, attributed** spend: inference turns and priced tool
+  calls (`web_search`, `media_generate_*`), plus any tool call that declares an
+  `amount_usd`. Two behaviours at the cap:
+
+  - **Dispatch is refused** for that teammate, before any model call, with a
+    notice naming the cap and the reset. The rest of the company keeps running.
+  - **A priced tool call parks for approval** rather than being denied.
+    Approving it runs that one call and nothing more; the cap is not raised.
+    Free reads and sends are unaffected — a spend cap caps spend.
+
+  Known limits, stated rather than papered over:
+
+  - **Executed x402 payments escape the counter.** Ledger entries carry no
+    agent, so there is nothing to attribute them to. What *is* covered is the
+    pre-flight case: a call declaring an `amount_usd` that would breach the
+    remaining budget parks before the money moves. Company-wide payment
+    spending is governed by `[budget].monthly_usd`, which is enforced on the
+    economy path.
+  - **Turn-boundary overshoot.** A turn or call that starts under the cap can
+    finish over it; the overshoot is bounded by one call. There is no
+    reservation ledger in v1 — the same documented window `[plan]` carries.
+  - **Unreadable spend fails differently at each layer, deliberately.** With no
+    meter or a failing meter, dispatch **runs** (bricking a teammate's
+    cognition with no operator recourse is worse than a day of overspend),
+    while a priced tool call **parks** (a human can wave that one through).
+  - **Operator-added (overlay) teammates are uncapped in v1.** Only manifest
+    `[[agent]]` entries carry the field.
 - **`[brain]`** selects the `Brain` implementation. `hosted` requires a
   TinyHumans credential at runtime; `sidecar` requires the `sidecar` feature.
 - **`[inference]`** (issue #56 — BYOK) routes the company's agents through a
