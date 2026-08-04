@@ -1290,7 +1290,13 @@ impl RuntimeBuilder {
                             // `set_workflow_runner`, so this is not a strong cycle.
                             deps.workflow_runner.set(&runner);
                             wf_runner = Some(runner);
-                            Some(Arc::new(HarnessBrain::new(pool, deps, record)) as Arc<dyn Brain>)
+                            Some(Arc::new(
+                                // Issue #242: the same run store the dispatch
+                                // choke point mints into and the boot reaper
+                                // sweeps, so an attempt's trace, cost and
+                                // status all land on the row it opened.
+                                HarnessBrain::new(pool, deps, record).with_runs(ops.runs.clone()),
+                            ) as Arc<dyn Brain>)
                         } else {
                             // Do not degrade silently (issue #174): an openhuman
                             // build with no resolvable inference source disables
