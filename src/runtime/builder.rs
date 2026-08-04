@@ -1713,6 +1713,74 @@ mod test {
         assert_eq!(company_id_from_name("***").as_ref(), "company");
     }
 
+    /// The shipped companies actually hand their agents the workspace tools
+    /// (issue #177, gap 2).
+    ///
+    /// Before this, `[tools].allow` listed no `workspace` grant while every
+    /// agent enumerated its tools explicitly — and per-agent grants are narrowed
+    /// by the company allow-list, so *no* agent received even `workspace_list`.
+    /// The tools existed (#237) and no shipped company could reach them, which
+    /// made the "an agent writes a note, the operator sees it" round trip
+    /// impossible out of the box.
+    ///
+    /// Reads are namespace-covered and writes need an explicit grant, so this
+    /// also pins the asymmetry: readers must NOT come out write-capable.
+    #[cfg(feature = "openhuman")]
+    #[test]
+    fn shipped_companies_grant_the_workspace_tools() {
+        use crate::company::grants_workspace_write_explicit;
+        use crate::harness::build::grants_cover;
+
+        for company in ["e2e_harness", "openhuman_demo"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("companies")
+                .join(company);
+            let manifest = CompanyManifest::from_path(&path)
+                .unwrap_or_else(|e| panic!("{company} manifest must parse: {e}"));
+
+            for agent in &manifest.agents {
+                let grants = agent_effective_grants(&manifest.tools.allow, &agent.tools);
+                assert!(
+                    grants_cover(&grants, "workspace"),
+                    "{company}/{} must reach the workspace tools; effective grants: {grants:?}",
+                    agent.id
+                );
+                // Only the writer edits notes; everyone else is read-only, so a
+                // reader can never overwrite operator-owned guidance.
+                assert_eq!(
+                    grants_workspace_write_explicit(&grants),
+                    agent.id == "writer",
+                    "{company}/{} write access is wrong; effective grants: {grants:?}",
+                    agent.id
+                );
+                // Every shipped agent asks for `mcp:*`, and `agent_effective_grants`
+                // intersects that request with the company allow-list — so an
+                // allow-list that omits it silently hands the agent no MCP at all.
+                // Both manifests were in exactly that state before this test
+                // existed (`openhuman_demo` had no allow-list, which covers
+                // nothing, so its agents resolved to an empty toolbelt). Asserted
+                // here because the symptom is a missing capability, not an error:
+                // nothing logs, nothing fails, the tools are simply absent.
+                //
+                // Probed with `grant_matches` against a concrete `mcp:<server>`
+                // name rather than `grants_cover`: MCP grants are colon-namespaced
+                // (`mcp:*`, `mcp:notion`) while `grants_cover` only understands the
+                // dot form, so it answers `false` for a grant list that plainly
+                // contains `mcp:*`.
+                if agent.tools.iter().any(|tool| tool == "mcp:*") {
+                    assert!(
+                        grants
+                            .iter()
+                            .any(|grant| grant_matches(grant, "mcp:any-server")),
+                        "{company}/{} asks for mcp:* but the allow-list does not \
+                         cover it; effective grants: {grants:?}",
+                        agent.id
+                    );
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn user_auth_stores_default_to_fs_and_are_reachable() {
         use crate::ports::{

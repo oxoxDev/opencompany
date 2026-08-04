@@ -997,6 +997,236 @@ async fn workspace_create_write_move_and_cycle_rejection() {
     assert_eq!(status, StatusCode::NO_CONTENT);
 }
 
+/// The read plane the console's Workspace tab runs on (issue #177): the tree
+/// `GET` reflects writes, and the file `GET` carries content plus
+/// server-computed backlinks.
+///
+/// Before this the only workspace read was GraphQL, which the console has no
+/// client for — so the tab rendered a localStorage fixture and never saw a note
+/// an agent (or another browser) wrote.
+#[tokio::test]
+async fn workspace_tree_and_file_reads_reflect_writes() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    // A workspace with nothing seeded into it reads as an empty tree, not a 404
+    // and not a fixture.
+    let (status, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(tree.as_array().unwrap().len(), 0);
+
+    let (_, folder) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "Standards", "kind": "folder"})),
+    )
+    .await;
+    let folder_id = folder["id"].as_str().unwrap().to_string();
+
+    let (_, voice) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({
+            "name": "voice.md",
+            "kind": "file",
+            "parentId": folder_id,
+            "content": "# Voice\n\nWarm and concise.",
+        })),
+    )
+    .await;
+    let voice_id = voice["id"].as_str().unwrap().to_string();
+
+    // A second note links to the first, so it must show up as its backlink.
+    let (_, brief) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({
+            "name": "brief.md",
+            "kind": "file",
+            "content": "Follows our [[voice]].",
+        })),
+    )
+    .await;
+    let brief_id = brief["id"].as_str().unwrap().to_string();
+
+    // The tree carries every node's metadata — and deliberately no bodies, so a
+    // navigation read never grows with the size of the workspace.
+    let (status, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let tree = tree.as_array().unwrap();
+    assert_eq!(tree.len(), 3);
+    for node in tree {
+        assert!(
+            node.get("content").is_none(),
+            "the tree read must not ship note bodies"
+        );
+        assert!(node["updatedAt"].is_number());
+    }
+    let listed = tree
+        .iter()
+        .find(|node| node["id"] == json!(voice_id))
+        .expect("the created note is in the tree");
+    assert_eq!(listed["name"], "voice.md");
+    assert_eq!(listed["kind"], "file");
+    assert_eq!(listed["parentId"], json!(folder_id));
+
+    // The file read carries the body and the inbound backlink, computed server
+    // side — the console derives neither.
+    let (status, file) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/workspace/file/{voice_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(file["name"], "voice.md");
+    assert!(
+        file["content"]
+            .as_str()
+            .unwrap()
+            .contains("Warm and concise")
+    );
+    assert!(file["updatedAt"].is_number());
+    let backlinks = file["backlinks"].as_array().unwrap();
+    assert_eq!(backlinks.len(), 1);
+    assert_eq!(backlinks[0]["id"], json!(brief_id));
+    assert_eq!(backlinks[0]["name"], "brief.md");
+
+    // An out-of-band write (an agent, or another browser) is visible on the very
+    // next read — the whole point of the tab reading the store.
+    let (status, _) = send(
+        &state,
+        "PUT",
+        &format!("/api/v1/company/workspace/file/{voice_id}"),
+        Some(json!({"content": "# Voice\n\nRewritten elsewhere."})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, file) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/workspace/file/{voice_id}"),
+        None,
+    )
+    .await;
+    assert!(
+        file["content"]
+            .as_str()
+            .unwrap()
+            .contains("Rewritten elsewhere")
+    );
+
+    // A folder id and an unknown id are both 404 — never an empty note.
+    let (status, body) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/workspace/file/{folder_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["code"], "company_not_found");
+
+    let (status, _) = send(
+        &state,
+        "GET",
+        "/api/v1/company/workspace/file/does-not-exist",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// Two-company isolation over the workspace read plane: company A's notes are
+/// invisible to B, and a tenant token may not address a company it does not own.
+/// The store is per-company by construction — this pins that the new `GET`s do
+/// not widen it.
+#[tokio::test]
+async fn workspace_reads_are_isolated_between_companies() {
+    use crate::server::platform_auth::{
+        PlatformAuthConfig, PlatformClaims, StaticPlatformVerifier,
+    };
+    use std::collections::HashSet;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let verifier = std::sync::Arc::new(StaticPlatformVerifier::new("plat-secret"));
+    let state = AppState::new(AppConfig::default())
+        .with_home(home.clone())
+        .with_platform_auth(PlatformAuthConfig::new(verifier));
+
+    for name in ["a", "b"] {
+        let id = CompanyId::new(name);
+        let runtime = RuntimeBuilder::new(home.clone(), manifest())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        state
+            .registry()
+            .insert(id.clone(), std::sync::Arc::new(runtime));
+        state.set_owner(id.clone(), format!("tenant:{name}"));
+    }
+
+    let token = |tenant: &str| {
+        StaticPlatformVerifier::tenant_token(&PlatformClaims {
+            tenant: tenant.to_string(),
+            scopes: HashSet::from(["operator".to_string()]),
+            companies: None,
+        })
+    };
+
+    let (status, note) = send_auth(
+        &state,
+        "POST",
+        "/api/v1/companies/a/workspace",
+        Some(json!({"name": "secret.md", "kind": "file", "content": "A body"})),
+        Some(&token("tenant:a")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let note_id = note["id"].as_str().unwrap().to_string();
+
+    // B's own workspace is empty — A's note is not in it.
+    let (status, tree_b) = send_auth(
+        &state,
+        "GET",
+        "/api/v1/companies/b/workspace",
+        None,
+        Some(&token("tenant:b")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(tree_b.as_array().unwrap().len(), 0);
+
+    // Even naming A's node id explicitly, B's scope does not resolve it.
+    let (status, _) = send_auth(
+        &state,
+        "GET",
+        &format!("/api/v1/companies/b/workspace/file/{note_id}"),
+        None,
+        Some(&token("tenant:b")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // And A's token may not address B's workspace at all — 403 (scoped auth).
+    let (status, _) = send_auth(
+        &state,
+        "GET",
+        "/api/v1/companies/b/workspace",
+        None,
+        Some(&token("tenant:a")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
 #[tokio::test]
 async fn skills_install_persists_the_registry_document_not_the_client_metadata() {
     let home_dir = home();

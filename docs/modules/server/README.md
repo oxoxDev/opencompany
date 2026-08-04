@@ -38,7 +38,7 @@ address check for `{id}`, operator + `sole()` for the alias).
 |---|---|
 | `tasks` | `POST …/tasks`, `PATCH`/`DELETE …/tasks/{id}` |
 | `memory` | `POST …/memory`, `DELETE …/memory/{id}` (journals `MemoryFactDeleted`) |
-| `workspace` | `POST …/workspace`, `PUT …/workspace/file/{id}`, `PATCH`/`DELETE …/workspace/{id}` |
+| `workspace` | `GET …/workspace`, `GET …/workspace/file/{id}`, `POST …/workspace`, `PUT …/workspace/file/{id}`, `PATCH`/`DELETE …/workspace/{id}` (the two `GET`s are REST twins of the GraphQL reads — the console has no GraphQL client, #177) |
 | `skills` | `POST …/skills`, `GET …/skills/registry`, `POST …/skills/{slug}/install\|uninstall`, `PUT …/skills/{slug}` |
 | `team` | `POST …/team`, `DELETE …/team/{id}`, `PUT …/team/{id}/inbox` (overlay; roster-only in v1) |
 | `mail` | `POST …/inboxes/{key}/read` |

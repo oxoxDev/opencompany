@@ -604,7 +604,7 @@ export function AppShell({
                 </div>
               }
             >
-              <WorkspaceView company={company} />
+              <WorkspaceView client={client} company={company} />
             </Suspense>
           )}
           {view === "approvals" && (

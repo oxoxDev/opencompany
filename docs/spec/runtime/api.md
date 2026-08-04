@@ -37,10 +37,10 @@ with no `{id}`.
 The console's writes are a REST router family under `src/server/ops/`, each
 route registered under **both** scope forms (`…/companies/{id}/…` and the
 `…/company/…` prosumer alias) by the `scoped` helper. These are the mutations,
-plus **one deliberate read exception**: the two inbox `GET`s at the end of the
-block below. Every other console read goes through GraphQL (see the read plane
-below). Anything a build doesn't serve `404`s — the console treats that as "not
-wired yet".
+plus **two deliberate read exceptions**: the two inbox `GET`s at the end of the
+block below, and the two workspace `GET`s (#177). Every other console read goes
+through GraphQL (see the read plane below). Anything a build doesn't serve
+`404`s — the console treats that as "not wired yet".
 
 ```text
 POST   …/tasks                              create a task card (`originChatId` records the thread it came from, #246)
@@ -48,6 +48,8 @@ PATCH  …/tasks/{taskId}                      edit / move a task
 DELETE …/tasks/{taskId}                      delete a task
 POST   …/memory                             add a memory fact
 DELETE …/memory/{factId}                     delete a memory fact
+GET    …/workspace                          the whole tree (metadata; no bodies)
+GET    …/workspace/file/{nodeId}             one file: content + inbound backlinks
 POST   …/workspace                          create a folder/file (or upload)
 PUT    …/workspace/file/{nodeId}             write file content
 PATCH  …/workspace/{nodeId}                  rename / move
@@ -75,6 +77,19 @@ into, and `GET …/team` tags each teammate with `inboxEnabled` so the Team togg
 reflects that store too. Messages come back in append order; the console sorts
 them newest-first. The GraphQL resolver stays the canonical read for any client
 that does speak GraphQL — these routes duplicate it, they do not replace it.
+
+The two workspace `GET`s are the same story one issue later (#177): the console
+had no reachable workspace read either, so the Workspace tab persisted to
+`localStorage` and the operator and the agents looked at two different trees —
+a note written by an agent through its `workspace_*` tools (#237) was invisible
+to the operator, and vice versa. They are REST twins of `Company.workspaceTree`
+/ `workspaceFile`, differing only in timestamp shape (epoch millis, matching
+every other console read, rather than ISO-8601 strings). The backlink scan is
+literally shared code (`company::workspace_links`), so the two surfaces cannot
+report different backlinks for the same note. The tree read carries metadata
+only — bodies are fetched per file, so a navigation read does not grow with the
+size of the workspace. Reading a folder id as a file is a `404`, never an empty
+note.
 
 Team writes are an **operator overlay** persisted through the store, merged
 into the manifest roster at read time — the version-controlled `company.toml`
@@ -133,8 +148,9 @@ separate work.
 
 Every console **read** is served by a single async-graphql query surface at
 `POST /graphql` (with a `GET /graphql` GraphiQL explorer in development) — the
-sole exception being the two inbox `GET`s above, which exist because the console
-ships no GraphQL client and the Inbox view needs a per-agent read. The schema is
+sole exceptions being the two inbox `GET`s and the two workspace `GET`s above,
+which exist because the console ships no GraphQL client and those two views need
+a reachable read (issues #173 and #177 respectively). The schema is
 query-only — REST otherwise owns writes — and is **built once at startup** and
 stored on `AppState`; each request injects its resolved `GqlAuth` principal.
 

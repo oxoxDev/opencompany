@@ -32,6 +32,12 @@ pub mod telegram;
 mod types;
 mod workflow_create;
 mod workflow_file;
+// The shared workspace-file read (node + content + `[[wikilink]]` backlinks)
+// behind both the GraphQL `workspaceFile` resolver and the REST
+// `GET …/workspace/file/{id}` route the console calls. Always compiled: the
+// REST route is in the default build, and one shared scan is what keeps the two
+// read surfaces from drifting.
+pub(crate) mod workspace_links;
 pub mod workspace_seed;
 
 use std::path::Path;

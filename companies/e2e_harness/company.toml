@@ -28,26 +28,39 @@ admins = ["harness-e2e@tinyhumans.ai"]
 [tools]
 # Composio integration tools (Gmail/Slack/GitHub). Fail-closed until a
 # per-company Composio bearer is set via the console.
-allow = ["composio"]
+#
+# `workspace` opens the company's own note tree — the same tree the console's
+# Workspace tab reads and writes (issue #177). Without it here, no agent gets so
+# much as `workspace_list`, because every agent below lists its tools explicitly
+# and per-agent grants are narrowed by this allow-list.
+#
+# Both forms are needed: this list is matched with exact/glob semantics, so bare
+# `workspace` covers an agent asking for `workspace` but NOT one asking for
+# `workspace.read`, and `workspace.*` covers the sub-grants but not the bare one.
+allow = ["composio", "mcp:*", "workspace", "workspace.*"]
 
 [[agent]]
 id = "ceo"
 role = "Chief Executive"
 description = "Sets direction, answers about the company, and delegates the work."
 tier = "orchestrator"
-tools = ["mcp:*", "composio"]
+# `workspace.read` is read-only by design: writes need a bare `workspace` or an
+# explicit `workspace.write`, so this cannot silently overwrite operator notes.
+tools = ["mcp:*", "composio", "workspace.read"]
 
 [[agent]]
 id = "engineer"
 role = "Engineer"
 description = "Explains how things are built and proposes technical plans."
-tools = ["mcp:*", "composio"]
+tools = ["mcp:*", "composio", "workspace.read"]
 
 [[agent]]
 id = "writer"
 role = "Writer"
 description = "Turns rough notes into short, clear written drafts."
-tools = ["mcp:*", "composio"]
+# The one agent that may edit a note, so the "an agent wrote it, the operator
+# sees it" round trip is demonstrable out of the box.
+tools = ["mcp:*", "composio", "workspace"]
 
 [[group_chat]]
 id = "engineering"
