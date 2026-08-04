@@ -99,8 +99,11 @@ per-teammate daily spend caps an admin sets from the console, which win over the
 manifest's `budget_usd_daily` and are read through
 `CompanyRecord::effective_budget` — the single reconciliation point the harness
 gate, the approval policy, and both roster reads share, so a cap raised in the
-console cannot be honoured by one surface and ignored by another. And (issue
-#168) `overlay_workflows`: the
+console cannot be honoured by one surface and ignored by another. At most one
+`overlay_budgets` entry may exist per teammate — the console write path upserts
+through `CompanyRecord::upsert_budget_override`, and a bundle import carrying two
+entries for the same teammate is rejected rather than resolved by guesswork.
+And (issue #168) `overlay_workflows`: the
 workflow graph bodies authored at runtime through the console's create dialog or
 the orchestrator's `create_workflow` tool. These are persisted here rather than
 written into `companies/<name>/workflows/<id>.toml` because the company source
