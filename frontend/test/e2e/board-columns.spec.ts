@@ -131,4 +131,14 @@ test("dragging into Planning moves the card without dispatching it", async ({ pa
   // the dispatch toast must NOT appear. This is the assertion that lets the
   // column ship ahead of epic #183 §4's auto-advance.
   await expect(page.getByText("Dispatched — the assignee is working on it.")).toHaveCount(0);
+
+  // The toast is a console-side signal and only fires for `in_progress`, so on
+  // its own it cannot distinguish "never dispatched" from "dispatched and the
+  // run already finished". Assert the host's own record instead: the task's
+  // timeline is folded from the company journal, so a dispatch that happened at
+  // any point leaves a `dispatched` entry behind that no later event removes.
+  const detail = await (await request.get(`${API}/tasks/${id}`)).json();
+  expect(
+    (detail.timeline ?? []).filter((entry: { kind: string }) => entry.kind === "dispatched"),
+  ).toHaveLength(0);
 });
