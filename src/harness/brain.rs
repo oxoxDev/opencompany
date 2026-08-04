@@ -567,10 +567,11 @@ impl HarnessBrain {
         // terminality backstop finds this row already settled and no-ops — the
         // rich settle always wins the race, because `run_task` returns before
         // `run_locked` reaches the backstop.
-        // Issue #242 / #333: tag every approval this attempt's turns parked with
-        // the run that produced it, and count them — a run that finished its
-        // work but left a person something to act on has not succeeded, it is in
-        // review.
+        //
+        // First (#333's unblocking move): tag every approval this attempt's own
+        // turns parked with the run that produced it, and count them. A run that
+        // finished its work but left a person something to act on has not
+        // succeeded — it is in review.
         let parked = match sink.as_ref() {
             Some(sink) => self
                 .deps
