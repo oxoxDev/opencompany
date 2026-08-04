@@ -18,7 +18,7 @@ pub struct TaskGql {
     pub title: String,
     /// An optional longer note.
     pub note: Option<String>,
-    /// The board column: `backlog` | `todo` | `in_progress` | `paused` |
+    /// The board column: `todo` | `planning` | `in_progress` | `paused` |
     /// `in_review` | `done`.
     pub column: String,
     /// The priority: `low` | `medium` | `high`.

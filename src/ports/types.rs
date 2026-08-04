@@ -489,7 +489,7 @@ pub enum CompanyEvent {
         /// card's note — never raw tool output, arguments, or call ids.
         output: String,
         /// The board column the card landed in: `in_review` on a normal
-        /// finish, `backlog` on a failure or cancellation, `paused` on a
+        /// finish, `todo` on a failure or cancellation, `paused` on a
         /// pause. Lets a reader tell a successful run from a stopped one
         /// without re-deriving it from `output`.
         column: String,

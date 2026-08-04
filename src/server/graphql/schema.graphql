@@ -675,7 +675,7 @@ type Task {
 	"""
 	note: String
 	"""
-	The board column: `backlog` | `todo` | `in_progress` | `paused` |
+	The board column: `todo` | `planning` | `in_progress` | `paused` |
 	`in_review` | `done`.
 	"""
 	column: String!

@@ -46,7 +46,7 @@ pub const MAX_REDIRECT_CHARS: usize = 2000;
 pub enum SteerAction {
     /// Stop the run and park the card in `paused`, preserving its partial work.
     Pause,
-    /// Stop the run and drop its partial work, returning the card to `backlog`.
+    /// Stop the run and drop its partial work, returning the card to `todo`.
     Cancel,
     /// Stop the current attempt and re-run it with an appended operator
     /// instruction. Bounded per dispatch (see the harness disposition).

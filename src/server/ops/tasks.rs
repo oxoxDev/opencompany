@@ -216,7 +216,7 @@ fn validate_parent(
 /// `"in-progress"` was persisted verbatim, so the card disappeared from every
 /// rendered column *and* — since only the exact literal `in_progress`
 /// edge-fires a dispatch — silently never ran. Refusing at the write boundary
-/// is the cheap place to keep the board's five columns the only five.
+/// is the cheap place to keep the board's six columns the only six.
 fn validate_column(column: &str) -> Result<(), ApiError> {
     if is_board_column(column) {
         return Ok(());
@@ -278,10 +278,11 @@ async fn create_task(
     // bad assignee is a `400` the operator sees rather than a card that lands
     // somewhere the board cannot render or hands work to a name nobody answers to.
     // Issue #206: a card created here is manual entry — the board's `+` button,
-    // which now lives on To-do alone — so that is the default. It is
-    // deliberately NOT `backlog`: backlog is the unqueued pool and where the
-    // lifecycle returns work that needs another pass, so defaulting new work
-    // there mixed "nobody has picked this up" with "someone just asked for it".
+    // which lives on To-do alone — so that is the default. Issue #301 made it
+    // the *only* not-started column: the separate `backlog` pool was collapsed
+    // into To-do, and every lifecycle return now lands here too, carrying its
+    // reason on the note. So this default is no longer a choice between two
+    // columns; it is simply where not-started work lives.
     let column = body.column.unwrap_or_else(|| COLUMN_TODO.to_string());
     validate_column(&column)?;
     let assignee = resolve_assignee(&company, body.assignee.unwrap_or_default()).await?;

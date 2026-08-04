@@ -7,7 +7,7 @@
 //! leaves no visible work item. This module adds the deterministic half: when an
 //! operator message is an actionable request ("build the landing page",
 //! "can you set up the newsletter"), [`detect_task_intent`] returns a cleaned
-//! task title and the handler opens a `backlog` card. The model's `spawn_task`
+//! task title and the handler opens a `todo` card. The model's `spawn_task`
 //! stays available for sub-tasks it wants to open on top.
 //!
 //! Conservative and cheap by design (no model call): it fires on imperative
