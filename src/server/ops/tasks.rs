@@ -25,6 +25,7 @@ use crate::ports::types::CompanyEvent;
 use crate::ports::{generate_id, now_millis};
 use crate::runtime::assignee;
 use crate::server::error::ApiError;
+use crate::server::ops::runs::{RunSummary, runs_for_task};
 use crate::server::ops::{ScopedCompany, scoped};
 
 /// Builds the task route fragment.
@@ -470,6 +471,15 @@ struct TaskDetail {
     timeline: Vec<TimelineEntry>,
     /// Parent and children.
     lineage: Lineage,
+    /// The card's recorded attempts, newest first (issue #242).
+    ///
+    /// Additive: a card dispatched before run records existed legitimately
+    /// carries an empty list, because synthesising attempts from old
+    /// `AgentReply` events would fabricate identity. Bounded by
+    /// [`TASK_DETAIL_RUN_LIMIT`](crate::server::ops::runs::TASK_DETAIL_RUN_LIMIT)
+    /// — a card can be re-dispatched without limit, and this read stays one
+    /// cheap call.
+    runs: Vec<RunSummary>,
     /// Epoch-millis the company started waiting on an operator *right now*
     /// (issue #305), or `None` when nothing is currently parked for this run.
     ///
@@ -546,10 +556,14 @@ async fn task_detail(
             .min()
     });
 
+    // An indexed store read, not another journal pass (issue #242).
+    let runs = runs_for_task(&company, &task_id).await?;
+
     Ok(Json(TaskDetail {
         task: card.into(),
         timeline,
         lineage: Lineage { parent, children },
+        runs,
         waiting_since,
     }))
 }
