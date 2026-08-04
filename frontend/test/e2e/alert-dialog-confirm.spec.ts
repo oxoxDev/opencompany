@@ -94,8 +94,8 @@ test("confirming a task delete dismisses the dialog before the request lands", a
 
   // Create a card of our own so the test never deletes somebody else's row.
   const title = `e2e confirm-closes ${Date.now()}`;
-  await page.getByRole("button", { name: "Add task to To-do" }).click();
-  await page.locator("#new-title").fill(title);
+  await page.getByRole("button", { name: "Add task" }).click();
+  await page.locator("#new-prompt").fill(title);
   await page.getByRole("button", { name: "Create", exact: true }).click();
 
   const card = page.locator('[role="button"]').filter({ hasText: title });

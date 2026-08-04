@@ -3,6 +3,12 @@ import { expect, test, type Page, type Request } from "@playwright/test";
 /**
  * Issue #263 — the task assignee is picked from the company roster, not typed.
  *
+ * Issue #301 moved *where*: the create box asks for a prompt and nothing else,
+ * so a new card is always unassigned (the host hands it to the orchestrator)
+ * and the picker lives on the card's own edit surface. These tests therefore
+ * exercise the picker through Edit / Reassign rather than through create — the
+ * invariant under test is unchanged, only the screen it is reached from.
+ *
  * These run against a live host serving the built console, with the
  * `e2e_harness` company: desks `engineering` / `content` and manifest agents
  * `ceo` / `engineer` / `writer`.
@@ -41,11 +47,22 @@ async function dismissTour(page: Page) {
   await expect(skip).toHaveCount(0);
 }
 
-async function openCreateDialog(page: Page) {
+/** Creates a card through the board's one prompt box (issue #301). */
+async function createViaPromptBox(page: Page, prompt: string) {
   await page.goto("/#/tasks");
   await dismissTour(page);
-  await page.getByRole("button", { name: "Add task to To-do" }).click();
+  await page.getByRole("button", { name: "Add task" }).click();
   await expect(page.getByRole("heading", { name: "New task" })).toBeVisible();
+  await page.locator("#new-prompt").fill(prompt);
+  await page.getByRole("button", { name: "Create" }).click();
+}
+
+/** Opens a seeded card's edit dialog — where the assignee is now picked. */
+async function openEditDialog(page: Page, id: string) {
+  await page.goto(`/#/tasks/${id}`);
+  await dismissTour(page);
+  await page.getByRole("button", { name: "Edit" }).click();
+  await expect(page.getByRole("heading", { name: "Edit task" })).toBeVisible();
 }
 
 /** Opens the assignee select and picks the option with this exact-ish name. */
@@ -59,15 +76,29 @@ function card(page: Page, title: string) {
   return page.locator("div[draggable=true]").filter({ hasText: title }).first();
 }
 
-test("the create dialog offers Unassigned, desks and teammates instead of a text field", async ({
+test("the edit dialog offers Unassigned, desks and teammates instead of a text field", async ({
   page,
+  request,
 }) => {
-  await openCreateDialog(page);
+  // The empty-desk row this asserts on needs a desk with nobody on it, and the
+  // `e2e_harness` manifest ships only staffed desks — so seed it rather than
+  // depend on one a previous run happened to leave behind. (This assertion
+  // silently required that leftover state before #301 repaired the spec: on a
+  // fresh host there was no `Legal` desk and it could not pass.) Idempotent, so
+  // a re-run against the same host is fine.
+  await request.post(`${API}/desks`, {
+    data: { id: "legal", name: "Legal", description: "Contracts and review." },
+  });
+
+  const created = await request.post(`${API}/tasks`, {
+    data: { title: `e2e picker ${Date.now()}` },
+  });
+  await openEditDialog(page, (await created.json()).id as string);
 
   // It is a select, not a free-text input: typing a name is no longer possible.
-  await expect(page.locator("input#new-assignee")).toHaveCount(0);
+  await expect(page.locator("input#task-assignee")).toHaveCount(0);
 
-  await page.locator("#new-assignee").click();
+  await page.locator("#task-assignee").click();
 
   // Blank is a labelled choice that says what it does, not an empty field.
   await expect(page.getByRole("option", { name: /Unassigned/ })).toBeVisible();
@@ -94,13 +125,18 @@ test("the create dialog offers Unassigned, desks and teammates instead of a text
   await expect(page.getByRole("option", { name: /Engineering desk — 1 teammate/ })).toBeVisible();
 });
 
-test("a card assigned to a desk keeps the desk, not the desk's lead", async ({ page }) => {
+test("a card assigned to a desk keeps the desk, not the desk's lead", async ({
+  page,
+  request,
+}) => {
   const title = `e2e desk card ${Date.now()}`;
-  await openCreateDialog(page);
-  await page.locator("#new-title").fill(title);
-  await pickAssignee(page, "new-assignee", /Engineering desk/);
-  await page.getByRole("button", { name: "Create" }).click();
+  const seeded = await request.post(`${API}/tasks`, { data: { title } });
+  await openEditDialog(page, (await seeded.json()).id as string);
+  await pickAssignee(page, "task-assignee", /Engineering desk/);
+  await page.getByRole("button", { name: "Save" }).click();
 
+  await page.goto("/#/tasks");
+  await dismissTour(page);
   const created = card(page, title);
   await expect(created).toBeVisible({ timeout: 15_000 });
   // The whole point: `engineering` (the desk), never `engineer` (its lead).
@@ -108,20 +144,24 @@ test("a card assigned to a desk keeps the desk, not the desk's lead", async ({ p
   await expect(created).not.toContainText(/\bengineer\b(?!ing)/);
 });
 
-test("a card can be created for a teammate and for nobody at all", async ({ page }) => {
+test("a card can be assigned to a teammate, and created for nobody at all", async ({
+  page,
+  request,
+}) => {
   const forWriter = `e2e writer card ${Date.now()}`;
-  await openCreateDialog(page);
-  await page.locator("#new-title").fill(forWriter);
-  await pickAssignee(page, "new-assignee", /^writer —/);
-  await page.getByRole("button", { name: "Create" }).click();
+  const seeded = await request.post(`${API}/tasks`, { data: { title: forWriter } });
+  await openEditDialog(page, (await seeded.json()).id as string);
+  await pickAssignee(page, "task-assignee", /^writer —/);
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.goto("/#/tasks");
+  await dismissTour(page);
   await expect(card(page, forWriter)).toContainText("writer", { timeout: 15_000 });
 
+  // Issue #301: the prompt box collects no assignee, so a card created on the
+  // board is unassigned by construction — the host hands it to the
+  // orchestrator. This is the default the create surface now relies on.
   const forNobody = `e2e unassigned card ${Date.now()}`;
-  await openCreateDialog(page);
-  await page.locator("#new-title").fill(forNobody);
-  // Unassigned is the default, but choose it explicitly so the round-trip is real.
-  await pickAssignee(page, "new-assignee", /Unassigned/);
-  await page.getByRole("button", { name: "Create" }).click();
+  await createViaPromptBox(page, forNobody);
 
   const nobody = card(page, forNobody);
   await expect(nobody).toBeVisible({ timeout: 15_000 });
@@ -146,10 +186,7 @@ test("renaming a card does not resubmit its assignee", async ({ page, request })
     }
   });
 
-  await page.goto(`/#/tasks/${id}`);
-  await dismissTour(page);
-  await page.getByRole("button", { name: "Edit" }).click();
-  await expect(page.getByRole("heading", { name: "Edit task" })).toBeVisible();
+  await openEditDialog(page, id);
   await page.locator("#task-title").fill(`${title} renamed`);
   await page.getByRole("button", { name: "Save" }).click();
 
