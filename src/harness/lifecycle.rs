@@ -1,7 +1,7 @@
 //! Orchestrator-owned lifecycle for a dispatched board task (issue #186).
 //!
 //! Before this module, `run_task` decided a dispatched card's fate inline: the
-//! landing column was a bare `"in_review"` / `"backlog"` / `"paused"` string
+//! landing column was a bare `"in_review"` / `"todo"` / `"paused"` string
 //! literal written at each of five break points in the steer loop, and the
 //! completion bubble was attributed to whichever agent happened to run the
 //! turn. Two problems with that:
@@ -52,13 +52,15 @@ use crate::ports::types::{OutboundMessage, ReplyTo};
 /// a card awaits the orchestrator, `COLUMN_IN_PROGRESS` where a card is being
 /// worked — where a dispatched card already is, and where one whose turn
 /// **handed the work off** stays while the delegate runs (issue #204) —
-/// `COLUMN_BACKLOG` where a stopped or failed run returns it, `COLUMN_PAUSED`
-/// where a paused run parks it (resume is a plain `column → in_progress` PATCH,
-/// which re-triggers dispatch), and `COLUMN_DONE` the terminal — reached by
-/// [`landing_column`] for a delegated card and by [`review_landing_column`] for
-/// an approved board card (issue #171 / PR #179).
+/// `COLUMN_TODO` where a stopped or failed run returns it (issue #301 — it used
+/// to return to a separate `backlog` pool, which epic #183 §3 collapsed into
+/// To-do), `COLUMN_PAUSED` where a paused run parks it (resume is a plain
+/// `column → in_progress` PATCH, which re-triggers dispatch), `COLUMN_PLANNING`
+/// which nothing here writes yet (§4's auto-advance owns it), and `COLUMN_DONE`
+/// the terminal — reached by [`landing_column`] for a delegated card and by
+/// [`review_landing_column`] for an approved board card (issue #171 / PR #179).
 pub use crate::ports::tasks::{
-    COLUMN_BACKLOG, COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED,
+    COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_PLANNING, COLUMN_TODO,
 };
 
 /// The note attribution used for an operator-initiated stop, as opposed to a
@@ -105,8 +107,10 @@ pub enum ReviewDecision {
     /// The work is accepted, which finishes the card: this is #171's
     /// done-transition for a board-created card.
     Approve,
-    /// The work needs another pass. The card returns to `backlog` so it can be
-    /// re-dispatched.
+    /// The work needs another pass. The card returns to `todo` so it can be
+    /// re-dispatched, carrying the reviewer's reason in its note (issue #301 /
+    /// epic #183 §3: a card that cannot proceed goes back to To-do with the
+    /// reason on it, never into a stuck state of its own).
     Revise,
 }
 
@@ -135,7 +139,7 @@ impl ReviewDecision {
 pub fn review_landing_column(decision: ReviewDecision) -> &'static str {
     match decision {
         ReviewDecision::Approve => COLUMN_DONE,
-        ReviewDecision::Revise => COLUMN_BACKLOG,
+        ReviewDecision::Revise => COLUMN_TODO,
     }
 }
 
@@ -175,14 +179,15 @@ pub fn success_terminal_column(card: &TaskRecord) -> &'static str {
 /// The board column a run ending this way lands its card in.
 ///
 /// The single authority for that mapping. A failed or cancelled run goes back
-/// to `backlog` (it is not reviewable work); a paused one parks; a hand-off
+/// to `todo` (it is not reviewable work) with its reason on the note — issue
+/// #301 rerouted this from the removed `backlog` pool; a paused one parks; a hand-off
 /// stays in `in_progress` because the work has only changed hands; everything
 /// that produced a result goes to its [`success_terminal_column`] — `done` for
 /// a delegated card, `in_review` for a board-created one.
 pub fn landing_column(end: TaskRunEnd, card: &TaskRecord) -> &'static str {
     match end {
         TaskRunEnd::Completed | TaskRunEnd::RedirectsExhausted => success_terminal_column(card),
-        TaskRunEnd::Failed | TaskRunEnd::Cancelled => COLUMN_BACKLOG,
+        TaskRunEnd::Failed | TaskRunEnd::Cancelled => COLUMN_TODO,
         TaskRunEnd::Paused => COLUMN_PAUSED,
         // A hand-off is explicitly NOT a terminal: the delegate is running, so
         // the card keeps the column it was dispatched in and only settles once
@@ -217,7 +222,10 @@ pub fn relay_text(card: &TaskRecord, responder: &str, orchestrator: &str) -> Str
         COLUMN_IN_REVIEW => "is ready for review",
         COLUMN_IN_PROGRESS => "is still in progress",
         COLUMN_PAUSED => "is paused",
-        COLUMN_BACKLOG => "went back to the backlog",
+        COLUMN_TODO => "is back in To-do",
+        // Nothing lands a card here yet (§4's auto-advance will), but naming it
+        // keeps a future relay off the raw-column-id fallback below.
+        COLUMN_PLANNING => "is being planned",
         COLUMN_DONE => "is done",
         other => other,
     };
@@ -300,11 +308,8 @@ mod test {
             landing_column(TaskRunEnd::RedirectsExhausted, &board),
             COLUMN_IN_REVIEW
         );
-        assert_eq!(landing_column(TaskRunEnd::Failed, &board), COLUMN_BACKLOG);
-        assert_eq!(
-            landing_column(TaskRunEnd::Cancelled, &board),
-            COLUMN_BACKLOG
-        );
+        assert_eq!(landing_column(TaskRunEnd::Failed, &board), COLUMN_TODO);
+        assert_eq!(landing_column(TaskRunEnd::Cancelled, &board), COLUMN_TODO);
         assert_eq!(landing_column(TaskRunEnd::Paused, &board), COLUMN_PAUSED);
         assert_eq!(
             landing_column(TaskRunEnd::Delegated, &board),
@@ -384,10 +389,7 @@ mod test {
     #[test]
     fn an_approving_review_finishes_the_card_and_revise_sends_it_back() {
         assert_eq!(review_landing_column(ReviewDecision::Approve), COLUMN_DONE);
-        assert_eq!(
-            review_landing_column(ReviewDecision::Revise),
-            COLUMN_BACKLOG
-        );
+        assert_eq!(review_landing_column(ReviewDecision::Revise), COLUMN_TODO);
     }
 
     /// The two done-writes are disjoint: review only ever sees a card that
@@ -496,10 +498,28 @@ mod test {
             "paused card must not read as finished"
         );
 
-        let returned = card(COLUMN_BACKLOG, Some("[operator] cancelled while in flight"));
+        let returned = card(COLUMN_TODO, Some("[operator] cancelled while in flight"));
         let text = relay_text(&returned, "maya", "ceo");
-        assert!(text.contains("went back to the backlog"), "{text}");
+        assert!(text.contains("is back in To-do"), "{text}");
+        // Issue #301: collapsing the backlog pool into To-do is only lossless
+        // because the reason rides along on the card. The relay must keep
+        // saying why, or "back in To-do" is indistinguishable from fresh work.
         assert!(text.contains("cancelled while in flight"), "{text}");
+
+        // Every board column has a sentence. Planning is inert today, so
+        // without an arm of its own a relay would fall through to the raw
+        // column id and read `"Ship the thing" planning.`.
+        for column in crate::ports::tasks::BOARD_COLUMNS {
+            let text = relay_text(&card(column, None), "maya", "ceo");
+            assert!(
+                !text.contains(&format!("\" {column}")),
+                "column {column} fell through to the raw-id fallback: {text}"
+            );
+        }
+        assert!(
+            relay_text(&card(COLUMN_PLANNING, None), "maya", "ceo").contains("is being planned"),
+            "planning needs its own sentence"
+        );
     }
 
     /// A card with no note (or a whitespace-only one) still relays a complete
