@@ -675,6 +675,50 @@ Old `RunRecord`s are never synthesised from historical `AgentReply` events:
 fabricating identity for attempts nobody recorded would be worse than a
 pre-existing card honestly showing zero of them.
 
+#### Reading runs back
+
+Three surfaces, all in `src/server/ops/runs.rs`, under both scope forms:
+
+| Route | Answers |
+|---|---|
+| `GET …/runs?task=&status=&limit=` | the company's attempts, newest first |
+| `GET …/runs/{run_id}` | one attempt plus its full persisted step trace |
+| `GET …/tasks/{task_id}` → `runs[]` | the card's attempts, additive on the task detail read |
+
+Each hands its predicates to `RunStore::list_runs` as a `RunFilter`. **No route
+here folds the journal** — that is the whole reason a run is state rather than
+an event, and the sibling `GET …/workflows/runs` (which does fold, and says so)
+is the cost being avoided. `?status=` takes a comma-separated list and refuses
+an unknown word with a `400`, because a typo'd filter answering `[]` is
+indistinguishable from "nothing matched".
+
+Three things the wire shape refuses to imply, each a state the write path really
+produces:
+
+- **`phase`** (`active` · `parked` · `terminal`), projected from
+  `RunStatus::phase`, is how a reader decides liveness. `finishedAtMillis` is
+  absent for a *parked* run exactly as for a running one — a parked run can
+  resume — so inferring liveness from the timestamp renders an attempt waiting
+  on a person as running forever.
+- **`stepCount` / `stepCountCapped`.** The count is the high-water ordinal
+  persisted, capped at `run_trace::MAX_RUN_STEPS`, and written on the settle —
+  so it reads `0` throughout a live run and stops meaning "steps the agent
+  took" once capped. `usage` settles alongside it and is provisional until then.
+- **A step's `status`** (`ok` · `error` · `running`) rides beside its `kind`. A
+  host killed mid-tool-call leaves that call recorded `running` — the point of
+  an incremental trace — meaning in-flight-when-the-trace-stopped, never failed.
+
+Steps project into the console's existing `TimelineEntry` contract (`seq` /
+`atMillis` / `kind` / `label` / `detail`, plus `status` and `elapsedMs`), so
+`kind` widens additively to include `tool_call` · `thinking` · `note` and the
+grouped-timeline renderer is reused rather than reinvented. `usage` is re-cased
+to camelCase by a local DTO — `TokenUsage` carries no `rename_all` because its
+field names are the decode contract for already-journaled events.
+
+Run detail is **refresh-on-read**: steps persist incrementally, so re-reading a
+live attempt shows the progress since. Streaming would widen the harness turn
+stream for something a re-read already answers.
+
 ## Assembly
 
 ```rust
