@@ -31,7 +31,7 @@ use crate::error::OpenCompanyError;
 use crate::feedback::tool::SEND_EMAIL_TOOL;
 use crate::policy::gate::ResolveOutcome;
 use crate::ports::brain::{CycleHost, UsageMetering};
-use crate::ports::tasks::TaskRecord;
+use crate::ports::tasks::{COLUMN_TODO, TaskRecord};
 use crate::ports::types::{
     Actor, ApprovalId, CompanyEvent, CompanyId, CompanyRecord, ContextOp, ContextOpResult,
     CycleRequest, Effect, EffectDisposition, EffectGroup, LedgerEntry, OutboundMessage,
@@ -831,7 +831,7 @@ impl<'a> CycleHostImpl<'a> {
             id: generate_id(),
             title: parsed.title.clone(),
             note: parsed.note,
-            column: "backlog".to_string(),
+            column: COLUMN_TODO.to_string(),
             priority: "medium".to_string(),
             assignee: parsed.assignee.unwrap_or_default(),
             updated_at_millis: now_millis(),
@@ -919,7 +919,7 @@ impl<'a> CycleHostImpl<'a> {
             id: generate_id(),
             title: first_line(&parsed.instruction, 80),
             note: Some(note),
-            column: "backlog".to_string(),
+            column: COLUMN_TODO.to_string(),
             priority: "medium".to_string(),
             assignee: desk_id.clone(),
             updated_at_millis: now_millis(),
@@ -2887,7 +2887,7 @@ mod test {
                     id: "t1".into(),
                     title: "Ship invoicing".into(),
                     note: Some("build the importer".into()),
-                    column: "backlog".into(),
+                    column: COLUMN_TODO.into(),
                     priority: "medium".into(),
                     assignee: "eng".into(),
                     updated_at_millis: 0,

@@ -903,7 +903,7 @@ async fn run_chat(
         None
     };
     // Deterministic task card: an actionable operator request ("build the
-    // landing page", "can you set up the newsletter") opens a `backlog` card so
+    // landing page", "can you set up the newsletter") opens a `todo` card so
     // "do X" always leaves a visible work item on the dashboard — independent of
     // whether the orchestrator model also calls `spawn_task` (it may open
     // sub-tasks on top). Pure questions, greetings, and acknowledgements don't
@@ -918,7 +918,7 @@ async fn run_chat(
             id: crate::ports::generate_id(),
             title,
             note,
-            column: "backlog".to_string(),
+            column: crate::ports::tasks::COLUMN_TODO.to_string(),
             priority: "medium".to_string(),
             assignee: String::new(),
             updated_at_millis: crate::ports::now_millis(),
@@ -1425,12 +1425,12 @@ mod test {
         assert_eq!(value["responses"][0]["channel"], "operator");
     }
 
-    /// An actionable operator chat opens exactly one `backlog` task card on the
+    /// An actionable operator chat opens exactly one `todo` task card on the
     /// dashboard (deterministic, independent of the brain's own `spawn_task`),
     /// and a greeting opens none. Runs on the default echo brain, so it proves
     /// the handler-level wiring, not model behaviour.
     #[tokio::test]
-    async fn actionable_chat_opens_a_backlog_task_card() {
+    async fn actionable_chat_opens_a_todo_task_card() {
         let home_dir = home();
         let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
@@ -1451,7 +1451,7 @@ mod test {
                 .unwrap()
         };
 
-        // Actionable → one backlog card, titled from the ask.
+        // Actionable → one To-do card, titled from the ask.
         let r = app
             .clone()
             .oneshot(chat("build the landing page"))
@@ -1460,7 +1460,7 @@ mod test {
         assert_eq!(r.status(), StatusCode::OK);
         let tasks = runtime.tasks().list(&id).await.unwrap();
         assert_eq!(tasks.len(), 1, "an actionable ask opens one card");
-        assert_eq!(tasks[0].column, "backlog");
+        assert_eq!(tasks[0].column, crate::ports::tasks::COLUMN_TODO);
         assert_eq!(tasks[0].priority, "medium");
         assert_eq!(tasks[0].title, "Build the landing page");
 

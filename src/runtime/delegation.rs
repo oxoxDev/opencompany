@@ -28,6 +28,7 @@ use crate::company::steer::{
 use crate::harness::TurnOutcome;
 use crate::harness::lifecycle::{self, TaskRunEnd};
 use crate::harness::orchestrator::{self, Delegation, DelegationQueue};
+use crate::ports::tasks::COLUMN_TODO;
 use crate::ports::types::{CompanyId, CompanyRecord, OutboundMessage, TurnStep};
 use crate::ports::{TaskRecord, TaskStore, generate_id, now_millis};
 use crate::runtime::assignee;
@@ -434,7 +435,7 @@ impl<'a> DelegationRunner<'a> {
             // The card belongs to the first hand-off that actually PRODUCES
             // something. A hand-off whose run was cancelled produced nothing, so
             // it does not get to keep the card: it would settle `Cancelled` ->
-            // `backlog` while a later hand-off that really ran had its answer
+            // `todo` while a later hand-off that really ran had its answer
             // merely appended to the note — filing work that happened under a
             // card marked cancelled. So an empty hand-off is *provisional* and a
             // later one that answers takes the card over from it (issue #213
@@ -524,7 +525,7 @@ impl<'a> DelegationRunner<'a> {
 
     /// Executes one drained delegation.
     ///
-    /// `spawn_task` opens a backlog card through the
+    /// `spawn_task` opens a To-do card through the
     /// [`TaskStore::upsert`](crate::ports::TaskStore) path the console uses and
     /// **reports the card's id** so the caller can say one was opened (issue
     /// #246) — it surfaces no bubble of its own, which is a different thing
@@ -553,7 +554,7 @@ impl<'a> DelegationRunner<'a> {
                     id: generate_id(),
                     title,
                     note,
-                    column: "backlog".to_string(),
+                    column: COLUMN_TODO.to_string(),
                     priority: "medium".to_string(),
                     assignee: assignee.unwrap_or_default(),
                     updated_at_millis: now_millis(),
