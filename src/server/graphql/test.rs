@@ -282,6 +282,135 @@ async fn team_reports_the_effective_cap_and_its_attribution() {
     );
 }
 
+/// Issue #343: the three budget states stay distinct **on the wire**, where the
+/// console reads them.
+///
+/// `effective_budget` keeping them apart in Rust is necessary but not
+/// sufficient — GraphQL flattens `Option<f64>` to a JSON value, and that is
+/// where the states can collapse without any Rust type changing:
+///
+/// - a stored `Some(0.0)` must serialize as numeric **`0`**, not `null`. If it
+///   arrives as `null` the console renders "no cap" for a teammate an admin
+///   deliberately muted, and the operator has no way to see the mute they set.
+/// - an explicit `None` must serialize as **`null` with the attribution still
+///   present**. The attribution is the only thing distinguishing "an admin
+///   uncapped this teammate" from "nobody ever set anything" — the two states
+///   whose difference the whole `Option<Option<f64>>` wire shape exists to carry.
+/// - a manifest cap with **no** override must serialize as the manifest number
+///   with **no** attribution, so the console never invents a "set by" line for a
+///   value that came out of `company.toml`.
+///
+/// All three are asserted against `Value::Null` / a numeric literal rather than
+/// with `is_some()`, because `assert!(v.is_null())` and an absent key are the
+/// same thing in `serde_json` — and "absent" is a fourth state the console would
+/// read as uncapped.
+#[tokio::test]
+async fn team_keeps_zero_explicit_null_and_manifest_only_caps_distinct() {
+    use crate::ports::types::{Actor, ActorKind, BudgetOverride, OverlayAgent};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_rich_company(&home).await;
+
+    let id = CompanyId::new("acme");
+    let store = FsCompanyStore::new(home.clone());
+    let mut record = store.load(&id).await.unwrap().unwrap();
+
+    // `maya` (manifest) gets a manifest cap and NO override — the fallback arm.
+    record.manifest.agents[0].budget_usd_daily = Some(4.25);
+
+    // Two overlay teammates carry the two override states.
+    record.overlay_agents.push(OverlayAgent {
+        id: "zeroed".to_string(),
+        name: "Zeroed".to_string(),
+        role: "Growth".to_string(),
+        description: None,
+    });
+    record.overlay_agents.push(OverlayAgent {
+        id: "uncapped".to_string(),
+        name: "Uncapped".to_string(),
+        role: "Ops".to_string(),
+        description: None,
+    });
+    let admin = Actor {
+        kind: ActorKind::User,
+        id: "user-admin".to_string(),
+    };
+    record.overlay_budgets = vec![
+        BudgetOverride {
+            agent_id: "zeroed".to_string(),
+            budget_usd_daily: Some(0.0),
+            set_by: admin.clone(),
+            at_millis: 1_700_000_000_000,
+        },
+        BudgetOverride {
+            agent_id: "uncapped".to_string(),
+            budget_usd_daily: None,
+            set_by: admin,
+            at_millis: 1_700_000_000_001,
+        },
+    ];
+    store.save(&record).await.unwrap();
+
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id:\"acme\"){ team { id budgetUsdDaily budgetSetBy budgetSetAtMillis } } }"}"#,
+    )
+    .await;
+    let team = value["data"]["company"]["team"].as_array().unwrap();
+
+    // 1. `Some(0.0)` — numeric zero, attributed. Not null, not absent.
+    // `as_f64` is `None` for both null and an absent key, so this one assertion
+    // rules out all three ways a zero cap could stop being a number.
+    let zeroed = team.iter().find(|m| m["id"] == "zeroed").unwrap();
+    assert_eq!(
+        zeroed["budgetUsdDaily"].as_f64(),
+        Some(0.0),
+        "a zero cap must arrive as numeric 0 — null or absent would render a \
+         muted teammate as uncapped: {zeroed}"
+    );
+    assert_eq!(zeroed["budgetSetBy"], "user-admin", "{zeroed}");
+    assert_eq!(
+        zeroed["budgetSetAtMillis"], 1_700_000_000_000f64,
+        "{zeroed}"
+    );
+
+    // 2. Explicit `None` — null cap, attribution still present.
+    let uncapped = team.iter().find(|m| m["id"] == "uncapped").unwrap();
+    assert_eq!(
+        uncapped["budgetUsdDaily"],
+        serde_json::Value::Null,
+        "an explicitly-uncapped override must arrive as a null cap: {uncapped}"
+    );
+    assert_eq!(
+        uncapped["budgetSetBy"], "user-admin",
+        "attribution is what tells an admin-set uncap apart from no override at \
+         all — it must survive the cap being null: {uncapped}"
+    );
+    assert_eq!(
+        uncapped["budgetSetAtMillis"], 1_700_000_000_001f64,
+        "{uncapped}"
+    );
+
+    // 3. Manifest cap, no override — the manifest number, no attribution.
+    let maya = team.iter().find(|m| m["id"] == "maya").unwrap();
+    assert_eq!(
+        maya["budgetUsdDaily"].as_f64(),
+        Some(4.25),
+        "with no override stored the manifest value must come through: {maya}"
+    );
+    assert_eq!(
+        maya["budgetSetBy"],
+        serde_json::Value::Null,
+        "a manifest cap has no operator to attribute it to: {maya}"
+    );
+    assert_eq!(
+        maya["budgetSetAtMillis"],
+        serde_json::Value::Null,
+        "a manifest cap has no set-at timestamp: {maya}"
+    );
+}
+
 #[tokio::test]
 async fn chats_list_the_manifest_desks() {
     let home_dir = home();
