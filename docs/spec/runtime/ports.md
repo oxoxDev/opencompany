@@ -362,17 +362,14 @@ pub trait TaskStore: Send + Sync {
 `TaskRecord` carries `{id, title, note, column, priority, assignee,
 updated_at}`.
 
-`column` ∈ `backlog|todo|in_progress|paused|in_review|done` — the `BOARD_COLUMNS`
-constant in `src/ports/tasks.rs`, which is the one authority the REST write
-boundary, the dispatch edge and the harness lifecycle seam all read, and which
-the console mirrors in the same order. (`paused` arrived with steering, issue
-#111; this line used to omit it.) Entering `in_progress` is what dispatches the
-card; nothing dispatches out of `done`.
+`column` ∈ `todo|planning|in_progress|paused|in_review|done` — the
+`BOARD_COLUMNS` constant in `src/ports/tasks.rs`, which is the one authority the
+REST write boundary, the dispatch edge and the harness lifecycle seam all read,
+and which the console mirrors in the same order. (`paused` arrived with
+steering, issue #111; this line used to omit it.) Entering `in_progress` is what
+dispatches the card; nothing dispatches out of `done`.
 
-`backlog` and `todo` are both "not started", and the split is deliberate:
-`backlog` is the unqueued pool — and where the lifecycle returns work that needs
-another pass (a failed dispatch, an orchestrator `revise` verdict) — while
-`todo` is what has been queued up next. `todo` is the board's one manual-entry
+`todo` is the one **not started** column, and the board's one manual-entry
 column: the console's `+` button lives there alone and `POST …/tasks` defaults
 to it (issue #206), so an operator cannot create a card straight into
 `in_progress` or a terminal column. The transcript's "Add to board" action
@@ -380,12 +377,42 @@ to it (issue #206), so an operator cannot create a card straight into
 decides where a chat-created card lands, which is what keeps the human drag into
 `in_progress` the only thing that spends an agent turn.
 
+**The collapsed `backlog` pool (issue #301, epic #183 §3).** `todo` used to be
+one of two not-started columns: `backlog` was the unqueued pool *and* where the
+lifecycle returned work needing another pass (a failed dispatch, a cancellation,
+an orchestrator `revise` verdict). #206 split them deliberately, to record *why*
+a card had not started — never picked up vs bounced back. #301 reverses that:
+the distinction is **provenance, not position**, and every return path already
+stamps its reason onto the card's note (`review_note`'s "reviewed: needs another
+pass — …", the dispatch error text, `[operator] cancelled while in flight`),
+which the board renders on the card. So a task that cannot proceed goes **back
+to To-do with the reason on the card**, never into a stuck state of its own.
+
+Nothing about that is silent for stored data: `backlog` is no longer a board
+column, so a card persisted under it would fail `is_board_column` and vanish
+from the board — the exact silent disappearance #205 exists to prevent.
+`TaskRecord::column` therefore deserializes through a normalizer that rewrites
+the legacy `backlog` literal to `todo`. Every backend funnels through it (sqlite
+and mongodb store the record as a `task_json` string, the fs bundle as a JSON
+array), so one seam heals every stored board lazily on read and the next upsert
+persists the new literal. Reads heal; **writes do not** — the REST DTOs
+deserialize `column` as a plain string and validate it separately, so a client
+still sending `backlog` gets a `400` naming the valid set.
+
+`planning` sits between intake and dispatch: the card is being turned into a
+plan. It is **accepted but inert** — nothing writes it automatically yet. Epic
+#183 §4's auto-advance owns it and is blocked on #242/#243; the vocabulary lands
+first so §4's code can write the column through a boundary that already accepts
+it, rather than having #242-dependent code write a column the host rejects. An
+operator may drag a card into it manually and nothing happens, which is correct:
+`planning` is not the dispatch edge.
+
 `assignee` names a **roster teammate id, a desk, or nobody** (`""`), resolved by
 `crate::runtime::assignee` against the full roster — manifest agents, operator
 overlay teammates, and desks (by id or case-insensitive name). The write plane
 rejects anything else with a `400` and stores the canonical key rather than what
 was typed; dispatch refuses a card whose assignee no longer resolves, returning
-it to `backlog` with the reason on the note, and writes the agent that actually
+it to `todo` with the reason on the note, and writes the agent that actually
 worked the card back onto `assignee` so the board names the doer (issue #205).
 That write-back covers an unassigned card and a card assigned to a teammate; a
 card assigned to a **desk** keeps the desk id. A desk assignment records who the

@@ -129,7 +129,9 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
   same four invented emails for every teammate).
 
 ### Tasks (Kanban) — `src/views/TasksView.tsx`, `src/lib/tasks-sample.ts`
-- Columns Backlog/In progress/In review/Done; drag to move; priority + assignee.
+- Columns To-do/Planning/In progress/Paused/In review/Done; drag to move. New work
+  enters through one prompt box on To-do (issue #301); priority + assignee are
+  edited on the card afterwards.
 - **Source:** ✅ real — `Company.tasks` (GraphQL, `TaskStore`-backed) reads the
   board; `POST …/tasks`, `PATCH`/`DELETE …/tasks/{id}` (REST) write it.
 
