@@ -1348,6 +1348,100 @@ mod test {
         }
     }
 
+    /// A brain that settles the dispatched run itself, the way `run_task` does
+    /// on the harness path — so the backstop can be shown to leave a rich settle
+    /// alone rather than racing it.
+    struct SettlingBrain {
+        runs: Arc<dyn crate::ports::RunStore>,
+        status: RunStatus,
+    }
+
+    #[async_trait]
+    impl Brain for SettlingBrain {
+        async fn run_cycle(&self, req: CycleRequest, _host: &dyn CycleHost) -> Result<CycleResult> {
+            for event in &req.events {
+                if let CompanyEvent::TaskDispatched {
+                    run_id: Some(run_id),
+                    ..
+                } = event
+                {
+                    let mut outcome = RunOutcome::new(self.status);
+                    if self.status == RunStatus::Failed {
+                        outcome = outcome.with_error("the brain said so");
+                    }
+                    self.runs
+                        .finish_run(&req.company_id, run_id, outcome)
+                        .await?;
+                }
+            }
+            Ok(CycleResult {
+                channel_responses: vec![OutboundMessage {
+                    task_id: None,
+                    channel: "operator".into(),
+                    text: "settled".into(),
+                    steps: Vec::new(),
+                    reply_to: None,
+                }],
+                new_traces: vec![CompressedTrace::now(&req.cycle_id, "settling cycle")],
+                ledger_deltas: Vec::new(),
+                token_usage: TokenUsage::default(),
+            })
+        }
+    }
+
+    /// The rich settle always wins: `run_task` finishes the row *inside*
+    /// `brain.run_cycle`, which is awaited before the backstop, so there is no
+    /// race for the backstop to lose. Pinned rather than argued, because a
+    /// backstop that overwrote a real outcome with a generic failure would be
+    /// worse than no backstop at all.
+    ///
+    /// Both cases matter. A **terminal** settle must survive; so must a
+    /// **parked** one — `Paused` and `WaitingApproval` are waiting on something
+    /// outside the cycle, and reclaiming them would delete real pending work
+    /// every time a cycle ended.
+    #[tokio::test]
+    async fn the_backstop_never_overwrites_a_settle_the_brain_already_made() {
+        for (status, error) in [
+            (RunStatus::Succeeded, None),
+            (RunStatus::Paused, None),
+            (RunStatus::WaitingApproval, None),
+            (RunStatus::Failed, Some("the brain said so")),
+        ] {
+            let home_dir = tmp_home();
+            let runs: Arc<dyn crate::ports::RunStore> =
+                Arc::new(crate::store::FsOps::new(home_dir.path().to_path_buf()));
+            let rt = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+                .with_runs(Arc::clone(&runs))
+                .with_brain(Arc::new(SettlingBrain {
+                    runs: Arc::clone(&runs),
+                    status,
+                }))
+                .build()
+                .await
+                .unwrap();
+            let run_id = pending_run(&rt, "t-1").await;
+
+            rt.run_cycle(vec![CompanyEvent::TaskDispatched {
+                task_id: "t-1".into(),
+                run_id: Some(run_id.clone()),
+            }])
+            .await
+            .expect("cycle");
+
+            let settled = rt
+                .runs()
+                .get_run(rt.id(), &run_id)
+                .await
+                .expect("read")
+                .expect("row");
+            assert_eq!(
+                settled.status, status,
+                "the backstop must not overwrite a {status} settle"
+            );
+            assert_eq!(settled.error.as_deref(), error);
+        }
+    }
+
     /// Mints a `Pending` run for `task`, so a test can drive a dispatch cycle
     /// the way `CompanyRuntime::dispatch_task` does.
     async fn pending_run(rt: &crate::company::runtime::CompanyRuntime, task: &str) -> String {
