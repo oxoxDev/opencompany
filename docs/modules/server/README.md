@@ -288,9 +288,22 @@ which route?* — as a `credentialSource` tier, stored-wins:
 
 | Tier | When | Console |
 | --- | --- | --- |
-| `static` | a token is already stored for this provider (BYO override), **or** this host registered its own provider app (the hatch) | Connect button, as today |
+| `static` | a token is already stored for this provider (BYO override), **or** this host registered its own provider app *and* has a state signing secret (the hatch) | Connect button, as today |
 | `attested` | no stored token, and the pod carries a platform-**projected** identity (`TINYHUMANS_TOKEN_FILE` naming a file that exists) | "Managed by the platform", no local Connect |
 | `none` | neither | read-only "not available on this host" |
+
+**The hatch also needs `OPENCOMPANY_OAUTH_STATE_SECRET`** (issue #318). The
+`state` nonce binds an in-flight authorization to one company, provider and
+expiry, and the callback verifies it before exchanging the code — it is the
+flow's CSRF defence. That signing key used to fall back to a literal baked into
+this repository, which made the value public, identical across every
+unconfigured deployment, and constructible rather than obtainable: verifying it
+proved only that it was well-formed. There is now **no default**. A host with a
+registered provider application but no secret reports `none` rather than
+offering a button whose check is void, `start` refuses with a message naming the
+variable, and the process logs the misconfiguration once — a tile has no room to
+name a variable, and an operator reads logs. Whitespace-only counts as unset, so
+an empty shell expansion gets the closed door rather than a secret of `" "`.
 
 `attested` deliberately requires the projected-file tier, not
 `TinyhumansTokenSource::from_env` as a whole: that resolver also accepts a
