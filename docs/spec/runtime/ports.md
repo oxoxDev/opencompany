@@ -94,7 +94,13 @@ construction, ≥1 response per cycle) are inherited, not re-verified.
 Durable company records: charter, roster, ledger, approval queue.
 
 The record also carries the **operator overlays** — teammates, desk members,
-desk order, operator-created desks, and (issue #168) `overlay_workflows`: the
+desk order, operator-created desks, (issue #343) `overlay_budgets`: the
+per-teammate daily spend caps an admin sets from the console, which win over the
+manifest's `budget_usd_daily` and are read through
+`CompanyRecord::effective_budget` — the single reconciliation point the harness
+gate, the approval policy, and both roster reads share, so a cap raised in the
+console cannot be honoured by one surface and ignored by another. And (issue
+#168) `overlay_workflows`: the
 workflow graph bodies authored at runtime through the console's create dialog or
 the orchestrator's `create_workflow` tool. These are persisted here rather than
 written into `companies/<name>/workflows/<id>.toml` because the company source
@@ -119,8 +125,12 @@ Every other manifest field is **seed-authoritative**; for `[tools]` and
 `[policy]` that is a security property, not a convention — a record-wins merge
 would let a runtime grant or a relaxed approval mode outlive the operator
 revoking it in version control. Runtime additions that must persist get their own
-overlay field instead (`overlay_agents`, `overlay_desks`, the `SecretStore` for
-console MCP credentials).
+overlay field instead (`overlay_agents`, `overlay_desks`, `overlay_budgets`, the
+`SecretStore` for console MCP credentials). `overlay_budgets` is the clearest
+case for why: a manifest baked into a hosted tenant's image cannot be edited at
+all, so without a record-side override the shipped cap would be the only cap
+forever — while keeping it *seed-authoritative* for everything else is what stops
+a console write from silently outliving a revocation in version control.
 
 ```rust
 // src/ports/store.rs
