@@ -1275,6 +1275,10 @@ impl HarnessPool {
                 company,
                 deps.store.as_ref(),
                 deps.meter.as_deref(),
+                // Issue #242: attribute the sample to the attempt this turn ran
+                // under, so "what did this run cost?" is answerable from the
+                // meter as well as from the run row.
+                run_sink.as_ref().map(|s| s.run_id()),
             )
             .await?;
         }
@@ -2810,6 +2814,7 @@ description = "Sets direction."
                     cached_input_tokens: 0,
                     cost_usd: 0.0,
                     kind: crate::ports::SampleKind::Inference,
+                    run_id: None,
                 },
             )
             .await
@@ -2965,6 +2970,7 @@ description = "Sets direction."
                     cached_input_tokens: 0,
                     cost_usd: 0.0,
                     kind: crate::ports::SampleKind::Inference,
+                    run_id: None,
                 },
             )
             .await
@@ -3078,6 +3084,7 @@ description = "Builds the product."
             cached_input_tokens: 0,
             cost_usd: usd,
             kind: crate::ports::SampleKind::Inference,
+            run_id: None,
         }
     }
 

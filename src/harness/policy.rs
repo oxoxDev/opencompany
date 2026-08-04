@@ -1837,6 +1837,7 @@ mod tests {
             cached_input_tokens: 0,
             cost_usd: usd,
             kind: SampleKind::Inference,
+            run_id: None,
         }
     }
 
