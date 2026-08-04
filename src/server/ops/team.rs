@@ -365,7 +365,11 @@ async fn add_member(
         at_millis: now_millis(),
     });
     if let Some(entry) = attribution.clone() {
-        record.overlay_budgets.push(entry);
+        // Through the upsert even though `agent.id` is freshly generated and so
+        // cannot already hold a row: the "one override per teammate" invariant
+        // belongs to the record, not to each call site's reasoning about id
+        // uniqueness.
+        record.upsert_budget_override(entry);
     }
     company
         .runtime
@@ -465,8 +469,7 @@ async fn set_budget(
     };
     // One override per teammate: replace in place rather than accumulating, so
     // `effective_budget`'s first-match read can never see a stale row.
-    record.overlay_budgets.retain(|b| b.agent_id != agent_id);
-    record.overlay_budgets.push(entry);
+    record.upsert_budget_override(entry);
     company
         .runtime
         .store()
