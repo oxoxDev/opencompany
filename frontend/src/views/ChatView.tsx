@@ -46,6 +46,15 @@ interface Props {
    */
   transcripts: Transcripts;
   setTranscripts: Dispatch<SetStateAction<Transcripts>>;
+  /**
+   * Called around the awaited chat POST with the **host thread id** it was sent
+   * on, so the shell can suppress the SSE echo of our own turn while it is in
+   * flight. Without this bracket the shell's live injection and the awaited
+   * reply below both render and the bubble doubles — the exact duplicate-bubble
+   * race the Conversation surface already brackets against.
+   */
+  onSendStart?: (threadId: string) => void;
+  onSendEnd?: (threadId: string) => void;
 }
 
 /**
@@ -69,6 +78,8 @@ export function ChatView({
   onReply,
   transcripts,
   setTranscripts,
+  onSendStart,
+  onSendEnd,
 }: Props) {
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [loadingTeam, setLoadingTeam] = useState(true);
@@ -227,6 +238,14 @@ export function ChatView({
   // A local the closures below can capture as non-null: TypeScript hoists
   // function declarations, so the guard above does not narrow inside them.
   const active = channel;
+  // The host thread this channel is addressed on. A real desk channel's id
+  // doubles as its thread id (`deskFromDto`), so addressing by it routes to
+  // that desk's lead. A DM's id is console-local (`dmChannelId`), not a host
+  // thread — but `chat` also accepts a roster teammate id directly
+  // (`responder_for` in `src/harness/brain.rs`), which is exactly what a DM's
+  // `member.id` is, so a DM addresses that teammate the same way a desk
+  // addresses its lead. It is also the id every live turn frame carries.
+  const activeThreadId = active.kind === "channel" ? active.id : active.member?.id;
 
   const append = (channelId: string, ...added: ChatMessage[]) =>
     setTranscripts((t) => ({ ...t, [channelId]: [...(t[channelId] ?? []), ...added] }));
@@ -238,17 +257,15 @@ export function ChatView({
   async function send(text: string, parentId?: string) {
     if (sending) return;
     const target = active.id;
+    const chatId = activeThreadId;
     append(target, makeMessage("you", text, { parentId }));
     setSending(true);
+    // Claim the thread for the duration of the POST. The backend journals an
+    // `AgentReply` for our own turn too and pushes it over SSE mid-await, so
+    // without this the shell injects that echo *and* the awaited reply lands
+    // below — two bubbles for one turn.
+    if (chatId) onSendStart?.(chatId);
     try {
-      // A real desk channel's id doubles as its thread id (`deskFromDto`), so
-      // addressing by it routes to that desk's lead. A DM's id is
-      // console-local (`dmChannelId`), not a host thread — but `chat` also
-      // accepts a roster teammate id directly (`responder_for` in
-      // `src/harness/brain.rs`), which is exactly what a DM's `member.id`
-      // is, so a DM addresses that teammate the same way a desk addresses
-      // its lead.
-      const chatId = active.kind === "channel" ? active.id : active.member?.id;
       const reply = await client.chat(text, company, chatId);
       const replies = reply.responses.length
         ? reply.responses.map((r) =>
@@ -261,6 +278,7 @@ export function ChatView({
       const msg = err instanceof ApiError ? err.message : "something went wrong";
       append(target, makeMessage("system", `Couldn't send — ${msg}`, { parentId }));
     } finally {
+      if (chatId) onSendEnd?.(chatId);
       setSending(false);
     }
   }
