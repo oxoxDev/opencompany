@@ -16,8 +16,8 @@ use crate::Result;
 use crate::company::WorkflowFile;
 use crate::error::OpenCompanyError;
 use crate::harness::{HarnessDeps, HarnessPool};
-use crate::ports::types::{CompanyId, CompanyRecord};
-use crate::ports::{WorkflowRun, WorkflowRunner};
+use crate::ports::types::{CompanyEvent, CompanyId, CompanyRecord, WorkflowNodeStatus};
+use crate::ports::{WorkflowRun, WorkflowRunContext, WorkflowRunner};
 
 /// How deeply a workflow may re-enter itself before the run is refused
 /// (issue #151 part a).
@@ -28,6 +28,14 @@ use crate::ports::{WorkflowRun, WorkflowRunner};
 /// and the cost of being wrong is asymmetric: refusing a deep run returns a
 /// readable tool error, while allowing it aborts the host.
 pub(crate) const MAX_WORKFLOW_DEPTH: usize = 4;
+
+/// How long a settling run waits for its node-progress events to finish
+/// reaching the journal (issue #371).
+///
+/// The drain is normally instant — the channel is already closed and only
+/// in-flight appends remain — so this bound never fires in practice. It exists
+/// to keep a progress-reporting stall from ever becoming a *run* stall.
+const PROGRESS_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 tokio::task_local! {
     /// How many workflow runs are already on this call chain.
@@ -65,6 +73,7 @@ pub async fn run_workflow(
     record: &CompanyRecord,
     workflow: &WorkflowFile,
     input: Value,
+    ctx: &WorkflowRunContext,
 ) -> Result<WorkflowRun> {
     // Issue #151 part a: refuse an unbounded re-entry before it takes the host
     // down. `run_workflow` is an orchestrator tool, and a workflow `agent` node
@@ -94,9 +103,55 @@ pub async fn run_workflow(
     WORKFLOW_DEPTH
         .scope(
             depth + 1,
-            run_workflow_inner(pool, deps, record, workflow, input),
+            run_workflow_inner(pool, deps, record, workflow, input, ctx),
         )
         .await
+}
+
+/// One node's finish, as the engine's observer callback hands it over to the
+/// async collector (issue #371).
+///
+/// Deliberately three scalars and no `ExecutionStep`: the engine's step carries
+/// the node's `output` items, and this hop exists partly to make it *impossible*
+/// for that payload to reach the journal — the same stance the live turn frames
+/// take on tool args. What is not carried cannot leak.
+struct NodeProgress {
+    node_id: String,
+    status: WorkflowNodeStatus,
+    elapsed_ms: u64,
+}
+
+/// A [`RunObserver`](tinyflows::observability::RunObserver) that forwards each
+/// node finish onto an unbounded channel.
+///
+/// The channel is the whole reason this type exists. Observer callbacks are
+/// **synchronous** (the engine invokes them inline, across threads) while
+/// [`EventLog::append`] is async, so the callback cannot journal directly. It
+/// also must not block: a node handler stalled on a disk write would make
+/// observability change the run's timing, which is exactly what an observer is
+/// not allowed to do. Unbounded is safe at this volume — one message per
+/// non-trigger node, ~8 for a six-node graph — and it means a slow journal can
+/// never apply backpressure to the engine.
+struct ProgressObserver {
+    tx: tokio::sync::mpsc::UnboundedSender<NodeProgress>,
+}
+
+impl tinyflows::observability::RunObserver for ProgressObserver {
+    fn on_step_finish(&self, step: &tinyflows::observability::ExecutionStep) {
+        // A closed receiver means the collector already stopped (the run is
+        // settling, or `deps.events` was never wired). Dropping the frame is
+        // correct: progress reporting must never disturb the run.
+        let _ = self.tx.send(NodeProgress {
+            node_id: step.node_id.clone(),
+            status: match step.status {
+                tinyflows::observability::StepStatus::Success => WorkflowNodeStatus::Ok,
+                tinyflows::observability::StepStatus::Error => WorkflowNodeStatus::Error,
+            },
+            // `u128` millis is the engine's type; a node running longer than
+            // 584 million years is not the failure mode worth a `Result`.
+            elapsed_ms: u64::try_from(step.duration_ms).unwrap_or(u64::MAX),
+        });
+    }
 }
 
 /// The run itself, always executed inside a [`WORKFLOW_DEPTH`] scope so a
@@ -107,10 +162,17 @@ async fn run_workflow_inner(
     record: &CompanyRecord,
     workflow: &WorkflowFile,
     input: Value,
+    ctx: &WorkflowRunContext,
 ) -> Result<WorkflowRun> {
     let graph = super::translate::translate(workflow);
     let compiled = tinyflows::compiler::compile(&graph).map_err(map_engine_error)?;
-    let run_id = uuid::Uuid::new_v4().to_string();
+    // Issue #371: the caller's run id, not a freshly minted one. Correlating the
+    // run's progress events with the `WorkflowRunFinished` the caller journals
+    // requires both halves to share an id, and only the caller can supply one
+    // that survives the error arm (where this function returns nothing at all).
+    // A side win: the run's `_workflow/` workspace directory, which is named
+    // from this id, becomes correlatable with the journal for the first time.
+    let run_id = ctx.run_id.clone();
     // Issue #154: the operator's run request rides the trigger payload. Pull it
     // out before the input is handed to the engine so every agent node's turn
     // message carries the topic — a node's authored `prompt` is the same on
@@ -120,12 +182,118 @@ async fn run_workflow_inner(
     // the capability bundle. Delivery is host-side and post-engine, so it is not
     // a capability — the engine never learns a report has a destination.
     let delivery = deps.delivery.clone();
+    // Issue #371: likewise read the journal off `deps` before it moves. `None`
+    // (the default build, and every existing test) degrades the whole progress
+    // path to a no-op — no started event, a `NoopObserver`, no collector.
+    let events = deps.events.clone();
     let capabilities =
         super::caps::build_capabilities(pool, deps, record, &workflow.id, &run_id, run_request)
             .await;
-    let outcome = tinyflows::engine::run(&compiled, input, &capabilities)
-        .await
-        .map_err(map_engine_error)?;
+
+    // The opening bracket, appended BEFORE the engine call so a run killed
+    // mid-flight leaves a start with no finish — which is precisely the shape
+    // the boot sweep looks for. Best-effort, like every other journal write on
+    // this path: losing the record is worth a log line, never a failed run.
+    if let Some(events) = events.as_ref() {
+        let started = CompanyEvent::WorkflowRunStarted {
+            workflow_id: workflow.id.clone(),
+            run_id: run_id.clone(),
+            scheduled: ctx.scheduled,
+        };
+        if let Err(err) = events.append(&record.id, started).await {
+            tracing::warn!(
+                company = %record.id,
+                workflow = %workflow.id,
+                %run_id,
+                %err,
+                "workflow: run-started progress event could not be journaled; the run is unaffected"
+            );
+        }
+    }
+
+    // Drive the engine with an observer when there is somewhere to put the
+    // frames, and exactly as before when there is not.
+    let outcome = match events.as_ref() {
+        None => tinyflows::engine::run(&compiled, input, &capabilities)
+            .await
+            .map_err(map_engine_error)?,
+        Some(events) => {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<NodeProgress>();
+            let collector = tokio::spawn({
+                let events = events.clone();
+                let company = record.id.clone();
+                let workflow_id = workflow.id.clone();
+                let run_id = run_id.clone();
+                async move {
+                    while let Some(progress) = rx.recv().await {
+                        let event = CompanyEvent::WorkflowNodeFinished {
+                            workflow_id: workflow_id.clone(),
+                            run_id: run_id.clone(),
+                            node_id: progress.node_id,
+                            status: progress.status,
+                            elapsed_ms: progress.elapsed_ms,
+                        };
+                        if let Err(err) = events.append(&company, event).await {
+                            tracing::warn!(
+                                %company,
+                                workflow = %workflow_id,
+                                %run_id,
+                                %err,
+                                "workflow: node progress event could not be journaled; the run is \
+                                 unaffected"
+                            );
+                        }
+                    }
+                }
+            });
+
+            let observer: Arc<dyn tinyflows::observability::RunObserver> =
+                Arc::new(ProgressObserver { tx });
+            let outcome =
+                tinyflows::engine::run_with_observer(&compiled, input, &capabilities, &observer)
+                    .await;
+
+            // Drop the last sender, then join — in that order, and before
+            // anything else. The drop closes the channel so the collector's
+            // `recv()` returns `None` and its loop ends; the join then waits for
+            // every already-sent frame to reach the journal. This is what makes
+            // the ordering guarantee true: every `WorkflowNodeFinished` is
+            // durably appended before the caller's `WorkflowRunFinished`, so a
+            // reader folding the journal never sees a run settle before its
+            // nodes land. Without the join the two would race and a fold could
+            // attach a node to the run *after* it had been rendered as finished.
+            //
+            // The drop closes the channel only if ours is the **last** `Arc` —
+            // true today, because the engine's per-node handler clones die with
+            // the graph inside `run_with_observer`. The bounded wait is there so
+            // that stays a *performance* assumption rather than a liveness one:
+            // if a future engine ever parked a clone somewhere longer-lived,
+            // this would log and move on instead of wedging the run (and the
+            // whole host process behind it) forever on a join that never
+            // returns. Frames already sent still reach the journal either way —
+            // they would just land after the finished event.
+            drop(observer);
+            match tokio::time::timeout(PROGRESS_DRAIN_TIMEOUT, collector).await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => tracing::warn!(
+                    company = %record.id,
+                    workflow = %workflow.id,
+                    %run_id,
+                    %err,
+                    "workflow: the node-progress collector did not shut down cleanly"
+                ),
+                Err(_) => tracing::warn!(
+                    company = %record.id,
+                    workflow = %workflow.id,
+                    %run_id,
+                    "workflow: node progress events did not drain in time; the run's finished \
+                     record may be journaled ahead of them"
+                ),
+            }
+
+            outcome.map_err(map_engine_error)?
+        }
+    };
 
     // Route every reached `output` node's report to its configured destination.
     // Deliberately here rather than in the HTTP handler: the orchestrator's
@@ -180,6 +348,7 @@ impl WorkflowRunner for HarnessWorkflowRunner {
         _company: &CompanyId,
         workflow: &WorkflowFile,
         input: Value,
+        ctx: &WorkflowRunContext,
     ) -> Result<WorkflowRun> {
         // Idempotent: builds the roster on first use, a no-op after. The run
         // addresses the record's own company; `_company` is the routed scope,
@@ -191,6 +360,7 @@ impl WorkflowRunner for HarnessWorkflowRunner {
             &self.record,
             workflow,
             input,
+            ctx,
         )
         .await
     }
@@ -384,6 +554,7 @@ to = "done"
             &rec,
             &file,
             serde_json::json!({ "brief": "launch" }),
+            &WorkflowRunContext::new(false),
         )
         .await
         .expect("workflow runs");
@@ -447,6 +618,7 @@ to = "done"
             &record(),
             &file,
             serde_json::json!({ "brief": "quarterly numbers" }),
+            &WorkflowRunContext::new(false),
         )
         .await
         .expect("workflow runs");
@@ -481,6 +653,7 @@ to = "done"
             &record(),
             &file,
             serde_json::json!({}),
+            &WorkflowRunContext::new(false),
         )
         .await
         .expect("an undeliverable report must not fail the run");
@@ -507,9 +680,15 @@ to = "done"
         let runner = HarnessWorkflowRunner::new(pool, deps(dir.path()), rec.clone());
 
         let file = parse_workflow(GREET).expect("workflow parses");
-        let run = WorkflowRunner::run(&runner, &rec.id, &file, serde_json::json!({}))
-            .await
-            .expect("workflow runs");
+        let run = WorkflowRunner::run(
+            &runner,
+            &rec.id,
+            &file,
+            serde_json::json!({}),
+            &WorkflowRunContext::new(false),
+        )
+        .await
+        .expect("workflow runs");
         assert!(run.output.to_string().contains("hello-marker"));
     }
 
@@ -545,6 +724,7 @@ to = "done"
             &record(),
             &file,
             serde_json::json!({}),
+            &WorkflowRunContext::new(false),
         )
         .await
         .expect_err("missing trigger rejected");
@@ -596,6 +776,7 @@ to = "done"
             &tools_record(),
             &file,
             serde_json::json!({ "seed": 1 }),
+            &WorkflowRunContext::new(false),
         )
         .await
         .expect("workflow runs");
@@ -656,6 +837,7 @@ to = "done"
             &tools_record(),
             &file,
             serde_json::json!({ "seed": 1 }),
+            &WorkflowRunContext::new(false),
         )
         .await
         .expect("run completes despite the failing node");
@@ -713,6 +895,7 @@ label = "error"
             &tools_record(),
             &file,
             serde_json::json!({ "seed": 1 }),
+            &WorkflowRunContext::new(false),
         )
         .await
         .expect("run completes via the recovery route");
@@ -769,6 +952,7 @@ to = "done"
             &tools_record(),
             &file,
             serde_json::json!({ "seed": 1 }),
+            &WorkflowRunContext::new(false),
         )
         .await
         .expect("run pauses cleanly");
@@ -818,6 +1002,7 @@ to = "done"
             &tools_record(),
             &file,
             serde_json::json!({ "seed": 1 }),
+            &WorkflowRunContext::new(false),
         )
         .await
         .expect_err("the SSRF guard must block the loopback request");
@@ -839,6 +1024,7 @@ to = "done"
             &tools_record(),
             &file,
             input,
+            &WorkflowRunContext::new(false),
         )
         .await
     }
@@ -1148,6 +1334,7 @@ to = "done"
             &tools_record(),
             &file,
             serde_json::json!({ "seed": 1 }),
+            &WorkflowRunContext::new(false),
         )
         .await
         .expect("sub_workflow run completes");
@@ -1195,6 +1382,7 @@ to = "sub"
             &tools_record(),
             &file,
             serde_json::json!({}),
+            &WorkflowRunContext::new(false),
         )
         .await
         .expect_err("a mutual sub_workflow reference must be refused");
@@ -1267,6 +1455,7 @@ to = "done"
             &tools_record(),
             &file,
             serde_json::json!({ "target": "greet_child" }),
+            &WorkflowRunContext::new(false),
         )
         .await
         .expect("dynamic sub_workflow run completes");
@@ -1348,6 +1537,7 @@ to = "done"
                     &tools_record(),
                     &file,
                     Value::Null,
+                    &WorkflowRunContext::new(false),
                 )
                 .await
             })
@@ -1378,10 +1568,239 @@ to = "done"
                     &tools_record(),
                     &file,
                     Value::Null,
+                    &WorkflowRunContext::new(false),
                 )
                 .await
             })
             .await;
         assert!(out.is_ok(), "a run below the limit must execute: {out:?}");
+    }
+
+    // --- issue #371: the per-node progress trail -----------------------------
+
+    /// Deps with a real filesystem journal wired, so the progress path is
+    /// exercised end to end rather than through a double: the claim under test
+    /// is that these events reach disk in an order a reader can rely on.
+    fn deps_with_events(dir: &std::path::Path) -> (HarnessDeps, Arc<dyn crate::ports::EventLog>) {
+        let events: Arc<dyn crate::ports::EventLog> = Arc::new(crate::store::FsEventLog::new(dir));
+        let mut deps = deps(dir);
+        deps.events = Some(events.clone());
+        (deps, events)
+    }
+
+    /// Every event journaled for `company`, oldest first.
+    async fn journaled(
+        events: &Arc<dyn crate::ports::EventLog>,
+        company: &CompanyId,
+    ) -> Vec<CompanyEvent> {
+        events
+            .read_from(company, crate::ports::types::EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read")
+            .into_iter()
+            .map(|s| s.event)
+            .collect()
+    }
+
+    /// The ordering guarantee the whole read side rests on: a run journals its
+    /// start, then one event per non-trigger node **in finish order**, and all
+    /// of them are durable before `run_workflow` returns — so the caller's
+    /// `WorkflowRunFinished` can only ever land after them.
+    ///
+    /// `GREET` is `start → ceo → done`; `start` is the trigger and the engine
+    /// reports no step for it, so exactly two node events are owed.
+    #[tokio::test]
+    async fn a_run_journals_a_start_then_one_event_per_non_trigger_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(HarnessPool::new());
+        let rec = record();
+        let (deps, events) = deps_with_events(dir.path());
+        pool.ensure(&rec, &deps).await.expect("roster builds");
+
+        let file = parse_workflow(GREET).expect("workflow parses");
+        let ctx = WorkflowRunContext::new(false);
+        run_workflow(pool, deps, &rec, &file, Value::Null, &ctx)
+            .await
+            .expect("workflow runs");
+
+        let journal = journaled(&events, &rec.id).await;
+        let trail: Vec<String> = journal
+            .iter()
+            .map(|e| match e {
+                CompanyEvent::WorkflowRunStarted { .. } => "started".to_string(),
+                CompanyEvent::WorkflowNodeFinished { node_id, .. } => format!("node:{node_id}"),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            trail,
+            vec!["started", "node:ceo", "node:done"],
+            "expected start then one event per non-trigger node, in graph order"
+        );
+
+        // One run id across the whole trail — the correlation the fold groups on.
+        for event in &journal {
+            match event {
+                CompanyEvent::WorkflowRunStarted {
+                    run_id,
+                    workflow_id,
+                    scheduled,
+                } => {
+                    assert_eq!(run_id, &ctx.run_id);
+                    assert_eq!(workflow_id, "greet");
+                    assert!(!scheduled, "a manual run is not flagged scheduled");
+                }
+                CompanyEvent::WorkflowNodeFinished {
+                    run_id,
+                    status,
+                    workflow_id,
+                    ..
+                } => {
+                    assert_eq!(run_id, &ctx.run_id);
+                    assert_eq!(workflow_id, "greet");
+                    assert_eq!(*status, WorkflowNodeStatus::Ok);
+                }
+                other => panic!("unexpected event on the journal: {other:?}"),
+            }
+        }
+    }
+
+    /// The scheduled flag rides the *start*, not only the outcome — which is
+    /// what lets the console mark a cron fire as such while it is still running.
+    #[tokio::test]
+    async fn a_scheduled_run_is_flagged_on_its_start_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(HarnessPool::new());
+        let rec = record();
+        let (deps, events) = deps_with_events(dir.path());
+        pool.ensure(&rec, &deps).await.expect("roster builds");
+
+        let file = parse_workflow(GREET).expect("workflow parses");
+        run_workflow(
+            pool,
+            deps,
+            &rec,
+            &file,
+            Value::Null,
+            &WorkflowRunContext::new(true),
+        )
+        .await
+        .expect("workflow runs");
+
+        let journal = journaled(&events, &rec.id).await;
+        let CompanyEvent::WorkflowRunStarted { scheduled, .. } = &journal[0] else {
+            panic!("expected the start first, got {:?}", journal[0]);
+        };
+        assert!(scheduled);
+    }
+
+    /// The arm the issue is really about: a run that dies partway still leaves
+    /// the nodes that DID complete on the journal, under the same run id the
+    /// caller will stamp on the failure. That pairing is what lets the console
+    /// say how far a failed run got instead of only that it failed.
+    ///
+    /// The graph is `start → ceo → fetch → done`, where `fetch` is an
+    /// `http_request` to loopback that the SSRF guard refuses. `on_error`
+    /// defaults to `stop`, so the run ends there — with `ceo` already recorded.
+    #[tokio::test]
+    async fn a_failed_run_still_journals_the_nodes_that_completed() {
+        let src = r#"
+id = "partial"
+name = "Partial"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "ceo"
+kind = "agent"
+name = "CEO"
+agent = "ceo"
+[[node]]
+id = "fetch"
+kind = "http_request"
+name = "Fetch"
+[node.config]
+method = "GET"
+url = "http://127.0.0.1:9/"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "ceo"
+[[edge]]
+from = "ceo"
+to = "fetch"
+[[edge]]
+from = "fetch"
+to = "done"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(HarnessPool::new());
+        let rec = record();
+        let (deps, events) = deps_with_events(dir.path());
+        pool.ensure(&rec, &deps).await.expect("roster builds");
+
+        let file = parse_workflow(src).expect("parses");
+        let ctx = WorkflowRunContext::new(false);
+        let outcome = run_workflow(pool, deps, &rec, &file, Value::Null, &ctx).await;
+        assert!(outcome.is_err(), "the loopback fetch must fail the run");
+
+        let journal = journaled(&events, &rec.id).await;
+        // The start is there, and so is the node that got through before the
+        // failure. `done` is not — an unreached node contributes no row, so
+        // absence means "never reached", never "silently dropped".
+        assert!(matches!(
+            journal.first(),
+            Some(CompanyEvent::WorkflowRunStarted { .. })
+        ));
+        let nodes: Vec<&String> = journal
+            .iter()
+            .filter_map(|e| match e {
+                CompanyEvent::WorkflowNodeFinished { node_id, .. } => Some(node_id),
+                _ => None,
+            })
+            .collect();
+        assert!(nodes.contains(&&"ceo".to_string()), "{nodes:?}");
+        assert!(!nodes.contains(&&"done".to_string()), "{nodes:?}");
+        // Every row shares the caller's id, so the `WorkflowRunFinished` the
+        // caller journals for this failure groups with them.
+        for event in &journal {
+            let run_id = match event {
+                CompanyEvent::WorkflowRunStarted { run_id, .. } => run_id,
+                CompanyEvent::WorkflowNodeFinished { run_id, .. } => run_id,
+                other => panic!("unexpected event: {other:?}"),
+            };
+            assert_eq!(run_id, &ctx.run_id);
+        }
+    }
+
+    /// A build with no journal wired (the default runtime, and every other test
+    /// in this module) runs exactly as it did before #371 — no start, no
+    /// observer, no collector task. The progress path degrades to nothing
+    /// rather than to a half-written trail.
+    #[tokio::test]
+    async fn a_runtime_without_a_journal_records_no_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(HarnessPool::new());
+        let rec = record();
+        let deps = deps(dir.path());
+        assert!(deps.events.is_none(), "this is the default-build shape");
+        pool.ensure(&rec, &deps).await.expect("roster builds");
+
+        let file = parse_workflow(GREET).expect("workflow parses");
+        let run = run_workflow(
+            pool,
+            deps,
+            &rec,
+            &file,
+            Value::Null,
+            &WorkflowRunContext::new(false),
+        )
+        .await
+        .expect("workflow runs");
+        assert!(run.pending_approvals.is_empty());
     }
 }
