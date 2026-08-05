@@ -244,6 +244,33 @@ test("a host refusal still reports honestly, with no markup in the message", asy
   await expect(approvalCard(page)).toBeVisible();
 });
 
+test("a connection that fails instantly is still reported as a failure", async ({
+  page,
+}) => {
+  // The other side of the honesty coin. An offline browser or a refused
+  // connection rejects immediately, which means the request never reached the
+  // host and the verdict cannot have been recorded — so the timeout copy would
+  // be a fresh lie in place of the one #380 removed. Only a *slow* failure
+  // supports the "recorded before the delay" inference.
+  const queue = await stubQueue(page);
+  await page.route(isApprovalResolve, (route) => route.abort("failed"));
+  void queue;
+
+  await openApprovals(page);
+  await page.getByRole("button", { name: "Approve" }).click();
+
+  const message = toasts(page).first();
+  await expect(message).toBeVisible({ timeout: 10_000 });
+  const text = (await message.innerText()).trim();
+
+  expect(text).toContain("Couldn't record your decision");
+  expect(text).not.toContain("your decision was recorded");
+  expect(text).not.toContain("<");
+
+  // Nothing was decided, so nothing leaves the queue.
+  await expect(approvalCard(page)).toBeVisible();
+});
+
 test("an unparseable body on the document reader falls back to the status line", async ({
   page,
 }) => {
