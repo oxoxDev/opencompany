@@ -122,6 +122,31 @@ function nameHash(name: string): string {
   return (hash >>> 0).toString(36);
 }
 
+/**
+ * The chat channel a **host thread id** belongs to, or `null` when this
+ * company has no channel that owns it.
+ *
+ * This is the one subtle rule in the chat's addressing, kept in one place so a
+ * caller cannot get it wrong twice. A desk's channel id *is* its thread id —
+ * {@link deskFromDto} leaves `DeskDto.id` untouched precisely so addressing the
+ * channel routes to that desk. A DM's is not: its channel id is the
+ * console-local {@link dmChannelId}, while the thread id the host journals
+ * under (and `chat` / `chat/history` take) is the roster teammate's agent id.
+ *
+ * Anything routing a host-side event — which always names a *thread* — into
+ * {@link Transcripts} has to make that distinction. Issue #367 is what the
+ * console looks like when it doesn't.
+ */
+export function channelIdForThread(
+  threadId: string,
+  desks: Desk[],
+  members: TeamMember[],
+): string | null {
+  if (desks.some((d) => d.id === threadId)) return threadId;
+  const member = members.find((m) => m.id === threadId);
+  return member ? dmChannelId(member) : null;
+}
+
 export function findChannel(sections: ChannelSection[], id: string | null): Channel | null {
   if (!id) return null;
   for (const s of sections) {
