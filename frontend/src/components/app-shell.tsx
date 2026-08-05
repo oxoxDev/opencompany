@@ -194,6 +194,12 @@ export function AppShell({
   // refreshes its run history live. Same shape as `taskEventTick` — a counter,
   // not the payload, so the view owns what it refetches.
   const [workflowRunTick, setWorkflowRunTick] = useState(0);
+  // Issue #371: the run-progress frame ITSELF, not just a nonce. The canvas
+  // paints per-node state, so unlike the tick above it needs the payload — a
+  // counter cannot say which node of which run just finished. Kept beside the
+  // tick rather than replacing it: the tick still drives the history refetch,
+  // which is a refetch and wants no payload.
+  const [workflowRunEvent, setWorkflowRunEvent] = useState<CompanyStreamEvent | null>(null);
   // The live tool timeline, per thread, built from the transient `tool_call` /
   // `tool_result` SSE frames while a turn runs (mirrors OpenHuman's live tool
   // rows). Cleared when the turn's final reply — carrying the authoritative
@@ -505,7 +511,14 @@ export function AppShell({
     onAgentReply: injectAgentReply,
     onTaskEvent: useCallback(() => setTaskEventTick((n) => n + 1), []),
     onTurnEvent,
-    onWorkflowRunEvent: useCallback(() => setWorkflowRunTick((n) => n + 1), []),
+    onWorkflowRunEvent: useCallback((event: CompanyStreamEvent) => {
+      // Both halves. The tick refreshes the durable history; the event drives
+      // the live canvas. Progress frames are far more frequent than outcomes,
+      // so only an outcome bumps the tick — refetching history once per node
+      // would be N round trips per run for a list that has not changed yet.
+      setWorkflowRunEvent(event);
+      if (event.type === "workflow_run_finished") setWorkflowRunTick((n) => n + 1);
+    }, []),
   });
 
   return (
@@ -638,6 +651,7 @@ export function AppShell({
                 client={client}
                 company={company}
                 runEventTick={workflowRunTick}
+                runEvent={workflowRunEvent}
               />
             </Suspense>
           )}
