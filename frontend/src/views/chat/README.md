@@ -34,6 +34,20 @@ Console-local, because the host has no surface for them yet:
 
 Transcripts are per-session memory. Closing the tab drops them.
 
+## Membership
+
+A desk's members come from the host (`GET {scope}/desks` → `members`, lead
+first). They scope the header's count and the member pane, so a two-person desk
+reads as two people rather than as the whole company (issue #369). A DM is a
+two-person line: the header states 2, and the pane shows the teammate on the
+other end.
+
+The fallback desks in `lib/desks.ts` carry no membership — there is none to
+carry — so a channel built from them falls back to the whole roster, and the
+pane renders one plain list. The rest of the company is always one section
+below, so adding a teammate or opening somebody's DM never needs a different
+surface.
+
 ## Files
 
 | | |
@@ -45,7 +59,7 @@ Transcripts are per-session memory. Closing the tab drops them.
 | `MessageRow.tsx` | One line — avatar gutter, author, body, reactions, hover action bar. |
 | `MessageComposer.tsx` | The composer dock; also used compact in the thread panel. |
 | `ThreadPanel.tsx` | Replies to one message, with their own composer. |
-| `MembersPane.tsx` | The roster — what the Team page used to be. |
+| `MembersPane.tsx` | Who is in this channel, then the rest of the roster. |
 | `AddMemberDialog.tsx` | Define a teammate. |
 
 `../ChatView.tsx` owns the state and composes them.

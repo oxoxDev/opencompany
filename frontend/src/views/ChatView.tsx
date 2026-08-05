@@ -20,6 +20,7 @@ import { ThreadPanel } from "./chat/ThreadPanel";
 import {
   buildChannels,
   buildTimeline,
+  channelMembers,
   channelTitle,
   deskFromDto,
   dmChannelId,
@@ -241,6 +242,26 @@ export function ChatView({
   // (issue #368).
   const channel = findChannel(sections, sub) ?? firstChannel(sections);
 
+  /**
+   * Who is in the channel on screen — `null` when it names no membership, in
+   * which case the pane falls back to the whole roster (issue #369).
+   *
+   * A desk's membership comes from the host. A DM's is the one teammate on the
+   * other end: it has no `memberIds` (nothing in the model claims a DM has a
+   * roster), so the two-person case is stated here rather than faked upstream.
+   */
+  const inChannel = useMemo(() => {
+    if (!channel) return null;
+    if (channel.kind === "dm") return channel.member ? [channel.member] : null;
+    return channelMembers(channel, members);
+  }, [channel, members]);
+
+  const outsideChannel = useMemo(() => {
+    if (!inChannel) return members;
+    const inside = new Set(inChannel.map((m) => m.id));
+    return members.filter((m) => !inside.has(m.id));
+  }, [inChannel, members]);
+
   const messages = channel ? (transcripts[channel.id] ?? []) : [];
   const entries = useMemo(
     () => (channel ? buildTimeline(messages, channel) : []),
@@ -274,6 +295,16 @@ export function ChatView({
   // addresses its lead. It is also the id every live turn frame carries.
   const activeThreadId = active.kind === "channel" ? active.id : active.member?.id;
   const liveSteps = activeThreadId ? liveStepsByThread?.[activeThreadId] : undefined;
+  /**
+   * The count beside the channel title.
+   *
+   * A DM is stated as 2 rather than derived: it is a two-person conversation,
+   * but the operator has no roster row, so counting rows would say 1 and
+   * inventing a "You" row to make the arithmetic work would be worse. A desk
+   * counts its own members; a channel with no membership of its own still
+   * counts the company, which is all it can honestly claim.
+   */
+  const headerCount = active.kind === "dm" ? 2 : (inChannel?.length ?? members.length);
 
   const append = (channelId: string, ...added: ChatMessage[]) =>
     setTranscripts((t) => ({ ...t, [channelId]: [...(t[channelId] ?? []), ...added] }));
@@ -448,7 +479,7 @@ export function ChatView({
       >
         <ChatHeader
           channel={channel}
-          memberCount={members.length}
+          memberCount={headerCount}
           membersOpen={membersOpen}
           onToggleMembers={() => setMembersOpen((o) => !o)}
           onOpenRail={() => setMobilePane("rail")}
@@ -485,7 +516,9 @@ export function ChatView({
 
           {membersOpen && (
             <MembersPane
-              members={members}
+              channelMembers={inChannel}
+              others={outsideChannel}
+              leadId={active.kind === "channel" ? active.memberIds?.[0] : undefined}
               loading={loadingTeam}
               fromHost={fromHost}
               onToggleInbox={(m) => void toggleMemberInbox(m)}

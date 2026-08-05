@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Mail, MessageSquare, MoreHorizontal, UserPlus, Wallet } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -15,7 +16,27 @@ import { cn } from "@/lib/utils";
 import { Avatar } from "./Avatar";
 
 interface Props {
-  members: TeamMember[];
+  /**
+   * Who is in the channel on screen, lead first — or `null` when the channel
+   * names no membership of its own (a fallback desk on a host without
+   * `.../desks`). `null` renders one plain roster list, which is what this pane
+   * did for every channel before issue #369.
+   */
+  channelMembers: TeamMember[] | null;
+  /**
+   * Everyone else on the roster. The roster-wide surface stays reachable — you
+   * still need it to open somebody's DM or add a teammate — it just stops being
+   * presented as this channel's membership. When `channelMembers` is `null`
+   * this is the whole roster.
+   */
+  others: TeamMember[];
+  /**
+   * The desk's lead (`DeskDto.members[0]`) — the routing target for this
+   * channel, badged rather than left implicit. Matched by id, so a lead who is
+   * no longer on the roster simply goes unbadged instead of promoting whoever
+   * happens to be first.
+   */
+  leadId?: string;
   loading: boolean;
   /** True when the roster came from the host rather than the starter set. */
   fromHost: boolean;
@@ -43,16 +64,24 @@ interface Props {
 }
 
 /**
- * The right-hand member pane — the company's roster, where a chat workspace
- * expects it.
+ * The right-hand member pane — who is in this channel, and the rest of the
+ * company under it.
  *
  * This replaces the standalone Team page: everything that page could do lives
  * on a row here (give an agent an inbox, drop them from the roster) or on the
  * Add button, and a row now also opens that teammate's DM, which the page
  * could not do at all.
+ *
+ * The two sections exist because those are two different questions. "Who is in
+ * this room" is what a channel header is for, and answering it with the whole
+ * company answered nothing (issue #369). But the roster-wide actions still have
+ * to live somewhere, so the rest of the company keeps its rows — visually
+ * subordinate, and never labelled as this channel's membership.
  */
 export function MembersPane({
-  members,
+  channelMembers,
+  others,
+  leadId,
   loading,
   fromHost,
   onToggleInbox,
@@ -65,18 +94,21 @@ export function MembersPane({
   onResetBudget,
   setByLabel,
 }: Props) {
+  const total = (channelMembers?.length ?? 0) + others.length;
+  // Both scopes on one line, so the pane never leaves you guessing which of the
+  // two numbers the header's count refers to.
+  const subtitle = channelMembers
+    ? `${channelMembers.length} in this channel · ${total} in the company`
+    : `${total} ${total === 1 ? "agent" : "agents"} · ${
+        fromHost ? "defined by this company" : "starter roster"
+      }`;
+
   return (
     <aside className="flex w-72 shrink-0 flex-col border-l bg-background">
       <header className="flex h-13 shrink-0 items-center gap-2 border-b px-3">
         <div className="min-w-0 flex-1">
           <h2 className="text-sm font-semibold tracking-tight">Team</h2>
-          <p className="truncate text-xs text-muted-foreground">
-            {loading
-              ? "Loading…"
-              : `${members.length} ${members.length === 1 ? "agent" : "agents"} · ${
-                  fromHost ? "defined by this company" : "starter roster"
-                }`}
-          </p>
+          <p className="truncate text-xs text-muted-foreground">{loading ? "Loading…" : subtitle}</p>
         </div>
         <Button
           variant="ghost"
@@ -98,32 +130,70 @@ export function MembersPane({
             ))}
           </div>
         ) : (
-          <ul className="flex flex-col gap-px">
-            {members.map((m) => (
-              <li key={m.id}>
-                <MemberRow
-                  member={m}
-                  inboxOn={m.inboxEnabled}
-                  onToggleInbox={() => onToggleInbox(m)}
-                  onRemove={() => onRemove(m.id)}
-                  onMessage={() => onMessage(m)}
-                  canEditBudget={canEditBudget}
-                  onEditBudget={() => onEditBudget(m)}
-                  onRemoveCap={() => onRemoveCap(m)}
-                  onResetBudget={() => onResetBudget(m)}
-                  setByLabel={setByLabel(m)}
-                />
-              </li>
-            ))}
-          </ul>
+          (() => {
+            const rows = (list: TeamMember[]) => (
+              <ul className="flex flex-col gap-px">
+                {list.map((m) => (
+                  <li key={m.id}>
+                    <MemberRow
+                      member={m}
+                      lead={m.id === leadId}
+                      inboxOn={m.inboxEnabled}
+                      onToggleInbox={() => onToggleInbox(m)}
+                      onRemove={() => onRemove(m.id)}
+                      onMessage={() => onMessage(m)}
+                      canEditBudget={canEditBudget}
+                      onEditBudget={() => onEditBudget(m)}
+                      onRemoveCap={() => onRemoveCap(m)}
+                      onResetBudget={() => onResetBudget(m)}
+                      setByLabel={setByLabel(m)}
+                    />
+                  </li>
+                ))}
+              </ul>
+            );
+
+            // No membership to scope to — one plain roster, as before.
+            if (!channelMembers) return rows(others);
+
+            return (
+              <>
+                <SectionLabel className="text-foreground">In this channel</SectionLabel>
+                {channelMembers.length > 0 ? (
+                  rows(channelMembers)
+                ) : (
+                  <p className="px-2 py-1.5 text-xs text-muted-foreground">
+                    Nobody is on this desk yet.
+                  </p>
+                )}
+
+                {others.length > 0 && (
+                  <div className="mt-2 border-t pt-2">
+                    <SectionLabel className="text-muted-foreground">Everyone else</SectionLabel>
+                    {rows(others)}
+                  </div>
+                )}
+              </>
+            );
+          })()
         )}
       </div>
     </aside>
   );
 }
 
+/** A section heading inside the pane's scroll body. */
+function SectionLabel({ children, className }: { children: ReactNode; className?: string }) {
+  return (
+    <h3 className={cn("px-2 pb-1 text-[11px] font-medium uppercase tracking-wide", className)}>
+      {children}
+    </h3>
+  );
+}
+
 function MemberRow({
   member,
+  lead,
   inboxOn,
   onToggleInbox,
   onRemove,
@@ -135,6 +205,8 @@ function MemberRow({
   setByLabel,
 }: {
   member: TeamMember;
+  /** The desk's lead — badged, since this channel routes to them. */
+  lead?: boolean;
   inboxOn: boolean;
   onToggleInbox: () => void;
   onRemove: () => void;
@@ -160,6 +232,11 @@ function MemberRow({
         <span className="min-w-0">
           <span className="flex items-center gap-1">
             <span className="truncate text-sm font-medium">{member.name}</span>
+            {lead && (
+              <span className="shrink-0 rounded border px-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                Lead
+              </span>
+            )}
             {inboxOn && (
               <Mail className="size-3 shrink-0 text-muted-foreground" aria-label="Has an inbox" />
             )}
