@@ -13,6 +13,21 @@ export interface Desk {
   blurb: string;
   /** Avatar tone key. The main line uses the brand mark instead. */
   tone?: string;
+  /**
+   * The desk's own members, as roster teammate ids, in the host's order —
+   * `members[0]` is the lead. Optional on purpose: the static desks below have
+   * no membership at all, and "this desk's membership is unknown" has to stay
+   * distinguishable from "this desk has nobody on it". A consumer that finds
+   * it absent should fall back to the company-wide roster rather than render
+   * an empty channel (issue #369).
+   */
+  members?: string[];
+  /**
+   * The subset of {@link members} added through the operator overlay rather
+   * than declared in the manifest. Carried through so a later surface can tell
+   * the removable members from the blueprint ones without refetching.
+   */
+  overlayMembers?: string[];
 }
 
 /** The main line plus a few focused desks. */
