@@ -183,6 +183,28 @@ export interface ApprovalSummary {
    * heuristic for it, and for nothing else.
    */
   task?: { link: "task"; id: string } | { link: "unlinked" };
+  /**
+   * The roster teammate whose blocked tool call this is (#372). Mirrors
+   * `Effect::agent`: present exactly when the effect came from a harness tool
+   * call, absent for a native effect the runtime performs itself.
+   *
+   * Optional because the host may predate the field — an old host omits it, and
+   * the card then names no asker rather than showing a raw id or a guess.
+   */
+  agent?: string | null;
+  /**
+   * What the effect will actually do — the tool call's arguments (#372).
+   *
+   * Already redacted and bounded by the host
+   * (`src/runtime/approval_display.rs`): credential-named keys arrive as the
+   * literal string `"[redacted]"`, long strings are truncated, and an oversized
+   * subtree arrives as `"[unrenderable]"`. The console never has to decide what
+   * is safe to show, and must not try to "unredact" anything.
+   *
+   * `unknown` rather than a shape: the payload is an arbitrary tool argument
+   * object, so every read of it is a narrowing one.
+   */
+  payload?: unknown;
 }
 
 export type Verdict = "approve" | "deny";

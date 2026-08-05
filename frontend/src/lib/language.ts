@@ -111,11 +111,109 @@ export function effectDone(kind: string, amountUsd?: number | null): string {
     : "Did something that cannot be undone";
 }
 
+/**
+ * Gated **tool** names → what using that tool means, in plain language (#372).
+ *
+ * Kept apart from {@link EFFECT_LABELS} on purpose. That table's entries are
+ * business effects, which are self-describing at kind level: `payment.send`
+ * without its amount still tells an operator what is about to happen. A tool
+ * name does not — `shell` without its command is meaningless — so these labels
+ * only ever appear *above* the payload block that says what the tool will do.
+ * Keeping them out of `EFFECT_LABELS` also leaves the
+ * `EFFECT_LABELS`/`EFFECT_DONE_LABELS` `satisfies` mirror undisturbed.
+ */
+const TOOL_LABELS: Readonly<Record<string, string>> = {
+  shell: "Run a terminal command",
+  glob: "Search files in its workspace",
+};
+
+/**
+ * What an approval is asking for, in plain language (#372).
+ *
+ * Resolution order, and why the last two rungs differ:
+ *
+ * 1. the effect glossary — a business effect, phrased as it always was;
+ * 2. {@link TOOL_LABELS} — a gated tool we have words for;
+ * 3. an unmapped kind **with** an `agent` — it came from a tool call, so we can
+ *    at least say a teammate wants to use a tool;
+ * 4. an unmapped kind with no agent — a native effect nobody has named.
+ *
+ * The title-cased fallback in {@link effectAction} is never reached from here.
+ * That fallback is what put "Glob" and "Shell" — raw runtime identifiers — in
+ * front of an operator, which is the bug #372 opens with and which the glossary
+ * rule at the top of this file forbids. `effectAction` itself is deliberately
+ * left alone so no other surface shifts under this change.
+ */
+export function approvalAction(a: ApprovalSummary): string {
+  return (
+    labelFor(EFFECT_LABELS, a.kind) ??
+    labelFor(TOOL_LABELS, a.kind) ??
+    (a.agent ? "Use one of its tools" : "Do something that needs your sign-off")
+  );
+}
+
 /** A one-line, human summary of what needs approval. */
 export function approvalSummary(a: ApprovalSummary): string {
-  const action = effectAction(a.kind);
+  const action = approvalAction(a);
   if (a.amount_usd != null) return `${action} — ${money(a.amount_usd)}`;
   return action;
+}
+
+/** One line of an approval's payload preview: a label and its value. */
+export interface PayloadLine {
+  label: string;
+  value: string;
+}
+
+/**
+ * The payload the host sent, as lines an operator can read (#372).
+ *
+ * The values are already redacted and bounded host-side, so this function's
+ * only job is presentation. Two shapes:
+ *
+ * * a kind we know the argument names of (`shell`, `glob`) gets its meaningful
+ *   arguments in a fixed, readable order — the command first, because that is
+ *   the thing being consented to;
+ * * anything else falls back to `key: value` over the payload's own top-level
+ *   entries, which is still concrete and still safe.
+ *
+ * Nested objects and arrays are re-serialized as compact JSON rather than
+ * dropped: an operator approving a structured call needs to see the structure.
+ * Returns `[]` when there is nothing to show, which is also what an **old
+ * host** produces (it omits `payload` entirely) — callers render the pre-#372
+ * one-line card in that case.
+ */
+export function payloadLines(a: ApprovalSummary): PayloadLine[] {
+  const payload = a.payload;
+  if (payload == null) return [];
+  if (typeof payload !== "object") return [{ label: "value", value: renderValue(payload) }];
+  if (Array.isArray(payload)) return [{ label: "items", value: renderValue(payload) }];
+
+  const entries = Object.entries(payload as Record<string, unknown>);
+  if (entries.length === 0) return [];
+
+  // Preferred ordering for the kinds whose argument names we know. Unlisted
+  // arguments still follow — this promotes, it never hides.
+  const preferred = PAYLOAD_KEY_ORDER[a.kind] ?? [];
+  const rank = (key: string) => {
+    const i = preferred.indexOf(key);
+    return i === -1 ? preferred.length : i;
+  };
+  return entries
+    .filter(([, value]) => value != null && value !== "")
+    .sort(([a1], [b1]) => rank(a1) - rank(b1))
+    .map(([label, value]) => ({ label, value: renderValue(value) }));
+}
+
+/** Which arguments lead the preview, per tool. Presentation only. */
+const PAYLOAD_KEY_ORDER: Readonly<Record<string, string[]>> = {
+  shell: ["command", "cwd", "timeout"],
+  glob: ["pattern", "path"],
+};
+
+function renderValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  return JSON.stringify(value) ?? String(value);
 }
 
 export function money(usd: number): string {
