@@ -273,10 +273,30 @@ pub struct ExecutedEffect {
     pub irreversible: bool,
 }
 
+/// A journal line [`load`](RuntimeJournal::load) could not replay (issue #386).
+///
+/// Deliberately carries **no line content**. The journal holds effect payloads —
+/// recipients, message bodies, arguments — and a corruption report exists to be
+/// logged and read by an operator, which is the one place [`ExecutedEffect`]
+/// goes to some trouble to keep those out of. The line number locates it in the
+/// file, the byte length separates a merged pair (long) from a truncated tail
+/// (short), and the parse error names the column without quoting it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CorruptLine {
+    /// The line's 1-based number in the journal file.
+    pub line: usize,
+    /// The line's length in bytes.
+    pub bytes: usize,
+    /// What the parse rejected.
+    pub message: String,
+}
+
 /// In-memory state rebuilt from (and kept in sync with) `journal.jsonl`.
 #[derive(Default)]
 struct State {
     executed: HashSet<String>,
+    /// Lines the last replay could not read — see [`CorruptLine`].
+    corrupt: Vec<CorruptLine>,
     /// Every irreversible effect that ran for a board task, indexed by that
     /// task and oldest first within it (issue #351).
     ///
@@ -407,6 +427,22 @@ impl RuntimeJournal {
 
     /// Replays the on-disk journal into memory, reconstructing the executed-key
     /// set and the parked-approval queue. Idempotent.
+    ///
+    /// **A damaged line does not fail the load** (issue #386). It is skipped,
+    /// logged against the file and line number, and reported through
+    /// [`corruption`](Self::corruption) for the caller to act on. Before this,
+    /// one bad line returned `Err` from here and took the whole company's boot
+    /// with it — turning the loss of a single record into the loss of every
+    /// record after it, plus the tenant. An operator cannot repair a journal
+    /// through a console that will not start.
+    ///
+    /// The skip is genuinely lossy and the safety argument is not symmetric: a
+    /// dropped `ApprovalResolved` leaves an approval parked, which a person can
+    /// still deny, while a dropped `EffectExecuted` un-commits a key and lets an
+    /// effect run twice. That is why [`replay_line`] recovers a merged line in
+    /// full rather than skipping it — the historical corruption this issue is
+    /// about is exactly the recoverable kind, and skipping it is the outcome
+    /// worth working to avoid.
     pub async fn load(&self) -> Result<()> {
         let contents = match tokio::fs::read_to_string(&self.path).await {
             Ok(contents) => contents,
@@ -415,80 +451,131 @@ impl RuntimeJournal {
         };
 
         let mut state = State::default();
-        for line in contents.lines() {
+        for (index, line) in contents.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
-            match serde_json::from_str::<JournalRecord>(line)? {
-                JournalRecord::EffectExecuted { key, effect } => {
-                    state.executed.insert(key);
-                    // Absent on a pre-#351 line: the key still replays, the
-                    // description simply does not exist to replay. Flag it, so
-                    // the console says "there is earlier activity I cannot
-                    // describe" rather than showing an all-clear.
-                    match effect {
-                        Some(effect) => state.index_executed(effect),
-                        None => state.undescribed_executed = true,
-                    }
-                }
-                JournalRecord::ApprovalParked {
-                    id,
-                    effect,
-                    at_millis,
-                    task,
-                } => {
-                    state.retain_approval_effect(&id, &effect);
-                    state.origins.insert(
-                        id.clone(),
-                        ApprovalOrigin {
-                            at_millis,
-                            kind: effect.kind.clone(),
-                            task: task.clone(),
-                            run_id: effect.run_id.clone(),
-                        },
+            let records = match replay_line(line) {
+                Ok(records) => records,
+                Err(message) => {
+                    let corrupt = CorruptLine {
+                        line: index + 1,
+                        bytes: line.len(),
+                        message,
+                    };
+                    tracing::error!(
+                        journal = %self.path.display(),
+                        line = corrupt.line,
+                        bytes = corrupt.bytes,
+                        error = %corrupt.message,
+                        "journal line could not be replayed; skipping it and continuing",
                     );
-                    state.parked.insert(
-                        id,
-                        ParkedApproval {
-                            effect,
-                            at_millis,
-                            task,
-                        },
-                    );
+                    state.corrupt.push(corrupt);
+                    continue;
                 }
-                JournalRecord::ApprovalResolved { id } => {
-                    state.parked.remove(&id);
-                }
-                JournalRecord::ApprovalExpired { id, .. } => {
-                    state.parked.remove(&id);
-                }
-                // Audit-only for the queue: the paired `ApprovalResolved`
-                // handles removal. The amended effect does supersede the parked
-                // one for description, because it is the amended arguments the
-                // grant was minted against.
-                JournalRecord::ApprovalAmended {
-                    id, amended_effect, ..
-                } => {
-                    state.retain_approval_effect(&id, &amended_effect);
-                }
-                JournalRecord::ApprovalGranted { grant } => {
-                    state.grants.insert(grant.approval_id.clone(), grant);
-                }
-                JournalRecord::GrantConsumed { id, effect } => {
-                    state.grants.remove(&id);
-                    // Absent only on a line written before the grant path was
-                    // described; same additive contract as `EffectExecuted`.
-                    if let Some(effect) = effect {
-                        state.index_executed(effect);
-                    }
-                }
-                JournalRecord::GrantExpired { id, .. } => {
-                    state.grants.remove(&id);
-                }
+            };
+            if records.len() > 1 {
+                // Recovered, not lost — so not a `CorruptLine`. Still worth
+                // saying out loud: the file carries damage from a host that
+                // predates the write fix, and a reader looking at it by hand
+                // should know why one line holds several records.
+                tracing::warn!(
+                    journal = %self.path.display(),
+                    line = index + 1,
+                    records = records.len(),
+                    "journal line holds several records with no separator; \
+                     replaying all of them",
+                );
+            }
+            for record in records {
+                Self::replay(&mut state, record);
             }
         }
         *self.state.lock().expect("journal state poisoned") = state;
         Ok(())
+    }
+
+    /// Lines the last [`load`](Self::load) could not replay, in file order.
+    ///
+    /// Empty is the only healthy answer. A non-empty one means the company is
+    /// running on an incomplete history and something above has to say so.
+    pub fn corruption(&self) -> Vec<CorruptLine> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .corrupt
+            .clone()
+    }
+
+    /// Folds one replayed record into the rebuilt state.
+    fn replay(state: &mut State, record: JournalRecord) {
+        match record {
+            JournalRecord::EffectExecuted { key, effect } => {
+                state.executed.insert(key);
+                // Absent on a pre-#351 line: the key still replays, the
+                // description simply does not exist to replay. Flag it, so
+                // the console says "there is earlier activity I cannot
+                // describe" rather than showing an all-clear.
+                match effect {
+                    Some(effect) => state.index_executed(effect),
+                    None => state.undescribed_executed = true,
+                }
+            }
+            JournalRecord::ApprovalParked {
+                id,
+                effect,
+                at_millis,
+                task,
+            } => {
+                state.retain_approval_effect(&id, &effect);
+                state.origins.insert(
+                    id.clone(),
+                    ApprovalOrigin {
+                        at_millis,
+                        kind: effect.kind.clone(),
+                        task: task.clone(),
+                        run_id: effect.run_id.clone(),
+                    },
+                );
+                state.parked.insert(
+                    id,
+                    ParkedApproval {
+                        effect,
+                        at_millis,
+                        task,
+                    },
+                );
+            }
+            JournalRecord::ApprovalResolved { id } => {
+                state.parked.remove(&id);
+            }
+            JournalRecord::ApprovalExpired { id, .. } => {
+                state.parked.remove(&id);
+            }
+            // Audit-only for the queue: the paired `ApprovalResolved`
+            // handles removal. The amended effect does supersede the parked
+            // one for description, because it is the amended arguments the
+            // grant was minted against.
+            JournalRecord::ApprovalAmended {
+                id, amended_effect, ..
+            } => {
+                state.retain_approval_effect(&id, &amended_effect);
+            }
+            JournalRecord::ApprovalGranted { grant } => {
+                state.grants.insert(grant.approval_id.clone(), grant);
+            }
+            JournalRecord::GrantConsumed { id, effect } => {
+                state.grants.remove(&id);
+                // Absent only on a line written before the grant path was
+                // described; same additive contract as `EffectExecuted`.
+                if let Some(effect) = effect {
+                    state.index_executed(effect);
+                }
+            }
+            JournalRecord::GrantExpired { id, .. } => {
+                state.grants.remove(&id);
+            }
+        }
     }
 
     /// Whether an effect under `key` was already committed.
@@ -867,6 +954,38 @@ impl RuntimeJournal {
             path: path.to_path_buf(),
             source,
         }
+    }
+}
+
+/// Parses one journal line into the record or records it holds.
+///
+/// The healthy answer is one record. A line written by a pre-#386 host may hold
+/// **two or more** with nothing between them, because `append` used to emit a
+/// record and its newline as separate unflushed writes and the newline could
+/// lose the race. `serde_json`'s stream deserializer reads concatenated values
+/// natively, so such a line replays *in full* instead of being dropped — which
+/// matters because dropping one would silently un-commit an `EffectExecuted`
+/// key and let an at-most-once effect run a second time. Recovering the merge
+/// is not a nicety; it is the difference between a cosmetic repair and a
+/// duplicated payment.
+///
+/// A line that is truncated rather than merged — a crash partway through a
+/// write, a filesystem that lost a tail — has no valid parse and is reported.
+/// All-or-nothing per line: half a line applied is worse than none, because the
+/// caller would have no way to know which half it got.
+fn replay_line(line: &str) -> std::result::Result<Vec<JournalRecord>, String> {
+    let single = match serde_json::from_str::<JournalRecord>(line) {
+        Ok(record) => return Ok(vec![record]),
+        Err(e) => e,
+    };
+    match serde_json::Deserializer::from_str(line)
+        .into_iter::<JournalRecord>()
+        .collect::<std::result::Result<Vec<_>, _>>()
+    {
+        Ok(records) if !records.is_empty() => Ok(records),
+        // Report the single-value error, not the stream one: it is the error
+        // that describes the line as it was meant to be written.
+        _ => Err(single.to_string()),
     }
 }
 
@@ -1637,6 +1756,111 @@ mod test {
                 "cyc:{i} must survive the reload",
             );
         }
+    }
+
+    /// **Issue #386**: a line an old host merged replays in full.
+    ///
+    /// This is the shape already sitting in journals written before the write
+    /// fix, and the shape CI tripped over. It must not be *skipped*: dropping a
+    /// merged line would un-commit an `EffectExecuted` key and let an
+    /// at-most-once effect fire again, which is a worse outcome than the parse
+    /// error it replaces.
+    #[tokio::test]
+    async fn a_merged_line_replays_every_record_it_holds() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+
+        let merged = format!(
+            "{}{}",
+            serde_json::to_string(&JournalRecord::EffectExecuted {
+                key: "cyc:0".into(),
+                effect: Some(executed(0)),
+            })
+            .unwrap(),
+            serde_json::to_string(&JournalRecord::EffectExecuted {
+                key: "cyc:1".into(),
+                effect: Some(executed(1)),
+            })
+            .unwrap(),
+        );
+        let intact = serde_json::to_string(&JournalRecord::EffectExecuted {
+            key: "cyc:2".into(),
+            effect: Some(executed(2)),
+        })
+        .unwrap();
+        tokio::fs::write(&path, format!("{merged}\n{intact}\n"))
+            .await
+            .unwrap();
+
+        let journal = RuntimeJournal::new(&path);
+        journal
+            .load()
+            .await
+            .expect("a merged line must not fail the load");
+        for key in ["cyc:0", "cyc:1", "cyc:2"] {
+            assert!(journal.is_executed(key), "{key} must replay");
+        }
+        assert!(
+            journal.corruption().is_empty(),
+            "a merged line is recovered, not lost, so it is not corruption",
+        );
+    }
+
+    /// **Issue #386**: a truncated line is reported, and the records around it
+    /// still replay.
+    ///
+    /// The old `load` returned `Err` here, which failed the company's boot: one
+    /// unreadable line cost every readable one after it, plus the console an
+    /// operator would need to repair the file.
+    #[tokio::test]
+    async fn a_truncated_line_is_reported_and_the_rest_still_replays() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+
+        let record = |key: &str, at| {
+            serde_json::to_string(&JournalRecord::EffectExecuted {
+                key: key.into(),
+                effect: Some(executed(at)),
+            })
+            .unwrap()
+        };
+        let whole = record("cyc:1", 1);
+        let truncated = &whole[..whole.len() / 2];
+        tokio::fs::write(
+            &path,
+            format!(
+                "{}\n{truncated}\n{}\n",
+                record("cyc:0", 0),
+                record("cyc:2", 2)
+            ),
+        )
+        .await
+        .unwrap();
+
+        let journal = RuntimeJournal::new(&path);
+        journal
+            .load()
+            .await
+            .expect("one bad line must not fail the boot");
+
+        assert!(journal.is_executed("cyc:0"), "the line before must replay");
+        assert!(
+            journal.is_executed("cyc:2"),
+            "the lines after the damage are the ones the old load lost",
+        );
+        assert!(
+            !journal.is_executed("cyc:1"),
+            "the truncated record is gone"
+        );
+
+        let corruption = journal.corruption();
+        assert_eq!(corruption.len(), 1, "exactly one line was unreadable");
+        assert_eq!(corruption[0].line, 2, "the report must locate the line");
+        assert_eq!(corruption[0].bytes, truncated.len());
+        assert!(
+            !corruption[0].message.contains("filing.submit"),
+            "a corruption report must not quote the line's contents",
+        );
     }
 
     /// **Issue #386**: when `append` returns, the record is on the file.
