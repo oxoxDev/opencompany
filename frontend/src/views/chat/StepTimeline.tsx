@@ -11,11 +11,23 @@ import { cn } from "@/lib/utils";
  * buried. Renders nothing when there are no steps (a memory-served / tool-less
  * reply). Ported from the retired Conversation page (issue #246) so the chat
  * workspace keeps the same tool-call visibility it had.
+ *
+ * `defaultOpen` is for the *live* timeline of a turn still running (issue
+ * #367): there the rows are the content — they are what says the company is
+ * working and on what — so they start open rather than behind a count. A
+ * finished reply's steps stay collapsed, where they are supporting detail.
+ * Either way the operator's own toggle wins from the first click.
  */
-export function StepTimeline({ steps }: { steps: TurnStep[] }) {
+export function StepTimeline({
+  steps,
+  defaultOpen = false,
+}: {
+  steps: TurnStep[];
+  defaultOpen?: boolean;
+}) {
   const failed = steps.filter((s) => s.status === "error").length;
   const hasError = failed > 0;
-  const [open, setOpen] = useState(hasError);
+  const [open, setOpen] = useState(defaultOpen || hasError);
 
   if (steps.length === 0) return null;
 

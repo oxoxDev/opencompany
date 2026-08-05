@@ -1,8 +1,10 @@
 import { useEffect, useRef } from "react";
 
+import type { TurnStep } from "@/api/types";
 import { cn } from "@/lib/utils";
 import { Avatar } from "./Avatar";
 import { MessageRow } from "./MessageRow";
+import { StepTimeline } from "./StepTimeline";
 import { channelTitle, type Channel, type TimelineEntry } from "./model";
 
 interface Props {
@@ -12,6 +14,13 @@ interface Props {
   openThreadId: string | null;
   /** Someone on the company side is composing a reply. */
   typing: boolean;
+  /**
+   * The tool rows of a turn running *right now* on this channel's thread, off
+   * the transient `tool_call` / `tool_result` / `thinking` frames. Present
+   * whether or not this console started the turn, which is the point — a turn
+   * an inbound message kicked off shows its work here too (issue #367).
+   */
+  liveSteps?: TurnStep[];
   onOpenThread: (messageId: string) => void;
   onReact: (messageId: string, emoji: string) => void;
 }
@@ -29,16 +38,20 @@ export function MessageTimeline({
   entries,
   openThreadId,
   typing,
+  liveSteps,
   onOpenThread,
   onReact,
 }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
+  const liveStepCount = liveSteps?.length ?? 0;
 
   useEffect(() => {
     const el = scroller.current;
     if (!el) return;
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [entries.length, typing]);
+    // Each new tool row grows the block at the bottom, so the scroll has to
+    // follow it as the turn works, not only when the reply lands.
+  }, [entries.length, typing, liveStepCount]);
 
   return (
     <div ref={scroller} className="flex-1 overflow-y-auto">
@@ -55,7 +68,11 @@ export function MessageTimeline({
             />
           </div>
         ))}
-        {typing && <TypingRow channel={channel} />}
+        {liveStepCount > 0 ? (
+          <LiveTurnRow channel={channel} steps={liveSteps ?? []} />
+        ) : (
+          typing && <TypingRow channel={channel} />
+        )}
       </div>
     </div>
   );
@@ -94,6 +111,30 @@ function ChannelIntro({ channel, empty }: { channel: Channel; empty: boolean }) 
           ? `This is the start of your direct message with ${channel.name} — ${lower(channel.purpose)}.`
           : `This is the very beginning of ${channelTitle(channel)}. ${sentence(channel.purpose)}`}
       </p>
+    </div>
+  );
+}
+
+/**
+ * What the company is doing right now, in place of the typing dots.
+ *
+ * Same avatar gutter as a message row so the work reads as coming from the
+ * voice that will answer, and the same {@link StepTimeline} the finished reply
+ * renders — so the rows do not re-draw differently the instant the turn ends.
+ */
+function LiveTurnRow({ channel, steps }: { channel: Channel; steps: TurnStep[] }) {
+  return (
+    <div className="flex items-start gap-2.5 px-4 py-1">
+      <Avatar
+        name={channel.voice ?? channel.name}
+        tone={channel.tone}
+        company={channel.kind === "channel" && channel.id === "main"}
+        className="size-9 shrink-0"
+      />
+      <div className="min-w-0 flex-1">
+        <StepTimeline steps={steps} defaultOpen />
+        <span className="sr-only">Working…</span>
+      </div>
     </div>
   );
 }

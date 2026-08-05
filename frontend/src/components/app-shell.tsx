@@ -493,6 +493,15 @@ export function AppShell({
           ],
         };
       });
+
+      // The reply is the end of that turn, so its live tool rows have served
+      // their purpose — the folded steps on the reply are the durable record.
+      // `onSendEnd` does this for a turn this console POSTed; a turn it did not
+      // has no send to end, and without this its rows would sit under the
+      // channel until the next turn on the same thread replaced them.
+      setLiveStepsByThread((prev) =>
+        prev[event.chatId]?.length ? { ...prev, [event.chatId]: [] } : prev,
+      );
     },
     // `useEvents` holds its callbacks in refs, so this identity churning as the
     // map lands cannot re-open the SSE stream.
@@ -652,6 +661,7 @@ export function AppShell({
               setTranscripts={setTranscripts}
               onSendStart={onSendStart}
               onSendEnd={onSendEnd}
+              liveStepsByThread={liveStepsByThread}
             />
           )}
           {view === "conversation" && (

@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { setInboxEnabled } from "@/api/inbox";
-import { ApiError, type TeamMemberDto } from "@/api/types";
+import { ApiError, type TeamMemberDto, type TurnStep } from "@/api/types";
 import { type ChatMessage, makeMessage } from "@/lib/chat";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { fromDto, newMember, starterTeam, type TeamMember } from "@/lib/team";
@@ -55,6 +55,13 @@ interface Props {
    */
   onSendStart?: (threadId: string) => void;
   onSendEnd?: (threadId: string) => void;
+  /**
+   * The in-flight tool timeline the shell folds out of the live turn frames,
+   * keyed by **host thread id** — so this view has to resolve its channel to a
+   * thread to read it (see `activeThreadId`). Covers turns this console never
+   * started, which is most of what issue #367 is about.
+   */
+  liveStepsByThread?: Record<string, TurnStep[]>;
 }
 
 /**
@@ -80,6 +87,7 @@ export function ChatView({
   setTranscripts,
   onSendStart,
   onSendEnd,
+  liveStepsByThread,
 }: Props) {
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [loadingTeam, setLoadingTeam] = useState(true);
@@ -246,6 +254,7 @@ export function ChatView({
   // `member.id` is, so a DM addresses that teammate the same way a desk
   // addresses its lead. It is also the id every live turn frame carries.
   const activeThreadId = active.kind === "channel" ? active.id : active.member?.id;
+  const liveSteps = activeThreadId ? liveStepsByThread?.[activeThreadId] : undefined;
 
   const append = (channelId: string, ...added: ChatMessage[]) =>
     setTranscripts((t) => ({ ...t, [channelId]: [...(t[channelId] ?? []), ...added] }));
@@ -437,6 +446,7 @@ export function ChatView({
               entries={entries}
               openThreadId={openThreadId}
               typing={sending && !openThreadId}
+              liveSteps={openThreadId ? undefined : liveSteps}
               onOpenThread={setOpenThreadId}
               onReact={react}
             />
