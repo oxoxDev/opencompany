@@ -12,10 +12,22 @@ import { initials as nameInitials, type TeamMember } from "@/lib/team";
  * the desk's name and the blurb falls back to its description — the id is
  * the one field that must survive untouched, since it doubles as the chat
  * thread id `send` addresses.
+ *
+ * `members` / `overlayMembers` come through as the host sent them, order
+ * included — `members[0]` is the desk's lead, and the rest is the hierarchy the
+ * company declared. Dropping them here is what made every channel show the
+ * whole company (issue #369).
  */
 export function deskFromDto(d: DeskDto): Desk {
   const slug = d.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  return { id: d.id, channel: slug || d.id, name: d.name, blurb: d.description ?? "" };
+  return {
+    id: d.id,
+    channel: slug || d.id,
+    name: d.name,
+    blurb: d.description ?? "",
+    members: d.members,
+    overlayMembers: d.overlayMembers,
+  };
 }
 
 /**
@@ -45,6 +57,17 @@ export interface Channel {
   tone?: string;
   /** The roster entry behind a DM, when there is one. */
   member?: TeamMember;
+  /**
+   * Who is in this channel, as roster teammate **ids** in the desk's own order
+   * (lead first). Ids rather than resolved `TeamMember`s so this model stays
+   * pure and a channel never goes stale when the roster reloads — resolve with
+   * {@link channelMembers}.
+   *
+   * Absent for DMs (a two-person line needs no list) and for the static
+   * fallback desks, which have no membership concept; a consumer that finds it
+   * absent falls back to the whole roster (issue #369).
+   */
+  memberIds?: string[];
 }
 
 export interface ChannelSection {
@@ -75,6 +98,7 @@ export function buildChannels(members: TeamMember[], desks: Desk[] = defaultDesk
     kind: "channel" as const,
     purpose: d.blurb,
     tone: d.tone,
+    memberIds: d.members,
   }));
 
   const dms: Channel[] = members.map((m) => ({
@@ -167,6 +191,25 @@ export function firstChannel(sections: ChannelSection[]): Channel | null {
     if (s.channels.length > 0) return s.channels[0];
   }
   return null;
+}
+
+/**
+ * A channel's own members, resolved against the roster — `null` when the
+ * channel names no membership (a DM, or a fallback desk), which is the caller's
+ * cue to fall back to the whole roster rather than draw an empty pane.
+ *
+ * Maps over the **ids**, not over the roster: the desk's order is meaningful —
+ * `memberIds[0]` is the lead — and filtering the roster would silently reorder
+ * everyone into roster order and lose that. An id with no roster row (a
+ * teammate removed since the desks were fetched) drops out rather than
+ * rendering a placeholder for somebody who isn't there.
+ */
+export function channelMembers(channel: Channel, roster: TeamMember[]): TeamMember[] | null {
+  if (!channel.memberIds) return null;
+  const byId = new Map(roster.map((m) => [m.id, m]));
+  return channel.memberIds
+    .map((id) => byId.get(id))
+    .filter((m): m is TeamMember => m !== undefined);
 }
 
 /** How a channel is titled in the header and the rail. */
