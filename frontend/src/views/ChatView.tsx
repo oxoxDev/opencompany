@@ -21,7 +21,6 @@ import {
   buildChannels,
   buildTimeline,
   channelTitle,
-  DEFAULT_CHANNEL,
   deskFromDto,
   dmChannelId,
   findChannel,
@@ -204,10 +203,13 @@ export function ChatView({
   }, [client, company]);
 
   const sections = useMemo(() => buildChannels(members, desks), [members, desks]);
-  const channel =
-    findChannel(sections, sub) ??
-    findChannel(sections, DEFAULT_CHANNEL) ??
-    firstChannel(sections);
+  // The hash's channel, else the first one that exists. There used to be a
+  // literal "main" between the two — an id only the *fallback* desks carry, so
+  // it matched nothing once a company's real desks loaded and matched the same
+  // channel `firstChannel` returns when they hadn't. It never selected anything
+  // the line below wouldn't; it only made "main" look like a real channel id
+  // (issue #368).
+  const channel = findChannel(sections, sub) ?? firstChannel(sections);
 
   const messages = channel ? (transcripts[channel.id] ?? []) : [];
   const entries = useMemo(
