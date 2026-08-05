@@ -771,26 +771,70 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
         // (see `RunWorkflowResponse` in `super::ops::workflows`). The stream is
         // operator-authenticated and company-scoped, like that response.
         //
-        // `runId` is deliberately not projected: it is always `None` today, so
-        // emitting it would put a permanently-null key on the wire.
+        // `runId` was not projected before issue #371, because it was always
+        // `None` and emitting it would have put a permanently-null key on the
+        // wire. Now every entry point mints one, and the console needs it: it is
+        // what ties this settle-frame to the progress frames it has been
+        // painting, so a cron run finishing mid-manual-run clears the right
+        // canvas. Still omitted when absent, for the pre-#371 rows.
         CompanyEvent::WorkflowRunFinished {
             workflow_id,
             scheduled,
+            run_id,
             deliveries,
             pending_approvals,
             error,
-            ..
         } => {
             let mut o = envelope("workflow_run_finished");
             o["workflowId"] = json!(workflow_id);
             o["scheduled"] = json!(scheduled);
             o["deliveries"] = json!(deliveries);
             o["pendingApprovals"] = json!(pending_approvals);
+            if let Some(run_id) = run_id {
+                o["runId"] = json!(run_id);
+            }
             // Omitted rather than null on a run that finished, so the console's
             // "did this fail?" check is a presence check.
             if let Some(error) = error {
                 o["error"] = json!(error);
             }
+            o
+        }
+        // Issue #371: the live half of per-node progress. This is what turns the
+        // console from "the button spins" into "node 3 of 6 just finished" —
+        // and it costs the wire nothing it did not already carry, because every
+        // projected field is structural.
+        //
+        // There is nothing to scrub here and that is by construction, not by
+        // omission: the events themselves carry no node output and no error
+        // text (see `CompanyEvent::WorkflowNodeFinished`), so this arm could not
+        // leak a payload even if it forwarded the event wholesale. Contrast the
+        // `workflow_run_finished` arm above, which has to *choose* what to
+        // forward because its event carries operator-only delivery rows.
+        CompanyEvent::WorkflowRunStarted {
+            workflow_id,
+            run_id,
+            scheduled,
+        } => {
+            let mut o = envelope("workflow_run_started");
+            o["workflowId"] = json!(workflow_id);
+            o["runId"] = json!(run_id);
+            o["scheduled"] = json!(scheduled);
+            o
+        }
+        CompanyEvent::WorkflowNodeFinished {
+            workflow_id,
+            run_id,
+            node_id,
+            status,
+            elapsed_ms,
+        } => {
+            let mut o = envelope("workflow_node_finished");
+            o["workflowId"] = json!(workflow_id);
+            o["runId"] = json!(run_id);
+            o["nodeId"] = json!(node_id);
+            o["status"] = json!(status);
+            o["elapsedMs"] = json!(elapsed_ms);
             o
         }
         // Not an attention signal, or carries a raw payload we never put on the
@@ -3002,6 +3046,91 @@ mod test {
         .expect("workflow_run_finished is an attention signal");
         assert_eq!(v["error"], "no inference source for agent node `worker`");
         assert_eq!(v["deliveries"].as_array().unwrap().len(), 0);
+    }
+
+    /// Issue #371: the live per-node trail. Both arms project, both carry the
+    /// run id that ties them to the run's settle-frame, and — the point — the
+    /// node arm carries a status and a duration and nothing else.
+    #[test]
+    fn projects_the_per_node_progress_trail() {
+        let started = super::project_event(&stored(CompanyEvent::WorkflowRunStarted {
+            workflow_id: "digest".into(),
+            run_id: "run-1".into(),
+            scheduled: true,
+        }))
+        .expect("workflow_run_started reaches the console");
+        assert_eq!(started["type"], "workflow_run_started");
+        assert_eq!(started["workflowId"], "digest");
+        assert_eq!(started["runId"], "run-1");
+        assert_eq!(started["scheduled"], true);
+
+        let node = super::project_event(&stored(CompanyEvent::WorkflowNodeFinished {
+            workflow_id: "digest".into(),
+            run_id: "run-1".into(),
+            node_id: "ceo".into(),
+            status: crate::ports::types::WorkflowNodeStatus::Error,
+            elapsed_ms: 1234,
+        }))
+        .expect("workflow_node_finished reaches the console");
+        assert_eq!(node["type"], "workflow_node_finished");
+        assert_eq!(node["runId"], "run-1");
+        assert_eq!(node["nodeId"], "ceo");
+        assert_eq!(node["status"], "error");
+        assert_eq!(node["elapsedMs"], 1234);
+
+        // The scrubbing claim, stated as a test: an errored node projects a
+        // status word and NOTHING that could carry the node's own words. The
+        // event type has no field to hold them, so this can only regress by
+        // widening the event — which is the point of keeping it closed.
+        let mut keys: Vec<&str> = node
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "atMillis",
+                "elapsedMs",
+                "nodeId",
+                "runId",
+                "seq",
+                "status",
+                "type",
+                "workflowId",
+            ],
+            "the node frame carries only structural fields: {node}"
+        );
+    }
+
+    /// Issue #371 also starts projecting the run id on the settle-frame — the
+    /// key that lets the console clear the right canvas when two runs overlap.
+    /// Still omitted for a pre-#371 row, so no permanently-null key appears.
+    #[test]
+    fn projects_the_run_id_on_a_finished_run_only_when_there_is_one() {
+        let with_id = super::project_event(&stored(CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".into(),
+            scheduled: false,
+            run_id: Some("run-9".into()),
+            deliveries: Vec::new(),
+            pending_approvals: Vec::new(),
+            error: None,
+        }))
+        .expect("projected");
+        assert_eq!(with_id["runId"], "run-9");
+
+        let legacy = super::project_event(&stored(CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".into(),
+            scheduled: false,
+            run_id: None,
+            deliveries: Vec::new(),
+            pending_approvals: Vec::new(),
+            error: None,
+        }))
+        .expect("projected");
+        assert!(legacy.get("runId").is_none(), "{legacy}");
     }
 
     #[test]
