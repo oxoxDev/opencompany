@@ -21,7 +21,8 @@ GET    /api/v1/companies/{id}                  status: charter, roster, budget b
 POST   /api/v1/companies/{id}/chat             operator message → event; SSE reply stream
 GET    /api/v1/companies/{id}/events?since=SEQ SSE stream of events/effects (work feed)
 GET    /api/v1/companies/{id}/approvals        pending approvals
-POST   /api/v1/companies/{id}/approvals/{aid}  { "verdict": "approve"|"deny", "note": "…" }
+POST   /api/v1/companies/{id}/approvals/{aid}  { "verdict": "approve"|"deny", "note": "…",
+                                               "detach": false }
 POST   /api/v1/companies/{id}/feedback         submit feedback (see feedback-loop/)
 GET    /api/v1/companies/{id}/feedback         past reports (no operator words)
 GET    /api/v1/companies/{id}/memory/traces    inspect working memory (debug)
@@ -31,6 +32,21 @@ POST   /api/v1/companies/{id}/pause            pause / resume lifecycle transiti
 
 Single-company (prosumer) mode aliases everything under `/api/v1/company/...`
 with no `{id}`.
+
+`detach` on the approval resolve chooses what the response waits for. Omitted
+(or `false`) it holds the response open for the agent's follow-up turn and
+answers with that cycle's messages — the long-standing contract, unchanged.
+Set, it answers `200 { "recorded": true, "alreadyResolved": bool }` as soon as
+the verdict is durable and the grant minted, and the continuation arrives on the
+`agent_reply` event-stream frame instead. `alreadyResolved` is a success: a
+second resolve of the same approval is an idempotent no-op that mints no second
+grant.
+
+Either way the resolve survives a dropped connection — the follow-up cycle runs
+on its own task, so it is no longer cancelled when a client or a reverse proxy
+gives up mid-turn. `detach` removes the *wait*; it is not what provides the
+drop-safety. See
+[company-brain/approvals.md](../company-brain/approvals.md#settling-the-verdict-is-not-running-the-follow-up).
 
 ## Console write plane (`src/server/ops/`)
 

@@ -52,6 +52,33 @@ effect emitted ─▶ evaluate ─▶ Allow ─▶ execute, journal
   is a no-op with a fixed reply. It writes no journal record and runs no
   follow-up cycle.
 
+### Settling the verdict is not running the follow-up
+
+Resolving is two halves with very different durations, and the runtime keeps
+them apart:
+
+1. **Settle** — record the verdict, journal it, mint the grant (or execute the
+   native effect). Milliseconds. When it returns, the operator's decision is
+   permanent.
+2. **Follow-up cycle** — a full agent turn, so the brain learns the verdict and
+   re-issues the granted call. Can take minutes.
+
+The follow-up always runs on its **own task**, which the resolve then awaits.
+That makes it drop-safe: a client that disappears mid-turn — a closed tab, or a
+reverse proxy giving up on a slow upstream — abandons the *waiting*, not the
+work. Fused, the two halves meant a dropped connection cancelled the
+re-dispatch after the grant had already been spent, so the operator's approval
+bought nothing and the conversation never resumed.
+
+A resolve can also **detach** (`"detach": true`), answering the moment the
+verdict is durable rather than holding the response open for the turn. The
+continuation then arrives on the event stream's `agent_reply` frame. The
+blocking form remains the default and its response body is unchanged.
+
+A follow-up cycle that *fails* is logged host-side and leaves a recoverable
+state, never a stranded one: the verdict and grant are already durable, and
+re-approving is the idempotent no-op above, so a retry mints no second grant.
+
 ## Approving a blocked tool call: single-use grants
 
 Two different things park on this queue and they need opposite treatment.
