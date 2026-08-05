@@ -186,6 +186,17 @@ pub enum OpenCompanyError {
         message: String,
     },
 
+    /// A spawned background task the caller was waiting on panicked or was
+    /// aborted, so its result never arrived (issue #383).
+    ///
+    /// Distinct from a failure *inside* that work, which reports itself through
+    /// its own variant. This one means the work's outcome is unknown — the
+    /// caller's wait ended without an answer. On the approval path the verdict
+    /// it settled is already durable regardless; only the follow-up cycle is
+    /// unaccounted for.
+    #[error("background work did not complete: {0}")]
+    BackgroundTask(String),
+
     /// A port method has no implementation in the current build.
     #[error("port not implemented: {0}")]
     Unimplemented(&'static str),
@@ -252,6 +263,7 @@ impl OpenCompanyError {
             Self::Orchestration { code, .. } => code.clone(),
             Self::Tinyplace { code, .. } => format!("tinyplace_{code}"),
             Self::TinyHumans { code, .. } => format!("tinyhumans_{code}"),
+            Self::BackgroundTask(_) => "background_task".to_string(),
             Self::Unimplemented(_) => "unimplemented".to_string(),
             #[cfg(feature = "openhuman")]
             Self::Harness(_) => "harness_error".to_string(),
