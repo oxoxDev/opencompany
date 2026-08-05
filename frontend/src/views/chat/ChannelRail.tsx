@@ -146,7 +146,10 @@ function ChannelRow({
       <ChannelIcon channel={channel} />
       <span className="min-w-0 flex-1 truncate">{channel.name}</span>
       {hasUnread && (
-        <span className="shrink-0 rounded-full bg-primary px-1.5 text-[10px] font-semibold leading-4 text-primary-foreground">
+        <span
+          data-testid="channel-unread"
+          className="shrink-0 rounded-full bg-primary px-1.5 text-[10px] font-semibold leading-4 text-primary-foreground"
+        >
           {unread > 99 ? "99+" : unread}
         </span>
       )}
