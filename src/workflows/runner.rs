@@ -1765,6 +1765,31 @@ to = "done"
             .collect();
         assert!(nodes.contains(&&"ceo".to_string()), "{nodes:?}");
         assert!(!nodes.contains(&&"done".to_string()), "{nodes:?}");
+
+        // **The failing node names itself.** A node that dies under the default
+        // `stop` policy still reports a step, with `Error` status, before the
+        // run ends — so failure attribution on the canvas is exact rather than
+        // inferred from "the last node we saw running". Worth pinning: if the
+        // engine ever stopped reporting the failing step, the console would
+        // silently fall back to guessing, and nothing else would notice.
+        let statuses: Vec<(&String, &WorkflowNodeStatus)> = journal
+            .iter()
+            .filter_map(|e| match e {
+                CompanyEvent::WorkflowNodeFinished {
+                    node_id, status, ..
+                } => Some((node_id, status)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![
+                (&"ceo".to_string(), &WorkflowNodeStatus::Ok),
+                (&"fetch".to_string(), &WorkflowNodeStatus::Error),
+            ],
+            "the node that failed must be reported as the errored one"
+        );
+
         // Every row shares the caller's id, so the `WorkflowRunFinished` the
         // caller journals for this failure groups with them.
         for event in &journal {
