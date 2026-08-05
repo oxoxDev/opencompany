@@ -243,11 +243,55 @@ pub struct DeliveryReport {
     pub reason: DeliveryReason,
 }
 
+/// What the *caller* knows about a run that the runner cannot work out for
+/// itself (issue #371).
+///
+/// # Why the entry point mints the id rather than the runner
+///
+/// The run id correlates a run's progress events with its outcome, and the
+/// outcome is journaled by the **caller** —
+/// [`record_run_finished`](crate::runtime::record_run_finished) — on *both*
+/// arms. On the error arm the runner returns nothing at all, so a runner-minted
+/// id would be lost exactly when it is most needed: a failed run's node events
+/// would be orphaned from the `WorkflowRunFinished` that carries the reason it
+/// failed, and the console could not say how far the run got before it died.
+/// Minting here, above the call, is what makes the two halves share one id on
+/// every path.
+///
+/// This is a **crate-internal port type**, not a wire type: it has no serde
+/// impl and no HTTP surface. Adding it to
+/// [`WorkflowRunner::run`](WorkflowRunner::run) makes the compiler enumerate
+/// every entry point, which is the whole point — an entry point that forgot to
+/// mint an id would silently journal an uncorrelatable run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkflowRunContext {
+    /// The correlation id for this run, minted by the entry point.
+    pub run_id: String,
+    /// Whether a cron schedule started this run rather than an operator. Rides
+    /// the run's [`WorkflowRunStarted`](crate::ports::types::CompanyEvent)
+    /// event so the console can tell a nobody-was-watching run from a Run-button
+    /// one *while it is happening*, not only once it settles.
+    pub scheduled: bool,
+}
+
+impl WorkflowRunContext {
+    /// A context with a freshly minted run id.
+    ///
+    /// `scheduled` says whether a cron started the run rather than an operator.
+    pub fn new(scheduled: bool) -> Self {
+        Self {
+            run_id: crate::ports::ids::generate_id(),
+            scheduled,
+        }
+    }
+}
+
 /// Runs a company's workflow graph to completion.
 ///
 /// `company` names the tenant whose roster the run's agent nodes execute on;
 /// `workflow` is the parsed graph; `input` is the trigger payload (an arbitrary
-/// JSON value seeded as the trigger node's item).
+/// JSON value seeded as the trigger node's item); `ctx` carries the caller's run
+/// id and whether a cron started the run.
 #[async_trait]
 pub trait WorkflowRunner: Send + Sync {
     /// Runs `workflow` for `company` with the trigger `input`, returning the
@@ -257,5 +301,6 @@ pub trait WorkflowRunner: Send + Sync {
         company: &CompanyId,
         workflow: &WorkflowFile,
         input: Value,
+        ctx: &WorkflowRunContext,
     ) -> Result<WorkflowRun>;
 }

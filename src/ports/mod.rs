@@ -61,7 +61,7 @@ pub use types::*;
 pub use usage::{SampleKind, UsageMeter, UsageSample};
 pub use users::{InviteRecord, UserRecord, UserRole, UserStatus, UserStore, normalize_email};
 pub use workflow_runner::{
-    DeliveryReason, DeliveryReport, DeliveryStatus, WorkflowRun, WorkflowRunner,
+    DeliveryReason, DeliveryReport, DeliveryStatus, WorkflowRun, WorkflowRunContext, WorkflowRunner,
 };
 pub use workspace::{NodeKind, WorkspaceNode, WorkspaceStore};
 
