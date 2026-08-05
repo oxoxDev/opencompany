@@ -1,4 +1,4 @@
-import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Background,
   BackgroundVariant,
@@ -66,6 +66,10 @@ import {
 
 const NODE_TYPES = { oc: WorkflowNode };
 
+/** A stable empty default for `runEvents`, so an omitted prop does not hand the
+ * fold a fresh array identity on every render. */
+const EMPTY_RUN_EVENTS: CompanyStreamEvent[] = [];
+
 /** Horizontal gap between layers and vertical gap between nodes in a layer. */
 const COL_GAP = 300;
 const ROW_GAP = 150;
@@ -81,7 +85,7 @@ export function WorkflowsView({
   client,
   company,
   runEventTick = 0,
-  runEvent = null,
+  runEvents = EMPTY_RUN_EVENTS,
 }: {
   client: OpenCompanyClient;
   company: string | null;
@@ -93,14 +97,19 @@ export function WorkflowsView({
    */
   runEventTick?: number;
   /**
-   * The latest workflow run frame off the SSE stream (issue #371) — a run
-   * starting, a node finishing, or a run settling.
+   * A rolling window of workflow run frames off the SSE stream (issue #371) —
+   * runs starting, nodes finishing, runs settling.
    *
-   * Unlike `runEventTick` this carries the payload, because the canvas paints
+   * Unlike `runEventTick` these carry the payload, because the canvas paints
    * per-node state and a counter cannot say which node of which run just
    * finished. The two coexist: the tick still drives the history refetch.
+   *
+   * A **window**, not a latest-event slot: two frames routinely arrive inside
+   * one React batch, and a slot drops the earlier one. The canvas state is
+   * folded from the window rather than accumulated frame by frame, so a
+   * coalesced render can never lose a node.
    */
-  runEvent?: CompanyStreamEvent | null;
+  runEvents?: CompanyStreamEvent[];
 }) {
   const { resolvedTheme } = useTheme();
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
@@ -150,15 +159,10 @@ export function WorkflowsView({
   // Bumped by the conflict banner's Reload, to re-fetch the selected graph (and
   // with it a fresh `version`) without changing the selection.
   const [graphTick, setGraphTick] = useState(0);
-  // Issue #371: what the run currently on screen has done, per node.
-  //
-  // `liveRunId` is the run these states belong to. It exists because a company
-  // can have two runs in flight — an operator pressing Run while a cron fire is
-  // mid-graph — and both stream onto the same SSE connection. Without it, the
-  // cron run's node frames would repaint the canvas the operator is watching.
-  const [liveRunId, setLiveRunId] = useState<string | null>(null);
-  const [nodeRunState, setNodeRunState] = useState<Record<string, NodeRunState>>({});
-  const [nodeElapsed, setNodeElapsed] = useState<Record<string, number>>({});
+  // Issue #371: the frontier painted between pressing Run and the first frame
+  // arriving, so the canvas answers the click immediately. Cleared as soon as
+  // the fold below has a run of its own to show.
+  const [optimistic, setOptimistic] = useState<Record<string, NodeRunState> | null>(null);
   // A past run selected from the history panel, overlaid on the canvas. When
   // set it WINS over the live state — the operator asked to look at that run.
   // This is what makes a scheduled run's failure point visible after the fact,
@@ -172,6 +176,10 @@ export function WorkflowsView({
   // journaled gets them the same per-node answer, just at the end instead of
   // during. Cleared as soon as it is used, or when live frames made it moot.
   const [awaitingRunId, setAwaitingRunId] = useState<string | null>(null);
+  // Run ids the live fold has actually seen frames for. The fallback above
+  // consults it so a console WITH a working stream never double-paints a run it
+  // already watched, and one without it still gets the journaled answer.
+  const liveRanRef = useRef<Set<string>>(new Set());
 
   // Load the workflow list once, and auto-select the first entry.
   useEffect(() => {
@@ -272,11 +280,11 @@ export function WorkflowsView({
           const mine = rows.find((r) => r.runId === awaitingRunId);
           if (mine) {
             setAwaitingRunId(null);
-            setNodeRunState((prev) => {
-              const reported = Object.values(prev).some((st) => st !== "running");
-              if (!reported && (mine.nodes?.length ?? 0) > 0) setOverlayRun(mine);
-              return prev;
-            });
+            // Only when the live fold never adopted this run — i.e. no frame
+            // for it ever arrived. With a live stream this is a no-op.
+            if (!liveRanRef.current.has(mine.runId ?? "") && (mine.nodes?.length ?? 0) > 0) {
+              setOverlayRun(mine);
+            }
           }
         }
       } catch (e) {
@@ -303,8 +311,7 @@ export function WorkflowsView({
     // the first frame. The `workflow_run_started` frame re-sets the same thing
     // a moment later, which is idempotent.
     setOverlayRun(null);
-    setNodeElapsed({});
-    setNodeRunState(graph ? initialRunState(graph) : {});
+    setOptimistic(graph ? initialRunState(graph) : null);
     // Trimmed once here so the echoed request and the payload the host receives
     // can never disagree.
     const asked = request.trim();
@@ -327,13 +334,9 @@ export function WorkflowsView({
       // A run that failed is journaled too (#228), and is the outcome most
       // worth finding again later — so refresh the history on this path as well.
       setRunsTick((n) => n + 1);
-      // Nothing is executing any more. Drop the derived marks so a failed run
-      // does not leave a node pulsing "running" forever; the reported ok/error
-      // ones stay, because they are how far it got.
-      setNodeRunState((prev) =>
-        Object.fromEntries(Object.entries(prev).filter(([, st]) => st !== "running")),
-      );
-      setLiveRunId(null);
+      // Drop the optimistic frontier so a failed run does not leave a node
+      // pulsing "running" forever. The fold owns anything actually reported.
+      setOptimistic(null);
     } finally {
       setRunning(false);
     }
@@ -412,93 +415,45 @@ export function WorkflowsView({
     toast.success("Workflow created.");
   }, []);
 
-  // Issue #371: fold the live SSE progress frames into per-node canvas state.
+  // Issue #371: the live canvas state, FOLDED from the frame window rather than
+  // accumulated frame by frame.
   //
-  // Everything here is guarded on the frame belonging to the workflow on screen
-  // AND (after the start) to the run we adopted, because one SSE connection
-  // carries every run of every workflow in the company.
-  useEffect(() => {
-    if (!runEvent || !selectedId) return;
+  // A fold is what makes this correct under React batching: several frames can
+  // land in one render, and an accumulating reducer would see only the last —
+  // losing a `workflow_run_started` that way strands every node frame behind
+  // it. Recomputing from the window instead has no such state to lose.
+  const liveRun = useMemo(
+    () => foldLiveRun(runEvents, selectedId, graph),
+    [runEvents, selectedId, graph],
+  );
 
-    switch (runEvent.type) {
-      case "workflow_run_started": {
-        if (runEvent.workflowId !== selectedId) return;
-        // Adopt this run and start from a clean canvas. A rerun must not leave
-        // the previous run's marks behind — they would read as this run's.
-        setLiveRunId(runEvent.runId);
-        setOverlayRun(null);
-        // The trigger fired by definition — the run exists — and the engine
-        // reports no step for it, so nothing else would ever mark it. Its
-        // successors are where execution is now.
-        setNodeRunState(graph ? initialRunState(graph) : {});
-        setNodeElapsed({});
-        return;
-      }
-      case "workflow_node_finished": {
-        if (runEvent.workflowId !== selectedId || runEvent.runId !== liveRunId) return;
-        const finished = runEvent.nodeId;
-        // Trust the host's word, but do not let an unknown one paint a node as
-        // succeeded: anything that is not "ok" is treated as a failure.
-        const state: NodeRunState = runEvent.status === "ok" ? "ok" : "error";
-        setNodeRunState((prev) => {
-          const next = { ...prev, [finished]: state };
-          // Advance the frontier. Only a successful node hands execution on —
-          // a failed one under the default `stop` policy ends the run, and
-          // lighting up its successors would claim work that never happened.
-          if (state === "ok" && graph) {
-            for (const id of successorsOf(graph, finished)) {
-              if (!next[id]) next[id] = "running";
-            }
-          }
-          return next;
-        });
-        setNodeElapsed((prev) => ({ ...prev, [finished]: runEvent.elapsedMs }));
-        return;
-      }
-      case "workflow_run_finished": {
-        if (runEvent.workflowId !== selectedId) return;
-        // A pre-#371 host sends no runId; treat that as "the run on screen"
-        // rather than ignoring it, else the canvas would spin forever.
-        if (runEvent.runId && liveRunId && runEvent.runId !== liveRunId) return;
-        // Clear the derived "running" marks — nothing is executing any more —
-        // but KEEP the reported ok/error ones. That residue is the answer to
-        // "how far did it get?", and it stays until a reselect or a rerun.
-        setNodeRunState((prev) =>
-          Object.fromEntries(
-            Object.entries(prev).filter(([, state]) => state !== "running"),
-          ),
-        );
-        setLiveRunId(null);
-        return;
-      }
-      default:
-        return;
-    }
-    // `graph` is read inside, but is deliberately NOT a dependency: a graph
-    // re-fetch mid-run would replay the last frame and could resurrect cleared
-    // marks. The selection effect below is what resets state on a graph change.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runEvent, selectedId, liveRunId]);
+  // The optimistic frontier is only for the gap before the first frame. Once
+  // the fold has adopted a run, it is the authority — and that run is recorded
+  // so the no-stream fallback knows it was watched live.
+  useEffect(() => {
+    if (!liveRun) return;
+    liveRanRef.current.add(liveRun.runId);
+    setOptimistic(null);
+  }, [liveRun]);
 
   // Switching workflow (or company) clears the canvas: another graph's node ids
   // are meaningless here, and a stale mark on a same-named node would be a lie.
   useEffect(() => {
-    setNodeRunState({});
-    setNodeElapsed({});
-    setLiveRunId(null);
+    setOptimistic(null);
     setOverlayRun(null);
   }, [selectedId, company]);
 
-  // What the canvas actually paints. An overlaid past run wins over the live
-  // state — selecting a history row is an explicit "show me that one".
-  const paintedStates = useMemo<Record<string, NodeRunState>>(
-    () => (overlayRun ? statesFromRun(overlayRun) : nodeRunState),
-    [overlayRun, nodeRunState],
-  );
-  const paintedElapsed = useMemo<Record<string, number>>(
-    () => (overlayRun ? elapsedFromRun(overlayRun) : nodeElapsed),
-    [overlayRun, nodeElapsed],
-  );
+  // What the canvas actually paints, in priority order: a past run the operator
+  // explicitly asked to see, else the live fold, else the optimistic frontier.
+  const paintedStates = useMemo<Record<string, NodeRunState>>(() => {
+    if (overlayRun) return statesFromRun(overlayRun);
+    if (liveRun) return liveRun.states;
+    return optimistic ?? {};
+  }, [overlayRun, liveRun, optimistic]);
+  const paintedElapsed = useMemo<Record<string, number>>(() => {
+    if (overlayRun) return elapsedFromRun(overlayRun);
+    return liveRun?.elapsed ?? {};
+  }, [overlayRun, liveRun]);
 
   const { nodes, edges } = useMemo(
     () =>
@@ -733,11 +688,7 @@ export function WorkflowsView({
               <span className="text-xs">
                 Showing the {overlayRun.scheduled ? "scheduled" : "manual"} run from{" "}
                 {new Date(overlayRun.atMillis).toLocaleString()}
-                {overlayRun.error
-                  ? failedNodeOf(overlayRun)
-                    ? ` — it failed at “${nodeName(graph, failedNodeOf(overlayRun)!)}”.`
-                    : " — it failed before any node ran."
-                  : "."}{" "}
+                {overlayRun.error ? ` — ${failureLocation(overlayRun, graph)}` : "."}{" "}
                 Unmarked nodes were never reached.
               </span>
               <Button size="sm" variant="outline" onClick={() => setOverlayRun(null)}>
@@ -1434,6 +1385,92 @@ function NodeResultCard({ node }: { node: NodeResult }) {
   );
 }
 
+/** The result of folding the SSE frame window down to one run's canvas state. */
+interface LiveRun {
+  runId: string;
+  states: Record<string, NodeRunState>;
+  elapsed: Record<string, number>;
+  /** False once the run has settled — its ok/error marks stay, its running ones go. */
+  active: boolean;
+}
+
+/** Folds the run-progress frame window (issue #371) into the canvas state for
+ * the workflow on screen.
+ *
+ * Pure, and recomputed from scratch on every window change. That is the point:
+ * an accumulating reducer loses frames that arrive inside one React batch,
+ * which for a graph with a sub-millisecond transform node is the normal case.
+ *
+ * Only the MOST RECENT run of the selected workflow is folded, and every frame
+ * is matched on its run id. One SSE connection carries every run in the
+ * company, so without that a cron fire would repaint a canvas an operator is
+ * watching, and two concurrent runs of the same graph would interleave into one
+ * incoherent picture. */
+function foldLiveRun(
+  events: CompanyStreamEvent[],
+  selectedId: string | null,
+  graph: WorkflowGraph | null,
+): LiveRun | null {
+  if (!selectedId || !graph) return null;
+
+  // The last start for this workflow wins — a rerun supersedes the run before.
+  let startIndex = -1;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.type === "workflow_run_started" && e.workflowId === selectedId) {
+      startIndex = i;
+      break;
+    }
+  }
+  if (startIndex === -1) return null;
+  const started = events[startIndex];
+  if (started.type !== "workflow_run_started") return null;
+
+  const runId = started.runId;
+  // The trigger fired by definition, and the engine reports no step for it, so
+  // nothing else would ever mark it. Its successors are where execution is now.
+  const states = initialRunState(graph);
+  const elapsed: Record<string, number> = {};
+  let active = true;
+
+  for (let i = startIndex + 1; i < events.length; i++) {
+    const e = events[i];
+    if (e.type === "workflow_node_finished") {
+      if (e.runId !== runId) continue;
+      // Anything that is not "ok" is treated as a failure: an unknown status
+      // word from a newer host must never paint a node as succeeded.
+      const state: NodeRunState = e.status === "ok" ? "ok" : "error";
+      states[e.nodeId] = state;
+      elapsed[e.nodeId] = e.elapsedMs;
+      // Advance the frontier. Only a successful node hands execution on — a
+      // failed one under the default `stop` policy ends the run, and lighting
+      // up its successors would claim work that never happened.
+      if (state === "ok") {
+        for (const id of successorsOf(graph, e.nodeId)) {
+          if (!states[id]) states[id] = "running";
+        }
+      }
+      continue;
+    }
+    if (e.type === "workflow_run_finished" && e.workflowId === selectedId) {
+      // A pre-#371 host sends no runId; treat that as "the run on screen"
+      // rather than ignoring it, else the canvas would spin forever.
+      if (!e.runId || e.runId === runId) active = false;
+    }
+  }
+
+  if (!active) {
+    // Nothing is executing any more, so the derived marks go. The REPORTED
+    // ok/error ones stay — they are the answer to "how far did it get?" — until
+    // a reselect or a rerun.
+    for (const [id, state] of Object.entries(states)) {
+      if (state === "running") delete states[id];
+    }
+  }
+
+  return { runId, states, elapsed, active };
+}
+
 /** A node's display name, falling back to its id when the graph is not loaded
  * (a company switch mid-overlay) — never a blank quote. */
 function nodeName(graph: WorkflowGraph | null, nodeId: string): string {
@@ -1481,6 +1518,28 @@ function elapsedFromRun(run: WorkflowRunOutcome): Record<string, number> {
   const out: Record<string, number> = {};
   for (const node of run.nodes ?? []) out[node.nodeId] = node.elapsedMs;
   return out;
+}
+
+/** Where a failed run stopped, in plain words (issue #371).
+ *
+ * Three genuinely different cases, and collapsing them fabricates precision:
+ *
+ * * a node reported `error` — the engine names it, so say it exactly;
+ * * nodes ran but none errored — an **interrupted** run, whose synthetic
+ *   outcome was written by the boot sweep and belongs to no node. Saying "it
+ *   failed at X" here would blame a node that succeeded, and saying "before any
+ *   node ran" would contradict the marks on the canvas;
+ * * nothing ran at all — a graph that would not compile, or a capability that
+ *   could not be built.
+ */
+function failureLocation(run: WorkflowRunOutcome, graph: WorkflowGraph | null): string {
+  const failed = failedNodeOf(run);
+  if (failed) return `it failed at “${nodeName(graph, failed)}”.`;
+  const ran = run.nodes?.length ?? 0;
+  if (ran > 0) {
+    return `it stopped after ${ran} node${ran === 1 ? "" : "s"}, without any of them reporting a failure.`;
+  }
+  return "it failed before any node ran.";
 }
 
 /** The node a run failed at, when its trail names one (issue #371).
