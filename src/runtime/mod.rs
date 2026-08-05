@@ -75,7 +75,7 @@ pub use registry::CompanyRegistry;
 pub use scheduler::{Clock, CompanyScheduler, FakeClock, SystemClock};
 pub use tools::StubToolProvider;
 pub use types::{ApprovalSummary, CompanyStatus, CycleReport};
-pub use workflow_outcome::record_run_finished;
+pub use workflow_outcome::{record_run_finished, sweep_interrupted_runs};
 pub use workflow_scheduler::WorkflowScheduler;
 
 // The assembly struct lives under `company/` to match the `ports.md` sketch
