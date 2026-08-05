@@ -9,6 +9,8 @@ system sits behind a port trait.
 Supporting docs:
 
 - [ports.md](ports.md) — the port trait contracts (normative)
+- [events.md](events.md) — the `CompanyEvent` vocabulary those ports carry, and
+  the run/task/approval correlation rules a journal reader folds on
 - [manifest.md](manifest.md) — `company.toml` schema
 - [lifecycle.md](lifecycle.md) — company state machine and durability
 - [rebuild.md](rebuild.md) — replacing a registered runtime in place (quiesce →

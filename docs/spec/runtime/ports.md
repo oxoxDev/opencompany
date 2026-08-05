@@ -147,7 +147,8 @@ pub trait CompanyStore: Send + Sync {
 
 ## EventLog
 
-Append-only, replayable. Boot replays the tail to rebuild in-flight state.
+Append-only, replayable, single-writer per company. Boot replays the tail to
+rebuild in-flight state.
 
 ```rust
 // src/ports/events.rs
@@ -159,205 +160,22 @@ pub trait EventLog: Send + Sync {
 }
 ```
 
-`CompanyEvent` variants: `OperatorMessage`, `WebhookReceived`,
-`ScheduleFired`, `A2aTaskReceived`, `ApprovalResolved`, `FeedbackFiled`,
-`PaymentReceived`, `LifecycleChanged`, `AgentReply`, `MemoryFactDeleted`,
-`TaskDispatched`, `McpCallFailed`, `WorkflowCreated` (a new saved workflow
-graph was authored + enabled via the console `POST …/workflows` route or the
-orchestrator's `create_workflow` tool; journaled best-effort after persist),
-`TaskSteered` (an operator paused, cancelled, or redirected an in-flight task
-or delegation), `DeskTaskCompleted` (a dispatched board task finished its run —
-the terminal anchor a per-task timeline ends on; "completed" means the run
-stopped, not that it succeeded, and `column` carries where the card landed),
-`TaskDiscussionPosted` (a human posted to a card's discussion thread, issue
-#335 — the Discussion tab's whole store, folded back out by
-`GET …/tasks/{task_id}` beside that card's timeline).
+**The `CompanyEvent` vocabulary lives in
+[`events.md`](events.md)** — every variant, the additive-serialization contract
+they all share, and the correlation rules that fold a company-scoped journal
+back into per-task, per-approval and per-run views:
 
-### Per-task event correlation (issue #185)
+* [Variants](events.md#variants)
+* [Per-task event correlation (issue #185)](events.md#per-task-event-correlation-issue-185)
+* [Per-task approval correlation (issue #333)](events.md#per-task-approval-correlation-issue-333)
+* [What a retry would repeat (issue #351)](events.md#what-a-retry-would-repeat-issue-351)
+* [Workflow run progress (issue #371)](events.md#workflow-run-progress-issue-371)
 
-The journal is company-scoped, so the events a dispatch *produces* cannot be
-filtered back to their task by shape alone. `AgentReply` and `McpCallFailed`
-therefore carry an optional `task_id`, stamped by the harness when the
-producing turn ran inside a `TaskDispatched` cycle and absent for an ordinary
-chat turn. Together with the `TaskDispatched` / `DeskTaskCompleted` anchors,
-that is what `GET …/tasks/{task_id}` filters on to assemble a task's timeline.
+It was split out (issue #371) because this file had grown past the repo's
+500-line cap for a Markdown file, and the event vocabulary is the half that
+keeps growing: this file owns the port *traits*, that one owns the *payloads*
+they carry.
 
-Both fields are additive — `#[serde(default, skip_serializing_if = …)]` — so
-every already-persisted event loads unchanged and an untagged event serializes
-byte-for-byte as it did before the field existed. No stored log needs
-migrating, and the cross-backend export/import round-trip is unaffected.
-
-`TaskRecord` gains `parent_task_id` on the same contract, recording the
-task-to-task edge that `origin_chat_id` (a *conversation*, shared by every
-sibling spawned in that thread, and absent entirely on a board-native card)
-cannot express. It is the parent half of the Task Detail screen's lineage.
-
-`OutboundMessage` gains `task_id` on the same contract (issue #246): the card a
-chat turn **opened**, so the console can say a card exists instead of leaving an
-operator to notice it on the board. It is journaled onto that turn's
-`AgentReply.task_id`, which widens that field's meaning from "the dispatch that
-produced this reply" to "the card this reply is about" — a card-creating reply
-now also appears on that card's timeline, which is the lineage an operator
-wants and costs no schema change. A turn that opens several cards reports the
-**first**: the journal field is a single optional id, and widening it would
-break the byte-identical round-trip, so the claim is incomplete but never wrong.
-Both `chat/history` surfaces (REST and GraphQL) project it from the shared
-`MessageView`, so the chip survives a transcript reload on either.
-
-### Per-task approval correlation (issue #333)
-
-`ApprovalResolved` carries an id, a verdict and an actor — never a task — so
-the same problem reaches the approval queue, and worse: a *parked* approval has
-no event at all. A task's Approvals tab could therefore only filter the
-timeline for resolutions that happened to fall inside the card's run window,
-which showed nothing while an approval was actually waiting and let a second
-card worked in that window absorb the first's sign-offs.
-
-The link is recorded where the approval is: the runtime journal's
-`ApprovalParked` record gains a `task` field, stamped by the cycle that parked
-the effect. A cycle knows which card it is working from its own trigger
-events — a `TaskDispatched`, or an `ApprovalResolved` whose approval was itself
-parked for a card, which is how a run needing two sign-offs keeps the link
-through the first.
-
-`task` is a two-armed link, not an optional id, and the distinction is the
-whole correctness of the feature:
-
-| On disk | Means | Read side |
-| --- | --- | --- |
-| `{"link":"task","id":"t-1"}` | that card owns it | shows on `t-1`, and only there |
-| `{"link":"unlinked"}` | no card owns it | shows on no card |
-| *absent* | written before #333 | falls back to the run window |
-
-An optional id collapses the middle row into the last one, and the middle row
-is not an edge case: every workflow delivery, operator-chat turn and scheduler
-tick parks unlinked. Treating those as "unknown" sends each of them to whatever
-card happened to be running, along with that card's `waitingSince` — the exact
-misattribution this issue exists to end. So a host from #333 onward always
-writes one of the first two, and absence means one thing only.
-
-#### Which key is authoritative
-
-Two keys correlate an approval to work, and they are kept **both**:
-`Effect.run_id` (issue #242) is **attempt-level**, and `ApprovalParked.task` is
-**card-level**. The read side resolves them in this order:
-
-```text
-card = if let Some(run_id) = effect.run_id { run_store.get(run_id).task_id }  // authoritative
-       else { approval_parked.task }                                          // fallback
-// neither recorded → genuinely unlinked, and NOT the run-window fallback
-```
-
-`run_id` wins wherever it is present because a `RunRecord` names its card, so a
-run id resolves to a task — while a task id can never say which *attempt*
-parked an approval. #183 settled that repeat trips through review are normal,
-so two attempts on one card is the expected case, and only `run_id` separates
-them.
-
-It cannot be the only key, though: `run_id` is `None` by design for every park
-with no attempt behind it — a chat turn, a workflow delivery, a scheduler tick,
-and the hosted brain's own gate — whereas `task` is stamped in
-`CycleHostImpl::park`, which *every* park path passes through. Neither key is a
-superset of the other, so "pick one" is not available. The card-level key also
-inherits through a resolution (an `ApprovalResolved` whose approval was itself
-parked for a card keeps that card), which the attempt-level one does not do.
-
-This is why the three-state link above is load-bearing rather than pedantic:
-with two keys, "unlinked because chat-parked — no run and no card" has to stay
-distinguishable from "not stamped because it predates #333", and only the
-second may fall back to the run window.
-
-A batch is ambiguous — and stamps nothing — when it names two different cards,
-or when it carries a card's dispatch alongside a turn that is its own work (an
-operator message, a webhook, a schedule tick, an inbound A2A task, or a
-resolution of an approval known to belong to no card). A cycle is a unit of
-batching, not of work, so "the card this cycle is for" is only well defined
-when nothing else rides along. Issue #357 guards the same seam per *attempt*
-with a queue-position boundary; this rule only has to stop the cross-turn leak.
-
-The journal keeps a per-approval origin index (park instant, effect kind,
-task link) because the parked effect is dropped from the queue on resolution
-and nothing else can answer what a resolved approval was.
-`GET …/tasks/{task_id}` returns `approvals[]` from it, joined by id.
-
-**That index is unbounded.** It holds one entry per approval ever parked, for
-the life of the process, and is never pruned — resolution and expiry remove the
-queue entry but deliberately not the origin. #333 widens each entry from a
-`u64` to a `u64` plus two `String`s (the effect kind, and the task id when
-linked). No journal rotation exists today, so replaying every `ApprovalParked`
-line on `load` is the only path to rebuild it, and it is the correct one. If
-rotation is ever added, this index is the first thing that must survive it: a
-rotated-away park line silently makes its approval unreadable.
-
-The field is additive on the same contract as the rest — a pre-#333 line
-replays with no link and keeps the old run-window correlation, so existing
-history still renders.
-
-### What a retry would repeat (issue #351)
-
-Re-entering a run re-runs its effects, and the two facts needed to warn about
-that already existed separately: the gate classifies `Sign` / `Publish` /
-`Identity` / capped `Spend` / first-contact `Send` as the effects it refuses to
-wave through, and the journal's executed-key set records what was committed to
-run. Neither reached the operator, because the key is opaque — it answers "has
-this run?" and nothing else.
-
-`EffectExecuted` therefore carries an optional `ExecutedEffect` alongside the
-key: the effect kind, its amount, the board task it ran for, and whether the
-gate called it irreversible. The classification is made **at execution time**,
-by `ManifestApprovalGate::is_irreversible` (which delegates to the supervised
-taxonomy, so there is one copy of the rules), and it is deliberately
-mode-independent: a `full`-mode company executes a filing without ever parking
-it, which is precisely when a retry dialog is the only warning anyone gets.
-
-There is **no payload**. The record is read back onto an operator's screen
-through `GET …/tasks/{task_id}`, which scrubs by construction, so recipients and
-message bodies are never retained in the first place.
-
-The task attribution comes from the cycle that ran the effect. Under
-`supervised` an irreversible effect never executes in the cycle that emitted it
-— it parks, and the operator's approval opens a fresh cycle carrying only
-`ApprovalResolved` — so `ApprovalParked` also gains an optional `task_id`, and
-the approved execution reads the card back off it. Without that, every effect
-that went through the approval gate the way the policy intends would be
-attributed to nothing.
-
-**Committed, not completed.** The record is written *before* the effect is
-performed — that ordering is the at-most-once guarantee — and a failed perform
-leaves it standing. So an entry means "this was committed, and the runtime will
-never re-attempt it", which is what the warning needs: the operator has to
-assume it happened, because nothing will finish it and nothing will retry it. It
-does not mean the effect is known to have completed, and the dialog's wording
-says so rather than rendering the list as flat fact.
-
-**Approved tool calls are described at redemption.** An approved effect carrying
-an `agent` is settled by minting a single-use grant, not by
-`execute_effect_once` — the tool then runs inside the agent's next turn — so it
-writes no `EffectExecuted` line at all. `GrantConsumed` therefore carries the
-same optional `ExecutedEffect`, built from the park record (retained past
-resolution, payload scrubbed, superseded by an approve-with-edit) joined to the
-gate's classification. It is attached at **redemption** rather than at minting,
-because a grant that expires unredeemed is a call that never ran and must not
-appear on a warning.
-
-**A journal that cannot describe itself says so.** Both fields are additive: a
-line written before #351 replays as a committed key with no description, which
-keeps the at-most-once guarantee exact and simply contributes no warning. That
-makes an empty list ambiguous on an upgraded company, so replay raises a
-company-wide flag when it reads an undescribed executed key, surfaced as
-`historyIncomplete` on `GET …/tasks/{task_id}`. With it set the console confirms
-a retry regardless and says earlier activity cannot be described, instead of
-presenting the gap as an all-clear. The flag is company-wide rather than
-per-task by necessity — an undescribed record carries no card either. The
-related pre-#351 case it cannot detect directly: an approval parked before the
-upgrade has no `task_id`, and that record is byte-identical to a legitimately
-card-less park written today, so flagging it would misreport every company that
-has ever parked an approval from operator chat.
-
-**Scope.** Task Detail only. The board's own re-dispatch — dragging a card back
-into `in_progress` (`company/runtime.rs`, `upsert_task` → `dispatch_task`) — has
-the same shape and now has this read available to it, and is deliberately left
-for a follow-up rather than half-gated here.
 
 ## MemoryStore
 
