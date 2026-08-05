@@ -175,6 +175,25 @@ export interface WorkflowRunResult {
    * so a response from a host predating issue #170 still parses.
    */
   deliveries?: DeliveryReport[];
+  /**
+   * The run's correlation id (issue #371). Optional on the type so a response
+   * from a host predating #371 still parses.
+   *
+   * The console needs it because the run's progress events arrive over SSE
+   * *while this request is still in flight*: without it, a cron fire that
+   * overlapped the manual run could not be told apart from the run being
+   * awaited, and its frames would repaint the canvas.
+   */
+  runId?: string;
+}
+
+/** One node's outcome inside a run (issue #371). */
+export interface WorkflowRunNode {
+  nodeId: string;
+  /** Whether the node succeeded or errored. */
+  status: "ok" | "error";
+  /** Wall-clock duration of the node's execution, in milliseconds. */
+  elapsedMs: number;
 }
 
 /**
@@ -202,6 +221,21 @@ export interface WorkflowRunOutcome {
   pendingApprovals: string[];
   /** Set when the run failed outright instead of finishing with rows. */
   error?: string;
+  /**
+   * Per-node progress, in the order the nodes finished (issue #371). Absent on
+   * a run journaled before #371 — so an empty/absent list means "no per-node
+   * trail", never "the run did nothing".
+   */
+  nodes?: WorkflowRunNode[];
+  /** When the run started. Absent on a pre-#371 row, whose only time is the finish. */
+  startedAtMillis?: number;
+  /**
+   * True for a run that started and has not settled.
+   *
+   * Trustworthy only because the host settles runs its previous process left
+   * open, at boot — so nothing sits here spinning forever.
+   */
+  running?: boolean;
 }
 
 export function listWorkflows(

@@ -53,6 +53,34 @@ export type CompanyStreamEvent =
       pendingApprovals: string[];
       /** Present only when the run failed outright. */
       error?: string;
+      /** The run's correlation id (issue #371). Absent on a pre-#371 row. */
+      runId?: string;
+    }
+  // Issue #371: the live per-node progress trail. A run announces itself, then
+  // reports each non-trigger node as it finishes, so the canvas can show which
+  // nodes are done while the run is still going — the whole point of the issue.
+  //
+  // There is deliberately no *node started* frame: the engine's observer has no
+  // such hook, so "currently executing" is derived from the graph topology the
+  // console already holds.
+  | {
+      type: "workflow_run_started";
+      seq: number;
+      atMillis: number;
+      workflowId: string;
+      runId: string;
+      scheduled: boolean;
+    }
+  | {
+      type: "workflow_node_finished";
+      seq: number;
+      atMillis: number;
+      workflowId: string;
+      runId: string;
+      nodeId: string;
+      /** Widened past the host's two words so an unknown status can't be a type error. */
+      status: string;
+      elapsedMs: number;
     }
   // The transient live turn-progress frames (`src/turn_stream.rs`): a tool call
   // just started (status `running`) or finished (status `ok`/`error`). These are
@@ -339,6 +367,18 @@ function handleEvent(
       }
       break;
     }
+    // Issue #371: progress frames route to the same subscriber the finished
+    // event does, and deliberately raise NO toast. Progress is not an attention
+    // signal — a six-node run would fire eight toasts and train the operator to
+    // dismiss the one that matters. The canvas is where this belongs.
+    //
+    // These arms exist because this file has already been bitten by events
+    // falling through to `default:` and vanishing; a new event type without an
+    // arm here is silently dropped, with nothing to debug.
+    case "workflow_run_started":
+    case "workflow_node_finished":
+      onWorkflowRunEvent?.(event);
+      break;
     default:
       // An unknown/forward event kind: ignore rather than surface noise.
       break;
