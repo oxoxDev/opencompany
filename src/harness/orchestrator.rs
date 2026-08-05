@@ -63,7 +63,7 @@ use crate::harness::lifecycle::ReviewDecision;
 use crate::ports::events::EventLog;
 use crate::ports::facts::FactStore;
 use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, OverlayAgent};
-use crate::ports::{CompanyStore, WorkflowRun, WorkflowRunner, generate_id};
+use crate::ports::{CompanyStore, WorkflowRun, WorkflowRunContext, WorkflowRunner, generate_id};
 
 /// The manifest cognition-tier that marks the orchestrator agent.
 pub const ORCHESTRATOR_TIER: &str = "orchestrator";
@@ -611,6 +611,20 @@ fn summarize_event(event: &CompanyEvent) -> String {
                 }
             }
         }
+        // Issue #371's progress trail. Summarized, not surfaced: the insight
+        // tail has ten slots and a six-node run would take eight of them to say
+        // things the run's own finished line already says better. The arms exist
+        // because the match is exhaustive, and they hold the same no-payload
+        // rule as their neighbours — node ids and durations only, which is all
+        // these events carry.
+        CompanyEvent::WorkflowRunStarted { workflow_id, .. } => {
+            format!("workflow run started: {workflow_id}")
+        }
+        CompanyEvent::WorkflowNodeFinished {
+            workflow_id,
+            node_id,
+            ..
+        } => format!("workflow {workflow_id} finished node {node_id}"),
     }
 }
 
@@ -1157,6 +1171,7 @@ pub fn orchestrator_tools(
         workflow_source_dir.clone(),
         store.clone(),
         workflow_runner,
+        events.clone(),
     )));
     // `create_workflow` (issue #112) shares the same source dir the run tool
     // reads graphs from, plus the store it enables the new id on and the event
@@ -1230,24 +1245,40 @@ pub struct RunWorkflowTool {
     /// bodies — the only place a hosted tenant's workflows live (issue #168).
     store: Arc<dyn CompanyStore>,
     runner: WorkflowRunnerHandle,
+    /// The company's journal, so an agent-initiated run records an outcome like
+    /// every other entry point (issues #228, #371).
+    ///
+    /// This tool journaled **nothing** before #371 — a gap #228 left open when
+    /// it made the console's and the scheduler's runs durable. That was merely
+    /// an inconsistency then; it stops being harmless once the runner emits a
+    /// `WorkflowRunStarted`, because an unjournaled finish would leave every
+    /// agent-initiated run reading as interrupted, and the boot sweep would
+    /// dutifully stamp a failure on runs that succeeded.
+    ///
+    /// `None` (the default build, and the tool's own tests) simply skips the
+    /// record, exactly as the runner skips the progress events — the two degrade
+    /// together, so the pair can never be half-present.
+    events: Option<Arc<dyn EventLog>>,
 }
 
 impl RunWorkflowTool {
     /// Builds the tool over the company id, its on-disk source directory
     /// (`companies/<name>`, whose `workflows/` subtree holds the seed graphs),
-    /// the company store (holding the runtime-authored graph bodies), and the
-    /// shared runner handle.
+    /// the company store (holding the runtime-authored graph bodies), the
+    /// shared runner handle, and the company's journal.
     pub fn new(
         company: CompanyId,
         source_dir: Option<PathBuf>,
         store: Arc<dyn CompanyStore>,
         runner: WorkflowRunnerHandle,
+        events: Option<Arc<dyn EventLog>>,
     ) -> Self {
         Self {
             company,
             source_dir,
             store,
             runner,
+            events,
         }
     }
 }
@@ -1352,7 +1383,13 @@ impl Tool for RunWorkflowTool {
         };
 
         tracing::debug!(company = %self.company, workflow = %wid, runner = true, "run_workflow: invoking runner");
-        match runner.run(&self.company, &file, input).await {
+        // Issue #371: an agent-initiated run is a run like any other, so it
+        // mints a context and journals an outcome on BOTH arms. Not scheduled —
+        // an agent asking for a run is closer to an operator pressing Run than
+        // to a cron fire, and the flag drives exactly that distinction in the
+        // console.
+        let ctx = WorkflowRunContext::new(false);
+        match runner.run(&self.company, &file, input, &ctx).await {
             Ok(run) => {
                 tracing::debug!(
                     company = %self.company,
@@ -1360,6 +1397,17 @@ impl Tool for RunWorkflowTool {
                     pending = run.pending_approvals.len(),
                     "run_workflow: run succeeded"
                 );
+                if let Some(events) = self.events.as_ref() {
+                    crate::runtime::record_run_finished(
+                        events,
+                        &self.company,
+                        &wid,
+                        false,
+                        &ctx.run_id,
+                        Ok(&run),
+                    )
+                    .await;
+                }
                 let md = summarize_run(&file, &run);
                 Ok(ToolResult::success_with_markdown(
                     json!({
@@ -1371,6 +1419,17 @@ impl Tool for RunWorkflowTool {
             }
             Err(err) => {
                 tracing::debug!(company = %self.company, workflow = %wid, error = %err, "run_workflow: run failed");
+                if let Some(events) = self.events.as_ref() {
+                    crate::runtime::record_run_finished(
+                        events,
+                        &self.company,
+                        &wid,
+                        false,
+                        &ctx.run_id,
+                        Err(err.to_string().as_str()),
+                    )
+                    .await;
+                }
                 Ok(ToolResult::error(format!(
                     "Workflow `{wid}` failed to run: {err}"
                 )))
@@ -2494,6 +2553,7 @@ name = "Morning"
             _company: &CompanyId,
             workflow: &WorkflowFile,
             _input: Value,
+            _ctx: &WorkflowRunContext,
         ) -> crate::Result<WorkflowRun> {
             self.calls.lock().unwrap().push(workflow.id.clone());
             Ok(self.run.clone())
@@ -2580,6 +2640,7 @@ name = "Morning"
             Some(dir.path().to_path_buf()),
             Arc::new(MemStore::default()),
             handle,
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo", "input": { "seed": 1 } }))
@@ -2612,6 +2673,7 @@ name = "Morning"
             Some(dir.path().to_path_buf()),
             Arc::new(MemStore::default()),
             handle,
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -2633,6 +2695,7 @@ name = "Morning"
             Some(dir.path().to_path_buf()),
             Arc::new(MemStore::default()),
             WorkflowRunnerHandle::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -2655,6 +2718,7 @@ name = "Morning"
             Some(dir.path().to_path_buf()),
             Arc::new(MemStore::default()),
             handle,
+            None,
         );
         let result = tool
             .execute(json!({ "id": "nope" }))
@@ -2674,6 +2738,7 @@ name = "Morning"
             None,
             Arc::new(MemStore::default()),
             WorkflowRunnerHandle::default(),
+            None,
         );
         let result = tool.execute(json!({})).await.expect("execute");
         assert!(result.is_error);
@@ -2693,6 +2758,7 @@ name = "Morning"
             Some(std::path::PathBuf::from("/tmp")),
             Arc::new(MemStore::default()),
             handle,
+            None,
         );
         let result = tool
             .execute(json!({ "id": "../secrets" }))
@@ -2787,6 +2853,7 @@ name = "Morning"
             Some(dir.path().to_path_buf()),
             store.clone(),
             handle,
+            None,
         );
         let result = run
             .execute(json!({ "id": "greeter" }))
@@ -2859,7 +2926,7 @@ name = "Morning"
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
-        let run = RunWorkflowTool::new(company, None, store, handle);
+        let run = RunWorkflowTool::new(company, None, store, handle, None);
         let result = run
             .execute(json!({ "id": "hosted" }))
             .await

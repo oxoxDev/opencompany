@@ -81,6 +81,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use crate::company::{WorkflowFile, list_workflows_union};
+use crate::ports::WorkflowRunContext;
 use crate::ports::types::CompanyId;
 use crate::ports::{DeliveryReport, DeliveryStatus};
 use crate::runtime::CompanyRegistry;
@@ -339,7 +340,14 @@ impl WorkflowScheduler {
                     // schedule for the life of the process with no log line.
                     let _claim = claim;
                     let (company, workflow_id) = key;
-                    match runner.run(&company, &workflow, input).await {
+                    // Issue #371: minted here so this run's progress events and
+                    // its outcome share one id — including on the `Err` arm
+                    // below, where the runner hands back nothing that could
+                    // carry one. `scheduled: true` rides the run's
+                    // `WorkflowRunStarted`, so the console can mark a cron fire
+                    // as such *while it runs*, not only once it settles.
+                    let ctx = WorkflowRunContext::new(true);
+                    match runner.run(&company, &workflow, input, &ctx).await {
                         Ok(run) => {
                             // A manual run hands `deliveries` back in the HTTP
                             // response and the console renders it. A scheduled
@@ -426,8 +434,15 @@ impl WorkflowScheduler {
                             // which on a hosted tenant is emphatically not the
                             // operator. This is the record the tenant's own
                             // console reads back, after the fact, on reload.
-                            record_run_finished(&events, &company, &workflow_id, true, Ok(&run))
-                                .await;
+                            record_run_finished(
+                                &events,
+                                &company,
+                                &workflow_id,
+                                true,
+                                &ctx.run_id,
+                                Ok(&run),
+                            )
+                            .await;
                         }
                         Err(err) => {
                             tracing::warn!(
@@ -444,6 +459,7 @@ impl WorkflowScheduler {
                                 &company,
                                 &workflow_id,
                                 true,
+                                &ctx.run_id,
                                 Err(err.to_string().as_str()),
                             )
                             .await;
@@ -807,6 +823,7 @@ mod test {
             company: &CompanyId,
             workflow: &WorkflowFile,
             input: Value,
+            _ctx: &crate::ports::WorkflowRunContext,
         ) -> crate::Result<WorkflowRun> {
             self.started.lock().unwrap().push(Recorded {
                 company: company.as_ref().to_string(),
@@ -852,6 +869,7 @@ mod test {
             _company: &CompanyId,
             _workflow: &WorkflowFile,
             _input: Value,
+            _ctx: &crate::ports::WorkflowRunContext,
         ) -> crate::Result<WorkflowRun> {
             self.attempts.fetch_add(1, Ordering::SeqCst);
             Err(crate::error::OpenCompanyError::Config(self.message.clone()))
@@ -1896,6 +1914,7 @@ to = "done"
                 _company: &CompanyId,
                 _workflow: &WorkflowFile,
                 _input: Value,
+                _ctx: &crate::ports::WorkflowRunContext,
             ) -> crate::Result<WorkflowRun> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 panic!("the runner blew up mid-run");
