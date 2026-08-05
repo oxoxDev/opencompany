@@ -25,10 +25,12 @@ import {
   type DeliveryStatus,
   type WorkflowGraph,
   type WorkflowNode as WorkflowNodeModel,
+  type WorkflowRunNode,
   type WorkflowRunOutcome,
   type WorkflowRunResult,
   type WorkflowSummary,
 } from "@/api/workflows";
+import type { CompanyStreamEvent } from "@/hooks/use-events";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
 import {
@@ -56,7 +58,11 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { WorkflowNode } from "@/components/workflow-node";
 import { WorkflowCreateDialog } from "@/views/WorkflowCreateDialog";
-import { nodeKindMeta, type WorkflowNodeData } from "@/lib/workflow-sample";
+import {
+  nodeKindMeta,
+  type NodeRunState,
+  type WorkflowNodeData,
+} from "@/lib/workflow-sample";
 
 const NODE_TYPES = { oc: WorkflowNode };
 
@@ -75,6 +81,7 @@ export function WorkflowsView({
   client,
   company,
   runEventTick = 0,
+  runEvent = null,
 }: {
   client: OpenCompanyClient;
   company: string | null;
@@ -85,6 +92,15 @@ export function WorkflowsView({
    * view a cron fired.
    */
   runEventTick?: number;
+  /**
+   * The latest workflow run frame off the SSE stream (issue #371) — a run
+   * starting, a node finishing, or a run settling.
+   *
+   * Unlike `runEventTick` this carries the payload, because the canvas paints
+   * per-node state and a counter cannot say which node of which run just
+   * finished. The two coexist: the tick still drives the history refetch.
+   */
+  runEvent?: CompanyStreamEvent | null;
 }) {
   const { resolvedTheme } = useTheme();
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
@@ -134,6 +150,28 @@ export function WorkflowsView({
   // Bumped by the conflict banner's Reload, to re-fetch the selected graph (and
   // with it a fresh `version`) without changing the selection.
   const [graphTick, setGraphTick] = useState(0);
+  // Issue #371: what the run currently on screen has done, per node.
+  //
+  // `liveRunId` is the run these states belong to. It exists because a company
+  // can have two runs in flight — an operator pressing Run while a cron fire is
+  // mid-graph — and both stream onto the same SSE connection. Without it, the
+  // cron run's node frames would repaint the canvas the operator is watching.
+  const [liveRunId, setLiveRunId] = useState<string | null>(null);
+  const [nodeRunState, setNodeRunState] = useState<Record<string, NodeRunState>>({});
+  const [nodeElapsed, setNodeElapsed] = useState<Record<string, number>>({});
+  // A past run selected from the history panel, overlaid on the canvas. When
+  // set it WINS over the live state — the operator asked to look at that run.
+  // This is what makes a scheduled run's failure point visible after the fact,
+  // which is the half of the issue a live canvas alone cannot answer.
+  const [overlayRun, setOverlayRun] = useState<WorkflowRunOutcome | null>(null);
+  // The run this view just POSTed, held until its history row arrives.
+  //
+  // The fallback for a console with no live stream: if `/events` 404s or the
+  // connection dropped, no progress frame ever lands and the canvas would stay
+  // blank for a run the operator watched happen. Overlaying the row the host
+  // journaled gets them the same per-node answer, just at the end instead of
+  // during. Cleared as soon as it is used, or when live frames made it moot.
+  const [awaitingRunId, setAwaitingRunId] = useState<string | null>(null);
 
   // Load the workflow list once, and auto-select the first entry.
   useEffect(() => {
@@ -226,6 +264,21 @@ export function WorkflowsView({
         if (!live) return;
         setRuns(rows);
         setHistorySupported(true);
+        // Issue #371, the no-live-stream fallback. If the run we just POSTed is
+        // in this page and nothing was ever *reported* live (only the frontier
+        // we derived ourselves), overlay the journaled row so the operator
+        // still gets the per-node answer.
+        if (awaitingRunId) {
+          const mine = rows.find((r) => r.runId === awaitingRunId);
+          if (mine) {
+            setAwaitingRunId(null);
+            setNodeRunState((prev) => {
+              const reported = Object.values(prev).some((st) => st !== "running");
+              if (!reported && (mine.nodes?.length ?? 0) > 0) setOverlayRun(mine);
+              return prev;
+            });
+          }
+        }
       } catch (e) {
         if (!live) return;
         // Degrade quietly: an older host simply has no history to show.
@@ -237,11 +290,21 @@ export function WorkflowsView({
     return () => {
       live = false;
     };
+    // `awaitingRunId` is read but deliberately not a dependency: it is cleared
+    // inside, and listing it would re-run this fetch on that clear.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, company, selectedId, runsTick, runEventTick]);
 
   const run = useCallback(async () => {
     if (!selectedId) return;
     setRunning(true);
+    // Issue #371: clear the previous run's marks and paint the opening frontier
+    // immediately, so the canvas responds to the click rather than waiting on
+    // the first frame. The `workflow_run_started` frame re-sets the same thing
+    // a moment later, which is idempotent.
+    setOverlayRun(null);
+    setNodeElapsed({});
+    setNodeRunState(graph ? initialRunState(graph) : {});
     // Trimmed once here so the echoed request and the payload the host receives
     // can never disagree.
     const asked = request.trim();
@@ -254,6 +317,7 @@ export function WorkflowsView({
       );
       setRanWith(asked);
       setResult(res);
+      setAwaitingRunId(res.runId ?? null);
       // The run is journaled host-side (#228); pull the history forward so the
       // chip and the panel reflect it immediately.
       setRunsTick((n) => n + 1);
@@ -263,10 +327,17 @@ export function WorkflowsView({
       // A run that failed is journaled too (#228), and is the outcome most
       // worth finding again later — so refresh the history on this path as well.
       setRunsTick((n) => n + 1);
+      // Nothing is executing any more. Drop the derived marks so a failed run
+      // does not leave a node pulsing "running" forever; the reported ok/error
+      // ones stay, because they are how far it got.
+      setNodeRunState((prev) =>
+        Object.fromEntries(Object.entries(prev).filter(([, st]) => st !== "running")),
+      );
+      setLiveRunId(null);
     } finally {
       setRunning(false);
     }
-  }, [client, company, selectedId, request]);
+  }, [client, company, selectedId, request, graph]);
 
   // Issue #259: remove the selected workflow.
   //
@@ -341,7 +412,101 @@ export function WorkflowsView({
     toast.success("Workflow created.");
   }, []);
 
-  const { nodes, edges } = useMemo(() => (graph ? layout(graph) : { nodes: [], edges: [] }), [graph]);
+  // Issue #371: fold the live SSE progress frames into per-node canvas state.
+  //
+  // Everything here is guarded on the frame belonging to the workflow on screen
+  // AND (after the start) to the run we adopted, because one SSE connection
+  // carries every run of every workflow in the company.
+  useEffect(() => {
+    if (!runEvent || !selectedId) return;
+
+    switch (runEvent.type) {
+      case "workflow_run_started": {
+        if (runEvent.workflowId !== selectedId) return;
+        // Adopt this run and start from a clean canvas. A rerun must not leave
+        // the previous run's marks behind — they would read as this run's.
+        setLiveRunId(runEvent.runId);
+        setOverlayRun(null);
+        // The trigger fired by definition — the run exists — and the engine
+        // reports no step for it, so nothing else would ever mark it. Its
+        // successors are where execution is now.
+        setNodeRunState(graph ? initialRunState(graph) : {});
+        setNodeElapsed({});
+        return;
+      }
+      case "workflow_node_finished": {
+        if (runEvent.workflowId !== selectedId || runEvent.runId !== liveRunId) return;
+        const finished = runEvent.nodeId;
+        // Trust the host's word, but do not let an unknown one paint a node as
+        // succeeded: anything that is not "ok" is treated as a failure.
+        const state: NodeRunState = runEvent.status === "ok" ? "ok" : "error";
+        setNodeRunState((prev) => {
+          const next = { ...prev, [finished]: state };
+          // Advance the frontier. Only a successful node hands execution on —
+          // a failed one under the default `stop` policy ends the run, and
+          // lighting up its successors would claim work that never happened.
+          if (state === "ok" && graph) {
+            for (const id of successorsOf(graph, finished)) {
+              if (!next[id]) next[id] = "running";
+            }
+          }
+          return next;
+        });
+        setNodeElapsed((prev) => ({ ...prev, [finished]: runEvent.elapsedMs }));
+        return;
+      }
+      case "workflow_run_finished": {
+        if (runEvent.workflowId !== selectedId) return;
+        // A pre-#371 host sends no runId; treat that as "the run on screen"
+        // rather than ignoring it, else the canvas would spin forever.
+        if (runEvent.runId && liveRunId && runEvent.runId !== liveRunId) return;
+        // Clear the derived "running" marks — nothing is executing any more —
+        // but KEEP the reported ok/error ones. That residue is the answer to
+        // "how far did it get?", and it stays until a reselect or a rerun.
+        setNodeRunState((prev) =>
+          Object.fromEntries(
+            Object.entries(prev).filter(([, state]) => state !== "running"),
+          ),
+        );
+        setLiveRunId(null);
+        return;
+      }
+      default:
+        return;
+    }
+    // `graph` is read inside, but is deliberately NOT a dependency: a graph
+    // re-fetch mid-run would replay the last frame and could resurrect cleared
+    // marks. The selection effect below is what resets state on a graph change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runEvent, selectedId, liveRunId]);
+
+  // Switching workflow (or company) clears the canvas: another graph's node ids
+  // are meaningless here, and a stale mark on a same-named node would be a lie.
+  useEffect(() => {
+    setNodeRunState({});
+    setNodeElapsed({});
+    setLiveRunId(null);
+    setOverlayRun(null);
+  }, [selectedId, company]);
+
+  // What the canvas actually paints. An overlaid past run wins over the live
+  // state — selecting a history row is an explicit "show me that one".
+  const paintedStates = useMemo<Record<string, NodeRunState>>(
+    () => (overlayRun ? statesFromRun(overlayRun) : nodeRunState),
+    [overlayRun, nodeRunState],
+  );
+  const paintedElapsed = useMemo<Record<string, number>>(
+    () => (overlayRun ? elapsedFromRun(overlayRun) : nodeElapsed),
+    [overlayRun, nodeElapsed],
+  );
+
+  const { nodes, edges } = useMemo(
+    () =>
+      graph
+        ? layout(graph, paintedStates, paintedElapsed)
+        : { nodes: [], edges: [] },
+    [graph, paintedStates, paintedElapsed],
+  );
 
   const selected = workflows.find((w) => w.id === selectedId) ?? null;
 
@@ -558,6 +723,31 @@ export function WorkflowsView({
         </div>
       )}
 
+      {/* Issue #371: the canvas is showing a PAST run, not the live one. Said
+          plainly, with the way out attached — an unexplained ring on a node
+          would otherwise read as the current state of the workflow. */}
+      {overlayRun && (
+        <div className="px-4 pt-3">
+          <Alert data-testid="workflow-overlay-banner">
+            <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs">
+                Showing the {overlayRun.scheduled ? "scheduled" : "manual"} run from{" "}
+                {new Date(overlayRun.atMillis).toLocaleString()}
+                {overlayRun.error
+                  ? failedNodeOf(overlayRun)
+                    ? ` — it failed at “${nodeName(graph, failedNodeOf(overlayRun)!)}”.`
+                    : " — it failed before any node ran."
+                  : "."}{" "}
+                Unmarked nodes were never reached.
+              </span>
+              <Button size="sm" variant="outline" onClick={() => setOverlayRun(null)}>
+                Clear
+              </Button>
+            </AlertDescription>
+          </Alert>
+        </div>
+      )}
+
       <div className="relative flex-1">
         {loadingList || loadingGraph ? (
           <div className="absolute inset-0 p-4">
@@ -612,6 +802,12 @@ export function WorkflowsView({
           runs={runs}
           workflowName={selected?.name ?? selectedId ?? ""}
           onClose={() => setHistoryOpen(false)}
+          selectedRunSeq={overlayRun?.seq ?? null}
+          onSelectRun={(picked) =>
+            // Clicking the row already shown clears it, so the control is a
+            // toggle rather than a one-way trip into overlay mode.
+            setOverlayRun((prev) => (prev?.seq === picked.seq ? null : picked))
+          }
         />
       )}
 
@@ -930,10 +1126,16 @@ function RunHistoryPanel({
   runs,
   workflowName,
   onClose,
+  selectedRunSeq,
+  onSelectRun,
 }: {
   runs: WorkflowRunOutcome[];
   workflowName: string;
   onClose: () => void;
+  /** The run currently overlaid on the canvas, if any (issue #371). */
+  selectedRunSeq: number | null;
+  /** Overlay this run's per-node states on the canvas (issue #371). */
+  onSelectRun: (run: WorkflowRunOutcome) => void;
 }) {
   return (
     <div className="border-t bg-card/60" data-testid="workflow-run-history">
@@ -958,7 +1160,12 @@ function RunHistoryPanel({
         ) : (
           <div className="space-y-2">
             {runs.map((run) => (
-              <RunHistoryRow key={run.seq} run={run} />
+              <RunHistoryRow
+                key={run.seq}
+                run={run}
+                selected={run.seq === selectedRunSeq}
+                onSelect={() => onSelectRun(run)}
+              />
             ))}
           </div>
         )}
@@ -967,11 +1174,30 @@ function RunHistoryPanel({
   );
 }
 
-/** One finished run: a summary line, and its delivery rows underneath. */
-function RunHistoryRow({ run }: { run: WorkflowRunOutcome }) {
+/** One finished run: a summary line, its per-node trail, and its delivery rows.
+ *
+ * Clicking it overlays that run's node states on the canvas (issue #371) —
+ * which is what makes a scheduled run's failure point visible, the case the
+ * live canvas by definition cannot cover because nobody was watching. */
+function RunHistoryRow({
+  run,
+  selected,
+  onSelect,
+}: {
+  run: WorkflowRunOutcome;
+  selected: boolean;
+  onSelect: () => void;
+}) {
   const tone = runTone(run);
+  const nodes = run.nodes ?? [];
+  const failedNode = failedNodeOf(run);
   return (
-    <div className="rounded-lg border bg-background/40 p-2" data-testid="workflow-run-row">
+    <div
+      className={`rounded-lg border bg-background/40 p-2 ${
+        selected ? "ring-2 ring-primary/40" : ""
+      }`}
+      data-testid="workflow-run-row"
+    >
       <div className="mb-1 flex flex-wrap items-center gap-2">
         <span className={`size-1.5 rounded-full ${tone.dot}`} />
         <Badge variant="outline" className="h-4 px-1.5 text-[10px] font-normal">
@@ -989,13 +1215,49 @@ function RunHistoryRow({ run }: { run: WorkflowRunOutcome }) {
             {run.pendingApprovals.length === 1 ? "" : "s"}
           </Badge>
         )}
+        {run.running && (
+          <Badge
+            variant="outline"
+            className="h-4 px-1.5 text-[10px] font-normal border-sky-500/40 bg-sky-500/10"
+          >
+            running
+          </Badge>
+        )}
+        {nodes.length > 0 && (
+          <Button
+            size="sm"
+            variant="ghost"
+            className="ml-auto h-5 px-2 text-[10px]"
+            onClick={onSelect}
+            aria-pressed={selected}
+            data-testid="workflow-run-overlay-toggle"
+          >
+            {selected ? "Hide on canvas" : "Show on canvas"}
+          </Button>
+        )}
       </div>
+
+      {/* Issue #371: the per-node trail, which is what turns "it failed" into
+          "it failed HERE". Absent for a run journaled before #371 — those rows
+          render exactly as they always did. */}
+      {nodes.length > 0 && (
+        <div className="mb-1 flex flex-wrap gap-1" data-testid="workflow-run-nodes">
+          {nodes.map((node) => (
+            <RunNodeChip key={`${node.nodeId}-${node.elapsedMs}`} node={node} />
+          ))}
+        </div>
+      )}
       {run.error ? (
         // The outcome that used to be quietest of all: a run that died left one
         // host-stdout warning and nothing an operator could ever find.
         <Alert variant="destructive" className="py-2">
           <AlertDescription className="text-[11px]">
-            This run failed: {run.error}
+            {/* Name the node when the trail names one — the engine reports a
+                failing node as an errored step, so this is exact. When it does
+                not (a graph that would not compile, a capability that could not
+                be built), say nothing about nodes rather than guessing. */}
+            {failedNode ? `This run failed at “${failedNode}”: ` : "This run failed: "}
+            {run.error}
           </AlertDescription>
         </Alert>
       ) : run.deliveries.length > 0 ? (
@@ -1008,6 +1270,26 @@ function RunHistoryRow({ run }: { run: WorkflowRunOutcome }) {
         </p>
       )}
     </div>
+  );
+}
+
+/** One node's outcome in a history row: its id, how it went, how long it took. */
+function RunNodeChip({ node }: { node: WorkflowRunNode }) {
+  const ok = node.status === "ok";
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] ${
+        ok
+          ? "border-emerald-500/40 bg-emerald-500/10"
+          : "border-red-500/50 bg-red-500/10"
+      }`}
+    >
+      <span className={`size-1.5 rounded-full ${ok ? "bg-emerald-500" : "bg-red-500"}`} />
+      <span className="font-medium">{node.nodeId}</span>
+      <span className="font-mono opacity-70">
+        {node.elapsedMs < 1000 ? `${node.elapsedMs}ms` : `${(node.elapsedMs / 1000).toFixed(1)}s`}
+      </span>
+    </span>
   );
 }
 
@@ -1152,10 +1434,77 @@ function NodeResultCard({ node }: { node: NodeResult }) {
   );
 }
 
+/** A node's display name, falling back to its id when the graph is not loaded
+ * (a company switch mid-overlay) — never a blank quote. */
+function nodeName(graph: WorkflowGraph | null, nodeId: string): string {
+  return graph?.nodes.find((n) => n.id === nodeId)?.name ?? nodeId;
+}
+
+/** The node ids `from` hands execution to. */
+function successorsOf(graph: WorkflowGraph, from: string): string[] {
+  return graph.edges.filter((e) => e.from === from).map((e) => e.to);
+}
+
+/** The canvas state a run starts in (issue #371): every trigger marked done,
+ * its successors marked running.
+ *
+ * Both halves are derived rather than reported. The engine emits no step for a
+ * trigger node — it is the thing that fired, not a thing that ran — and it has
+ * no `on_step_start` hook at all, so "where is it now" has to come from the
+ * graph. After a branch point this briefly marks more than one arm; that
+ * corrects itself as the real finishes arrive. */
+function initialRunState(graph: WorkflowGraph): Record<string, NodeRunState> {
+  const state: Record<string, NodeRunState> = {};
+  for (const node of graph.nodes) {
+    if (node.kind !== "trigger") continue;
+    state[node.id] = "ok";
+    for (const id of successorsOf(graph, node.id)) state[id] = "running";
+  }
+  return state;
+}
+
+/** The per-node states of a PAST run, for overlaying it on the canvas.
+ *
+ * No `running` ever comes out of this: the run is over. A node the run never
+ * reached simply has no entry, so it renders unmarked — "not reached" and not
+ * "still to come", which for a failed run is the honest reading. */
+function statesFromRun(run: WorkflowRunOutcome): Record<string, NodeRunState> {
+  const state: Record<string, NodeRunState> = {};
+  for (const node of run.nodes ?? []) {
+    state[node.nodeId] = node.status === "ok" ? "ok" : "error";
+  }
+  return state;
+}
+
+/** Per-node durations of a past run, keyed for the canvas. */
+function elapsedFromRun(run: WorkflowRunOutcome): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const node of run.nodes ?? []) out[node.nodeId] = node.elapsedMs;
+  return out;
+}
+
+/** The node a run failed at, when its trail names one (issue #371).
+ *
+ * The engine reports a failing node as an `error` step before the run ends, so
+ * this is exact rather than inferred. `null` when the run failed with no
+ * errored node — a graph that would not compile, a capability that could not be
+ * built — where naming a node would be a fabrication. */
+function failedNodeOf(run: WorkflowRunOutcome): string | null {
+  return (run.nodes ?? []).find((n) => n.status !== "ok")?.nodeId ?? null;
+}
+
 /** Lays a saved graph out left→right by longest-path depth, stacking siblings
  * vertically within each layer. Cycles are bounded by an iteration cap, so a
- * back edge never loops forever. */
-function layout(graph: WorkflowGraph): { nodes: Node<WorkflowNodeData>[]; edges: Edge[] } {
+ * back edge never loops forever.
+ *
+ * `runStates` / `elapsed` (issue #371) tint each node with what the run on
+ * screen did. Both default to empty, which is the resting canvas — identical to
+ * how it rendered before #371. */
+function layout(
+  graph: WorkflowGraph,
+  runStates: Record<string, NodeRunState> = {},
+  elapsed: Record<string, number> = {},
+): { nodes: Node<WorkflowNodeData>[]; edges: Edge[] } {
   const depth = new Map<string, number>(graph.nodes.map((n) => [n.id, 0]));
   for (let i = 0; i < graph.nodes.length; i++) {
     let changed = false;
@@ -1186,6 +1535,8 @@ function layout(graph: WorkflowGraph): { nodes: Node<WorkflowNodeData>[]; edges:
         summary: n.summary ?? (n.agent ? `Agent: ${n.agent}` : ""),
         emoji: meta.emoji,
         color: meta.color,
+        runState: runStates[n.id],
+        elapsedMs: elapsed[n.id],
       },
     };
   });
