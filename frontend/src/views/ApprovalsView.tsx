@@ -9,6 +9,7 @@ import {
   FileText,
   Globe,
   KeyRound,
+  Loader2,
   Mail,
   MessageSquare,
   Repeat,
@@ -22,7 +23,7 @@ import {
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
-import { ApiError, type ApprovalSummary } from "@/api/types";
+import { ApiError, type ApprovalSummary, type Verdict } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import type { CompanyFeed } from "@/hooks/use-company";
@@ -61,13 +62,35 @@ interface Props {
 
 /** The approvals inbox: the few things the company parked for the operator. */
 export function ApprovalsView({ client, company, feed, onResolved, onGoToConversation }: Props) {
-  const [busy, setBusy] = useState<string | null>(null);
+  // Issue #373: in-flight state is per approval, not a single module-wide slot.
+  //
+  // Approving is not a quick write — the host mints a grant and re-dispatches
+  // the agent, holding the POST open for a whole turn (#243) — so two decisions
+  // being in flight at once is a legitimate state the operator can reach, and
+  // one the host already handles by serialising them behind its per-company
+  // lock. The old `string | null` could not represent it, which is why deciding
+  // one card greyed out every other card on the screen until a hard reload.
+  //
+  // A map rather than a set of ids because the verdict has to survive the wait:
+  // an approve and a decline are different promises to the operator ("the agent
+  // is doing it" vs "recorded"), and the card says which one it is waiting on.
+  const [inFlight, setInFlight] = useState<ReadonlyMap<string, Verdict>>(() => new Map());
   const { approvals, now } = feed;
   const askerNames = useAskerNames(client, company, approvals);
 
-  async function decide(a: ApprovalSummary, verdict: "approve" | "deny") {
-    if (busy) return;
-    setBusy(a.id);
+  const markInFlight = (id: string, verdict: Verdict | null) =>
+    setInFlight((prev) => {
+      const next = new Map(prev);
+      if (verdict) next.set(id, verdict);
+      else next.delete(id);
+      return next;
+    });
+
+  async function decide(a: ApprovalSummary, verdict: Verdict) {
+    // Per-row guard: only a double-press on THIS card is ignored. The global
+    // early return that used to live here made every other card inert too.
+    if (inFlight.has(a.id)) return;
+    markInFlight(a.id, verdict);
     try {
       await client.resolveApproval(a.id, verdict, undefined, company);
       // Issue #243: approving no longer just records a verdict — it hands the
@@ -91,7 +114,12 @@ export function ApprovalsView({ client, company, feed, onResolved, onGoToConvers
       onResolved(`Couldn't record your decision — ${msg}`);
       toast.error(`Couldn't record your decision — ${msg}`);
     } finally {
-      setBusy(null);
+      // Unconditional, and keyed on the id rather than clearing a single slot:
+      // the feed refreshes on its own schedule and routinely drops the decided
+      // row while its request is still open, so the flag has to be removable
+      // whether or not the row it belongs to still exists. Deleting a key that
+      // is already gone is a no-op, which is the point.
+      markInFlight(a.id, null);
     }
   }
 
@@ -116,9 +144,7 @@ export function ApprovalsView({ client, company, feed, onResolved, onGoToConvers
                   approval={a}
                   now={now}
                   askerNames={askerNames}
-                  isBusy={busy === a.id}
-                  dimmed={busy !== null && busy !== a.id}
-                  disabled={busy !== null}
+                  deciding={inFlight.get(a.id) ?? null}
                   onDecide={(verdict) => void decide(a, verdict)}
                 />
               ))}
@@ -152,18 +178,15 @@ function ApprovalCard({
   approval: a,
   now,
   askerNames,
-  isBusy,
-  dimmed,
-  disabled,
+  deciding,
   onDecide,
 }: {
   approval: ApprovalSummary;
   now: number;
   askerNames: Map<string, string>;
-  isBusy: boolean;
-  dimmed: boolean;
-  disabled: boolean;
-  onDecide: (verdict: "approve" | "deny") => void;
+  /** The verdict this card is waiting on, or `null` when it is idle (#373). */
+  deciding: Verdict | null;
+  onDecide: (verdict: Verdict) => void;
 }) {
   const Icon = KIND_ICONS[a.kind] ?? ShieldCheck;
   const lines = useMemo(() => payloadLines(a), [a]);
@@ -172,8 +195,10 @@ function ApprovalCard({
   // operator can at least tell two askers apart.
   const asker = a.agent ? (askerNames.get(a.agent) ?? a.agent) : null;
 
+  // No cross-card dimming: another card being decided is not this card's
+  // business, and treating it as such is the visual half of the #373 bug.
   return (
-    <Card className={cn("transition-opacity", dimmed && "opacity-60")}>
+    <Card>
       <CardContent className="flex flex-col gap-3 py-4">
         <div className="flex items-start gap-4">
           <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground">
@@ -185,12 +210,30 @@ function ApprovalCard({
               <p className="text-xs font-medium text-muted-foreground">{money(a.amount_usd)}</p>
             )}
           </div>
+          {/* Disabled on THIS card's own state only — a decision in flight on
+              another card leaves these live. That is the whole of #373's
+              first cause. */}
           <div className="flex shrink-0 gap-2">
-            <Button variant="outline" size="sm" disabled={disabled} onClick={() => onDecide("deny")}>
-              <X className="size-4" /> Decline
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={deciding !== null}
+              onClick={() => onDecide("deny")}
+            >
+              {deciding === "deny" ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <X className="size-4" />
+              )}{" "}
+              Decline
             </Button>
-            <Button size="sm" disabled={disabled} onClick={() => onDecide("approve")}>
-              <Check className="size-4" /> Approve
+            <Button size="sm" disabled={deciding !== null} onClick={() => onDecide("approve")}>
+              {deciding === "approve" ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Check className="size-4" />
+              )}{" "}
+              Approve
             </Button>
           </div>
         </div>
@@ -219,10 +262,15 @@ function ApprovalCard({
             </>
           )}
           <span>{timeAgo(a.at_millis, now)}</span>
-          {isBusy && (
+          {/* Honest copy for a request that spans an agent turn (#373): an
+              approve is not done when the button stops spinning, it is handed
+              to the agent. A decline IS terminal, so it only has to record. */}
+          {deciding && (
             <>
               <span aria-hidden>·</span>
-              <span>Working on it…</span>
+              <span className="text-foreground">
+                {deciding === "approve" ? "Waiting for the agent…" : "Recording…"}
+              </span>
             </>
           )}
         </div>
