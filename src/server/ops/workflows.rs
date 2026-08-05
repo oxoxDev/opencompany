@@ -83,7 +83,10 @@ use crate::company::{
     workflow_version,
 };
 use crate::error::OpenCompanyError;
-use crate::ports::types::{CompanyEvent, CompanyRecord, EventSeq, OverlayWorkflow};
+use crate::ports::WorkflowRunContext;
+use crate::ports::types::{
+    CompanyEvent, CompanyRecord, EventSeq, OverlayWorkflow, WorkflowNodeStatus,
+};
 use crate::runtime::cron::{CivilTime, CronExpr};
 use crate::runtime::record_run_finished;
 use crate::server::error::ApiError;
@@ -744,6 +747,14 @@ struct RunWorkflowResponse {
     /// where an operator learns a report was NOT delivered — a delivery failure
     /// never fails the run, so it has nowhere else to surface.
     deliveries: Vec<crate::ports::DeliveryReport>,
+    /// The run's correlation id (issue #371).
+    ///
+    /// Additive, and the console needs it for one specific reason: the run's
+    /// progress events arrive over SSE *while this request is still in flight*,
+    /// so without an id handed back the console cannot be certain the frames it
+    /// has been painting belong to the run it just awaited rather than a cron
+    /// fire that overlapped it.
+    run_id: String,
 }
 
 /// `POST …/workflows/{wid}/run` (both scope forms).
@@ -787,7 +798,15 @@ async fn run_workflow(
         })?;
 
     let input = body.map(|Json(b)| b.input).unwrap_or(Value::Null);
-    let run = match runner.run(company.id(), &file, input).await {
+    // Issue #371: minted HERE, above the call, not inside the runner. The error
+    // arm below journals an outcome for a run that returned nothing at all, and
+    // that outcome has to carry the same id as the progress events the run
+    // already emitted — otherwise a failed run's nodes would be orphaned from
+    // the record that says why it failed, which is the exact case the issue is
+    // about ("a run that fails at the fourth of six nodes reports only that it
+    // failed").
+    let ctx = WorkflowRunContext::new(false);
+    let run = match runner.run(company.id(), &file, input, &ctx).await {
         Ok(run) => run,
         Err(err) => {
             // Issue #228: a manual run that dies is journaled too, before the
@@ -798,6 +817,7 @@ async fn run_workflow(
                 company.id(),
                 &wid,
                 false,
+                &ctx.run_id,
                 Err(err.to_string().as_str()),
             )
             .await;
@@ -816,6 +836,7 @@ async fn run_workflow(
         company.id(),
         &wid,
         false,
+        &ctx.run_id,
         Ok(&run),
     )
     .await;
@@ -824,6 +845,7 @@ async fn run_workflow(
         output: run.output,
         pending_approvals: run.pending_approvals,
         deliveries: run.deliveries,
+        run_id: ctx.run_id,
     }))
 }
 
@@ -969,6 +991,37 @@ struct WorkflowRunOutcome {
     /// Set when the run failed outright instead of finishing with rows.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// Per-node progress for this run, in the order the nodes finished (issue
+    /// #371). Empty for a run journaled before #371, and for one whose nodes all
+    /// failed to journal — so an empty list means "no per-node trail", never
+    /// "the run did nothing".
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    nodes: Vec<WorkflowRunNode>,
+    /// When the run *started*, from its `WorkflowRunStarted` row (issue #371).
+    /// Absent on a pre-#371 row, whose only timestamp is the finish.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started_at_millis: Option<u64>,
+    /// `true` for a run that has started and not yet settled.
+    ///
+    /// Honest rather than optimistic, and only because of the boot sweep: a run
+    /// whose host died is settled with an "interrupted" outcome at the next
+    /// start, so nothing sits here spinning forever. Omitted when false, which
+    /// keeps every settled row's wire shape as short as it was.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    running: bool,
+}
+
+/// One node's outcome inside a run (issue #371).
+///
+/// Structural only — id, status, duration. The node's own output and error text
+/// are deliberately absent from the event this is folded from, so they cannot
+/// appear here either.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowRunNode {
+    node_id: String,
+    status: WorkflowNodeStatus,
+    elapsed_ms: u64,
 }
 
 /// `GET …/workflows/runs?workflow=&limit=` — the company's finished workflow
@@ -1002,44 +1055,132 @@ async fn list_runs(
         .await
         .map_err(ApiError)?;
 
-    let mut runs: Vec<WorkflowRunOutcome> = stored
-        .into_iter()
-        .filter_map(|stored| {
-            let CompanyEvent::WorkflowRunFinished {
-                workflow_id,
-                scheduled,
-                run_id,
-                deliveries,
-                pending_approvals,
-                error,
-            } = stored.event
-            else {
-                return None;
-            };
-            // The `?workflow=` filter is applied here rather than after the
-            // `limit` cut, so asking for one workflow returns that workflow's
-            // most recent N — not "whichever of the last N happen to match".
-            if query
-                .workflow
-                .as_deref()
-                .is_some_and(|wanted| wanted != workflow_id)
-            {
-                return None;
-            }
-            Some(WorkflowRunOutcome {
-                seq: stored.seq.value(),
-                at_millis: stored.at_millis,
-                workflow_id,
-                scheduled,
-                run_id,
-                deliveries,
-                pending_approvals,
-                error,
-            })
-        })
-        .collect();
+    // Issue #371 turned this from a filter into a **group-by-run fold**: a run
+    // now contributes up to N+2 rows (a start, one per node, a finish) instead
+    // of one, and they have to come back as a single history entry.
+    //
+    // The invariant that keeps it simple: the journal is append-only and
+    // single-writer, so a run's rows are ordered `Started < Node… < Finished` —
+    // the runner drains and joins its progress collector before returning, which
+    // is what makes the last part true rather than a race. Rows of *different*
+    // runs may interleave (two workflows can run at once), so the grouping is
+    // keyed on run id rather than on adjacency.
+    //
+    // A pre-#371 finished row has no run id and no start, so it simply folds to
+    // itself — one row in, one entry out, exactly as before.
+    let mut runs: Vec<WorkflowRunOutcome> = Vec::new();
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    // The `?workflow=` filter is applied per event rather than after the `limit`
+    // cut, so asking for one workflow returns that workflow's most recent N —
+    // not "whichever of the last N happen to match".
+    let wanted = query.workflow.as_deref();
+    let matches = |workflow_id: &str| wanted.is_none_or(|w| w == workflow_id);
 
-    // Newest first: a history panel leads with the run that just happened.
+    for stored in stored {
+        let seq = stored.seq.value();
+        let at_millis = stored.at_millis;
+        match stored.event {
+            CompanyEvent::WorkflowRunStarted {
+                workflow_id,
+                run_id,
+                scheduled,
+            } => {
+                if !matches(&workflow_id) {
+                    continue;
+                }
+                index.insert(run_id.clone(), runs.len());
+                runs.push(WorkflowRunOutcome {
+                    // The start's own position and time key the entry. The
+                    // finish overwrites `at_millis` below so a settled run still
+                    // sorts and displays by when it *ended*, as it always has;
+                    // `seq` likewise, so ordering is unchanged for settled runs.
+                    seq,
+                    at_millis,
+                    workflow_id,
+                    scheduled,
+                    run_id: Some(run_id),
+                    deliveries: Vec::new(),
+                    pending_approvals: Vec::new(),
+                    error: None,
+                    nodes: Vec::new(),
+                    started_at_millis: Some(at_millis),
+                    // Flipped off by the finish. A start that never gets one is
+                    // a run in flight — or one the boot sweep has yet to settle.
+                    running: true,
+                });
+            }
+            CompanyEvent::WorkflowNodeFinished {
+                workflow_id,
+                run_id,
+                node_id,
+                status,
+                elapsed_ms,
+            } => {
+                if !matches(&workflow_id) {
+                    continue;
+                }
+                // A node whose start is missing (a journal truncated below it,
+                // or a `?workflow=` filter that cannot match) has no entry to
+                // attach to. Dropped rather than synthesising a headless run.
+                if let Some(entry) = index.get(&run_id).and_then(|i| runs.get_mut(*i)) {
+                    entry.nodes.push(WorkflowRunNode {
+                        node_id,
+                        status,
+                        elapsed_ms,
+                    });
+                }
+            }
+            CompanyEvent::WorkflowRunFinished {
+                workflow_id,
+                scheduled,
+                run_id,
+                deliveries,
+                pending_approvals,
+                error,
+            } => {
+                if !matches(&workflow_id) {
+                    continue;
+                }
+                // Settle the open entry when there is one…
+                if let Some(entry) = run_id
+                    .as_ref()
+                    .and_then(|id| index.get(id))
+                    .and_then(|i| runs.get_mut(*i))
+                {
+                    entry.seq = seq;
+                    entry.at_millis = at_millis;
+                    entry.deliveries = deliveries;
+                    entry.pending_approvals = pending_approvals;
+                    entry.error = error;
+                    entry.running = false;
+                    continue;
+                }
+                // …else stand alone. Two ways to get here, both legitimate: a
+                // pre-#371 row (no run id, no start), and a #371 row whose start
+                // fell off the readable journal. Either way the entry looks
+                // exactly like the pre-#371 shape — no nodes, no start time, not
+                // running — so old history renders unchanged.
+                runs.push(WorkflowRunOutcome {
+                    seq,
+                    at_millis,
+                    workflow_id,
+                    scheduled,
+                    run_id,
+                    deliveries,
+                    pending_approvals,
+                    error,
+                    nodes: Vec::new(),
+                    started_at_millis: None,
+                    running: false,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    // Newest first: a history panel leads with the run that just happened. The
+    // `limit` now cuts *runs* rather than journal rows, which is the number the
+    // caller was asking about all along.
     runs.reverse();
     runs.truncate(limit);
     Ok(Json(runs))
@@ -1575,6 +1716,7 @@ mod tests {
                 detail: "never written in".into(),
                 reason: crate::ports::DeliveryReason::RecipientNotEstablished,
             }],
+            run_id: "run-1".into(),
         })
         .unwrap();
         assert_eq!(json["deliveries"][0]["node"], "done");
@@ -1603,6 +1745,7 @@ mod tests {
                 detail: "waiting for you in Approvals".into(),
                 reason: crate::ports::DeliveryReason::ParkedForApproval,
             }],
+            run_id: "run-1".into(),
         })
         .unwrap();
         assert_eq!(json["deliveries"][0]["status"], "pending");
@@ -1616,9 +1759,13 @@ mod tests {
             output: Value::Null,
             pending_approvals: Vec::new(),
             deliveries: Vec::new(),
+            run_id: "run-1".into(),
         })
         .unwrap();
         assert_eq!(json["deliveries"], serde_json::json!([]));
+        // Issue #371: the correlation id rides the response in camelCase, so the
+        // console can tie the frames it painted mid-request to the run it awaited.
+        assert_eq!(json["runId"], "run-1");
     }
 
     #[test]
@@ -1655,7 +1802,7 @@ mod tests {
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
 
-        use super::super::{CompanyEvent, DEFAULT_RUN_LIMIT};
+        use super::super::{CompanyEvent, DEFAULT_RUN_LIMIT, WorkflowNodeStatus};
         use crate::company::CompanyManifest;
         use crate::ports::CompanyStore;
         use crate::ports::types::{CompanyId, CompanyRecord};
@@ -2076,6 +2223,265 @@ mod tests {
                 "no inference source for agent node `worker`"
             );
             assert_eq!(body[0]["deliveries"].as_array().unwrap().len(), 0);
+        }
+
+        // ── Issue #371: the per-node progress fold ─────────────────────────
+
+        /// Journals a `WorkflowRunStarted`, the way the runner does before the
+        /// engine call.
+        async fn journal_start(
+            state: &AppState,
+            id: &CompanyId,
+            workflow_id: &str,
+            run_id: &str,
+            scheduled: bool,
+        ) {
+            let runtime = state.registry().get(id).expect("registered");
+            runtime
+                .events()
+                .append(
+                    id,
+                    CompanyEvent::WorkflowRunStarted {
+                        workflow_id: workflow_id.to_string(),
+                        run_id: run_id.to_string(),
+                        scheduled,
+                    },
+                )
+                .await
+                .expect("append");
+        }
+
+        /// Journals one `WorkflowNodeFinished`, the way the run observer does.
+        async fn journal_node(
+            state: &AppState,
+            id: &CompanyId,
+            workflow_id: &str,
+            run_id: &str,
+            node_id: &str,
+            status: WorkflowNodeStatus,
+        ) {
+            let runtime = state.registry().get(id).expect("registered");
+            runtime
+                .events()
+                .append(
+                    id,
+                    CompanyEvent::WorkflowNodeFinished {
+                        workflow_id: workflow_id.to_string(),
+                        run_id: run_id.to_string(),
+                        node_id: node_id.to_string(),
+                        status,
+                        elapsed_ms: 42,
+                    },
+                )
+                .await
+                .expect("append");
+        }
+
+        /// Journals a finished outcome carrying a run id, the way every entry
+        /// point does post-#371.
+        async fn journal_finish(
+            state: &AppState,
+            id: &CompanyId,
+            workflow_id: &str,
+            run_id: &str,
+            scheduled: bool,
+            error: Option<&str>,
+        ) {
+            let runtime = state.registry().get(id).expect("registered");
+            runtime
+                .events()
+                .append(
+                    id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: workflow_id.to_string(),
+                        scheduled,
+                        run_id: Some(run_id.to_string()),
+                        deliveries: Vec::new(),
+                        pending_approvals: Vec::new(),
+                        error: error.map(str::to_string),
+                    },
+                )
+                .await
+                .expect("append");
+        }
+
+        /// **The issue's durable half at the HTTP boundary.** A run's start,
+        /// its per-node rows and its outcome come back as ONE history entry
+        /// carrying the node trail — which is what makes a scheduled run's
+        /// failure point readable after the fact.
+        #[tokio::test]
+        async fn run_history_groups_a_runs_nodes_under_one_entry() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_start(&state, &id, "digest", "run-1", true).await;
+            journal_node(
+                &state,
+                &id,
+                "digest",
+                "run-1",
+                "ceo",
+                WorkflowNodeStatus::Ok,
+            )
+            .await;
+            journal_node(
+                &state,
+                &id,
+                "digest",
+                "run-1",
+                "send",
+                WorkflowNodeStatus::Error,
+            )
+            .await;
+            journal_finish(&state, &id, "digest", "run-1", true, Some("send failed")).await;
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            let rows = body.as_array().expect("array");
+            assert_eq!(rows.len(), 1, "four journal rows fold to one run: {body}");
+
+            assert_eq!(rows[0]["runId"], "run-1");
+            assert_eq!(rows[0]["error"], "send failed");
+            assert!(rows[0].get("running").is_none(), "a settled run: {body}");
+            assert!(rows[0]["startedAtMillis"].is_number(), "{body}");
+
+            // In finish order, with the status and duration the canvas paints.
+            let nodes = rows[0]["nodes"].as_array().expect("nodes");
+            assert_eq!(nodes.len(), 2);
+            assert_eq!(nodes[0]["nodeId"], "ceo");
+            assert_eq!(nodes[0]["status"], "ok");
+            assert_eq!(nodes[0]["elapsedMs"], 42);
+            assert_eq!(nodes[1]["nodeId"], "send");
+            assert_eq!(nodes[1]["status"], "error");
+        }
+
+        /// A run whose host died leaves a start with no finish, and it folds as
+        /// `running: true` with the nodes it did complete. Honest only because
+        /// the boot sweep settles such runs — see `sweep_interrupted_runs`.
+        #[tokio::test]
+        async fn run_history_reports_an_unsettled_run_as_running() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_start(&state, &id, "digest", "run-live", false).await;
+            journal_node(
+                &state,
+                &id,
+                "digest",
+                "run-live",
+                "ceo",
+                WorkflowNodeStatus::Ok,
+            )
+            .await;
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert_eq!(body[0]["running"], true, "{body}");
+            assert_eq!(body[0]["nodes"].as_array().unwrap().len(), 1);
+            assert!(body[0].get("error").is_none(), "{body}");
+        }
+
+        /// **The compatibility claim, pinned.** A journal written before #371
+        /// carries finished rows with no run id and no starts. Those fold
+        /// exactly as they always did — one row in, one entry out, no `nodes`
+        /// key, no `running` key, no `startedAtMillis`.
+        #[tokio::test]
+        async fn run_history_folds_pre_371_rows_unchanged() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_run(&state, &id, "digest", true, Vec::new(), None).await;
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            let rows = body.as_array().expect("array");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["workflowId"], "digest");
+            assert!(rows[0].get("nodes").is_none(), "{body}");
+            assert!(rows[0].get("running").is_none(), "{body}");
+            assert!(rows[0].get("startedAtMillis").is_none(), "{body}");
+            assert!(rows[0].get("runId").is_none(), "{body}");
+        }
+
+        /// Two runs interleaving on one journal — the shape two concurrent
+        /// workflows produce — attach their nodes to the right entry. This is
+        /// why the fold groups on run id rather than on row adjacency.
+        #[tokio::test]
+        async fn run_history_keeps_interleaved_runs_apart() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_start(&state, &id, "a", "run-a", false).await;
+            journal_start(&state, &id, "b", "run-b", false).await;
+            journal_node(&state, &id, "b", "run-b", "b1", WorkflowNodeStatus::Ok).await;
+            journal_node(&state, &id, "a", "run-a", "a1", WorkflowNodeStatus::Ok).await;
+            journal_finish(&state, &id, "a", "run-a", false, None).await;
+            journal_finish(&state, &id, "b", "run-b", false, None).await;
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            let rows = body.as_array().expect("array");
+            assert_eq!(rows.len(), 2, "{body}");
+            let by_id = |run: &str| {
+                rows.iter()
+                    .find(|r| r["runId"] == run)
+                    .unwrap_or_else(|| panic!("{run} missing: {body}"))
+                    .clone()
+            };
+            assert_eq!(by_id("run-a")["nodes"][0]["nodeId"], "a1");
+            assert_eq!(by_id("run-a")["nodes"].as_array().unwrap().len(), 1);
+            assert_eq!(by_id("run-b")["nodes"][0]["nodeId"], "b1");
+            assert_eq!(by_id("run-b")["nodes"].as_array().unwrap().len(), 1);
+        }
+
+        /// `?limit=` now cuts **runs**, not journal rows — the number the caller
+        /// was asking about all along. Without the group-aware cut, a limit of 2
+        /// over three 4-row runs would return fragments.
+        #[tokio::test]
+        async fn run_history_limit_counts_runs_not_journal_rows() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            for i in 0..3 {
+                let run = format!("run-{i}");
+                journal_start(&state, &id, "digest", &run, false).await;
+                journal_node(&state, &id, "digest", &run, "ceo", WorkflowNodeStatus::Ok).await;
+                journal_node(&state, &id, "digest", &run, "done", WorkflowNodeStatus::Ok).await;
+                journal_finish(&state, &id, "digest", &run, false, None).await;
+            }
+
+            let response = router(state)
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/runs?limit=2",
+                    None,
+                ))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            let rows = body.as_array().expect("array");
+            assert_eq!(rows.len(), 2, "{body}");
+            // Newest first, and each one whole.
+            assert_eq!(rows[0]["runId"], "run-2");
+            assert_eq!(rows[0]["nodes"].as_array().unwrap().len(), 2);
+            assert_eq!(rows[1]["runId"], "run-1");
         }
 
         /// `?workflow=` narrows to one graph, and does so BEFORE the limit cut —
