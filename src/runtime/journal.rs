@@ -444,14 +444,24 @@ impl RuntimeJournal {
     /// about is exactly the recoverable kind, and skipping it is the outcome
     /// worth working to avoid.
     pub async fn load(&self) -> Result<()> {
-        let contents = match tokio::fs::read_to_string(&self.path).await {
+        // Read bytes, not a `String`. A torn write can split a multi-byte
+        // codepoint, and `read_to_string` would fail the whole load on that one
+        // bad byte — failing the boot for exactly the damage this function
+        // exists to survive. Decoding per line instead keeps a single mangled
+        // line on the `CorruptLine` path with the rest of the journal intact.
+        let contents = match tokio::fs::read(&self.path).await {
             Ok(contents) => contents,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(self.io_err(e)),
         };
 
         let mut state = State::default();
-        for (index, line) in contents.lines().enumerate() {
+        for (index, raw) in contents.split(|b| *b == b'\n').enumerate() {
+            // Lossy on purpose: invalid bytes become U+FFFD, the line then fails
+            // to parse as JSON, and it lands on the same skip-and-log path as
+            // any other unrecoverable line rather than aborting the replay.
+            let line = String::from_utf8_lossy(raw);
+            let line = line.as_ref();
             if line.trim().is_empty() {
                 continue;
             }
@@ -912,7 +922,18 @@ impl RuntimeJournal {
         out
     }
 
-    /// Appends one record, whole, and does not return until it is on the file.
+    /// Appends one record, whole, and does not return until the write syscall
+    /// has completed.
+    ///
+    /// **The guarantee is process-crash durability, not host-crash durability.**
+    /// There is no `sync_data`/`sync_all` here, so the bytes are in the kernel's
+    /// page cache rather than on stable storage when this returns: killing the
+    /// process cannot lose them, but a host crash or power loss between the
+    /// append and the flush still can. The at-most-once contract therefore holds
+    /// against a process dying — the case this codebase actually handles, and
+    /// the one the boot reaper and the interrupted-run sweep are built around —
+    /// and not against losing the machine. Whether an `fsync` per append is
+    /// worth its cost on this path is a separate decision (see #392).
     ///
     /// Delegates to [`append_line`](crate::store::fs::append_line), which emits
     /// the record **and** its newline in a single blocking `write_all` under
@@ -1864,6 +1885,55 @@ mod test {
             !corruption[0].message.contains("filing.submit"),
             "a corruption report must not quote the line's contents",
         );
+    }
+
+    /// **Issue #386**: a torn write can split a multi-byte codepoint, so the
+    /// damaged line is not merely bad JSON — it is not valid UTF-8 at all.
+    ///
+    /// `load` used to `read_to_string`, which fails on the first invalid byte
+    /// anywhere in the file. That turned exactly the damage this recovery path
+    /// exists for into the whole-boot failure it exists to prevent, and no
+    /// amount of per-line JSON handling downstream could have saved it. Raised
+    /// in review of PR #389.
+    #[tokio::test]
+    async fn a_line_that_is_not_valid_utf8_is_skipped_like_any_other_damage() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+
+        let record = |key: &str, at| {
+            serde_json::to_string(&JournalRecord::EffectExecuted {
+                key: key.into(),
+                effect: Some(executed(at)),
+            })
+            .unwrap()
+        };
+
+        // A lone continuation byte: never valid on its own, which is what the
+        // tail of a split codepoint looks like.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(record("cyc:0", 0).as_bytes());
+        bytes.push(b'\n');
+        bytes.extend_from_slice(&[0x7b, 0x9f, 0x8d]);
+        bytes.push(b'\n');
+        bytes.extend_from_slice(record("cyc:2", 2).as_bytes());
+        bytes.push(b'\n');
+        tokio::fs::write(&path, &bytes).await.unwrap();
+
+        let journal = RuntimeJournal::new(&path);
+        journal
+            .load()
+            .await
+            .expect("invalid UTF-8 on one line must not fail the boot");
+
+        assert!(journal.is_executed("cyc:0"), "the line before must replay");
+        assert!(
+            journal.is_executed("cyc:2"),
+            "the lines after the damage must still replay",
+        );
+
+        let corruption = journal.corruption();
+        assert_eq!(corruption.len(), 1, "exactly one line was unreadable");
+        assert_eq!(corruption[0].line, 2, "the report must locate the line");
     }
 
     /// **Issue #386**: when `append` returns, the record is on the file.
