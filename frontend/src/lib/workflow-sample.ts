@@ -13,7 +13,34 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   summary: string;
   emoji: string;
   color: NodeColor;
+  /**
+   * How this node fared in the run being shown (issue #371) — the live one, or
+   * a past run overlaid from the history panel. Absent when no run is being
+   * shown, which is the resting state and must look exactly as it did before.
+   */
+  runState?: NodeRunState;
+  /** Wall-clock duration of the node's execution, once it has finished. */
+  elapsedMs?: number;
 }
+
+/**
+ * A node's state within one run (issue #371).
+ *
+ * `running` is **derived**, not reported: the engine's observer has an
+ * `on_step_finish` hook and no `on_step_start`, so the console marks the
+ * successors of a finished node as running rather than being told. It is
+ * therefore a good-faith frontier, not ground truth — after a branch point it
+ * briefly marks both arms until one of them finishes. `ok` and `error` are
+ * reported by the engine and are exact.
+ */
+export type NodeRunState = "running" | "ok" | "error";
+
+/** Ring + glow per run state, layered over the node's own kind accent. */
+export const RUN_STATE_CLASSES: Record<NodeRunState, string> = {
+  running: "ring-2 ring-sky-500/70 shadow-sky-500/20 animate-pulse",
+  ok: "ring-2 ring-emerald-500/60",
+  error: "ring-2 ring-red-500/80",
+};
 
 /** Per-kind emoji + accent, mirroring OpenHuman's node-kind metadata. */
 export const NODE_KIND_META: Record<string, { emoji: string; color: NodeColor }> = {
