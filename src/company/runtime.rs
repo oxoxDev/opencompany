@@ -872,16 +872,23 @@ impl CompanyRuntime {
     }
 
     /// The approvals currently awaiting the operator.
+    ///
+    /// The single projection point for [`ApprovalSummary`], and therefore the
+    /// single place issue #372's `agent` + `payload` are filled in. The payload
+    /// is redacted and bounded **here**, before it is a summary at all, so no
+    /// caller can accidentally serialize the raw effect.
     pub fn pending_approvals(&self) -> Vec<ApprovalSummary> {
         self.journal
             .pending()
             .into_iter()
             .map(|p| ApprovalSummary {
                 id: p.id,
-                kind: p.effect.kind,
+                kind: p.effect.kind.clone(),
                 amount_usd: p.effect.amount_usd,
                 at_millis: p.at_millis,
                 task: p.task,
+                agent: p.effect.agent.clone(),
+                payload: crate::runtime::approval_display::display_payload(&p.effect),
             })
             .collect()
     }

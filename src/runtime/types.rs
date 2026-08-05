@@ -100,4 +100,27 @@ pub struct ApprovalSummary {
     /// pre-#333 approval serializes as it always did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<TaskLink>,
+    /// The roster teammate whose blocked tool call this approval was parked for
+    /// (issue #372), mirroring [`Effect::agent`](crate::ports::types::Effect::agent).
+    ///
+    /// `Some(id)` is exactly "projected from a harness tool call" — the console
+    /// renders "Asked by <name>". `None` is a *native* effect the runtime
+    /// performs itself, or a park journaled before #243 stamped the field, and
+    /// the card names no asker rather than inventing one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// What the effect will actually do, as an operator-readable copy of its
+    /// payload (issue #372) — the tool-call arguments for a harness effect.
+    ///
+    /// Redacted and bounded host-side by
+    /// [`display_payload`](crate::runtime::approval_display::display_payload),
+    /// so no credential crosses the wire and no unbounded blob reaches a
+    /// browser. `None` when the effect carries no arguments.
+    ///
+    /// Both new fields are omitted when absent, which is what keeps the wire
+    /// additive: an old console ignores the unknown keys, and a new console
+    /// treats their absence as "old host" and renders the card exactly as it
+    /// did before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
 }

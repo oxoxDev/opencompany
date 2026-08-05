@@ -12,6 +12,11 @@
 //!   trigger nodes (issue #169). Both share the [`cron`] matcher and [`Clock`].
 //! - The [`journal`] backs at-most-once effects and the durable approval queue.
 
+/// Issue #372: the host-side projection of a parked effect's payload onto the
+/// approval card — shown in full by default, with a credential-key denylist as
+/// the safety net, and bounded so an agent-authored blob cannot reach a
+/// browser unbounded. See [`approval_display`].
+pub mod approval_display;
 /// Brain-agnostic resolution of a task card's `assignee` against the full
 /// roster — teammates, overlay teammates and desks (issue #205). Shared by the
 /// harness dispatch path and the REST write boundary so the board's assignee

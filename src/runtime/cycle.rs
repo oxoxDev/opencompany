@@ -2006,6 +2006,109 @@ mod test {
         assert!(!rt.journal.is_executed(&format!("approval:{id}")));
     }
 
+    // --- What the card says (issue #372) ------------------------------------
+
+    /// A harness-projected park reaches the operator naming its asker and what
+    /// it will actually do — the whole point of #372, where the card used to say
+    /// only "Shell".
+    #[tokio::test]
+    async fn a_harness_park_projects_its_agent_and_payload() {
+        const FAKE_SECRET: &str = "NOT-A-REAL-KEY-planted-for-tests";
+        let home_dir = tmp_home();
+        let (rt, _id) = park_one(
+            home_dir.path().to_path_buf(),
+            harness_effect(
+                "engineer",
+                "shell",
+                serde_json::json!({
+                    "command": "./deploy.sh --staging",
+                    "env": { "API_KEY": FAKE_SECRET },
+                }),
+            ),
+        )
+        .await;
+
+        let pending = rt.pending_approvals();
+        assert_eq!(pending.len(), 1);
+        let summary = &pending[0];
+        assert_eq!(summary.agent.as_deref(), Some("engineer"));
+
+        let payload = summary.payload.as_ref().expect("the arguments are carried");
+        // The command is verbatim: it IS the thing being consented to.
+        assert_eq!(payload["command"], "./deploy.sh --staging");
+        // ...and the planted credential never leaves the host.
+        let wire = serde_json::to_string(summary).unwrap();
+        assert!(
+            !wire.contains(FAKE_SECRET),
+            "secret reached the wire: {wire}"
+        );
+        assert!(wire.contains(crate::runtime::approval_display::REDACTED));
+    }
+
+    /// A **native** effect the runtime performs itself names no asker, and an
+    /// argument-less one carries no payload — so the card renders exactly as it
+    /// did before #372 rather than inventing an agent. This is also the shape a
+    /// journal-replayed pre-#243 park takes.
+    #[tokio::test]
+    async fn a_native_park_projects_no_agent_and_no_payload() {
+        let home_dir = tmp_home();
+        let (rt, _id) = park_one(
+            home_dir.path().to_path_buf(),
+            Effect {
+                kind: "filing.submit".into(),
+                group: EffectGroup::Sign,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::Value::Null,
+                agent: None,
+                run_id: None,
+            },
+        )
+        .await;
+
+        let pending = rt.pending_approvals();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].agent.is_none());
+        assert!(pending[0].payload.is_none());
+    }
+
+    /// The wire stays **additive**: absent fields are omitted entirely, so the
+    /// JSON an old console receives is byte-identical to the pre-#372 shape and
+    /// its unknown-key tolerance is never exercised.
+    #[tokio::test]
+    async fn absent_display_fields_are_omitted_from_the_wire() {
+        let home_dir = tmp_home();
+        let (rt, _id) = park_one(
+            home_dir.path().to_path_buf(),
+            Effect {
+                kind: "filing.submit".into(),
+                group: EffectGroup::Sign,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::Value::Null,
+                agent: None,
+                run_id: None,
+            },
+        )
+        .await;
+
+        let wire: serde_json::Value =
+            serde_json::to_value(&rt.pending_approvals()[0]).expect("serializes");
+        let keys: Vec<&str> = wire
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        assert!(!keys.contains(&"agent"), "agent leaked as null: {keys:?}");
+        assert!(
+            !keys.contains(&"payload"),
+            "payload leaked as null: {keys:?}"
+        );
+    }
+
     /// Approve-with-edit mints against the **amended** arguments.
     ///
     /// Granting the original would let the agent re-issue the very call the
