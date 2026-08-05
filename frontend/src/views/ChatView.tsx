@@ -8,6 +8,7 @@ import {
   type ReactNode,
   type SetStateAction,
 } from "react";
+import { TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
@@ -293,6 +294,15 @@ export function ChatView({
   // the line below wouldn't; it only made "main" look like a real channel id
   // (issue #368).
   const channel = desks ? (findChannel(sections, sub) ?? firstChannel(sections)) : null;
+  /**
+   * The hash named a channel this company doesn't have, and the first-channel
+   * fallback answered instead.
+   *
+   * Only meaningful once the desks are in: before that, *every* id looks
+   * unknown. Derived rather than stored, so it clears itself the moment the
+   * hash changes — there is no stale banner to dismiss.
+   */
+  const unknownChannel = desks && sub && !findChannel(sections, sub) ? sub : null;
 
   /**
    * Who is in the channel on screen — `null` when it names no membership, in
@@ -567,6 +577,18 @@ export function ChatView({
 
         <div className="flex min-h-0 flex-1">
           <div className="flex min-w-0 flex-1 flex-col">
+            {unknownChannel && (
+              <p
+                role="status"
+                className="flex shrink-0 items-center gap-1.5 border-b bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground"
+              >
+                <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+                <span className="min-w-0 truncate">
+                  <span className="font-medium text-foreground">#{unknownChannel}</span> isn&apos;t a
+                  channel here — showing {channelTitle(active)} instead.
+                </span>
+              </p>
+            )}
             <MessageTimeline
               channel={channel}
               entries={entries}

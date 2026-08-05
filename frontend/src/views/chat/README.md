@@ -8,11 +8,20 @@ the desks the two shared without ever being connected.
 ## Routing
 
 `#/chat/<channelId>` — the channel id is the hash's second segment, so a
-channel is linkable and survives a refresh. An unknown id falls back to
-`general` rather than erroring.
+channel is linkable and survives a refresh.
 
-- Desks are `#general`, `#strategy`, `#creative`, `#front-desk` (`lib/desks.ts`).
+- A desk's channel id is the host's desk id, which is also its chat thread id.
 - A DM is `dm:<slug-of-name>` — e.g. `#/chat/dm:designer`.
+- A host with no `.../desks` route falls back to `#general`, `#strategy`,
+  `#creative`, `#front-desk` (`lib/desks.ts`).
+
+Nothing resolves until `/desks` has answered — the view holds a loading state
+rather than resolving against the fallback desks and swapping under you, which
+is what made every deep link flash `#general` (issue #370). An id that doesn't
+resolve *after* they land opens the first channel and says so in a notice above
+the timeline, so the URL and the content never disagree silently. A `/desks`
+failure that isn't "this host has none" (404 or an empty list) is a retryable
+error state, not invented channels.
 
 DM ids key on the teammate's **name**, not their roster id: the starter roster
 mints ids from a module counter (`lib/team.ts`), so those differ between two
