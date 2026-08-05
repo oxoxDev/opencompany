@@ -609,6 +609,87 @@ pub enum CompanyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// A workflow run began (issue #371) — the opening bracket of a run's
+    /// per-node progress trail.
+    ///
+    /// Before this, a run reported once, at the end. Between pressing Run and
+    /// the drawer appearing there was no signal at all: a long run was
+    /// indistinguishable from a wedged one, and a run that died at the fourth of
+    /// six nodes said only that it died. This event and
+    /// [`WorkflowNodeFinished`](Self::WorkflowNodeFinished) are the trail, and
+    /// they ride the journal rather than a side channel because the journal
+    /// already feeds the live operator SSE projection — **one append serves both
+    /// the live half and the durable half**, so a scheduled run nobody watched
+    /// reads back exactly as a watched one did.
+    ///
+    /// This is deliberately **not** [issue #242's `RunRecord`](Self::TaskDispatched).
+    /// That record keys to a board task with an attempt ordinal; a workflow run
+    /// has neither, and minting a synthetic task id to borrow the shape would
+    /// leak a lie into every `RunStore` consumer.
+    ///
+    /// [`run_id`](Self::WorkflowRunStarted::run_id) is **required** here (unlike
+    /// on `WorkflowRunFinished`, where it stays optional for the rows written
+    /// before entry points minted one). It is the correlation key: a run's node
+    /// events and its finished event share it, so the fold can group them and
+    /// the console can overlay one past run's states onto the canvas.
+    ///
+    /// Additive: old journals never carry it, and its presence changes how no
+    /// existing variant serializes.
+    WorkflowRunStarted {
+        /// The workflow graph that is running (its `workflows/<id>.toml` stem).
+        workflow_id: String,
+        /// The run's correlation id, minted by the entry point.
+        run_id: String,
+        /// Whether a cron schedule started this run rather than an operator.
+        scheduled: bool,
+    },
+    /// One non-trigger node of a workflow run finished (issue #371), reported by
+    /// the engine's `RunObserver` as the graph is walked.
+    ///
+    /// One event per node — roughly eight for a six-node graph, against the
+    /// dozens of steps a single chat turn emits — which is why the journal is
+    /// the right carrier at this volume rather than a dedicated store.
+    ///
+    /// **No node output and no error text ride this event.** That is the same
+    /// scrubbing stance the live turn-progress frames take: the journal is read
+    /// by the operator SSE projection and wired to the inference sidecar, and a
+    /// node's raw items are exactly the payload none of those readers need. The
+    /// run-level failure reason already lands on
+    /// [`WorkflowRunFinished::error`](Self::WorkflowRunFinished) — a tenant-scoped
+    /// surface — so nothing is lost by keeping this one structural.
+    ///
+    /// There is no matching *started* event, and that is an engine constraint
+    /// rather than a choice: tinyflows' `RunObserver` has `on_step_finish` but
+    /// no `on_step_start`, so "currently executing" is derived client-side from
+    /// the graph topology the console already holds.
+    WorkflowNodeFinished {
+        /// The workflow graph that is running.
+        workflow_id: String,
+        /// The run this node belongs to — the same id its
+        /// [`WorkflowRunStarted`](Self::WorkflowRunStarted) carries.
+        run_id: String,
+        /// The graph node that just finished.
+        node_id: String,
+        /// Whether the node succeeded or errored.
+        status: WorkflowNodeStatus,
+        /// Wall-clock duration of the node's execution, in milliseconds.
+        elapsed_ms: u64,
+    },
+}
+
+/// How one workflow node's execution came out (issue #371).
+///
+/// A closed two-value set on purpose: it is the entire payload of
+/// [`CompanyEvent::WorkflowNodeFinished`] beyond the structural ids, and having
+/// no `String` arm is what guarantees, by construction, that a node's own error
+/// text cannot reach the journal or the wire through this event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkflowNodeStatus {
+    /// The node executed and produced output.
+    Ok,
+    /// The node's executor errored (after any retries were exhausted).
+    Error,
 }
 
 /// A `CompanyEvent` durably appended to the log with its sequence and time.
@@ -3056,6 +3137,87 @@ mod test {
         assert!(!out.contains("deliveries"), "{out}");
         assert!(!out.contains("pending_approvals"), "{out}");
         assert!(!out.contains("error"), "{out}");
+    }
+
+    /// Issue #371's opening bracket round-trips through the JSONL the journal
+    /// puts every event through.
+    #[test]
+    fn workflow_run_started_round_trips() {
+        let event = CompanyEvent::WorkflowRunStarted {
+            workflow_id: "digest".to_string(),
+            run_id: "run-1".to_string(),
+            scheduled: true,
+        };
+        assert_eq!(round_trip(&event), event);
+    }
+
+    /// Both node outcomes round-trip, including the elapsed reading — the field
+    /// that turns "it finished" into "it took this long", which is what tells a
+    /// slow run from a wedged one.
+    #[test]
+    fn workflow_node_finished_round_trips_both_statuses() {
+        for status in [WorkflowNodeStatus::Ok, WorkflowNodeStatus::Error] {
+            let event = CompanyEvent::WorkflowNodeFinished {
+                workflow_id: "digest".to_string(),
+                run_id: "run-1".to_string(),
+                node_id: "ceo".to_string(),
+                status,
+                elapsed_ms: 1234,
+            };
+            assert_eq!(round_trip(&event), event);
+        }
+    }
+
+    /// Every field on both #371 variants is required, and that is the point:
+    /// the correlation id is what groups a run's nodes with its outcome, so a
+    /// line without one would be unfoldable. Nothing is `skip_serializing_if`,
+    /// so the wire form is fully self-describing.
+    #[test]
+    fn workflow_progress_variants_serialize_every_field() {
+        let started = serde_json::to_string(&CompanyEvent::WorkflowRunStarted {
+            workflow_id: "digest".to_string(),
+            run_id: "run-1".to_string(),
+            scheduled: false,
+        })
+        .expect("serialize");
+        assert_eq!(
+            started,
+            r#"{"kind":"WorkflowRunStarted","workflow_id":"digest","run_id":"run-1","scheduled":false}"#
+        );
+
+        let node = serde_json::to_string(&CompanyEvent::WorkflowNodeFinished {
+            workflow_id: "digest".to_string(),
+            run_id: "run-1".to_string(),
+            node_id: "ceo".to_string(),
+            status: WorkflowNodeStatus::Error,
+            elapsed_ms: 7,
+        })
+        .expect("serialize");
+        assert_eq!(
+            node,
+            r#"{"kind":"WorkflowNodeFinished","workflow_id":"digest","run_id":"run-1","node_id":"ceo","status":"error","elapsed_ms":7}"#
+        );
+    }
+
+    /// The replay guarantee #371 rests on, stated as a test: adding these two
+    /// variants cannot change how an already-persisted line loads. A journal
+    /// written before #371 contains neither `kind`, and the pre-#371 wire form
+    /// of the variant they sit beside still decodes byte-for-byte as it did.
+    #[test]
+    fn pre_371_journal_lines_are_unaffected_by_the_new_variants() {
+        let line = r#"{"kind":"WorkflowRunFinished","workflow_id":"digest","scheduled":true,"pending_approvals":["review"]}"#;
+        let event: CompanyEvent = serde_json::from_str(line).expect("pre-#371 line loads");
+        assert_eq!(
+            event,
+            CompanyEvent::WorkflowRunFinished {
+                workflow_id: "digest".to_string(),
+                scheduled: true,
+                run_id: None,
+                deliveries: Vec::new(),
+                pending_approvals: vec!["review".to_string()],
+                error: None,
+            }
+        );
     }
 
     /// Issue #259's two variants pin their wire shape the same way
