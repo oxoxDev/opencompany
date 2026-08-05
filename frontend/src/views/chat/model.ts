@@ -25,9 +25,6 @@ export function deskFromDto(d: DeskDto): Desk {
  */
 export type Transcripts = Record<string, ChatMessage[]>;
 
-/** The channel a fresh session lands on, and where an unaddressed system line goes. */
-export const DEFAULT_CHANNEL = "main";
-
 export type ChannelKind = "channel" | "dm";
 
 export interface Channel {
@@ -158,11 +155,12 @@ export function findChannel(sections: ChannelSection[], id: string | null): Chan
 
 /**
  * The first channel across all sections, or `null` when there are none.
- * Used as the last-resort selection so the chat never renders blank while any
- * channel exists — the hard-coded {@link DEFAULT_CHANNEL} ("main") only exists
- * in the fallback desks, so once a company's real desks load (ids drawn from
- * the roster, never "main") it no longer matches and the view would otherwise
- * bail to null.
+ *
+ * The last-resort selection, so the chat never renders blank while any channel
+ * exists (issue #366), and the address of last resort for a line with no
+ * channel of its own (issue #368). Both used to reach for a literal `"main"`
+ * instead — an id carried only by the first *fallback* desk, so it matched
+ * nothing at all on a company with desks of its own.
  */
 export function firstChannel(sections: ChannelSection[]): Channel | null {
   for (const s of sections) {

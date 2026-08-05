@@ -48,7 +48,6 @@ import { Overview } from "@/views/Overview";
 import { ChatView } from "@/views/ChatView";
 import {
   channelIdForThread,
-  DEFAULT_CHANNEL,
   deskFromDto,
   dmChannelId,
   type Transcripts,
@@ -214,6 +213,10 @@ export function AppShell({
   // out to hydrate each channel and used to throw it away — leaving the shell
   // unable to say which channel an incoming event belongs to (issue #367).
   const [chatChannelByThread, setChatChannelByThread] = useState<Record<string, string>>({});
+  // This company's first desk channel — the same channel `ChatView` lands on
+  // when the hash names none, and so where a line with nowhere else to go is
+  // still somewhere the operator will find it.
+  const [firstDeskChannelId, setFirstDeskChannelId] = useState<string | null>(null);
   // The chat channel the operator last had on screen. A ref, not state,
   // because it outlives `ChatView`: it is what an unaddressed system line is
   // addressed to after the operator has walked off to Approvals (issue #368).
@@ -320,6 +323,7 @@ export function AppShell({
     // channels that no longer exist, and start the unread floor again so the
     // incoming company's rehydrated history isn't counted as news.
     setChatChannelByThread({});
+    setFirstDeskChannelId(null);
     setLastViewedChannel({});
     setUnreadSince(Date.now());
     activeChatChannelRef.current = null;
@@ -397,6 +401,7 @@ export function AppShell({
         const roster = team.map(fromDto);
         // Keep the addressing this loop resolves, not just its side effect.
         setChatChannelByThread(channelMap(chatDesks, roster));
+        setFirstDeskChannelId(chatDesks[0]?.id ?? null);
         chatDesks.forEach((d) => hydrateChannel(d.id, d.id));
         roster.forEach((m) => hydrateChannel(dmChannelId(m), m.id));
       })
@@ -407,6 +412,7 @@ export function AppShell({
         const fallbackDesks = defaultDesks();
         defaultThreads().forEach((t) => hydrate(t.id));
         setChatChannelByThread(channelMap(fallbackDesks, []));
+        setFirstDeskChannelId(fallbackDesks[0]?.id ?? null);
         fallbackDesks.forEach((d) => hydrateChannel(d.id, d.id));
       });
 
@@ -458,16 +464,37 @@ export function AppShell({
       ts.map((t) => (t.id === threadId ? { ...t, messages: updater(t.messages) } : t)),
     );
 
-  // Approval decisions and other events land in a transcript rather than
-  // vanishing. Both chat surfaces get the line: Chat's `main` channel gets it
-  // appended directly (the shell owns `transcripts`, not `ChatView`, so this
-  // survives `ChatView` unmounting), and the parked Conversation appends to
-  // its active thread.
+  /**
+   * Approval decisions and other unaddressed lines land in a transcript rather
+   * than vanishing. Both chat surfaces get the line: Chat appends it to a
+   * channel, and the parked Conversation to its active thread. The shell owns
+   * `transcripts`, not `ChatView`, so the write survives that view unmounting —
+   * which it always has, because these lines are written from Approvals.
+   *
+   * The channel is resolved, not assumed (issue #368). This used to append to
+   * the literal `"main"`, which is the id of the first *fallback* desk and of
+   * nothing else: a company with its own desks has channel ids taken verbatim
+   * from its manifest, so every decision line — the failures included, which is
+   * the half that matters — was filed under a key no channel renders.
+   *
+   * In order: the channel the operator last had open, which survives the walk
+   * over to Approvals and is where they will look first; else this company's
+   * first desk channel, the same first-match `ChatView` lands on when the hash
+   * names none (issue #366); else there is genuinely no channel to write to, so
+   * the line stays out of `transcripts` and the toast `ApprovalsView` raises
+   * alongside this call is what surfaces the decision. Never a dead bucket.
+   *
+   * Either way the channel it lands in shows an unread badge until the operator
+   * opens it, so the line says where it went rather than waiting to be found.
+   */
   const noteSystem = (line: string) => {
-    setTranscripts((t) => ({
-      ...t,
-      [DEFAULT_CHANNEL]: [...(t[DEFAULT_CHANNEL] ?? []), makeMessage("system", line)],
-    }));
+    const target = activeChatChannelRef.current ?? firstDeskChannelId;
+    if (target) {
+      setTranscripts((t) => ({
+        ...t,
+        [target]: [...(t[target] ?? []), makeMessage("system", line)],
+      }));
+    }
     setThreadMessages(activeThreadId, (m) => [...m, makeMessage("system", line)]);
   };
 
