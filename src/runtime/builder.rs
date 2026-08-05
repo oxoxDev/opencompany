@@ -923,14 +923,14 @@ impl RuntimeBuilder {
         // `Arc`s go to the delivery deps and to the runtime — one gate, one
         // journal, one approvals queue.
         //
-        // On a rebuild the journal is **inherited, never reopened**. It is the
-        // one piece where a second instance is not merely wasteful: `append`
-        // writes a record and its newline as two writes under a per-instance
-        // lock, so two journals on one path interleave onto a single line and
-        // fail to parse on replay — bricking the next boot, not just this
-        // process. `load()` is skipped for the same reason it is not repeated at
-        // boot: the inherited journal is already replayed, and re-reading it
-        // would re-apply records the live instance has since resolved.
+        // On a rebuild the journal is **inherited, never reopened**, and the
+        // reason is now the in-memory state rather than the file. Since #386 a
+        // second instance on one path cannot corrupt it — appends are whole
+        // `O_APPEND` writes serialised on a process-wide per-path lock — but it
+        // is still wasteful, and `load()` is skipped for the reason it is not
+        // repeated at boot: the inherited journal is already replayed, and
+        // re-reading it would re-apply records the live instance has since
+        // resolved.
         let journal = match handover.as_ref() {
             Some(h) => h.journal.clone(),
             None => {
@@ -938,6 +938,26 @@ impl RuntimeBuilder {
                     Bundle::new(home.clone(), &id).journal_jsonl(),
                 ));
                 journal.load().await?;
+                // Issue #386: a damaged line no longer fails the boot, which
+                // means the company can come up on an incomplete history. That
+                // is the right trade — an operator cannot repair a journal
+                // through a console that will not start — but it is only
+                // defensible if somebody is told. `load` already logged each
+                // line; this is the one line that names the company, because
+                // the effect keys behind it are what the at-most-once guarantee
+                // is made of.
+                let corruption = journal.corruption();
+                if !corruption.is_empty() {
+                    tracing::error!(
+                        company = %id,
+                        lines = corruption.len(),
+                        first_line = corruption[0].line,
+                        "journal lines could not be replayed; this company booted \
+                         without them, so committed effects may be missing from \
+                         the at-most-once set and approvals may be missing from \
+                         the queue",
+                    );
+                }
                 journal
             }
         };

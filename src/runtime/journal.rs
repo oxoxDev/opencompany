@@ -1022,9 +1022,12 @@ mod test {
     ///
     /// The name comes from the OS, not from [`crate::ports::generate_id`] —
     /// minted ids are unique only within a process, so two test processes
-    /// sharing `/tmp` could otherwise land on the same journal path and
-    /// interleave their appends into an unparseable line. Dropping the
-    /// returned handle removes the directory, including after a failed assert.
+    /// sharing `/tmp` could otherwise land on the same journal path and mix
+    /// their records into one file. Since #386 that no longer produces an
+    /// unparseable line, but it still produces a journal holding another
+    /// test's history, which fails these assertions just as thoroughly.
+    /// Dropping the returned handle removes the directory, including after a
+    /// failed assert.
     fn tmp_dir() -> tempfile::TempDir {
         tempfile::Builder::new()
             .prefix("opencompany-journal-")
