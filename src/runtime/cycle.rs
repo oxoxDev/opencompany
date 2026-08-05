@@ -972,6 +972,12 @@ fn cycle_task_id(
             | CompanyEvent::WorkflowUpdated { .. }
             | CompanyEvent::WorkflowDeleted { .. }
             | CompanyEvent::WorkflowRunFinished { .. }
+            // Issue #371: a run's start and its per-node finishes are records of
+            // a workflow walking its graph, not stimuli for a new cycle. They
+            // name no card and compete with none, so they pass through exactly
+            // like the run outcome they bracket.
+            | CompanyEvent::WorkflowRunStarted { .. }
+            | CompanyEvent::WorkflowNodeFinished { .. }
             | CompanyEvent::TaskSteered { .. }
             | CompanyEvent::TaskDiscussionPosted { .. }
             | CompanyEvent::DeskTaskCompleted { .. } => continue,

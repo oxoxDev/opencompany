@@ -219,6 +219,30 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             };
             (Role::System, "workflow".to_string(), body, "workflow.run")
         }
+        // Issue #371's per-node progress trail. Structural ids and a duration —
+        // that is the entire payload, by construction — so wiring it out could
+        // leak nothing even if we wanted it to. It is still excluded, because
+        // the sidecar reads company activity for *insight*, and "node 4 of 6
+        // took 1.2s" is telemetry: it would spend the wire budget on the
+        // finest-grained events the journal produces while saying nothing about
+        // what the company did. The run's own `WorkflowRunFinished` arm above
+        // already carries that.
+        CompanyEvent::WorkflowRunStarted { workflow_id, .. } => (
+            Role::System,
+            "workflow".to_string(),
+            format!("Run of workflow {workflow_id} started"),
+            "workflow.run.started",
+        ),
+        CompanyEvent::WorkflowNodeFinished {
+            workflow_id,
+            node_id,
+            ..
+        } => (
+            Role::System,
+            "workflow".to_string(),
+            format!("Workflow {workflow_id} finished node {node_id}"),
+            "workflow.node",
+        ),
     };
     WireEvent {
         seq,
