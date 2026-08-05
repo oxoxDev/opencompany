@@ -1266,6 +1266,39 @@ struct ResolveApproval {
     /// An optional payload edit; overlaid onto the parked effect on `approve`.
     #[serde(default)]
     amended_payload: Option<serde_json::Value>,
+    /// Answer as soon as the verdict is durable, rather than holding the
+    /// response open for the agent's follow-up turn (issue #383).
+    ///
+    /// Defaults to `false`, which keeps the response byte-identical to what
+    /// every existing caller receives — a [`ChatResponse`] carrying the
+    /// follow-up cycle's messages. Setting it swaps the body for a
+    /// [`ResolveReceiptDto`] and lets the continuation arrive on the event
+    /// stream's `agent_reply` frame instead, which is where a console that is
+    /// already subscribed would rather read it anyway.
+    ///
+    /// Either way the resolve now survives a dropped connection — the
+    /// drop-safety comes from `CompanyRuntime::resolve_approval_spawned`, not
+    /// from this flag. What the flag buys is not having to *wait*: a turn slower
+    /// than the proxy's read timeout no longer produces a gateway error page
+    /// over a decision that was recorded seconds earlier (issue #380).
+    #[serde(default)]
+    detach: bool,
+}
+
+/// The answer to a detached resolve: the verdict is durable, that is all this
+/// claims. The agent's continuation arrives afterwards on the event stream's
+/// `agent_reply` frame, which the console already projects and consumes.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolveReceiptDto {
+    /// Always `true` — a non-`true` receipt is an error response instead.
+    /// Present so the body is self-describing rather than an empty object.
+    recorded: bool,
+    /// Whether there was nothing left to resolve, because a previous request (or
+    /// a double-click) already did. Not a failure: issue #243 made the second
+    /// resolve a no-op that mints no second grant, and saying so lets the console
+    /// render it as the success it is.
+    already_resolved: bool,
 }
 
 async fn run_resolve(
@@ -1274,17 +1307,20 @@ async fn run_resolve(
     runtime: Arc<CompanyRuntime>,
     approval_id: String,
     body: ResolveApproval,
-) -> Result<Json<ChatResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     runtime.ensure_running().await?;
     let actor = Actor {
         kind: ActorKind::Operator,
         id: "operator".to_string(),
     };
     let id = ApprovalId::new(approval_id);
-    let report = match (body.verdict, body.amended_payload) {
+    // The verdict is settled inline; only the follow-up cycle is on the handle.
+    // So by the time this returns — in either mode — the decision is journaled
+    // and any grant is minted.
+    let (receipt, follow_up) = match (body.verdict, body.amended_payload) {
         (Verdict::Approve, Some(payload)) => {
             runtime
-                .resolve_approval_amended(&id, payload, actor)
+                .resolve_approval_amended_spawned(&id, payload, actor)
                 .await?
         }
         (Verdict::Deny, Some(_)) => {
@@ -1292,12 +1328,43 @@ async fn run_resolve(
                 "amended_payload cannot accompany a deny verdict".to_string(),
             )));
         }
-        (verdict, None) => runtime.resolve_approval(&id, verdict, actor).await?,
+        (verdict, None) => {
+            runtime
+                .resolve_approval_spawned(&id, verdict, actor)
+                .await?
+        }
     };
+
+    if body.detach {
+        // Nothing here waits on the turn. The webhook fan-out still owes the
+        // report, so it moves onto its own task rather than being dropped —
+        // a detached resolve must not silently stop notifying subscribers.
+        let state = state.clone();
+        let company = company.clone();
+        tokio::spawn(async move {
+            // A failed cycle already logged itself in `spawn_follow_up`; a
+            // panicked one is worth its own line, since nothing else reports it.
+            match crate::company::runtime::join_follow_up(follow_up).await {
+                Ok(report) => emit_cycle_webhooks(&state, &company, &report).await,
+                Err(OpenCompanyError::BackgroundTask(detail)) => {
+                    tracing::error!(%company, %detail, "[approval] a detached follow-up cycle did not finish");
+                }
+                Err(_) => {}
+            }
+        });
+        return Ok(Json(ResolveReceiptDto {
+            recorded: true,
+            already_resolved: receipt.already_resolved(),
+        })
+        .into_response());
+    }
+
+    let report = crate::company::runtime::join_follow_up(follow_up).await?;
     emit_cycle_webhooks(state, company, &report).await;
     Ok(Json(ChatResponse {
         responses: report.responses,
-    }))
+    })
+    .into_response())
 }
 
 /// `POST /api/v1/companies/{id}/approvals/{aid}`.
@@ -1306,7 +1373,7 @@ async fn resolve_approval(
     State(state): State<AppState>,
     Path((id, aid)): Path<(String, String)>,
     Json(body): Json<ResolveApproval>,
-) -> Result<Json<ChatResponse>, Response> {
+) -> Result<Response, Response> {
     let company = CompanyId::new(&id);
     if let Some(resp) = authorize_address(&state, &auth, &company) {
         return Err(resp);
@@ -1323,7 +1390,7 @@ async fn resolve_approval_single(
     State(state): State<AppState>,
     Path(aid): Path<String>,
     Json(body): Json<ResolveApproval>,
-) -> Result<Json<ChatResponse>, Response> {
+) -> Result<Response, Response> {
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     let id = runtime.id().clone();
     if let Some(resp) = authorize_address(&state, &auth, &id) {
@@ -1367,6 +1434,17 @@ mod test {
     }
 
     async fn build_state(home: &std::path::Path, lifecycle: &str, config: AppConfig) -> AppState {
+        build_state_with_brain(home, lifecycle, config, None).await
+    }
+
+    /// [`build_state`], optionally swapping the runtime's cognition. The
+    /// approval-continuation tests need a brain they can stall mid-turn.
+    async fn build_state_with_brain(
+        home: &std::path::Path,
+        lifecycle: &str,
+        config: AppConfig,
+        brain: Option<Arc<dyn crate::ports::brain::Brain>>,
+    ) -> AppState {
         // Pre-seed a record so the builder preserves the requested lifecycle.
         let store = FsCompanyStore::new(home.to_path_buf());
         let id = CompanyId::new("acme");
@@ -1388,11 +1466,11 @@ mod test {
             .await
             .unwrap();
 
-        let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
-            .with_id(id.clone())
-            .build()
-            .await
-            .unwrap();
+        let mut builder = RuntimeBuilder::new(home.to_path_buf(), manifest()).with_id(id.clone());
+        if let Some(brain) = brain {
+            builder = builder.with_brain(brain);
+        }
+        let runtime = builder.build().await.unwrap();
         let state = AppState::new(config);
         state.registry().insert(id, Arc::new(runtime));
         crate::server::test_support::seed_fixed_admin(&state, "acme").await;
@@ -2581,6 +2659,463 @@ mod test {
         assert!(value["responses"].is_array());
     }
 
+    /// The tool call the operator is asked to sign off. `agent: Some(_)` is what
+    /// makes approving it mint a single-use grant rather than execute it
+    /// (issue #243) — which is the whole reason a lost continuation hurts: the
+    /// grant is spent on a turn that never happens.
+    fn gated_tool_call() -> crate::ports::types::Effect {
+        crate::ports::types::Effect {
+            kind: "composio_execute".into(),
+            group: crate::ports::types::EffectGroup::Sign,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" }),
+            agent: Some("ceo".into()),
+            run_id: None,
+        }
+    }
+
+    /// The dotted kind the stalled brain parks once its follow-up turn gets
+    /// past the barrier. Parking journals durably (`record_parked`), so its
+    /// presence in `pending_approvals()` is proof the continuation reached the
+    /// end of the turn *and* wrote to disk — not merely that a task was alive.
+    const CONTINUATION_MARKER: &str = "continuation.marker";
+
+    /// A brain that parks one gated tool call per operator message and, on the
+    /// follow-up `ApprovalResolved` cycle, blocks mid-turn until the test
+    /// releases it — the shape of a slow agent turn behind a proxy.
+    struct StalledContinuationBrain {
+        /// Fires once the follow-up turn has begun. By this point the verdict
+        /// is journaled and the grant minted, so this is exactly the moment the
+        /// field report's connection died.
+        entered: Arc<tokio::sync::Notify>,
+        /// The test's permission for the turn to finish.
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::brain::Brain for StalledContinuationBrain {
+        async fn run_cycle(
+            &self,
+            req: crate::ports::types::CycleRequest,
+            host: &dyn crate::ports::brain::CycleHost,
+        ) -> crate::Result<crate::ports::types::CycleResult> {
+            for event in &req.events {
+                match event {
+                    CompanyEvent::OperatorMessage { .. } => {
+                        host.park_effect(gated_tool_call()).await?;
+                    }
+                    CompanyEvent::ApprovalResolved { .. } => {
+                        self.entered.notify_one();
+                        self.release.notified().await;
+                        host.park_effect(crate::ports::types::Effect {
+                            kind: CONTINUATION_MARKER.into(),
+                            group: crate::ports::types::EffectGroup::Other,
+                            amount_usd: None,
+                            established_thread: false,
+                            first_time_counterparty: false,
+                            payload: serde_json::json!({}),
+                            agent: None,
+                            run_id: None,
+                        })
+                        .await?;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(crate::ports::types::CycleResult {
+                channel_responses: Vec::new(),
+                new_traces: vec![crate::ports::types::CompressedTrace::now(
+                    &req.cycle_id,
+                    "stalled continuation",
+                )],
+                ledger_deltas: Vec::new(),
+                token_usage: crate::ports::types::TokenUsage::default(),
+            })
+        }
+    }
+
+    fn chat_request(text: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/company/chat")
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({ "text": text }).to_string()))
+            .unwrap()
+    }
+
+    /// A resolve against the single-company alias. `scope` lets the same body be
+    /// aimed at the `/companies/{id}` form, which must behave identically.
+    fn resolve_request_scoped(
+        scope: &str,
+        approval_id: &ApprovalId,
+        body: serde_json::Value,
+    ) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(format!("{scope}/approvals/{approval_id}"))
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    fn resolve_request(approval_id: &ApprovalId, body: serde_json::Value) -> Request<Body> {
+        resolve_request_scoped("/api/v1/company", approval_id, body)
+    }
+
+    /// Whether the stalled brain's follow-up turn has journaled its marker yet.
+    fn continued(runtime: &Arc<CompanyRuntime>) -> bool {
+        runtime
+            .pending_approvals()
+            .iter()
+            .any(|a| a.kind == CONTINUATION_MARKER)
+    }
+
+    /// Waits for the stalled brain's follow-up turn to journal its marker.
+    async fn await_continuation(runtime: &Arc<CompanyRuntime>) -> bool {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !continued(runtime) {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    /// A running company with one tool call parked and a brain that will stall
+    /// on the follow-up turn until `release` is fired.
+    struct StalledCompany {
+        app: axum::Router,
+        runtime: Arc<CompanyRuntime>,
+        approval_id: ApprovalId,
+        /// Fires once the follow-up turn has begun — by which point the verdict
+        /// is journaled and the grant minted.
+        entered: Arc<tokio::sync::Notify>,
+        /// The test's permission for that turn to finish.
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    async fn stalled_company(home: &std::path::Path) -> StalledCompany {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let state = build_state_with_brain(
+            home,
+            "running",
+            AppConfig::default(),
+            Some(Arc::new(StalledContinuationBrain {
+                entered: entered.clone(),
+                release: release.clone(),
+            })),
+        )
+        .await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let app = router(state);
+
+        let response = app.clone().oneshot(chat_request("do it")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let parked = runtime.pending_approvals();
+        assert_eq!(parked.len(), 1, "the brain parked one tool call");
+        let approval_id = parked[0].id.clone();
+
+        StalledCompany {
+            app,
+            runtime,
+            approval_id,
+            entered,
+            release,
+        }
+    }
+
+    /// **Issue #383 / #380 defect 3 — the keystone.** A client that walks away
+    /// mid-turn must not take the agent's continuation with it.
+    ///
+    /// The host is plain `axum::serve(listener, router(state))` and nothing on
+    /// the resolve path was spawned, so the follow-up agent turn lived *inside*
+    /// the request future. Hyper drops that future the moment the peer closes,
+    /// and nginx closes its upstream connection when it gives up on a slow
+    /// response. So on a hosted tenant the sequence was: verdict recorded,
+    /// journaled, single-use grant minted — and then the re-dispatch the grant
+    /// existed for cancelled mid-flight. The operator's approval was spent and
+    /// the conversation never resumed, which is precisely what #380 reported.
+    ///
+    /// `Router::oneshot` reproduces that cancellation faithfully rather than by
+    /// analogy: the mechanism is the same one hyper uses — the handler future is
+    /// owned by the future the caller is polling, and dropping the latter drops
+    /// the former.
+    #[tokio::test]
+    async fn a_dropped_connection_does_not_cancel_the_follow_up_cycle() {
+        let home_dir = home();
+        let c = stalled_company(home_dir.path()).await;
+
+        // Approve it, then let the connection die once the turn is under way.
+        let mut resolving = Box::pin(c.app.clone().oneshot(resolve_request(
+            &c.approval_id,
+            serde_json::json!({"verdict":"approve"}),
+        )));
+        tokio::select! {
+            _ = &mut resolving => panic!("the resolve answered before the follow-up turn began"),
+            _ = c.entered.notified() => {}
+        }
+        drop(resolving);
+
+        // The verdict is already durable and the grant already spent — this is
+        // the state the operator is left in when the proxy gives up.
+        assert!(
+            !c.runtime
+                .pending_approvals()
+                .iter()
+                .any(|a| a.id == c.approval_id),
+            "the verdict was journaled before the connection dropped"
+        );
+        assert!(
+            c.runtime.grants.peek(&c.approval_id).is_some(),
+            "the single-use grant was minted before the connection dropped"
+        );
+
+        // So the continuation the grant exists for must still complete.
+        c.release.notify_one();
+        assert!(
+            await_continuation(&c.runtime).await,
+            "the follow-up cycle died with the dropped connection: the grant is spent \
+             and the agent never continued"
+        );
+        assert_eq!(
+            c.runtime.grants.live_count(),
+            1,
+            "the continuation minted no second grant"
+        );
+    }
+
+    /// The same proof over a **real socket**, so the keystone rests on hyper's
+    /// actual behaviour rather than on `oneshot` being a good model of it.
+    ///
+    /// This boots the production server — `axum::serve` over a bound
+    /// `TcpListener` — writes the resolve by hand, and then hangs up mid-turn
+    /// the way a proxy does when it gives up on a slow upstream. Hyper reads the
+    /// peer's close while the handler is still pending and drops the request,
+    /// which is precisely the cancellation #380's hosted tenant hit. A graceful
+    /// `FIN` is enough; it does not take a reset.
+    ///
+    /// **The pause after the close is load-bearing.** Hyper does not learn the
+    /// peer is gone the instant the client calls `close` — it learns when its
+    /// connection task next polls the socket and reads EOF. Release the barrier
+    /// before that happens and the turn finishes on its own merits, so the test
+    /// passes whether or not the cycle is drop-safe and proves nothing. Measured
+    /// while building this: without the pause, the pre-fix inline code passed
+    /// this test; with it, the pre-fix code fails and the fix passes.
+    #[tokio::test]
+    async fn a_real_socket_close_does_not_cancel_the_follow_up_cycle() {
+        use tokio::io::AsyncWriteExt;
+
+        let home_dir = home();
+        let c = stalled_company(home_dir.path()).await;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = c.app.clone();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let body = serde_json::json!({ "verdict": "approve" }).to_string();
+        let request = format!(
+            "POST /api/v1/company/approvals/{} HTTP/1.1\r\n\
+             Host: {addr}\r\n\
+             Cookie: {}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\r\n{body}",
+            c.approval_id,
+            crate::server::test_support::fixed_cookie("acme"),
+            body.len(),
+        );
+        let mut socket = tokio::net::TcpStream::connect(addr).await.unwrap();
+        socket.write_all(request.as_bytes()).await.unwrap();
+        socket.flush().await.unwrap();
+
+        // The turn is under way — the verdict is journaled and the grant minted.
+        // Now the client goes away without ever reading a response, and we wait
+        // for hyper to actually notice (see the note above).
+        c.entered.notified().await;
+        socket.shutdown().await.unwrap();
+        drop(socket);
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        assert!(
+            c.runtime.grants.peek(&c.approval_id).is_some(),
+            "the grant was minted before the socket closed"
+        );
+
+        c.release.notify_one();
+        assert!(
+            await_continuation(&c.runtime).await,
+            "a real peer close cancelled the follow-up cycle: the grant is spent \
+             and the agent never continued"
+        );
+        assert_eq!(c.runtime.grants.live_count(), 1);
+        server.abort();
+    }
+
+    /// `detach` answers on the verdict, not on the turn (issue #383).
+    ///
+    /// This is the half that removes the *wait*, and with it #380's gateway
+    /// timeout: the response is already in the operator's hands while the agent
+    /// is demonstrably still mid-turn. The continuation then arrives on the
+    /// event stream, where the console is already subscribed.
+    #[tokio::test]
+    async fn a_detached_resolve_answers_before_the_turn_finishes() {
+        let home_dir = home();
+        let c = stalled_company(home_dir.path()).await;
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            c.app.clone().oneshot(resolve_request(
+                &c.approval_id,
+                serde_json::json!({"verdict":"approve","detach":true}),
+            )),
+        )
+        .await
+        .expect("a detached resolve must not wait on the agent turn")
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({ "recorded": true, "alreadyResolved": false })
+        );
+
+        // The answer really did precede the work: the turn is only now under
+        // way, and is still blocked.
+        c.entered.notified().await;
+        assert!(
+            !continued(&c.runtime),
+            "the turn had already finished, so this proved nothing about waiting"
+        );
+        assert!(
+            c.runtime.grants.peek(&c.approval_id).is_some(),
+            "the grant is minted before the response, not after the turn"
+        );
+
+        c.release.notify_one();
+        assert!(
+            await_continuation(&c.runtime).await,
+            "a detached continuation must still land"
+        );
+        assert_eq!(c.runtime.grants.live_count(), 1);
+    }
+
+    /// The default is unchanged: no `detach` key means the response still
+    /// carries the follow-up cycle's messages, in the same `ChatResponse` shape
+    /// every existing caller parses. Only the drop-safety is new.
+    #[tokio::test]
+    async fn the_default_resolve_still_answers_with_the_cycle_response() {
+        let home_dir = home();
+        let c = stalled_company(home_dir.path()).await;
+
+        // Let the turn through the moment it starts.
+        c.release.notify_one();
+        let response = c
+            .app
+            .clone()
+            .oneshot(resolve_request(
+                &c.approval_id,
+                serde_json::json!({"verdict":"approve"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            value.get("responses").is_some_and(|r| r.is_array()),
+            "the un-detached body is still a ChatResponse, got {value}"
+        );
+        assert!(
+            continued(&c.runtime),
+            "the un-detached resolve waited for the turn, as it always did"
+        );
+        assert_eq!(c.runtime.grants.live_count(), 1);
+    }
+
+    /// A second resolve of the same approval is a success, not a failure, and
+    /// mints nothing (issue #243). `detach` reports that as `alreadyResolved`,
+    /// which is what makes a retry after a timeout safe to *show* as a retry
+    /// rather than as an error — the thing #380's operator had no way to know.
+    #[tokio::test]
+    async fn a_second_resolve_reports_already_resolved_and_mints_nothing() {
+        let home_dir = home();
+        let c = stalled_company(home_dir.path()).await;
+        c.release.notify_one();
+
+        let first = c
+            .app
+            .clone()
+            .oneshot(resolve_request(
+                &c.approval_id,
+                serde_json::json!({"verdict":"approve","detach":true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let bytes = to_bytes(first.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["alreadyResolved"], false);
+        assert!(await_continuation(&c.runtime).await);
+
+        let second = c
+            .app
+            .clone()
+            .oneshot(resolve_request(
+                &c.approval_id,
+                serde_json::json!({"verdict":"approve","detach":true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        let bytes = to_bytes(second.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({ "recorded": true, "alreadyResolved": true })
+        );
+        assert_eq!(
+            c.runtime.grants.live_count(),
+            1,
+            "re-approving minted no second grant"
+        );
+    }
+
+    /// Both scope forms carry `detach` identically — the `/companies/{id}` route
+    /// and the single-company alias are the same handler, and a console pointed
+    /// at either must get the same contract.
+    #[tokio::test]
+    async fn detach_works_on_the_company_id_scope_too() {
+        let home_dir = home();
+        let c = stalled_company(home_dir.path()).await;
+        c.release.notify_one();
+
+        let response = c
+            .app
+            .clone()
+            .oneshot(resolve_request_scoped(
+                "/api/v1/companies/acme",
+                &c.approval_id,
+                serde_json::json!({"verdict":"approve","detach":true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({ "recorded": true, "alreadyResolved": false })
+        );
+        assert!(await_continuation(&c.runtime).await);
+        assert_eq!(c.runtime.grants.live_count(), 1);
+    }
+
     #[tokio::test]
     async fn deny_with_amended_payload_is_400() {
         let home_dir = home();
@@ -2588,24 +3123,31 @@ mod test {
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/company/approvals/missing")
-                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"verdict":"deny","amended_payload":{"text":"edited"}}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["code"], "invalid_request");
+        // The contradiction is rejected before anything is settled, so `detach`
+        // cannot turn it into a `200 { recorded: true }` over a decision that was
+        // never taken (issue #383).
+        for body in [
+            r#"{"verdict":"deny","amended_payload":{"text":"edited"}}"#,
+            r#"{"verdict":"deny","amended_payload":{"text":"edited"},"detach":true}"#,
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/company/approvals/missing")
+                        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "for {body}");
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["code"], "invalid_request");
+        }
     }
 
     #[tokio::test]
