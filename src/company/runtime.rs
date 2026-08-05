@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::Mutex as TokioMutex;
+use tokio::task::JoinHandle;
 
 use crate::Result;
 use crate::error::OpenCompanyError;
@@ -41,7 +42,26 @@ use crate::ports::tasks::COLUMN_IN_PROGRESS as IN_PROGRESS;
 fn task_enters_in_progress(prev_column: Option<&str>, next_column: &str) -> bool {
     next_column == IN_PROGRESS && prev_column != Some(IN_PROGRESS)
 }
+
+/// Awaits a spawned follow-up cycle and flattens its two failure modes into one
+/// (issue #383).
+///
+/// A [`JoinError`](tokio::task::JoinError) means the cycle task panicked or was
+/// aborted — neither of which the cycle itself can report. Callers that want to
+/// answer on the response body await through here; callers that have detached
+/// simply drop the handle, which abandons only the waiting.
+pub(crate) async fn join_follow_up(
+    follow_up: JoinHandle<Result<CycleReport>>,
+) -> Result<CycleReport> {
+    match follow_up.await {
+        Ok(report) => report,
+        Err(err) => Err(OpenCompanyError::BackgroundTask(format!(
+            "the follow-up cycle did not finish: {err}"
+        ))),
+    }
+}
 use crate::runtime::CycleRunner;
+use crate::runtime::cycle::ResolveReceipt;
 use crate::runtime::grants::{GRANT_TTL_MILLIS, GrantSet};
 use crate::runtime::journal::{ApprovalOrigin, ExecutedEffect, RuntimeJournal};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
@@ -689,20 +709,61 @@ impl CompanyRuntime {
 
     /// Resolves a parked approval and runs a follow-up cycle so the brain learns
     /// the verdict. Returns the follow-up cycle's report.
+    ///
+    /// The verdict is settled inline and the follow-up cycle runs on a **spawned
+    /// task** this then awaits — so the report is the same one callers always
+    /// got, but the cycle producing it no longer lives inside the caller's
+    /// future. See [`resolve_approval_spawned`](Self::resolve_approval_spawned)
+    /// for why that matters.
     pub async fn resolve_approval(
-        &self,
+        self: &Arc<Self>,
         id: &ApprovalId,
         verdict: Verdict,
         by: Actor,
     ) -> Result<CycleReport> {
-        // Checked before the gate is touched, not inside the follow-up cycle: a
-        // resolution that journaled the verdict and then failed to run its
-        // follow-up would leave the brain permanently unaware of an approval the
-        // operator had already granted.
+        let (_, follow_up) = self.resolve_approval_spawned(id, verdict, by).await?;
+        join_follow_up(follow_up).await
+    }
+
+    /// Settles a parked approval's verdict **inline** and runs its follow-up
+    /// cycle on a spawned task, handing back both the receipt and the task's
+    /// handle (issue #383).
+    ///
+    /// The point of the split is drop-safety. This host is plain
+    /// `axum::serve(listener, router(state))`; hyper drops a handler's future the
+    /// moment the peer closes the connection, and a reverse proxy in front of a
+    /// hosted tenant closes it the moment it decides the upstream is too slow.
+    /// Nothing on the old resolve path was spawned, so the follow-up agent turn
+    /// lived inside that future and died with it — after the verdict was
+    /// journaled and after the single-use grant was minted. The operator's
+    /// approval was spent on a re-dispatch that never happened, and the
+    /// conversation never resumed (issue #380, defect 3).
+    ///
+    /// Awaiting a [`JoinHandle`] is drop-safe: dropping the handle abandons the
+    /// *waiting*, not the work. So every caller — including the one that just
+    /// awaits it and answers exactly as before — survives a disconnect, with no
+    /// wire change required to get that.
+    ///
+    /// Spawned cycles still serialise on the runtime's per-company cycle lock
+    /// exactly as inline ones did, so this adds no concurrency. What changes is
+    /// that a burst of resolves all *complete* rather than some being shed by
+    /// dropped connections.
+    ///
+    /// `ensure_accepting` is checked before the gate is touched, not inside the
+    /// follow-up cycle: a resolution that journaled the verdict and then failed
+    /// to run its follow-up would leave the brain permanently unaware of an
+    /// approval the operator had already granted.
+    pub async fn resolve_approval_spawned(
+        self: &Arc<Self>,
+        id: &ApprovalId,
+        verdict: Verdict,
+        by: Actor,
+    ) -> Result<(ResolveReceipt, JoinHandle<Result<CycleReport>>)> {
         self.ensure_accepting()?;
-        CycleRunner::new(self)
-            .resolve_approval(id, verdict, by)
-            .await
+        let receipt = CycleRunner::new(self)
+            .settle_approval(id, verdict, by)
+            .await?;
+        Ok((receipt.clone(), self.spawn_follow_up(receipt)))
     }
 
     /// Resolves a parked approval to an operator-amended effect
@@ -710,16 +771,73 @@ impl CompanyRuntime {
     /// the parked effect, which is then executed. Runs a follow-up cycle so the
     /// brain learns the resolution; the immutable journal records both the
     /// original (parked) and amended effects.
+    ///
+    /// Drop-safe on the same terms as [`resolve_approval`](Self::resolve_approval).
     pub async fn resolve_approval_amended(
-        &self,
+        self: &Arc<Self>,
         id: &ApprovalId,
         amended_payload: serde_json::Value,
         by: Actor,
     ) -> Result<CycleReport> {
+        let (_, follow_up) = self
+            .resolve_approval_amended_spawned(id, amended_payload, by)
+            .await?;
+        join_follow_up(follow_up).await
+    }
+
+    /// The amend counterpart to
+    /// [`resolve_approval_spawned`](Self::resolve_approval_spawned).
+    pub async fn resolve_approval_amended_spawned(
+        self: &Arc<Self>,
+        id: &ApprovalId,
+        amended_payload: serde_json::Value,
+        by: Actor,
+    ) -> Result<(ResolveReceipt, JoinHandle<Result<CycleReport>>)> {
         self.ensure_accepting()?;
-        CycleRunner::new(self)
-            .resolve_approval_amended(id, amended_payload, by)
-            .await
+        let receipt = CycleRunner::new(self)
+            .settle_approval_amended(id, amended_payload, by)
+            .await?;
+        Ok((receipt.clone(), self.spawn_follow_up(receipt)))
+    }
+
+    /// Spawns the follow-up cycle a settled verdict owes, on a task that owns
+    /// its own `Arc<CompanyRuntime>` and so outlives whatever asked for it.
+    ///
+    /// [`ResolveReceipt::AlreadyResolved`] owes no cycle, but still spawns —
+    /// answering with the same synthetic report on a handle of the same shape
+    /// keeps every caller on one path instead of branching on a case that only
+    /// arises from a double-click.
+    ///
+    /// A failed follow-up is logged here rather than swallowed, because the
+    /// detached caller has nowhere to put it. It is genuinely recoverable: the
+    /// verdict and the grant are already durable, and re-approving is a safe
+    /// no-op (`ResolveOutcome::NotParked` → the already-resolved report, per
+    /// issue #243), so the operator can retry without minting a second grant.
+    fn spawn_follow_up(
+        self: &Arc<Self>,
+        receipt: ResolveReceipt,
+    ) -> JoinHandle<Result<CycleReport>> {
+        let rt = Arc::clone(self);
+        tokio::spawn(async move {
+            let event = match receipt {
+                ResolveReceipt::AlreadyResolved => {
+                    return Ok(CycleRunner::new(&rt).already_resolved_report());
+                }
+                ResolveReceipt::Settled(event) => event,
+            };
+            let report = CycleRunner::new(&rt).run(vec![event]).await;
+            if let Err(error) = &report {
+                tracing::error!(
+                    company = %rt.id,
+                    %error,
+                    "[approval] the follow-up cycle after a resolved approval failed; \
+                     the verdict and the grant are already durable, so the agent was \
+                     not told the outcome — re-approving is a safe no-op and will \
+                     re-run it"
+                );
+            }
+            report
+        })
     }
 
     /// Sweeps every parked approval past its TTL, resolving each to a

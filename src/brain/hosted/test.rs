@@ -560,13 +560,15 @@ async fn e2e_supervised_effect_parks_and_acks_not_ok() {
         vec![effect_frame("filing.submit", 0, Value::Null)],
     );
 
-    let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
-        .with_brain_mode(BrainMode::Hosted)
-        .with_credential(SecretValue("th_live".into()))
-        .with_transport(transport.clone())
-        .build()
-        .await
-        .unwrap();
+    let rt = Arc::new(
+        RuntimeBuilder::new(home.clone(), manifest("supervised"))
+            .with_brain_mode(BrainMode::Hosted)
+            .with_credential(SecretValue("th_live".into()))
+            .with_transport(transport.clone())
+            .build()
+            .await
+            .unwrap(),
+    );
 
     let report = rt
         .run_cycle(vec![CompanyEvent::OperatorMessage {

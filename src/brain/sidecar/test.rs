@@ -548,11 +548,13 @@ async fn e2e_supervised_effect_parks_through_the_real_gate() {
     );
     let inference = Arc::new(MockInferenceClient::new());
 
-    let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
-        .with_brain(sidecar_brain_for(transport.clone(), inference))
-        .build()
-        .await
-        .unwrap();
+    let rt = Arc::new(
+        RuntimeBuilder::new(home.clone(), manifest("supervised"))
+            .with_brain(sidecar_brain_for(transport.clone(), inference))
+            .build()
+            .await
+            .unwrap(),
+    );
 
     let report = rt
         .run_cycle(vec![CompanyEvent::OperatorMessage {

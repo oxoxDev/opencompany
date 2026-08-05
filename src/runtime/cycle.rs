@@ -72,6 +72,32 @@ pub(crate) const RUN_UNSETTLED_ERROR: &str =
 /// row carries the same reason the caller saw rather than a generic one.
 pub(crate) const RUN_CYCLE_FAILED_ERROR: &str = "the dispatch cycle failed";
 
+/// What settling an approval's verdict produced — the outcome of the fast half
+/// of a resolve, before any model is called (issue #383).
+///
+/// Both arms mean the operator's decision is final. They differ only in what is
+/// still owed: `Settled` owes one follow-up cycle, `AlreadyResolved` owes
+/// nothing because a previous resolve already ran it.
+#[derive(Debug, Clone)]
+pub enum ResolveReceipt {
+    /// Nothing was parked under this id — an unknown id, or one a concurrent
+    /// request (or a double-click) already resolved. No journal record was
+    /// written and no cycle is owed. Issue #243 made this a safe no-op rather
+    /// than a second grant; surfacing it here lets the HTTP layer say so.
+    AlreadyResolved,
+    /// The verdict is journaled and any approved effect settled — the grant is
+    /// minted, or the native effect executed. The carried `ApprovalResolved` is
+    /// the event the follow-up cycle must run so the brain learns the verdict.
+    Settled(CompanyEvent),
+}
+
+impl ResolveReceipt {
+    /// Whether this resolve found nothing left to resolve.
+    pub fn already_resolved(&self) -> bool {
+        matches!(self, Self::AlreadyResolved)
+    }
+}
+
 /// Drives cycles for one [`CompanyRuntime`].
 pub struct CycleRunner<'a> {
     rt: &'a CompanyRuntime,
@@ -434,43 +460,62 @@ working on):\n{}\n]",
         }
     }
 
-    /// Resolves a parked approval, executes the effect on approval, and runs a
-    /// follow-up cycle feeding the resolution back to the brain.
+    /// Settles a parked approval's verdict — the **fast half** of resolving one.
+    ///
+    /// Records the outcome on the gate, journals it durably, and settles the
+    /// approved effect (minting the single-use grant, or executing a native
+    /// effect). Everything here is local bookkeeping and a couple of appends; no
+    /// model is called. What it deliberately does *not* do is run the follow-up
+    /// cycle — that is [`ResolveReceipt::Settled`]'s event, handed back for the
+    /// caller to run separately.
+    ///
+    /// The split exists because the two halves have wildly different durations
+    /// and wildly different consequences if they are lost (issue #383). The
+    /// settle is milliseconds and, once it returns, the operator's decision is
+    /// permanent. The follow-up is a full agent turn and can outlast any proxy
+    /// in front of the host. Fusing them meant the HTTP status reported the
+    /// *turn's* fate as though it were the *verdict's*, so a slow turn behind
+    /// nginx read as "couldn't record your decision" over a decision that was
+    /// already journaled and already granted (issue #380, defect 1). Worse,
+    /// because the whole thing lived in the request future, the dropped
+    /// connection took the continuation with it — grant spent, agent never
+    /// re-dispatched (defect 3).
     ///
     /// Resolving an approval that is **not parked** — an unknown id, or one a
-    /// concurrent request already resolved — is a no-op that answers with a
-    /// fixed line (issue #243). It writes no journal record and runs no cycle.
+    /// concurrent request already resolved — is a no-op that yields
+    /// [`ResolveReceipt::AlreadyResolved`] (issue #243). It writes no journal
+    /// record and owes no cycle.
     ///
     /// Before this the double-submit path was indistinguishable from a deny (see
     /// [`ResolveOutcome`]), so a double-clicked approve appended a second
     /// `ApprovalResolved` to the journal and ran a second follow-up cycle over an
     /// approval that no longer existed — burning a model turn to tell the brain
     /// about a resolution it had already been told about.
-    pub async fn resolve_approval(
+    pub async fn settle_approval(
         &self,
         id: &ApprovalId,
         verdict: Verdict,
         by: Actor,
-    ) -> Result<CycleReport> {
+    ) -> Result<ResolveReceipt> {
         let outcome = self
             .rt
             .approval_gate
             .resolve_outcome(id, verdict, by.clone(), now_millis());
         if outcome == ResolveOutcome::NotParked {
-            return Ok(self.already_resolved_report());
+            return Ok(ResolveReceipt::AlreadyResolved);
         }
         self.rt.journal.record_resolved(id).await?;
         if let ResolveOutcome::Approved(effect) = outcome {
             self.settle_approved_effect(id, effect).await?;
         }
-        // Follow-up cycle so the brain learns the verdict. Appending the
-        // resolution here (rather than separately) keeps the event logged once.
-        self.run(vec![CompanyEvent::ApprovalResolved {
+        // The follow-up event, so the brain learns the verdict. Returning it
+        // (rather than appending it here) keeps the event logged exactly once:
+        // the cycle that runs it is the thing that appends it.
+        Ok(ResolveReceipt::Settled(CompanyEvent::ApprovalResolved {
             approval_id: id.clone(),
             verdict,
             by,
-        }])
-        .await
+        }))
     }
 
     /// Applies an approved effect: **mint a grant** when it came from a harness
@@ -591,7 +636,7 @@ working on):\n{}\n]",
     /// "nothing happened" instead of an error, because from the operator's side
     /// a double-submit is not a failure, it is a request whose work was already
     /// done.
-    fn already_resolved_report(&self) -> CycleReport {
+    pub(crate) fn already_resolved_report(&self) -> CycleReport {
         CycleReport {
             cycle_id: generate_id(),
             responses: vec![OutboundMessage {
@@ -607,19 +652,25 @@ working on):\n{}\n]",
         }
     }
 
-    /// Resolves a parked approval to an operator-amended effect
-    /// (approve-with-edit): overlays `amended_payload` onto the parked effect,
-    /// executes the amended version (at-most-once), and runs a follow-up cycle.
+    /// Settles a parked approval to an operator-amended effect
+    /// (approve-with-edit): overlays `amended_payload` onto the parked effect and
+    /// executes the amended version (at-most-once).
+    ///
+    /// The amend counterpart to [`settle_approval`](Self::settle_approval), and
+    /// split from its follow-up cycle for the same reasons (issue #383). It has
+    /// no `AlreadyResolved` arm: an id with nothing parked yields no executable
+    /// effect and simply settles to a resolution the brain is still told about,
+    /// exactly as before.
     ///
     /// Both the original and the amended effect are preserved in the immutable
     /// journal (`ApprovalParked` + `ApprovalAmended`), so the audit trail shows
     /// what the brain requested and what the operator approved.
-    pub async fn resolve_approval_amended(
+    pub async fn settle_approval_amended(
         &self,
         id: &ApprovalId,
         amended_payload: serde_json::Value,
         by: Actor,
-    ) -> Result<CycleReport> {
+    ) -> Result<ResolveReceipt> {
         let now = now_millis();
 
         // Overlay the operator's edit onto the parked effect. A missing id (or
@@ -653,15 +704,14 @@ working on):\n{}\n]",
             self.settle_approved_effect(id, effect.clone()).await?;
         }
 
-        // Follow-up cycle so the brain learns the approval resolved (with an
-        // edit). `CompanyEvent` is closed, so the verdict rides as `Approve`;
+        // The follow-up event, so the brain learns the approval resolved (with
+        // an edit). `CompanyEvent` is closed, so the verdict rides as `Approve`;
         // the edit itself lives in the journal audit trail.
-        self.run(vec![CompanyEvent::ApprovalResolved {
+        Ok(ResolveReceipt::Settled(CompanyEvent::ApprovalResolved {
             approval_id: id.clone(),
             verdict: Verdict::Approve,
             by,
-        }])
-        .await
+        }))
     }
 
     /// Replays the journal to rebuild the executed-key set, the approval queue,
@@ -1896,13 +1946,15 @@ mod test {
             agent: None,
             run_id: None,
         };
-        let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
-            .with_brain(Arc::new(EffectBrain {
-                effect: sign_effect,
-            }))
-            .build()
-            .await
-            .unwrap();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home.clone(), manifest("supervised"))
+                .with_brain(Arc::new(EffectBrain {
+                    effect: sign_effect,
+                }))
+                .build()
+                .await
+                .unwrap(),
+        );
 
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
@@ -1949,12 +2001,20 @@ mod test {
     }
 
     /// Parks `effect` through a real cycle and returns the runtime + approval id.
-    async fn park_one(home: std::path::PathBuf, effect: Effect) -> (CompanyRuntime, ApprovalId) {
-        let rt = RuntimeBuilder::new(home, manifest("supervised"))
-            .with_brain(Arc::new(EffectBrain { effect }))
-            .build()
-            .await
-            .unwrap();
+    /// Returns the runtime behind an `Arc`, as the server's registry holds it:
+    /// resolving an approval spawns its follow-up cycle onto a clone of that
+    /// handle, so the cycle outlives the request that asked for it (issue #383).
+    async fn park_one(
+        home: std::path::PathBuf,
+        effect: Effect,
+    ) -> (Arc<CompanyRuntime>, ApprovalId) {
+        let rt = Arc::new(
+            RuntimeBuilder::new(home, manifest("supervised"))
+                .with_brain(Arc::new(EffectBrain { effect }))
+                .build()
+                .await
+                .unwrap(),
+        );
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
                 text: "do it".into(),
@@ -1966,6 +2026,93 @@ mod test {
         assert_eq!(report.parked.len(), 1);
         let id = report.parked[0].clone();
         (rt, id)
+    }
+
+    /// Parks one tool call, then fails every follow-up turn.
+    struct FailingContinuationBrain {
+        effect: Effect,
+    }
+
+    #[async_trait]
+    impl Brain for FailingContinuationBrain {
+        async fn run_cycle(&self, req: CycleRequest, host: &dyn CycleHost) -> Result<CycleResult> {
+            for event in &req.events {
+                match event {
+                    CompanyEvent::OperatorMessage { .. } => {
+                        host.park_effect(self.effect.clone()).await?;
+                    }
+                    CompanyEvent::ApprovalResolved { .. } => {
+                        return Err(OpenCompanyError::Unimplemented("the follow-up turn failed"));
+                    }
+                    _ => {}
+                }
+            }
+            Ok(CycleResult {
+                channel_responses: Vec::new(),
+                new_traces: vec![CompressedTrace::now(&req.cycle_id, "failing continuation")],
+                ledger_deltas: Vec::new(),
+                token_usage: TokenUsage::default(),
+            })
+        }
+    }
+
+    /// Issue #383: a follow-up cycle that fails leaves a *recoverable* state,
+    /// not a stranded one.
+    ///
+    /// Detaching the cycle means its failure has nowhere to be returned to, so
+    /// the safety net has to be the ordering rather than the caller: the verdict
+    /// is journaled and the grant minted before the turn is ever attempted, and
+    /// re-approving is a no-op that mints no second grant (issue #243). This
+    /// pins all three, so "the runtime logs it and the operator can retry" is a
+    /// property of the code rather than a claim in a PR body.
+    #[tokio::test]
+    async fn a_failed_follow_up_cycle_leaves_the_verdict_and_grant_intact() {
+        let home_dir = tmp_home();
+        let effect = harness_effect("finance", "composio_execute", serde_json::json!({}));
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .with_brain(Arc::new(FailingContinuationBrain {
+                    effect: effect.clone(),
+                }))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let report = rt
+            .run_cycle(vec![CompanyEvent::OperatorMessage {
+                text: "do it".into(),
+                by: None,
+                chat: None,
+            }])
+            .await
+            .unwrap();
+        let id = report.parked[0].clone();
+
+        let failed = rt.resolve_approval(&id, Verdict::Approve, operator()).await;
+        assert!(failed.is_err(), "the caller still learns the turn failed");
+
+        // The operator's decision survived it.
+        assert!(
+            rt.pending_approvals().is_empty(),
+            "the verdict was journaled before the turn was attempted"
+        );
+        assert!(rt.grants.peek(&id).is_some(), "and the grant was minted");
+        assert_eq!(rt.grants.live_count(), 1);
+
+        // Retrying is safe: a no-op report, and still exactly one grant.
+        let again = rt
+            .resolve_approval(&id, Verdict::Approve, operator())
+            .await
+            .expect("re-approving is a no-op, not a second failure");
+        assert_eq!(
+            again.responses[0].text,
+            "This approval was already resolved."
+        );
+        assert_eq!(
+            rt.grants.live_count(),
+            1,
+            "a retry after a failed continuation mints no second grant"
+        );
     }
 
     /// The core of #243: approving an agent's blocked tool call mints a
@@ -2077,14 +2224,16 @@ mod test {
         let gate = Arc::new(
             ManifestApprovalGate::new(manifest("supervised").policy.clone()).with_ttl_millis(0),
         );
-        let rt = RuntimeBuilder::new(home, manifest("supervised"))
-            .with_approvals(gate)
-            .with_brain(Arc::new(EffectBrain {
-                effect: harness_effect("finance", "composio_execute", serde_json::json!({})),
-            }))
-            .build()
-            .await
-            .unwrap();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home, manifest("supervised"))
+                .with_approvals(gate)
+                .with_brain(Arc::new(EffectBrain {
+                    effect: harness_effect("finance", "composio_execute", serde_json::json!({})),
+                }))
+                .build()
+                .await
+                .unwrap(),
+        );
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
                 text: "do it".into(),
@@ -2238,13 +2387,15 @@ mod test {
             agent: None,
             run_id: None,
         };
-        let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
-            .with_brain(Arc::new(EffectBrain {
-                effect: sign_effect,
-            }))
-            .build()
-            .await
-            .unwrap();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home.clone(), manifest("supervised"))
+                .with_brain(Arc::new(EffectBrain {
+                    effect: sign_effect,
+                }))
+                .build()
+                .await
+                .unwrap(),
+        );
 
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
@@ -2392,13 +2543,15 @@ mod test {
 
         // A fresh runtime over the same home rehydrates the parked approval and
         // can resolve it by its original id.
-        let rt2 = RuntimeBuilder::new(home.clone(), manifest("supervised"))
-            .with_brain(Arc::new(EffectBrain {
-                effect: sign_effect,
-            }))
-            .build()
-            .await
-            .unwrap();
+        let rt2 = Arc::new(
+            RuntimeBuilder::new(home.clone(), manifest("supervised"))
+                .with_brain(Arc::new(EffectBrain {
+                    effect: sign_effect,
+                }))
+                .build()
+                .await
+                .unwrap(),
+        );
         assert_eq!(rt2.pending_approvals().len(), 1);
         rt2.resolve_approval(&approval_id, Verdict::Deny, operator())
             .await
@@ -2425,14 +2578,16 @@ mod test {
         // A recording operator channel we keep a handle to (Arc-shared buffer).
         let operator_channel = OperatorChannel::new();
         let channels: Vec<Arc<dyn ChannelAdapter>> = vec![Arc::new(operator_channel.clone())];
-        let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
-            .with_brain(Arc::new(EffectBrain {
-                effect: sign_effect,
-            }))
-            .with_channels(channels)
-            .build()
-            .await
-            .unwrap();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home.clone(), manifest("supervised"))
+                .with_brain(Arc::new(EffectBrain {
+                    effect: sign_effect,
+                }))
+                .with_channels(channels)
+                .build()
+                .await
+                .unwrap(),
+        );
 
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
@@ -2896,14 +3051,16 @@ mod test {
         let home_dir = tmp_home();
         let home = home_dir.path().to_path_buf();
         let sender = Arc::new(RecordingMailSender::new());
-        let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
-            .with_mail(CompanyMail {
-                sender: sender.clone(),
-                smtp: test_smtp("ceo@acme.test"),
-            })
-            .build()
-            .await
-            .unwrap();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home.clone(), manifest("full"))
+                .with_mail(CompanyMail {
+                    sender: sender.clone(),
+                    smtp: test_smtp("ceo@acme.test"),
+                })
+                .build()
+                .await
+                .unwrap(),
+        );
 
         // What `park_cold_recipient` builds, field for field.
         let effect = Effect {
@@ -2962,14 +3119,16 @@ mod test {
         let home_dir = tmp_home();
         let home = home_dir.path().to_path_buf();
         let sender = Arc::new(RecordingMailSender::new());
-        let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
-            .with_mail(CompanyMail {
-                sender: sender.clone(),
-                smtp: test_smtp("ceo@acme.test"),
-            })
-            .build()
-            .await
-            .unwrap();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home.clone(), manifest("full"))
+                .with_mail(CompanyMail {
+                    sender: sender.clone(),
+                    smtp: test_smtp("ceo@acme.test"),
+                })
+                .build()
+                .await
+                .unwrap(),
+        );
 
         let effect = Effect {
             kind: EMAIL_SEND_KIND.into(),
@@ -3045,14 +3204,16 @@ mod test {
 
         // Fresh runtime over the same home: boot replay rehydrates the card.
         let sender = Arc::new(RecordingMailSender::new());
-        let rt2 = RuntimeBuilder::new(home.clone(), manifest("full"))
-            .with_mail(CompanyMail {
-                sender: sender.clone(),
-                smtp: test_smtp("ceo@acme.test"),
-            })
-            .build()
-            .await
-            .unwrap();
+        let rt2 = Arc::new(
+            RuntimeBuilder::new(home.clone(), manifest("full"))
+                .with_mail(CompanyMail {
+                    sender: sender.clone(),
+                    smtp: test_smtp("ceo@acme.test"),
+                })
+                .build()
+                .await
+                .unwrap(),
+        );
         let pending = rt2.pending_approvals();
         assert_eq!(pending.len(), 1, "{pending:?}");
         assert_eq!(pending[0].id, approval_id, "the ORIGINAL id, not a new one");
