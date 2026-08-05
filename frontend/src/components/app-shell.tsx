@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   FolderClosed,
   LayoutDashboard,
@@ -214,6 +214,16 @@ export function AppShell({
   // out to hydrate each channel and used to throw it away — leaving the shell
   // unable to say which channel an incoming event belongs to (issue #367).
   const [chatChannelByThread, setChatChannelByThread] = useState<Record<string, string>>({});
+  // The chat channel the operator last had on screen. A ref, not state,
+  // because it outlives `ChatView`: it is what an unaddressed system line is
+  // addressed to after the operator has walked off to Approvals (issue #368).
+  const activeChatChannelRef = useRef<string | null>(null);
+  // When each channel was last looked at, and the floor for a channel never
+  // looked at. Together with `transcripts` these *derive* the unread counts
+  // below — nothing increments a counter, so a message that turns out to be a
+  // duplicate cannot leave a badge behind for a line that was never added.
+  const [lastViewedChannel, setLastViewedChannel] = useState<Record<string, number>>({});
+  const [unreadSince, setUnreadSince] = useState(() => Date.now());
   const [threads, setThreads] = useState(defaultThreads);
   const [activeThreadId, setActiveThreadId] = useState("main");
   // A monotonic nonce bumped on every task-lifecycle SSE event, so the
@@ -307,8 +317,12 @@ export function AppShell({
     let cancelled = false;
     // Another company's channel ids are another namespace. Drop this one's
     // addressing up front rather than routing the next company's events into
-    // channels that no longer exist.
+    // channels that no longer exist, and start the unread floor again so the
+    // incoming company's rehydrated history isn't counted as news.
     setChatChannelByThread({});
+    setLastViewedChannel({});
+    setUnreadSince(Date.now());
+    activeChatChannelRef.current = null;
 
     const hydrate = (threadId: string) => {
       client
@@ -400,6 +414,41 @@ export function AppShell({
       cancelled = true;
     };
   }, [client, company]);
+
+  /**
+   * Unread per channel, for the channel rail's badges (issue #367 — the rail
+   * has always rendered them, it was handed a hard-coded empty map).
+   *
+   * Derived from the transcripts rather than counted as messages arrive. A
+   * counter would have to be incremented from inside the injection, which only
+   * finds out whether it actually appended anything inside a state updater —
+   * and an updater that also bumped a second piece of state would be an impure
+   * one, which React is free to run twice. Deriving sidesteps that entirely and
+   * is self-correcting: whatever is in the channel and newer than the last look
+   * at it is unread, by definition.
+   *
+   * Your own lines never count. Neither does anything older than the floor,
+   * which is why a page load's worth of rehydrated history arrives read.
+   */
+  const unread = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const [channelId, messages] of Object.entries(transcripts)) {
+      const since = lastViewedChannel[channelId] ?? unreadSince;
+      const count = messages.filter((m) => m.from !== "you" && m.at > since).length;
+      if (count > 0) counts[channelId] = count;
+    }
+    return counts;
+  }, [transcripts, lastViewedChannel, unreadSince]);
+
+  /**
+   * `ChatView` reporting which channel is on screen — on every switch, and
+   * again as the open channel's transcript grows so a line read as it lands
+   * doesn't leave a badge behind.
+   */
+  const onChannelViewed = useCallback((channelId: string) => {
+    activeChatChannelRef.current = channelId;
+    setLastViewedChannel((v) => ({ ...v, [channelId]: Date.now() }));
+  }, []);
 
   const setThreadMessages = (
     threadId: string,
@@ -662,6 +711,8 @@ export function AppShell({
               onSendStart={onSendStart}
               onSendEnd={onSendEnd}
               liveStepsByThread={liveStepsByThread}
+              unread={unread}
+              onChannelViewed={onChannelViewed}
             />
           )}
           {view === "conversation" && (

@@ -62,6 +62,15 @@ interface Props {
    * started, which is most of what issue #367 is about.
    */
   liveStepsByThread?: Record<string, TurnStep[]>;
+  /** Channel id → unread count, for the rail's badges. Owned by the shell. */
+  unread?: Record<string, number>;
+  /**
+   * Reports the channel actually on screen — which the hash need not name,
+   * since it may have been resolved by the first-channel fallback. The shell
+   * clears that channel's unread count and remembers it as where an
+   * unaddressed line belongs after this view is gone (issue #368).
+   */
+  onChannelViewed?: (channelId: string) => void;
 }
 
 /**
@@ -88,6 +97,8 @@ export function ChatView({
   onSendStart,
   onSendEnd,
   liveStepsByThread,
+  unread,
+  onChannelViewed,
 }: Props) {
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [loadingTeam, setLoadingTeam] = useState(true);
@@ -241,6 +252,14 @@ export function ChatView({
   useEffect(() => {
     setOpenThreadId(null);
   }, [channel?.id]);
+
+  // Whoever owns the unread counts needs to know what is actually being looked
+  // at. Re-runs as the open channel's transcript grows, not only on a switch:
+  // a reply that lands while you are reading the channel is read, and should
+  // not leave a badge on the channel you are sitting in.
+  useEffect(() => {
+    if (channel) onChannelViewed?.(channel.id);
+  }, [channel?.id, messages.length, onChannelViewed]);
 
   if (!channel) return null;
   // A local the closures below can capture as non-null: TypeScript hoists
@@ -416,11 +435,7 @@ export function ChatView({
       <ChannelRail
         sections={sections}
         activeId={channel.id}
-        // Nothing arrives in a channel you are not looking at yet — every
-        // reply answers a line you just sent. The rail renders unread counts
-        // already, so this is the one seam to fill when the host starts
-        // pushing messages of its own.
-        unread={{}}
+        unread={unread ?? {}}
         onSelect={selectChannel}
         className={cn("md:flex", mobilePane === "rail" ? "flex" : "hidden")}
       />
