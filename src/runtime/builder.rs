@@ -993,6 +993,27 @@ impl RuntimeBuilder {
             );
         }
 
+        // Issue #371, the workflow-side equivalent of the sweep above, and it
+        // rests on the same three invariants: a workflow run is journaled with a
+        // start before the engine call, every entry point drives the run future
+        // in this process, and one process owns this journal. So a start with no
+        // finish at boot is a run that died with the last host, and settling it
+        // is what keeps `GET …/workflows/runs` honest when it folds an unmatched
+        // start as `running: true`.
+        //
+        // Gated on the handover for exactly the reason the run reaper is: a
+        // scheduler-spawned workflow run survives a live runtime swap, and
+        // sweeping mid-life would stamp "interrupted by a host restart" on a run
+        // still walking its graph — whose real outcome would then land after the
+        // synthetic one, leaving two contradictory finishes for one run id.
+        //
+        // It reads the journal rather than a store, so it is deliberately placed
+        // after `journal.load()` above and, like it, is best-effort: a failure is
+        // logged inside the sweep and never stops a company booting.
+        if handover.is_none() {
+            crate::runtime::sweep_interrupted_runs(&events, &id).await;
+        }
+
         // The policy gate, rehydrated from the journal replay above so approvals
         // survive a restart with their original ids.
         //
