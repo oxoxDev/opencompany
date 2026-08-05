@@ -18,10 +18,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::Result;
@@ -29,6 +28,20 @@ use crate::error::OpenCompanyError;
 use crate::ports::types::{ApprovalId, Effect};
 use crate::runtime::grants::GrantedCall;
 pub use crate::runtime::types::TaskLink;
+use crate::store::fs::{PathLocks, append_line};
+
+/// Journal append locks, keyed by path, shared by every [`RuntimeJournal`] in
+/// the process (issue #386).
+///
+/// The lock this replaced was a field on `RuntimeJournal`, so two journals over
+/// one file serialised against nothing — which is the state the type has always
+/// been in, and which nothing stopped a caller reaching. A `static` is the only
+/// thing two independently-constructed instances can share.
+///
+/// In-process only, and deliberately so: a second *process* on the same
+/// `OPENCOMPANY_DATA_DIR` is outside any lock's reach. What keeps that case from
+/// tearing is [`append_line`]'s single `O_APPEND` write, not this.
+static JOURNAL_WRITE_LOCKS: LazyLock<PathLocks> = LazyLock::new(PathLocks::default);
 
 /// One durable journal record.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -359,25 +372,36 @@ impl State {
 /// A per-company append-only journal backing at-most-once effects and the
 /// durable approval queue.
 ///
-/// Exactly one process may write a given journal file. [`append`](Self::append)
-/// emits the record and its newline as two separate writes under an in-process
-/// lock, so a second writer on the same path can interleave between them and
-/// leave two records on one line, which then fails to parse on replay.
+/// One process should own a given journal file, but [`append`](Self::append) no
+/// longer depends on that for integrity (issue #386). Every record is written
+/// whole — terminator included — in a single `O_APPEND` write that has reached
+/// the kernel before the call returns, so a concurrent writer can land a record
+/// before or after but never inside one. Writers in *this* process additionally
+/// serialise on [`JOURNAL_WRITE_LOCKS`], which keeps records in call order, so a
+/// park cannot be replayed after the resolution that drains it.
 pub struct RuntimeJournal {
     path: PathBuf,
     state: StdMutex<State>,
-    write_lock: TokioMutex<()>,
+    write_lock: Arc<TokioMutex<()>>,
 }
 
 impl RuntimeJournal {
     /// Opens (or prepares) the journal at `path` without loading it.
     ///
     /// Call [`load`](Self::load) to replay an existing journal into memory.
+    ///
+    /// Two journals over one path share an append lock. The key is the
+    /// absolutised path, so a relative and an absolute spelling of one file
+    /// match; a symlinked or `..`-laden spelling still does not, and falls back
+    /// on the atomic write for its safety.
     pub fn new(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let write_lock =
+            JOURNAL_WRITE_LOCKS.get(&std::path::absolute(&path).unwrap_or_else(|_| path.clone()));
         Self {
-            path: path.into(),
+            path,
             state: StdMutex::new(State::default()),
-            write_lock: TokioMutex::new(()),
+            write_lock,
         }
     }
 
@@ -801,6 +825,28 @@ impl RuntimeJournal {
         out
     }
 
+    /// Appends one record, whole, and does not return until it is on the file.
+    ///
+    /// Delegates to [`append_line`](crate::store::fs::append_line), which emits
+    /// the record **and** its newline in a single blocking `write_all` under
+    /// `O_APPEND`. This used to open a `tokio::fs::File` and write the two
+    /// halves separately, then drop the handle without flushing — and tokio's
+    /// async `File` returns from `write_all` once the write is *queued* on a
+    /// blocking task, not once it lands. Measured on this code, 199 of 200
+    /// appends returned with their bytes still in flight. Two consequences, both
+    /// live:
+    ///
+    /// * The queued newline could be overtaken by the next append's opening
+    ///   brace, putting two records on one physical line — the
+    ///   `serde_json` "trailing characters" failure this issue was filed for.
+    /// * `Ok(())` meant "queued", not "written". A commit that `record_executed`
+    ///   had already reported durable could still be lost to a crash, and an
+    ///   `ENOSPC` on the real write was never reported to anyone. The
+    ///   at-most-once guarantee rests on that record being on disk *before* the
+    ///   side effect runs, so this was the more serious half.
+    ///
+    /// Identical to the corruption PR #43 removed from `store::fs::append_line`
+    /// and the feedback store's copy of it; the journal was the last twin.
     async fn append(&self, record: &JournalRecord) -> Result<()> {
         let line = serde_json::to_string(record)?;
         let _guard = self.write_lock.lock().await;
@@ -809,17 +855,7 @@ impl RuntimeJournal {
                 .await
                 .map_err(|e| self.io_err_at(parent, e))?;
         }
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .await
-            .map_err(|e| self.io_err(e))?;
-        file.write_all(line.as_bytes())
-            .await
-            .map_err(|e| self.io_err(e))?;
-        file.write_all(b"\n").await.map_err(|e| self.io_err(e))?;
-        Ok(())
+        append_line(&self.path, &line).await
     }
 
     fn io_err(&self, source: std::io::Error) -> OpenCompanyError {
@@ -844,6 +880,8 @@ impl std::fmt::Debug for RuntimeJournal {
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use super::*;
     use crate::ports::now_millis;
     use crate::ports::types::EffectGroup;
@@ -1547,6 +1585,148 @@ mod test {
             Some(500)
         );
         assert!(reloaded.replayed_grants().is_empty());
+    }
+
+    /// Every non-empty line of the journal at `path`, parsed. Panics with the
+    /// offending line's number and text when one does not parse, because a
+    /// torn line is exactly what these tests exist to catch and
+    /// `unwrap`-on-`Err` hides which line it was.
+    async fn parse_every_line(path: &Path) -> Vec<JournalRecord> {
+        let raw = tokio::fs::read_to_string(path).await.expect("journal file");
+        raw.lines()
+            .enumerate()
+            .filter(|(_, l)| !l.trim().is_empty())
+            .map(|(i, line)| {
+                serde_json::from_str::<JournalRecord>(line)
+                    .unwrap_or_else(|e| panic!("line {} did not parse: {e}\n  {line}", i + 1))
+            })
+            .collect()
+    }
+
+    /// **Issue #386**: rapid appends through a *single* journal must not tear a
+    /// line.
+    ///
+    /// This is the shape CI actually hit. `append` used to leave its trailing
+    /// newline in a `tokio::fs::File` whose background write nobody awaited,
+    /// then drop the handle and release the lock — so the next append's opening
+    /// bytes could reach the file before the previous record's terminator, and
+    /// two records landed on one line. One writer was enough; concurrency
+    /// across instances was never required.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rapid_appends_through_one_journal_never_tear_a_line() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+        let journal = RuntimeJournal::new(&path);
+
+        const N: usize = 256;
+        for i in 0..N {
+            journal
+                .record_executed(&format!("cyc:{i}"), executed(i as u64))
+                .await
+                .unwrap();
+        }
+
+        let records = parse_every_line(&path).await;
+        assert_eq!(records.len(), N, "every append is its own line");
+
+        let reloaded = RuntimeJournal::new(&path);
+        reloaded.load().await.unwrap();
+        for i in 0..N {
+            assert!(
+                reloaded.is_executed(&format!("cyc:{i}")),
+                "cyc:{i} must survive the reload",
+            );
+        }
+    }
+
+    /// **Issue #386**: when `append` returns, the record is on the file.
+    ///
+    /// The deterministic half of the bug, and the more serious one. The
+    /// at-most-once guarantee is that an effect's key is durable *before* the
+    /// side effect runs; the old write path returned once the write was queued
+    /// on tokio's blocking pool, so `record_executed` reported a commit that a
+    /// crash could still lose and an `ENOSPC` on the real write reached nobody.
+    /// Measured against that path, 199 of 200 appends failed this assertion —
+    /// the torn line was the rare, visible symptom of a window that was open
+    /// almost always.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_append_has_reached_the_file_before_it_returns() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+        let journal = RuntimeJournal::new(&path);
+
+        let mut expected = 0usize;
+        for i in 0..64u64 {
+            let key = format!("cyc:{i}");
+            expected += serde_json::to_string(&JournalRecord::EffectExecuted {
+                key: key.clone(),
+                effect: Some(executed(i)),
+            })
+            .unwrap()
+            .len()
+                + 1;
+            journal.record_executed(&key, executed(i)).await.unwrap();
+            // A synchronous stat, so the assertion cannot be satisfied by the
+            // very blocking pool that would still be running a queued write.
+            let on_disk = std::fs::metadata(&path).expect("journal file").len() as usize;
+            assert_eq!(
+                on_disk,
+                expected,
+                "append #{} returned with {} of {expected} bytes on the file",
+                i + 1,
+                on_disk,
+            );
+        }
+    }
+
+    /// **Issue #386**: two journals over one path must not interleave.
+    ///
+    /// `write_lock` is per-instance, so it serialises nothing between two
+    /// `RuntimeJournal` values sharing a file. Nothing in the type stops a
+    /// caller building two, and the test suite builds them routinely. The
+    /// defence is the process-wide per-path lock plus the single whole-line
+    /// write.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_appends_from_two_journals_over_one_path_lose_nothing() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+
+        const N: usize = 128;
+        let one = Arc::new(RuntimeJournal::new(&path));
+        let two = Arc::new(RuntimeJournal::new(&path));
+
+        let a = tokio::spawn({
+            let one = Arc::clone(&one);
+            async move {
+                for i in 0..N {
+                    one.record_executed(&format!("a:{i}"), executed(i as u64))
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        let b = tokio::spawn({
+            let two = Arc::clone(&two);
+            async move {
+                for i in 0..N {
+                    two.record_executed(&format!("b:{i}"), executed(i as u64))
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        a.await.unwrap();
+        b.await.unwrap();
+
+        let records = parse_every_line(&path).await;
+        assert_eq!(records.len(), N * 2, "no record may be lost or merged");
+
+        let reloaded = RuntimeJournal::new(&path);
+        reloaded.load().await.unwrap();
+        for i in 0..N {
+            assert!(reloaded.is_executed(&format!("a:{i}")), "a:{i} lost");
+            assert!(reloaded.is_executed(&format!("b:{i}")), "b:{i} lost");
+        }
     }
 
     #[test]
