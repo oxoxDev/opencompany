@@ -656,10 +656,36 @@ export interface ApiErrorBody {
 }
 
 export class ApiError extends Error {
+  /**
+   * The raw response body, kept only when it was **not** the host's envelope
+   * (issue #380) — a proxy's error page, an HTML 502, a plain-text upstream
+   * failure.
+   *
+   * Diagnostic only, and deliberately not part of `message`: `message` is
+   * rendered to operators as prose, and an arbitrary upstream body is not
+   * prose. Nothing in the console renders this field; it exists so that
+   * "which hop failed" survives for whoever is reading a bug report, and it is
+   * bounded by the client so a megabyte error page is not retained on an Error
+   * that may sit in state for the life of the view.
+   */
+  detail?: string;
+
   constructor(
     public status: number,
     public code: string,
     message: string,
+    /**
+     * Whether `code` and `message` came from the host's own `{error, code}`
+     * envelope, rather than being synthesised from the status line (#380).
+     *
+     * This is the difference between "the host considered the request and
+     * refused" and "something between the browser and the host gave up", and
+     * callers cannot recover it from `status` alone: the host itself answers
+     * 503 while quiescing and 502 on an upstream transport failure, so those
+     * codes are ambiguous on the wire and unambiguous here. `ApprovalsView`
+     * turns on exactly this to decide whether a decision may still have landed.
+     */
+    public readonly fromHost: boolean = false,
   ) {
     super(message);
     this.name = "ApiError";

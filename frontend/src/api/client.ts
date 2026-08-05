@@ -84,15 +84,13 @@ export class OpenCompanyClient {
     }
 
     const text = await res.text();
-    const data = text ? safeJson(text) : undefined;
     if (!res.ok) {
-      const envelope = data as ApiErrorBody | undefined;
       // Let the app react to an expired or revoked session. Auth routes opt out
       // (they 401 as a normal answer) so a failed login cannot loop the view.
       if (res.status === 401 && !path.includes("/auth/")) this.onUnauthorized?.();
-      throw new ApiError(res.status, envelope?.code ?? `http_${res.status}`, envelope?.error ?? res.statusText);
+      throw httpError(res, text);
     }
-    return data as T;
+    return (text ? parseJson(text) : undefined) as T;
   }
 
   /** Whether a specific company is being operated (vs single-company mode). */
@@ -113,10 +111,11 @@ export class OpenCompanyClient {
   /**
    * A GET whose answer is a document, not JSON (issue #352).
    *
-   * `request` runs every response through `safeJson`, which turns a non-JSON
-   * body into an `{error, code:"unparseable"}` object rather than throwing — so
-   * a route that answers HTML needs its own reader. Same auth, same
-   * `credentials: "include"`, same 401 handling; only the parsing differs.
+   * `request` parses every successful response as JSON and hands back
+   * `undefined` when it is not — so a route that answers HTML needs its own
+   * reader to see the body at all. Same auth, same `credentials: "include"`,
+   * same 401 handling, and since #380 the same `httpError` on the failure
+   * path; only the success-path parsing differs.
    *
    * Returns the host's own `Content-Disposition` filename alongside the body.
    * The host already names the file; without this the caller has to invent a
@@ -135,9 +134,8 @@ export class OpenCompanyClient {
     }
     const text = await res.text();
     if (!res.ok) {
-      const envelope = safeJson(text) as ApiErrorBody | undefined;
       if (res.status === 401) this.onUnauthorized?.();
-      throw new ApiError(res.status, envelope?.code ?? `http_${res.status}`, envelope?.error ?? res.statusText);
+      throw httpError(res, text);
     }
     return { text, filename: attachmentFilename(res.headers.get("content-disposition")) };
   }
@@ -567,10 +565,82 @@ function attachmentFilename(header: string | null): string | undefined {
   return name && name !== "." && name !== ".." ? name : undefined;
 }
 
-function safeJson(text: string): unknown {
+/** How much of an unrecognised body is kept on `ApiError.detail`. */
+const DETAIL_CHARS = 2_000;
+
+/**
+ * `JSON.parse`, or `undefined` when the body is not JSON.
+ *
+ * This used to be `safeJson`, which failed **open**: an unparseable body became
+ * `{ error: text, code: "unparseable" }`, so the body itself arrived at the
+ * throw sites below wearing the shape of the host's error envelope and was
+ * taken as the operator-facing message. On a hosted tenant that meant an nginx
+ * `504` page — `<html><head><title>…`, padding comments and all — was rendered
+ * as the reason a request failed (issue #380). Returning `undefined` is what
+ * makes the fallback below reachable.
+ */
+function parseJson(text: string): unknown {
   try {
     return JSON.parse(text);
   } catch {
-    return { error: text, code: "unparseable" };
+    return undefined;
   }
+}
+
+/**
+ * The host's `{error, code}` envelope, or `undefined` when the body is not one.
+ *
+ * Both fields are required and both must be strings, matching `ApiErrorBody`
+ * and what the host actually emits (`server/error.rs` serialises
+ * `{error: Display, code: &str}` for every route). Anything else — a bare JSON
+ * string, an array, a `null`, a proxy's JSON-shaped health blob — is not our
+ * envelope, and guessing at it is how an arbitrary upstream body becomes UI
+ * prose. The strictness is the point: this predicate is the only thing standing
+ * between a foreign response body and `ApiError.message`.
+ */
+function errorEnvelope(text: string): ApiErrorBody | undefined {
+  const parsed = parseJson(text);
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const { error, code } = parsed as Record<string, unknown>;
+  if (typeof error !== "string" || typeof code !== "string") return undefined;
+  return { error, code };
+}
+
+/**
+ * A short, safe description of a status the host refused on.
+ *
+ * `statusText` first, but it cannot be the whole answer: HTTP/2 and HTTP/3
+ * carry no reason phrase, so `res.statusText` is `""` on most hosted
+ * deployments — exactly the tenants that sit behind the proxy this bug came
+ * from. Falling back to `statusText` alone would have traded an HTML dump for a
+ * blank message, so `HTTP 504` is the floor.
+ */
+function statusMessage(res: Response): string {
+  return res.statusText.trim() || `HTTP ${res.status}`;
+}
+
+/**
+ * The `ApiError` for a response the host refused (issue #380).
+ *
+ * Shared by `request` and `getDocument`, which had drifted into two
+ * byte-identical copies of this logic — so the bug existed twice and had to be
+ * fixed twice. One function means the next change to error handling cannot land
+ * on only one of the two readers.
+ */
+function httpError(res: Response, text: string): ApiError {
+  const envelope = errorEnvelope(text);
+  const err = new ApiError(
+    res.status,
+    envelope?.code ?? `http_${res.status}`,
+    envelope?.error ?? statusMessage(res),
+    envelope !== undefined,
+  );
+  // Not discarded, just not rendered. A proxy error page is the only clue to
+  // which hop gave up, which is worth keeping for a bug report even though it
+  // is worthless as prose.
+  if (!envelope && text.trim()) {
+    err.detail = text.slice(0, DETAIL_CHARS);
+    console.debug(`[api] ${res.status} ${res.url}: unrecognised error body`, err.detail);
+  }
+  return err;
 }
