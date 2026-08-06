@@ -77,6 +77,30 @@ const AUTOSAVE_DELAY_MS = 800;
 /** The folder created to hold notes rescued from the retired local scratchpad. */
 const IMPORT_FOLDER_NAME = "Imported from this browser";
 
+/**
+ * The body of the import receipt, for a scratchpad of `files` notes and
+ * `folders` folders (issue #500).
+ *
+ * Names *both* categories rather than reporting one number, because the
+ * scratchpad is a flat list of two kinds and no single label is honest for
+ * every mix of them: calling the whole list "notes" over-reports a mixed
+ * import, and counting only files makes a folder-only import announce
+ * "0 notes" — a success that reads as a failure and still never mentions the
+ * folders that did arrive. The common files-only scratchpad renders exactly
+ * as it always did. The `IMPORT_FOLDER_NAME` root is packaging, not imported
+ * content, and is deliberately outside this tally.
+ */
+export function importSummary(files: number, folders: number): string {
+  const parts: string[] = [];
+  if (files > 0) parts.push(`${files} note${files === 1 ? "" : "s"}`);
+  if (folders > 0) parts.push(`${folders} folder${folders === 1 ? "" : "s"}`);
+  // Unreachable from the banner, which only renders for a non-empty
+  // scratchpad — but a receipt claiming an unqualified "Imported" would be the
+  // worst possible reading of an import that moved nothing.
+  if (parts.length === 0) return "nothing";
+  return parts.join(" and ");
+}
+
 /** What the editor's status line is currently reporting. */
 type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -328,6 +352,10 @@ export function WorkspaceView({ client, company }: Props) {
 
   async function importLegacy() {
     setImporting(true);
+    // Partitioned once, so the loops below and the receipt that reports them
+    // can never disagree about what was imported (#500).
+    const folders = legacy.filter((n) => n.kind === "folder");
+    const files = legacy.filter((n) => n.kind === "file");
     try {
       const root = await createNode(client, company, {
         name: IMPORT_FOLDER_NAME,
@@ -338,7 +366,7 @@ export function WorkspaceView({ client, company }: Props) {
       const remap = new Map<string, string>();
       const parentFor = (node: FsNode) =>
         node.parentId ? (remap.get(node.parentId) ?? root.id) : root.id;
-      for (const folder of legacy.filter((n) => n.kind === "folder")) {
+      for (const folder of folders) {
         const created = await createNode(client, company, {
           name: folder.name,
           kind: "folder",
@@ -346,7 +374,7 @@ export function WorkspaceView({ client, company }: Props) {
         });
         remap.set(folder.id, created.id);
       }
-      for (const file of legacy.filter((n) => n.kind === "file")) {
+      for (const file of files) {
         await createNode(client, company, {
           name: ensureMdExt(file.name),
           kind: "file",
@@ -356,7 +384,7 @@ export function WorkspaceView({ client, company }: Props) {
       }
       clearLegacyLocal(company);
       setLegacy([]);
-      toast.success(`Imported ${legacy.length} note${legacy.length === 1 ? "" : "s"}.`);
+      toast.success(`Imported ${importSummary(files.length, folders.length)}.`);
       await loadTree({ silent: true });
     } catch (e) {
       // The key is left intact on failure, so the banner comes back and nothing
