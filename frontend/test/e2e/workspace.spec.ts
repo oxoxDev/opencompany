@@ -174,14 +174,23 @@ test("the retired local scratchpad is offered for import, its seed discarded", a
 }) => {
   const stamp = Date.now().toString(36);
   const rescued = `local-note-${stamp}`;
+  const filed = `filed-note-${stamp}`;
+  const rescuedFolder = `local-folder-${stamp}`;
   const legacyKey = await legacyKeyFor(request);
 
-  // Plant a legacy key holding one user-authored note (`fs-…`) alongside a
-  // bundled seed node (`seed-…`), exactly as the retired store would have.
+  // Plant a legacy key holding user-authored nodes (`fs-…`) alongside a bundled
+  // seed node (`seed-…`), exactly as the retired store would have.
+  //
+  // The user's nodes are deliberately of BOTH kinds, one of them a note nested
+  // inside the folder (#500). An all-files fixture makes the list's length and
+  // its file count the same number, so a receipt counting the wrong one of the
+  // two still passes — which is exactly how "N notes" survived counting
+  // folders. The nesting also puts a real parent-child pair through the
+  // import's `parentFor` remap, which a flat fixture never exercised.
   await page.goto("/#/workspace");
   await dismissOnboarding(page);
   await page.evaluate(
-    ([key, name]) => {
+    ([key, name, folderName, nestedName]) => {
       localStorage.setItem(
         key,
         JSON.stringify([
@@ -201,20 +210,44 @@ test("the retired local scratchpad is offered for import, its seed discarded", a
             updatedAt: Date.now(),
             content: "Something the operator actually typed.",
           },
+          {
+            id: "fs-user-folder",
+            name: folderName,
+            kind: "folder",
+            parentId: null,
+            updatedAt: Date.now(),
+          },
+          {
+            id: "fs-user-2",
+            name: `${nestedName}.md`,
+            kind: "file",
+            parentId: "fs-user-folder",
+            updatedAt: Date.now(),
+            content: "Filed inside a folder the operator made.",
+          },
         ]),
       );
     },
-    [legacyKey, rescued] as const,
+    [legacyKey, rescued, rescuedFolder, filed] as const,
   );
 
   await openWorkspace(page);
 
-  // The banner offers only the user's note — the seed is not counted.
+  // The banner offers only the user's nodes — the seed is not counted.
   const banner = page.getByTestId("workspace-migration-banner");
   await expect(banner).toBeVisible({ timeout: 30_000 });
-  await expect(banner).toContainText("1 note");
+  await expect(banner).toContainText("3 notes");
 
   await page.getByTestId("workspace-migration-import").click();
+
+  // The receipt names what was actually imported, per kind (#500). Two notes
+  // and one folder — not the flat list's length, and not the import folder the
+  // console creates to hold them, which is packaging rather than content.
+  await expect(page.locator("[data-sonner-toast] [data-title]").first()).toHaveText(
+    "Imported 2 notes and 1 folder.",
+    { timeout: 30_000 },
+  );
+
   await expect(banner).toBeHidden({ timeout: 30_000 });
 
   // The rescued note is on the host, under the import folder.
@@ -229,6 +262,15 @@ test("the retired local scratchpad is offered for import, its seed discarded", a
   const note = nodes.find((n) => n.name === `${rescued}.md`);
   expect(note, "the user's note must be imported").toBeTruthy();
   expect(note!.parentId).toBe(folder!.id);
+
+  // The user's own folder came across too, and the note filed inside it is
+  // still inside it — the remap resolved the child's old local parent id.
+  const nested = nodes.find((n) => n.kind === "folder" && n.name === rescuedFolder);
+  expect(nested, "the user's folder must be imported").toBeTruthy();
+  expect(nested!.parentId).toBe(folder!.id);
+  const filedNote = nodes.find((n) => n.name === `${filed}.md`);
+  expect(filedNote, "the nested note must be imported").toBeTruthy();
+  expect(filedNote!.parentId).toBe(nested!.id);
 
   // The seed's invented note was never imported.
   expect(nodes.some((n) => n.name.includes("Spring launch"))).toBe(false);
