@@ -127,7 +127,7 @@ pub fn is_board_column(column: &str) -> bool {
 /// | Settled status | Column | Why |
 /// | --- | --- | --- |
 /// | [`Succeeded`](RunStatus::Succeeded) | [`COLUMN_IN_REVIEW`] | a person accepts the result |
-/// | [`WaitingApproval`](RunStatus::WaitingApproval) | [`COLUMN_IN_REVIEW`] | a person authorises the call |
+/// | [`WaitingApproval`](RunStatus::WaitingApproval) | [`COLUMN_PAUSED`] | the run stopped short; nothing to accept yet |
 /// | [`Paused`](RunStatus::Paused) | [`COLUMN_PAUSED`] | resumed, not approved |
 /// | [`Failed`](RunStatus::Failed) | [`COLUMN_TODO`] | with the run's error on the card |
 /// | [`Cancelled`](RunStatus::Cancelled) | [`COLUMN_TODO`] | with the cancellation reason on the card |
@@ -142,11 +142,40 @@ pub fn is_board_column(column: &str) -> bool {
 /// as done would make the terminal column mean "the model stopped talking"
 /// rather than "we shipped this".
 ///
-/// The consequence is that In Review carries **two** meanings — *approve this
-/// call* and *accept this result* — which are not interchangeable. The card is
-/// what disambiguates them: every settle stamps its own reason onto the note,
-/// so an operator opening an In Review card reads whether they are authorising
-/// an action or signing off finished work rather than having to guess.
+/// # `WaitingApproval` lands in Paused, **not** in review (issue #465)
+///
+/// This row used to share [`COLUMN_IN_REVIEW`] with `Succeeded`, on the argument
+/// that "a person acts next either way; the note says which act is wanted". That
+/// made In Review carry two non-interchangeable meanings — *approve this call*
+/// and *accept this result* — and left the operator to tell them apart from the
+/// note.
+///
+/// It is not a labelling problem. **[`COLUMN_IN_REVIEW`] is defined by the
+/// verdict that consumes it**: `review_landing_column(Approve)` writes
+/// [`COLUMN_DONE`], and it is the only route there. So a run that stopped at an
+/// unauthorised call sat one click away from being filed as finished — the exact
+/// state issue #337 set out to remove when it stopped a parked run auto-landing
+/// in Done. #337 closed the automatic route and left the manual one open.
+///
+/// A run parked on an approval has not produced a reviewable result: it stopped
+/// early, and in the worst case (its *first* call parked) it produced nothing at
+/// all while the board announced work to check. So the parked case leaves the
+/// review columns entirely and lands in [`COLUMN_PAUSED`] — the board's "stopped,
+/// not finished" column, and the one column the console gives a Resume control,
+/// which is the gesture that actually puts the work back in flight once the call
+/// is authorised.
+///
+/// **This narrows epic #183 decision 2** ("Paused vs In review is decided by who
+/// unblocks it — a person must act → In review"), which is why it is written
+/// down rather than quietly contradicted. That rule separates *waiting on a
+/// person* from *waiting on a system*, and it still holds — on the
+/// [`RunStatus`], where [`WaitingApproval`](RunStatus::WaitingApproval) remains
+/// distinct from [`Paused`](RunStatus::Paused) and the console renders it
+/// "Waiting on you". What the rule does not answer is *has the work happened
+/// yet*, and that is the question the **column** asks. The two questions get two
+/// answers in two places instead of one column trying to carry both — the same
+/// split [`crate::harness::lifecycle::run_status_for`] already documents, and the
+/// same reason `landing_column(Delegated)` diverges from its run status.
 ///
 /// # Why it lives on the port
 ///
@@ -161,11 +190,13 @@ pub fn is_board_column(column: &str) -> bool {
 /// card goes rather than silently inheriting somebody else's answer.
 pub fn column_for_settled_run(status: RunStatus) -> Option<&'static str> {
     match status {
-        // A person acts next either way; the note says which act is wanted.
-        RunStatus::Succeeded | RunStatus::WaitingApproval => Some(COLUMN_IN_REVIEW),
-        // Waiting on something other than a person — resume is a plain
-        // `column → in_progress` PATCH, which re-fires dispatch.
-        RunStatus::Paused => Some(COLUMN_PAUSED),
+        // A result somebody still has to accept.
+        RunStatus::Succeeded => Some(COLUMN_IN_REVIEW),
+        // Stopped short, so there is nothing to accept yet (issue #465). Both
+        // park the card; resume is a plain `column → in_progress` PATCH, which
+        // re-fires dispatch. `WaitingApproval` keeps saying *who* unblocks it on
+        // the run status — the column only says the work has not happened.
+        RunStatus::WaitingApproval | RunStatus::Paused => Some(COLUMN_PAUSED),
         // Not reviewable work. Epic #183 §3: a card that cannot proceed returns
         // to To-do carrying the reason, never into a stuck column of its own.
         RunStatus::Failed | RunStatus::Cancelled => Some(COLUMN_TODO),
@@ -790,9 +821,11 @@ mod test {
             column_for_settled_run(RunStatus::Succeeded),
             Some(COLUMN_IN_REVIEW)
         );
+        // Issue #465: a run parked on an approval stopped short of a result, so
+        // it parks the card rather than presenting it as reviewable work.
         assert_eq!(
             column_for_settled_run(RunStatus::WaitingApproval),
-            Some(COLUMN_IN_REVIEW)
+            Some(COLUMN_PAUSED)
         );
         assert_eq!(
             column_for_settled_run(RunStatus::Paused),
@@ -837,6 +870,42 @@ mod test {
                 "{status} must not auto-advance a card to Done"
             );
         }
+    }
+
+    /// **Issue #465, stated as the rule rather than the value.** Only a run that
+    /// produced a result may land in the column a review verdict consumes.
+    ///
+    /// The teeth: `review_landing_column(Approve)` turns [`COLUMN_IN_REVIEW`]
+    /// into [`COLUMN_DONE`] in one gesture, and it is the only route to Done. A
+    /// run that stopped at an unauthorised call has produced nothing to accept —
+    /// in the reported case, nothing at all — so leaving it reviewable put
+    /// unstarted work one click from finished. #337 removed the automatic route
+    /// to that state; this removes the manual one.
+    ///
+    /// Written as a loop over "did this run produce a result" rather than as an
+    /// equality on `WaitingApproval`, so a future status that also stops short
+    /// has to answer the same question instead of inheriting a column.
+    #[test]
+    fn only_a_run_that_produced_a_result_lands_where_review_can_approve_it() {
+        for status in [
+            RunStatus::WaitingApproval,
+            RunStatus::Paused,
+            RunStatus::Failed,
+            RunStatus::Cancelled,
+        ] {
+            assert_ne!(
+                column_for_settled_run(status),
+                Some(COLUMN_IN_REVIEW),
+                "{status} produced nothing to review, so it must not present as \
+                 reviewable work a verdict could approve straight to Done"
+            );
+        }
+        // The converse, so this cannot be satisfied by emptying the column: a
+        // run that *did* produce a result still reaches the reviewer.
+        assert_eq!(
+            column_for_settled_run(RunStatus::Succeeded),
+            Some(COLUMN_IN_REVIEW)
+        );
     }
 
     /// Whatever the table says must be a column the board actually renders —
