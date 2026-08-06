@@ -72,6 +72,21 @@ fn say(text: &str) -> Turn {
 struct Rule {
     when: Box<dyn Fn(&Ctx) -> bool + Send>,
     then: Turn,
+    /// Run against the live company *before* answering.
+    effect: Effect,
+}
+
+/// Something a rule does to the running company on its way past.
+///
+/// The scripted endpoint is called from inside the cycle, which makes it the
+/// only place a test can mutate the board **while the turn is still in
+/// flight** — and that is the only way to reach the vanished-card path from
+/// outside the process.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Effect {
+    None,
+    /// Delete every card on the board.
+    ClearBoard,
 }
 
 /// What the endpoint can see about one request.
@@ -122,12 +137,34 @@ impl Ctx {
     fn fresh(&self) -> bool {
         self.tool_results.is_empty()
     }
+
+    /// The CEO-relay hand-back — the extra orchestrator turn that runs *after*
+    /// the desk answered and its card settled.
+    ///
+    /// Matched on the relay prompt's own wording rather than on turn ordering,
+    /// because the orchestrator's first turn continues after `delegate_to_desk`
+    /// returns and that continuation is also a non-fresh orchestrator request.
+    /// A rule keyed only on "the orchestrator, not fresh" lands on the
+    /// continuation, which runs *before* the hand-off has opened its card.
+    fn is_relay(&self) -> bool {
+        self.user
+            .contains("Relay their answer back to the operator")
+    }
 }
 
 fn rule(when: impl Fn(&Ctx) -> bool + Send + 'static, then: Turn) -> Rule {
     Rule {
         when: Box::new(when),
         then,
+        effect: Effect::None,
+    }
+}
+
+/// A rule that wipes the board on its way past — see [`Effect`].
+fn rule_clearing_the_board(when: impl Fn(&Ctx) -> bool + Send + 'static, then: Turn) -> Rule {
+    Rule {
+        effect: Effect::ClearBoard,
+        ..rule(when, then)
     }
 }
 
@@ -136,6 +173,18 @@ struct Script {
     /// Every request body the endpoint saw, so a test can assert on what an
     /// agent was actually shown rather than on what it presumably was.
     seen: Mutex<Vec<Value>>,
+    /// The company's own base URL, registered once the host is up so an
+    /// [`Effect`] can reach back into it mid-turn.
+    host: Mutex<Option<String>>,
+    /// How many cards each fired [`Effect::ClearBoard`] actually deleted.
+    ///
+    /// Recorded rather than asserted in place, because **a panic inside this
+    /// endpoint is invisible to the test**: the agent turn treats a failed
+    /// inference call as a recoverable turn, so the cycle completes and the
+    /// case goes green over a scenario that never happened. Found exactly that
+    /// way — the first draft of the deleted-card test passed while its rule was
+    /// panicking on an empty board. The test asserts on this instead.
+    cleared: Mutex<Vec<usize>>,
 }
 
 impl Script {
@@ -149,6 +198,44 @@ impl Script {
             .filter(|ctx| ctx.is(role))
             .map(|ctx| ctx.user)
             .collect()
+    }
+
+    /// Deletes every card, from inside the turn that is running, and records how
+    /// many went — see [`Script::cleared`] for why it records rather than
+    /// asserts.
+    async fn clear_board(&self) {
+        let Some(base) = self.host.lock().expect("host").clone() else {
+            return;
+        };
+        let client = reqwest::Client::new();
+        let Ok(res) = client
+            .get(format!("{base}/api/v1/companies/{COMPANY}/tasks"))
+            .bearer_auth(TOKEN)
+            .send()
+            .await
+        else {
+            return;
+        };
+        let cards: Vec<Value> = res.json().await.unwrap_or_default();
+        let mut deleted = 0;
+        for card in cards {
+            let Some(id) = card["id"].as_str() else {
+                continue;
+            };
+            let deleted_ok = client
+                .delete(format!("{base}/api/v1/companies/{COMPANY}/tasks/{id}"))
+                .bearer_auth(TOKEN)
+                .send()
+                .await
+                .is_ok_and(|r| r.status().is_success());
+            deleted += usize::from(deleted_ok);
+        }
+        self.cleared.lock().expect("cleared").push(deleted);
+    }
+
+    /// How many cards each fired board-clearing rule deleted, in order.
+    fn cleared(&self) -> Vec<usize> {
+        self.cleared.lock().expect("cleared").clone()
     }
 }
 
@@ -173,6 +260,8 @@ async fn spawn_model(rules: Vec<Rule>) -> (String, Arc<Script>) {
     let script = Arc::new(Script {
         rules: Mutex::new(rules),
         seen: Mutex::new(Vec::new()),
+        host: Mutex::new(None),
+        cleared: Mutex::new(Vec::new()),
     });
     let handle = Arc::clone(&script);
     let app = axum::Router::new().route(
@@ -187,8 +276,16 @@ async fn spawn_model(rules: Vec<Rule>) -> (String, Arc<Script>) {
                     rules
                         .iter()
                         .position(|r| (r.when)(&ctx))
-                        .map(|i| rules.remove(i).then)
+                        .map(|i| rules.remove(i))
+                        .map(|r| (r.then, r.effect))
                 };
+                let (next, effect) = match next {
+                    Some((then, effect)) => (Some(then), effect),
+                    None => (None, Effect::None),
+                };
+                if effect == Effect::ClearBoard {
+                    script.clear_board().await;
+                }
                 let message = match next.unwrap_or_else(|| say("done")) {
                     Turn::Say(text) => json!({ "role": "assistant", "content": text }),
                     Turn::Call { tool, args } => tool_call_message(&[(tool, args)]),
@@ -443,6 +540,27 @@ fn id_of(card: &Value) -> &str {
     card["id"].as_str().expect("card id")
 }
 
+/// `(published path, author of its first version)` for every artifact on a
+/// card, sorted — the per-item attribution the artifact record actually stores.
+async fn authors_on(host: &Host, task_id: &str) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = host
+        .artifacts(task_id)
+        .await
+        .iter()
+        .map(|a| {
+            (
+                a["source"].as_str().unwrap_or("?").to_string(),
+                a["versions"][0]["authorId"]
+                    .as_str()
+                    .unwrap_or("?")
+                    .to_string(),
+            )
+        })
+        .collect();
+    pairs.sort();
+    pairs
+}
+
 /// Asserts the invariant the issue is about: one card, it holds the delivered
 /// file, the reply links to *it*, and it is filed under the agent that actually
 /// published — not the responder that relayed for them.
@@ -547,6 +665,61 @@ async fn a_substantial_ask_to_a_desk_that_publishes_opens_one_card() {
     assert_sole_card_carries(&host, &board, "writer", "Q3 board memo").await;
 }
 
+/// The card the turn opened is **deleted mid-turn**, so the publish falls back
+/// to minting a replacement. The reply must link to the card that holds the
+/// deliverable, not to the id of the card that is gone.
+///
+/// This is #463's own failure reachable through the fallback added to prevent
+/// it: `spawned_task` still names the deleted card, `published_card` names the
+/// replacement, and preferring the former sends the operator to a card that no
+/// longer exists — with the deliverable somewhere else.
+///
+/// The delete is fired from the **relay** turn, which is the one window that
+/// works: the hand-off's card is settled by then (an earlier delete would be
+/// undone by that settle) and the publish queue has not yet been drained.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_publish_onto_a_card_deleted_mid_turn_links_the_reply_to_the_replacement() {
+    let (model, script) = spawn_model(vec![
+        rule(
+            |c| c.is("Chief Executive") && c.fresh(),
+            call(
+                "delegate_to_desk",
+                json!({ "desk": "content", "instruction": "Draft the Q3 board memo and publish it." }),
+            ),
+        ),
+        rule(
+            |c| c.is("Writer") && c.fresh(),
+            call(
+                "publish_artifact",
+                json!({ "path": "memo.md", "title": "Q3 board memo" }),
+            ),
+        ),
+        rule(|c| c.is("Writer"), say("Drafted and published it.")),
+        rule_clearing_the_board(
+            |c| c.is("Chief Executive") && c.is_relay(),
+            say("The desk published it — and someone just cleared the board."),
+        ),
+    ])
+    .await;
+    let host = spawn_host(model).await;
+    *script.host.lock().expect("host") = Some(host.base.clone());
+    host.seed_file("writer", "memo.md", "# Q3 board memo\n");
+
+    let reply = host.chat("assemble the Q3 board pack", None).await;
+
+    // Prove the scenario happened before asserting anything about it: exactly
+    // one clearing rule fired and it really deleted the hand-off's card.
+    assert_eq!(
+        script.cleared(),
+        vec![1],
+        "the card was never deleted, so this case proves nothing"
+    );
+    let board = host.board(&reply).await;
+    // The deliverable is never dropped: a replacement card carries it, and the
+    // reply points at THAT card rather than at the id that no longer resolves.
+    assert_sole_card_carries(&host, &board, "writer", "Q3 board memo").await;
+}
+
 /// A recognised imperative that the orchestrator hands off. The REST handler
 /// carded it before the cycle started; #442's stand-down lived only on the
 /// direct path, so the hand-off opened a second one.
@@ -609,6 +782,68 @@ async fn a_recognised_imperative_delegated_and_published_opens_one_card() {
     // The handler's To-do card had no owner; the publish files onto it and it
     // becomes the writer's, because they are who delivered.
     assert_sole_card_carries(&host, &board, "writer", "Quarterly close memo").await;
+}
+
+/// Two different agents publish in one turn, and each artifact records **its
+/// own** author.
+///
+/// The desk lead's turn and the relay turn both run with the full toolbelt
+/// under the same `Conversation` claim, so one drain can hold publishes from
+/// more than one agent. `PendingPublish.agent` carries the truth per item; a
+/// single publisher picked for the whole batch stamps the writer's name on the
+/// orchestrator's file and the reverse.
+///
+/// The **card** still takes one owner — a card has one — so only the artifact
+/// authors are per item.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_agents_publishing_in_one_turn_each_keep_their_own_authorship() {
+    let (model, _script) = spawn_model(vec![
+        rule(
+            |c| c.is("Chief Executive") && c.fresh(),
+            call(
+                "delegate_to_desk",
+                json!({ "desk": "content", "instruction": "Draft the Q3 board memo and publish it." }),
+            ),
+        ),
+        rule(
+            |c| c.is("Writer") && c.fresh(),
+            call(
+                "publish_artifact",
+                json!({ "path": "memo.md", "title": "Q3 board memo" }),
+            ),
+        ),
+        rule(|c| c.is("Writer"), say("Drafted and published it.")),
+        // The relay turn publishes too — the orchestrator's own covering note.
+        rule(
+            |c| c.is("Chief Executive"),
+            call(
+                "publish_artifact",
+                json!({ "path": "notes.md", "title": "Covering note" }),
+            ),
+        ),
+        rule(|c| c.is("Chief Executive"), say("Memo and covering note attached.")),
+    ])
+    .await;
+    let host = spawn_host(model).await;
+    host.seed_file("writer", "memo.md", "# Q3 board memo\n");
+    host.seed_file("ceo", "notes.md", "# Covering note\n");
+
+    let reply = host.chat("assemble the Q3 board pack", None).await;
+    let board = host.board(&reply).await;
+    let card = board.only();
+
+    // `authors_on` sorts by path, so `memo.md` precedes `notes.md`.
+    assert_eq!(
+        authors_on(&host, id_of(card)).await,
+        vec![
+            ("memo.md".to_string(), "writer".to_string()),
+            ("notes.md".to_string(), "ceo".to_string()),
+        ],
+        "each artifact must record the agent that published IT"
+    );
+    // The card keeps a single owner — the first publisher, who is also whose
+    // card it already was.
+    assert_eq!(card["assignee"].as_str(), Some("writer"));
 }
 
 /// A substantial ask with no publish still opens exactly one — the case #442
