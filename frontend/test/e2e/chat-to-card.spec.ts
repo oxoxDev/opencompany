@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import { LIVE_BRAIN, LIVE_BRAIN_REASON } from "./capabilities";
+
 /**
  * End-to-end proof for the chat↔card edge (issue #246).
  *
@@ -83,6 +85,11 @@ test("any message on a desk thread can be added to the board", async ({ page }) 
 test("a card the orchestrator opens is chipped in chat, and survives a reload", async ({
   page,
 }) => {
+  // Only THIS test needs the scripted backend — the one above it drives the
+  // console's own "Add to board" action and passes against a default host, so
+  // the skip is per-test rather than per-file.
+  test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);
+
   await openThread(page, /Your company/);
 
   // `SPAWNONE` is the scripted backend's cue to call `spawn_task` once.

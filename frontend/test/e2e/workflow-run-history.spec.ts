@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+import { LIVE_BRAIN, LIVE_BRAIN_REASON } from "./capabilities";
+
 /**
  * Issue #228: the Workflows view reads a workflow's finished runs back from the
  * host's journal, so a run's outcome survives the drawer being dismissed, the
@@ -116,6 +118,12 @@ test("the run-history panel opens and shows only the selected workflow's runs", 
 test("running a workflow adds it to the durable history and it survives a reload", async ({
   page,
 }) => {
+  // Per-test: the two above read history the host already holds and pass on a
+  // default build. This one has to actually RUN the workflow, and the runner
+  // lives behind `openhuman` — with the feature off the Run button journals
+  // nothing and the poll below can only time out.
+  test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);
+
   await page.goto("/#/workflows");
   await dismissTour(page);
 

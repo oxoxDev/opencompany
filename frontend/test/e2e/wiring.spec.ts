@@ -1,5 +1,11 @@
 import { expect, test } from "@playwright/test";
 
+import { LIVE_BRAIN, LIVE_BRAIN_REASON } from "./capabilities";
+
+// File-level: this spec exists only to prove the mocked-backend chain, so there
+// is nothing in it that a default-feature host can answer.
+test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);
+
 /**
  * End-to-end wiring proof for the operator console.
  *
@@ -16,6 +22,22 @@ import { expect, test } from "@playwright/test";
  * The admin address must match `companies/e2e_harness/company.toml`'s
  * `[users] admins`, which is what makes the login flow succeed.
  */
+
+// The first-run product tour opens a Radix dialog over the console, and while
+// it is up every element beneath it is `aria-hidden` — so `getByRole` finds
+// nothing, including the composer's Send button. `getByPlaceholder` still
+// matches (it is an attribute selector, and Playwright's visibility model is
+// CSS-based), which is why this spec appeared to reach the composer and then
+// timed out on the very next line. Nineteen of the other specs already do this;
+// this one predates the tour and was never updated.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    const real = Storage.prototype.getItem;
+    Storage.prototype.getItem = function getItem(key: string) {
+      return key.startsWith("oc-tour:") ? '{"skipped":true}' : real.call(this, key);
+    };
+  });
+});
 
 test("operator console renders a mocked backend reply end to end", async ({
   page,
