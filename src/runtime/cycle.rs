@@ -72,6 +72,30 @@ pub(crate) const RUN_UNSETTLED_ERROR: &str =
 /// row carries the same reason the caller saw rather than a generic one.
 pub(crate) const RUN_CYCLE_FAILED_ERROR: &str = "the dispatch cycle failed";
 
+/// Where the machine-appended part of a desk-addressed operator message begins
+/// (issue #176's handed-task awareness, written by
+/// [`inject_handed_task_awareness`](CycleRunner::inject_handed_task_awareness)).
+///
+/// **An operator message is not only what the operator typed.** For a message
+/// addressed to a desk or teammate, the cycle appends a briefing of that
+/// target's open cards before the brain ever sees it — so `text` arrives as
+/// `<what the operator wrote>` + this marker + `<a list of card titles>`.
+///
+/// This exists as a shared constant because issue #442 needs to read the
+/// operator's own words back out of that: it decides whether a message asks for
+/// something substantial enough to open a card, and scoring the appended card
+/// list instead made every desk message look substantial — including "thanks!".
+/// Self-amplifying, too: each card it opened lengthened the briefing on the next
+/// message, which opened another.
+///
+/// A `const` rather than a literal in each place so the writer and the reader
+/// cannot drift apart. Anything that reasons about an operator message's
+/// *content* must split on this first; see
+/// [`operator_words`](crate::runtime::delegation::operator_words), whose test
+/// builds its input from this constant so a wording change fails the test rather
+/// than silently un-splitting the message.
+pub(crate) const OPEN_WORK_ANNOTATION: &str = "\n\n[Open work already handed to you";
+
 /// What settling an approval's verdict produced — the outcome of the fast half
 /// of a resolve, before any model is called (issue #383).
 ///
@@ -460,6 +484,11 @@ impl<'a> CycleRunner<'a> {
     /// "what are you working on?" is answered truthfully. A no-op when nothing
     /// is addressed or no open work matches. Mutates only the in-memory events
     /// handed to the brain, never the durable event log.
+    ///
+    /// What it appends begins with [`OPEN_WORK_ANNOTATION`] — read that constant
+    /// before adding any code downstream that reasons about an operator message,
+    /// because after this runs the text is no longer only what the operator
+    /// typed.
     async fn inject_handed_task_awareness(
         &self,
         record: &CompanyRecord,
@@ -504,7 +533,7 @@ impl<'a> CycleRunner<'a> {
             }
             lines.sort();
             text.push_str(&format!(
-                "\n\n[Open work already handed to you (answer truthfully if asked what you are \
+                "{OPEN_WORK_ANNOTATION} (answer truthfully if asked what you are \
 working on):\n{}\n]",
                 lines.join("\n")
             ));
