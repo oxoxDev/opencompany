@@ -94,6 +94,26 @@ pub(crate) async fn read_optional(path: &Path) -> Result<String> {
 }
 
 /// Parses every non-empty JSONL line of `path` into `T`, skipping absent files.
+///
+/// **Strict**: one unparseable line fails the whole read. That is the right
+/// default for everything that still uses it, and it is a decision rather than
+/// an oversight (issue #387):
+///
+/// * **Read-modify-write callers must stay strict.** `evict` and `mark_read`
+///   read a file here and then [`write_atomic`] it back. A tolerant read would
+///   drop the damaged line from the in-memory vector, and the rewrite would then
+///   erase it from disk — turning recoverable damage into permanent deletion,
+///   silently. See [`read_jsonl_lenient`] for the same boundary stated from the
+///   other side.
+/// * **Request-time read-only callers stay strict too.** A failed inbox or
+///   context read surfaces as one failed request the operator can retry and
+///   report; it does not cost a company its boot. Making those tolerant is a
+///   separate judgement about each surface's error budget, and it is not made
+///   here.
+///
+/// Only the *boot* path — the ledger read in [`FsCompanyStore::load`] — is
+/// tolerant, because there the failure is not one request but the whole
+/// company, and the console that would repair the file is behind the boot.
 pub(crate) async fn read_jsonl<T>(path: &Path) -> Result<Vec<T>>
 where
     T: serde::de::DeserializeOwned,
@@ -107,6 +127,92 @@ where
         out.push(serde_json::from_str(line)?);
     }
     Ok(out)
+}
+
+/// A JSONL line [`read_jsonl_lenient`] could not parse: quarantined in place,
+/// never deleted.
+///
+/// Carries where the line is, how big it is, and what the parser rejected —
+/// and **never the line's contents**. A ledger memo is free text a person or an
+/// agent wrote; echoing it into a log to explain a parse failure would put
+/// arbitrary tenant prose into the container log. The 1-based line number and
+/// the byte length are enough for an operator to find the line by hand.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SkippedLine {
+    /// The line's 1-based number in the file.
+    pub(crate) line: usize,
+    /// The line's length in bytes, as it sits on disk.
+    pub(crate) bytes: usize,
+    /// What the parse rejected. `serde_json`'s message is positional
+    /// ("EOF while parsing a string at line 1 column 74") and quotes no input.
+    pub(crate) message: String,
+}
+
+/// Parses every non-empty JSONL line of `path` into `T`, **skipping** the lines
+/// that will not parse and reporting them rather than failing the read.
+///
+/// Returns the values that did parse, oldest first, plus one [`SkippedLine`]
+/// per line that did not. An absent file is an empty read, as in [`read_jsonl`].
+///
+/// Bytes are read and decoded per line, not through `read_to_string`. A torn
+/// write can split a multi-byte codepoint, and a whole-file UTF-8 decode fails
+/// on that one bad byte — losing the entire file to damage confined to a single
+/// line. Decoding lossily per line keeps the damage where it is. This mirrors
+/// [`RuntimeJournal::load`](crate::runtime::journal::RuntimeJournal::load),
+/// which reached the same conclusion for the journal (issue #386).
+///
+/// # Tolerance boundary — do not widen it
+///
+/// **A read-modify-write consumer must never call this.** Skipping is only safe
+/// because the bytes stay on disk: the caller drops the line from its in-memory
+/// view and a person can still repair the file. A caller that reads here and
+/// then rewrites the file atomically would write back exactly the lines that
+/// parsed, deleting the damaged one for good — converting a recoverable fault
+/// into silent, permanent data loss, which is strictly worse than the failed
+/// boot this function exists to prevent. Rewriters ([`FsMemoryStore::evict`],
+/// [`FsInboxStore::mark_read`]) stay on strict [`read_jsonl`], where a damaged
+/// line aborts the rewrite instead of laundering it.
+///
+/// The one caller today is the ledger read in [`FsCompanyStore::load`]. A ledger
+/// entry is descriptive accounting: dropping one from a boot-time view
+/// misreports spend until the file is repaired, which is recoverable and
+/// visible. It is not an at-most-once safety key — the journal's
+/// `EffectExecuted` records are, and they are handled separately and more
+/// carefully for exactly that reason.
+pub(crate) async fn read_jsonl_lenient<T>(path: &Path) -> Result<(Vec<T>, Vec<SkippedLine>)>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let contents = match tokio::fs::read(path).await {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), Vec::new())),
+        Err(e) => return Err(io_err(path, e)),
+    };
+
+    let mut out = Vec::new();
+    let mut skipped = Vec::new();
+    for (index, raw) in contents.split(|b| *b == b'\n').enumerate() {
+        // Lossy on purpose: an invalid byte becomes U+FFFD, the line then fails
+        // to parse as JSON, and it lands on the same skip-and-report path as any
+        // other unreadable line instead of aborting the whole read.
+        let line = String::from_utf8_lossy(raw);
+        let line = line.as_ref();
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str(line) {
+            Ok(value) => out.push(value),
+            Err(error) => skipped.push(SkippedLine {
+                line: index + 1,
+                // The on-disk length, not the lossily-decoded one: U+FFFD is
+                // three bytes and would inflate the count for exactly the lines
+                // an operator is trying to locate.
+                bytes: raw.len(),
+                message: error.to_string(),
+            }),
+        }
+    }
+    Ok((out, skipped))
 }
 
 /// Atomically writes `contents` to `path` via a temp file + rename.
@@ -228,7 +334,34 @@ impl CompanyStore for FsCompanyStore {
             serde_json::from_str(&meta_src)?
         };
 
-        let ledger = read_jsonl::<LedgerEntry>(&bundle.ledger_jsonl()).await?;
+        // The ledger is read leniently, and this is the only place in the fs
+        // backend that is (issue #387). Every other read here is either a
+        // rewriter — where skipping would delete the damaged line on write-back
+        // — or a request-time reader, where a failure costs one request. This
+        // one is neither: it is on the boot path, so a single malformed
+        // accounting line used to take the whole company down, and the repair
+        // console an operator would use sits behind the boot it killed.
+        //
+        // The skipped lines stay on disk untouched. Nothing in `load` writes,
+        // and `append_ledger` only appends, so the file after a tolerated boot
+        // is byte-identical to the file before it.
+        let ledger_path = bundle.ledger_jsonl();
+        let (ledger, skipped) = read_jsonl_lenient::<LedgerEntry>(&ledger_path).await?;
+        if let Some(first) = skipped.first() {
+            // `error!`, not `warn!`: the company is running on an incomplete
+            // ledger, so its reported spend is wrong until someone repairs the
+            // file. Loud once per load, naming the file and the first bad line —
+            // never the line's contents, which are operator/agent free text.
+            tracing::error!(
+                company = %id,
+                ledger = %ledger_path.display(),
+                skipped = skipped.len(),
+                first_line = first.line,
+                first_bytes = first.bytes,
+                error = %first.message,
+                "[store] ledger lines could not be parsed; they were skipped so the company can still boot, and left on disk for repair — reported spend is incomplete until they are fixed"
+            );
+        }
 
         Ok(Some(CompanyRecord {
             id: id.clone(),
@@ -1025,6 +1158,131 @@ mod test {
         let loaded = store.load(&id).await.unwrap().unwrap();
         assert_eq!(loaded.ledger.len(), 3);
         assert_eq!(loaded.ledger[2].memo, "entry 2");
+    }
+
+    /// A company with a damaged ledger still boots, and the damage is
+    /// quarantined rather than deleted (issue #387).
+    ///
+    /// Before this, `read_jsonl` parsed inside its loop, so the first bad line
+    /// returned `Err` from `FsCompanyStore::load`, the builder propagated it,
+    /// and one torn accounting line made the company unbootable — with the
+    /// console that would repair it sitting behind the boot it killed.
+    ///
+    /// Four lines, two of them damaged in the two ways a torn write actually
+    /// produces: JSON that stops mid-value, and a byte sequence that is not
+    /// UTF-8 at all. The second is the reason this reads bytes rather than a
+    /// `String`: a whole-file decode would fail on that one byte and lose all
+    /// four lines to damage confined to one.
+    #[tokio::test]
+    async fn a_damaged_ledger_line_is_skipped_and_left_on_disk() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let store = FsCompanyStore::new(&root);
+        let id = CompanyId::new("acme");
+        store
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: sample_manifest(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                template_provenance: None,
+            })
+            .await
+            .unwrap();
+
+        // The memo text the report must never echo. Distinctive enough that a
+        // substring search cannot pass by accident.
+        const MEMO_TWO: &str = "acquire-northwind-holdings";
+        const MEMO_THREE: &str = "settle-quarterly-invoice";
+
+        let mut bytes: Vec<u8> = Vec::new();
+        // 1. Intact.
+        bytes.extend_from_slice(
+            br#"{"at_millis":1,"kind":"inference.spend","amount_usd":1.0,"memo":"first entry"}"#,
+        );
+        bytes.push(b'\n');
+        // 2. A torn write: the JSON stops in the middle of the memo string.
+        bytes.extend_from_slice(
+            format!(
+                r#"{{"at_millis":2,"kind":"inference.spend","amount_usd":2.0,"memo":"{MEMO_TWO}"#
+            )
+            .as_bytes(),
+        );
+        bytes.push(b'\n');
+        // 3. Invalid UTF-8 in a structural position, so the lossy U+FFFD lands
+        //    where a key is expected and the line cannot parse. (Damage *inside*
+        //    a string would decode to a valid — if mangled — record, which is
+        //    the recoverable case and deliberately not skipped.)
+        bytes.extend_from_slice(br#"{"at_millis":3,"#);
+        bytes.push(0xFF);
+        bytes.extend_from_slice(
+            format!(r#""kind":"inference.spend","amount_usd":3.0,"memo":"{MEMO_THREE}"}}"#)
+                .as_bytes(),
+        );
+        bytes.push(b'\n');
+        // 4. Intact.
+        bytes.extend_from_slice(
+            br#"{"at_millis":4,"kind":"inference.spend","amount_usd":4.0,"memo":"fourth entry"}"#,
+        );
+        bytes.push(b'\n');
+
+        let path = Bundle::new(root.clone(), &id).ledger_jsonl();
+        tokio::fs::write(&path, &bytes).await.unwrap();
+
+        // The company boots, carrying the entries that survived.
+        let loaded = store
+            .load(&id)
+            .await
+            .expect("a damaged ledger line must not fail the load")
+            .expect("the company exists");
+        assert_eq!(
+            loaded.ledger.len(),
+            2,
+            "the two intact entries load; the two damaged ones are skipped"
+        );
+        assert_eq!(loaded.ledger[0].memo, "first entry");
+        assert_eq!(loaded.ledger[1].memo, "fourth entry");
+
+        // The report locates the damage without quoting it.
+        let (entries, skipped) = read_jsonl_lenient::<LedgerEntry>(&path).await.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            skipped.iter().map(|s| s.line).collect::<Vec<_>>(),
+            vec![2, 3],
+            "the report names the 1-based line numbers of the damaged lines"
+        );
+        for entry in &skipped {
+            assert!(
+                entry.bytes > 0,
+                "the report carries the on-disk line length"
+            );
+            assert!(
+                !entry.message.is_empty(),
+                "the report says what was rejected"
+            );
+            for memo in [MEMO_TWO, MEMO_THREE] {
+                assert!(
+                    !entry.message.contains(memo),
+                    "a memo is free text and must never reach the report: {:?}",
+                    entry.message
+                );
+            }
+        }
+
+        // Quarantine, not repair: the file is untouched, so an operator can
+        // still recover the damaged lines by hand.
+        let after = tokio::fs::read(&path).await.unwrap();
+        assert_eq!(
+            after, bytes,
+            "loading must not rewrite the ledger — skipping a line the reader \
+             could not parse must never become deleting it"
+        );
     }
 
     #[tokio::test]
