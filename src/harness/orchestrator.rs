@@ -70,9 +70,15 @@ use crate::ports::{CompanyStore, WorkflowRun, WorkflowRunner, generate_id};
 /// The manifest cognition-tier that marks the orchestrator agent.
 pub const ORCHESTRATOR_TIER: &str = "orchestrator";
 
-/// Max delegations drained from a single orchestrator turn (v1 cap). Anything an
-/// over-eager turn queues beyond this is discarded — delegation is bounded so a
-/// runaway turn can't fan out unboundedly.
+/// Max delegations one orchestrator turn may make (v1 cap) — delegation is
+/// bounded so a runaway turn can't fan out unboundedly.
+///
+/// Enforced **at the tool boundary** since issue #419
+/// ([`DelegationQueue::push_within_cap`]): a call past the cap is refused in the
+/// model's own turn, naming the bound. It used to be enforced only in the drain,
+/// which took `min(cap)` and destroyed the rest — after the tool had already
+/// told the model the card would be opened this turn. Ask for five cards, get
+/// told five were opened, find two.
 pub const MAX_DELEGATIONS_PER_TURN: usize = 3;
 
 /// How many recent events [`QueryCompanyTool`] surfaces.
@@ -128,10 +134,36 @@ pub fn is_delegation_tool(tool: &str) -> bool {
 }
 
 /// The orchestrator persona brief, appended to the orchestrator agent's persona.
+///
+/// # The two decisions are named separately (issue #442)
+///
+/// This brief used to say "delegate when a request belongs to a specialist desk
+/// **or** should be tracked as work" — one verb covering two independent
+/// questions. A request that was *both* (a specialist should do it **and** it
+/// should be on the board) had no stated answer, and of the two tools the model
+/// could reach for, the one described as actually doing the work
+/// (`delegate_to_desk`) was the one that touched no board. So the work got done,
+/// well, and nothing tracked it.
+///
+/// The brief now separates them, and — because a brief is guidance and guidance
+/// is not a guarantee — the runtime no longer depends on the model getting the
+/// second one right: a substantial hand-off opens its card in
+/// [`DelegationRunner::run_delegation`](crate::runtime::delegation::DelegationRunner::run_delegation)
+/// whichever tool was chosen. What the brief has to do now is stop the model
+/// *double-tracking* (a `spawn_task` beside every hand-off), which is why it
+/// tells it what `spawn_task` is still for.
 pub fn orchestrator_brief() -> String {
     " You are also this company's orchestrator: the single point of contact for the operator. \
-Answer from whole-company context, and when a request belongs to a specialist desk or should be \
-tracked as work, delegate instead of guessing. Use `query_company` to ground answers in the \
+Answer from whole-company context. Two decisions come up constantly and they are INDEPENDENT — do \
+not collapse them into one. (1) WHO SHOULD DO THIS: when a request belongs to a specialist desk, \
+hand it to that desk with `delegate_to_desk` rather than answering from your own guess; when it is \
+yours to answer, answer it. (2) SHOULD THIS BE TRACKED: you do not have to decide this, and you \
+must not pick a tool in order to influence it. Anything substantial handed to a desk is opened as a \
+board card automatically, and so is anything substantial an operator asks a desk or teammate \
+directly — the hand-off IS the card, so never call `spawn_task` alongside a `delegate_to_desk` for \
+the same work, and never prefer one over the other to get something tracked. Reach for `spawn_task` \
+only for work that belongs on the board but must NOT start in this turn: something for later, for \
+somebody else, or waiting on a person. Use `query_company` to ground answers in the \
 company's durable facts, recent activity, saved workflows, team roster, and desks — it is the \
 source of truth for what workflows exist, who is on the team, and which desks can take work, so \
 consult it before answering \"what workflows/teammates do we have?\" or before delegating, rather \
@@ -139,7 +171,7 @@ than guessing or naming a skill \
 — `delegate_to_desk` to hand a turn to a desk's lead \
 member, naming the desk by an id `query_company` lists under Desks (a desk is not a person: \
 handing work to a teammate's name is not a delegation), \
-`spawn_task` to open a tracked task card, `run_workflow` to execute one of the \
+`spawn_task` to open a card for work that should wait rather than start now, `run_workflow` to execute one of the \
 company's saved workflows by id (for example to advance or finish a task that is waiting on a \
 workflow run) — you can run workflows yourself; never claim the run_workflow tool is unavailable — \
 `create_workflow` to author and save a brand-new workflow graph (a trigger plus agent / tool / \
@@ -223,12 +255,48 @@ pub struct DelegationQueue {
 }
 
 impl DelegationQueue {
-    /// Enqueues a delegation.
+    /// Enqueues a delegation **without regard for the per-turn cap**.
+    ///
+    /// Production callers want [`push_within_cap`](Self::push_within_cap)
+    /// instead: this one can queue work the drain will later throw away, which
+    /// is exactly the failure issue #419 is about. Kept for the tests that
+    /// deliberately over-fill the queue to prove the cap holds.
     pub fn push(&self, delegation: Delegation) {
         self.inner
             .lock()
             .expect("delegation queue")
             .push(delegation);
+    }
+
+    /// Enqueues a delegation unless `cap` are already queued for this turn.
+    /// Returns whether it was queued (issue #419).
+    ///
+    /// # Why the cap is enforced *here*
+    ///
+    /// [`drain`](Self::drain) takes `min(cap)` and clears the rest, so anything
+    /// past the cap was destroyed — while the tool that queued it had already
+    /// told the model "it will be opened on the board this turn". Ask for five
+    /// cards and the turn reports five; two exist. The bound was real and
+    /// nothing announced it.
+    ///
+    /// Refusing at the boundary is the fix that keeps the model's own account
+    /// of the turn honest: the tool call fails, in the model's turn, with the
+    /// cap named — so it can tell the operator which items it did not get to
+    /// instead of confidently reporting work that never happened.
+    ///
+    /// Refusal rather than carry-over is deliberate. Carrying overflow into the
+    /// next turn would mean the queue outliving the turn that filled it, and the
+    /// queue is [`clear`](Self::clear)ed before every turn precisely so a stale
+    /// delegation cannot leak into one — including into a CEO-relay turn, which
+    /// is forbidden to delegate at all.
+    #[must_use = "a refused delegation must be reported to the model, not dropped"]
+    pub fn push_within_cap(&self, delegation: Delegation, cap: usize) -> bool {
+        let mut guard = self.inner.lock().expect("delegation queue");
+        if guard.len() >= cap {
+            return false;
+        }
+        guard.push(delegation);
+        true
     }
 
     /// Records that a hand-off named `desk`, which the company cannot hand work
@@ -239,10 +307,22 @@ impl DelegationQueue {
 
     /// Drains up to `cap` refused desk keys (FIFO) and discards the rest, so a
     /// turn that calls the tool repeatedly cannot grow an unbounded note.
+    ///
+    /// A discard is logged rather than silent (issue #419) — the note it would
+    /// have grown is the operator's only record that a hand-off was attempted.
     pub fn drain_refusals(&self, cap: usize) -> Vec<String> {
         let mut guard = self.refused.lock().expect("delegation queue");
         let take = guard.len().min(cap);
+        let dropped = guard.len() - take;
         let drained: Vec<String> = guard.drain(..take).collect();
+        if dropped > 0 {
+            tracing::warn!(
+                dropped,
+                cap,
+                "[delegation] discarded refused hand-offs past the per-turn cap; they will not be \
+                 recorded on the card"
+            );
+        }
         guard.clear();
         drained
     }
@@ -256,10 +336,26 @@ impl DelegationQueue {
 
     /// Drains up to `cap` queued delegations (FIFO) and discards the rest, so a
     /// single turn can never fan out past the cap.
+    ///
+    /// Since issue #419 the discard should be unreachable from the tool path —
+    /// [`push_within_cap`](Self::push_within_cap) refuses at the boundary, so
+    /// the queue never grows past `cap`. It is still counted and **logged**
+    /// rather than dropped in silence, because a queue that arrives here over
+    /// the cap means some caller bypassed that boundary and is quietly losing
+    /// work the model already claimed it had done.
     pub fn drain(&self, cap: usize) -> Vec<Delegation> {
         let mut guard = self.inner.lock().expect("delegation queue");
         let take = guard.len().min(cap);
+        let dropped = guard.len() - take;
         let drained: Vec<Delegation> = guard.drain(..take).collect();
+        if dropped > 0 {
+            tracing::warn!(
+                dropped,
+                cap,
+                "[delegation] discarding queued delegations past the per-turn cap — the tool \
+                 boundary should have refused these before they were queued"
+            );
+        }
         guard.clear();
         drained
     }
@@ -704,7 +800,7 @@ impl Tool for SpawnTaskTool {
     }
 
     fn description(&self) -> &str {
-        "Open a tracked task card on the company's board for work that should be followed up. Provide a `title`, an optional `note` brief, and an optional `assignee` (a desk or teammate id)."
+        "Open a task card on the company's board for work that should NOT start in this turn — something for later, for somebody else, or waiting on a person. Provide a `title`, an optional `note` brief, and an optional `assignee` (a desk or teammate id). Do NOT use this to get a hand-off tracked: work you hand to a desk with `delegate_to_desk` already opens its own card, and calling both for the same work opens two."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -736,11 +832,18 @@ impl Tool for SpawnTaskTool {
             .filter(|a| !a.is_empty())
             .map(str::to_string);
 
-        self.queue.push(Delegation::SpawnTask {
-            title: title.clone(),
-            note,
-            assignee,
-        });
+        if !self.queue.push_within_cap(
+            Delegation::SpawnTask {
+                title: title.clone(),
+                note,
+                assignee,
+            },
+            MAX_DELEGATIONS_PER_TURN,
+        ) {
+            return Ok(ToolResult::error(over_cap(&format!(
+                "the card \"{title}\" was NOT opened"
+            ))));
+        }
         Ok(ToolResult::success(format!(
             "Queued a task card: \"{title}\". It will be opened on the board this turn."
         )))
@@ -812,7 +915,7 @@ impl Tool for DelegateToDeskTool {
     }
 
     fn description(&self) -> &str {
-        "Hand a turn to a desk's lead member so a specialist answers. Provide the `desk` (its id or name) and the `instruction` to carry out."
+        "Hand a turn to a desk's lead member so a specialist answers. Provide the `desk` (its id or name) and the `instruction` to carry out. A substantial hand-off is opened as a tracked board card automatically, assigned to that lead — you do not need to call `spawn_task` as well."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -854,10 +957,17 @@ impl Tool for DelegateToDeskTool {
             return Ok(ToolResult::error(refusal));
         }
 
-        self.queue.push(Delegation::DelegateToDesk {
-            desk: desk.clone(),
-            instruction,
-        });
+        if !self.queue.push_within_cap(
+            Delegation::DelegateToDesk {
+                desk: desk.clone(),
+                instruction,
+            },
+            MAX_DELEGATIONS_PER_TURN,
+        ) {
+            return Ok(ToolResult::error(over_cap(&format!(
+                "nothing was handed to the {desk} desk"
+            ))));
+        }
         Ok(ToolResult::success(format!(
             "Delegated to the {desk} desk. Its lead will answer this turn."
         )))
@@ -925,11 +1035,18 @@ impl Tool for AssignTaskTool {
         let assignee = required_str(&args, "assignee")?;
         let note = optional_str(&args, "note");
 
-        self.queue.push(Delegation::AssignTask {
-            task_id: task_id.clone(),
-            assignee: assignee.clone(),
-            note,
-        });
+        if !self.queue.push_within_cap(
+            Delegation::AssignTask {
+                task_id: task_id.clone(),
+                assignee: assignee.clone(),
+                note,
+            },
+            MAX_DELEGATIONS_PER_TURN,
+        ) {
+            return Ok(ToolResult::error(over_cap(&format!(
+                "card {task_id} was NOT assigned"
+            ))));
+        }
         Ok(ToolResult::success(format!(
             "Assigned card {task_id} to {assignee}."
         )))
@@ -999,11 +1116,18 @@ impl Tool for ReviewTaskTool {
         })?;
         let note = optional_str(&args, "note");
 
-        self.queue.push(Delegation::ReviewTask {
-            task_id: task_id.clone(),
-            decision,
-            note,
-        });
+        if !self.queue.push_within_cap(
+            Delegation::ReviewTask {
+                task_id: task_id.clone(),
+                decision,
+                note,
+            },
+            MAX_DELEGATIONS_PER_TURN,
+        ) {
+            return Ok(ToolResult::error(over_cap(&format!(
+                "card {task_id} was NOT reviewed"
+            ))));
+        }
         Ok(match decision {
             ReviewDecision::Approve => ToolResult::success(format!(
                 "Approved card {task_id}; it is complete and has moved to done."
@@ -1013,6 +1137,22 @@ impl Tool for ReviewTaskTool {
             )),
         })
     }
+}
+
+/// The refusal a delegation tool returns once this turn has already queued
+/// [`MAX_DELEGATIONS_PER_TURN`] of them (issue #419).
+///
+/// `effect` names, in the tool's own terms, the thing that did **not** happen —
+/// because the failure mode being fixed is a model that reports work it never
+/// did. The refusal has to be unmistakably a refusal, name the bound, and say
+/// what to do next, or the model will paper over it in its summary exactly as
+/// it papered over the silent discard.
+fn over_cap(effect: &str) -> String {
+    format!(
+        "Refused: this turn has already used all {MAX_DELEGATIONS_PER_TURN} of its delegations, so \
+{effect}. Nothing was queued and nothing will happen. Do not report this as done — tell the \
+operator which items you got to and which you did not, and raise the rest in your next turn."
+    )
 }
 
 /// Reads a required non-empty string argument, trimmed.
@@ -2079,6 +2219,135 @@ mod tests {
         });
         queue.clear();
         assert_eq!(queue.queued(), 0);
+    }
+
+    // ── Issue #419: the cap is announced, not silently applied ─────────────
+
+    /// The queue itself refuses past the cap rather than accepting work the
+    /// drain will destroy.
+    #[test]
+    fn push_within_cap_refuses_once_the_turn_is_full() {
+        let queue = DelegationQueue::default();
+        for i in 0..MAX_DELEGATIONS_PER_TURN {
+            assert!(queue.push_within_cap(
+                Delegation::SpawnTask {
+                    title: format!("t{i}"),
+                    note: None,
+                    assignee: None,
+                },
+                MAX_DELEGATIONS_PER_TURN,
+            ));
+        }
+        assert!(!queue.push_within_cap(
+            Delegation::SpawnTask {
+                title: "one too many".to_string(),
+                note: None,
+                assignee: None,
+            },
+            MAX_DELEGATIONS_PER_TURN,
+        ));
+        assert_eq!(queue.queued(), MAX_DELEGATIONS_PER_TURN);
+    }
+
+    /// The defect #419 names: the tool told the model "it will be opened on the
+    /// board this turn" for a card the drain then threw away, so a turn asked
+    /// for five cards, reported five, and left two. The call past the cap is now
+    /// an **error** naming the bound, and nothing is queued.
+    #[tokio::test]
+    async fn spawn_task_refuses_past_the_cap_instead_of_promising_a_discarded_card() {
+        let queue = DelegationQueue::default();
+        let tool = SpawnTaskTool::new(queue.clone());
+        for i in 0..MAX_DELEGATIONS_PER_TURN {
+            let ok = tool
+                .execute(json!({ "title": format!("item {i}") }))
+                .await
+                .expect("execute");
+            assert!(!ok.is_error, "within the cap: {}", ok.text());
+        }
+        let refused = tool
+            .execute(json!({ "title": "the fourth item" }))
+            .await
+            .expect("execute");
+        assert!(refused.is_error, "{}", refused.text());
+        let text = refused.text();
+        assert!(text.contains("the fourth item"), "{text}");
+        assert!(text.contains("NOT opened"), "{text}");
+        assert!(
+            text.contains(&MAX_DELEGATIONS_PER_TURN.to_string()),
+            "the refusal names the bound: {text}"
+        );
+        // The queue is exactly full — the refusal queued nothing, so the drain
+        // has nothing left over to destroy.
+        assert_eq!(queue.queued(), MAX_DELEGATIONS_PER_TURN);
+        assert_eq!(queue.drain(MAX_DELEGATIONS_PER_TURN).len(), 3);
+    }
+
+    /// Same for the hand-off tool, whose success line ("Its lead will answer
+    /// this turn") was the more misleading of the two: it claimed a teammate had
+    /// been given work nobody would ever run.
+    #[tokio::test]
+    async fn delegate_to_desk_refuses_past_the_cap() {
+        let queue = DelegationQueue::default();
+        // An empty store loads no record, so desk grounding fails open and the
+        // hand-off is queued exactly as it was before #272 — which isolates this
+        // test to the cap.
+        let store = Arc::new(MemStore::default()) as Arc<dyn CompanyStore>;
+        let tool = DelegateToDeskTool::new(queue.clone(), CompanyId::new("acme"), store);
+        for i in 0..MAX_DELEGATIONS_PER_TURN {
+            let ok = tool
+                .execute(json!({ "desk": "eng", "instruction": format!("item {i}") }))
+                .await
+                .expect("execute");
+            assert!(!ok.is_error, "within the cap: {}", ok.text());
+        }
+        let refused = tool
+            .execute(json!({ "desk": "eng", "instruction": "one more" }))
+            .await
+            .expect("execute");
+        assert!(refused.is_error, "{}", refused.text());
+        assert!(
+            refused.text().contains("nothing was handed"),
+            "{}",
+            refused.text()
+        );
+        assert_eq!(queue.queued(), MAX_DELEGATIONS_PER_TURN);
+    }
+
+    /// The two board-lifecycle tools share the queue and therefore the cap, so
+    /// they share the refusal — an `assign_task` that silently did not assign is
+    /// the same defect wearing a different hat.
+    #[tokio::test]
+    async fn the_lifecycle_tools_refuse_past_the_cap_too() {
+        let queue = DelegationQueue::default();
+        let assign = AssignTaskTool::new(queue.clone());
+        let review = ReviewTaskTool::new(queue.clone());
+        for i in 0..MAX_DELEGATIONS_PER_TURN {
+            assign
+                .execute(json!({ "task_id": format!("t{i}"), "assignee": "eng" }))
+                .await
+                .expect("execute");
+        }
+        let refused_assign = assign
+            .execute(json!({ "task_id": "t9", "assignee": "eng" }))
+            .await
+            .expect("execute");
+        assert!(refused_assign.is_error, "{}", refused_assign.text());
+        assert!(
+            refused_assign.text().contains("NOT assigned"),
+            "{}",
+            refused_assign.text()
+        );
+        let refused_review = review
+            .execute(json!({ "task_id": "t9", "decision": "approve" }))
+            .await
+            .expect("execute");
+        assert!(refused_review.is_error, "{}", refused_review.text());
+        assert!(
+            refused_review.text().contains("NOT reviewed"),
+            "{}",
+            refused_review.text()
+        );
+        assert_eq!(queue.queued(), MAX_DELEGATIONS_PER_TURN);
     }
 
     #[tokio::test]
