@@ -63,10 +63,18 @@
 //!   express "no expiry" cannot regress into it.
 //!
 //! What it never covers is decided elsewhere, once:
-//! [`EffectGroup::is_broadly_grantable`](crate::ports::types::EffectGroup::is_broadly_grantable)
-//! applied to the group already recorded on the parked effect, so only
-//! `EffectGroup::Other` tools can be granted this way — never Spend, Send,
-//! Sign, Publish, Hire or Identity.
+//! [`Effect::may_be_granted_standing`](crate::ports::types::Effect::may_be_granted_standing)
+//! applied to the parked effect, which asks what the tool can **reach** rather
+//! than what its name is called (issue #444). Running an arbitrary command,
+//! reaching an arbitrary address and overwriting operator-owned guidance are
+//! all refused, as is every Spend / Send / Sign / Publish / Hire / Identity
+//! consequence and every tool nobody has classified.
+//!
+//! Because it has no `args` field this type admits any arguments, which is a
+//! fair summary of a tool's consequence only while consequence is a property of
+//! the tool name. It is not one for `composio_execute`, so the policy
+//! re-classifies the live call before honouring a grant — see
+//! [`ApprovalPolicy::standing_grant_allows`](crate::harness::policy::ApprovalPolicy).
 //!
 //! ## Durability
 //!

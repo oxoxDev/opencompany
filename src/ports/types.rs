@@ -897,24 +897,20 @@ pub enum EffectGroup {
     Other,
 }
 
+/// The residual bucket. Named here rather than inferred, because for a while it
+/// silently meant two things at once — see
+/// [`Effect::may_be_granted_standing`].
 impl EffectGroup {
-    /// May a tool in this group be granted **broadly** — one standing
-    /// permission covering any arguments until a deadline (issue #374)?
+    /// Is this the catch-all bucket, i.e. did the classifier find no particular
+    /// consequence to name on the operator's card?
     ///
-    /// Only [`Other`](Self::Other). Every named group is a consequence the
-    /// operator has to see per call: Spend moves money, Send reaches a
-    /// counterparty, Sign and Publish are externally visible and not reversible
-    /// by the company alone, Hire commits it to someone, Identity changes who it
-    /// is. None of those are things to hand over for a week at a time.
-    ///
-    /// **This is the rule; it lives here so there is one of it.** The tool-name
-    /// → group mapping is `classify_group` in `crate::harness::policy`, which
-    /// compiles only under the `openhuman` feature, while the three places that
-    /// enforce this — the mint path, the approval summary the card reads, and
-    /// the resolve route's 400 — are all in the default build. Expressing the
-    /// rule twice across that seam is exactly the drift the issue forbids, so
-    /// both sides call this.
-    pub fn is_broadly_grantable(&self) -> bool {
+    /// This answers the *labelling* question and nothing else. It used to double
+    /// as the standing-grant rule, which is what let `shell` and
+    /// `workspace_write` be handed over for a week: neither name contains a
+    /// consequence word, so both landed here, so both were grantable. That rule
+    /// now lives on [`Effect::may_be_granted_standing`], where it is decided by
+    /// what the tool can reach.
+    pub fn is_unclassified(&self) -> bool {
         matches!(self, Self::Other)
     }
 }
@@ -1005,6 +1001,44 @@ impl Effect {
     /// Whether the counterparty is new.
     pub fn is_first_time_counterparty(&self) -> bool {
         self.first_time_counterparty
+    }
+
+    /// May an operator turn this parked call into a **standing** permission —
+    /// one grant covering repeat calls until a deadline (issues #374, #444)?
+    ///
+    /// **This is the rule; it lives here so there is one of it.** Three places
+    /// enforce it — the mint path, the approval summary the card reads, and the
+    /// resolve route's 400 — and all three are in the default build, while the
+    /// tool policy that produced the effect compiles only under the `openhuman`
+    /// feature. So the rule cannot live in the policy, and expressing it twice
+    /// across that seam is the drift issue #444 is about.
+    ///
+    /// ## Why it is no longer `group == Other`
+    ///
+    /// `Other` is the bucket a tool falls into when the classifier finds no
+    /// consequence word in its name. Reading that as "safe to hand over for a
+    /// week" put the three broadest capabilities in the system on the grantable
+    /// side — running an arbitrary command, reaching an arbitrary address, and
+    /// overwriting the guidance the operator wrote — while a repository read
+    /// scoped to one connected account stayed off it. Nothing was malfunctioning;
+    /// the rule was measuring a name's vocabulary rather than what the tool can
+    /// do.
+    ///
+    /// It now asks [`consequence_of`](crate::policy::consequence_of), the same
+    /// declaration the parking side reads, using the two things an effect
+    /// already carries: [`kind`](Self::kind) is the tool name and
+    /// [`payload`](Self::payload) is the arguments it was called with. No new
+    /// field, so no journal line changes shape and no replayed effect answers
+    /// this differently from a live one.
+    ///
+    /// Arguments matter here, not just the tool: `composio_execute` carries
+    /// every Composio action under one name, so the same tool is grantable when
+    /// it is listing a repository's pull requests and per-call when it is
+    /// sending mail.
+    pub fn may_be_granted_standing(&self) -> bool {
+        crate::policy::consequence_of(&self.kind, &self.payload)
+            .standing
+            .is_grantable()
     }
 }
 

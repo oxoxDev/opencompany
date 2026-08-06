@@ -199,15 +199,19 @@ fn note(id: &str, name: &str, parent: &str) -> WorkspaceNode {
 
 /// A one-agent company, with `grants` controlling the workspace surface.
 fn manifest(grants: &str) -> CompanyManifest {
+    // `full` so an ordinary turn is not parked; the write tool's own
+    // compare-and-swap token is what guards the write in this mode.
+    manifest_in_mode(grants, "full")
+}
+
+fn manifest_in_mode(grants: &str, mode: &str) -> CompanyManifest {
     toml::from_str(&format!(
         r#"
 [company]
 name = "Acme"
 
 [policy]
-# `full` so an ordinary turn is not parked; the write tool's own
-# compare-and-swap token is what guards the write in this mode.
-mode = "full"
+mode = "{mode}"
 
 [tools]
 allow = [{grants}]
@@ -597,5 +601,182 @@ async fn an_edit_between_turns_changes_what_the_next_turn_reads() {
     assert!(
         after,
         "the second turn did not pick up the operator's edit — the tools are caching: {results:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The approval boundary, driven by a model (issues #443, #444)
+// ---------------------------------------------------------------------------
+
+/// Re-`ensure` the pool against the same deps under a different policy mode.
+///
+/// The fixture above is `full` on purpose — it exists to prove the workspace
+/// tools work, and parking every call would get in the way. The gate is only
+/// observable under `supervised`, which is also the **default** mode a company
+/// gets, so it is the mode these last tests care about.
+async fn supervised(deps: &HarnessDeps, grants: &str) -> (HarnessPool, CompanyRecord) {
+    let mut record = CompanyRecord {
+        id: CompanyId::new("acme"),
+        manifest: manifest_in_mode(grants, "supervised"),
+        ledger: Vec::new(),
+        lifecycle: "running".to_string(),
+        overlay_agents: Vec::new(),
+        overlay_desk_members: Vec::new(),
+        overlay_desk_order: Vec::new(),
+        overlay_desks: Vec::new(),
+        overlay_workflows: Vec::new(),
+        overlay_budgets: Vec::new(),
+        template_provenance: None,
+    };
+    record.manifest.tools.allow = manifest(grants).tools.allow;
+    let pool = HarnessPool::new();
+    pool.ensure(&record, deps).await.expect("pool ensures");
+    (pool, record)
+}
+
+/// End-to-end, through a model: a read of the company workspace runs without
+/// asking, and a write of it parks — **and the parked card does not offer a
+/// standing scope**.
+///
+/// The last clause is issue #444's headline, and nothing shorter than this can
+/// show it. The two halves of the gate live in different modules and disagreed
+/// about this one tool: `is_external_effect` refused to exempt `workspace_write`
+/// because it overwrites guidance the operator wrote, while the standing-grant
+/// rule read its `Other` group — a group it lands in only because the name
+/// carries no consequence word — and offered it for a week. This drives one real
+/// turn and asks both halves about the same call.
+#[tokio::test]
+async fn a_supervised_turn_reads_the_workspace_freely_and_parks_a_write_with_no_scope_offered() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, script) = spawn_script(vec![
+        Turn::Call {
+            tool: "workspace_read",
+            args: json!({ "path": "Standards/Engineering standards.md" }),
+        },
+        Turn::WriteWithObservedRev {
+            path: "Standards/Engineering standards.md",
+            content: "# Engineering\nRewritten.",
+            delta: 0,
+        },
+        Turn::Say("done"),
+    ])
+    .await;
+    let (_pool, deps, _record, _store) = harness(base, "\"workspace\"", dir.path()).await;
+    let (pool, record) = supervised(&deps, "\"workspace\"").await;
+
+    let queued_before = deps.approval_requests.queued();
+    pool.run(&record.id, "ceo", "tidy the standards", &deps, None)
+        .await
+        .expect("the turn runs");
+    let parked = deps.approval_requests.take_from(queued_before);
+
+    assert_eq!(
+        parked.len(),
+        1,
+        "the read must not park and the write must: {:?}",
+        parked.iter().map(|r| r.tool.clone()).collect::<Vec<_>>()
+    );
+    assert_eq!(parked[0].tool, "workspace_write");
+    // Not vacuous: the read that did not park was really made, and really
+    // returned — so "one parked request" is one write, not one read the belt
+    // silently withheld.
+    assert!(
+        tool_results(&script).len() >= 2,
+        "both the read and the (blocked) write must have fed a result back"
+    );
+    assert!(
+        !parked[0].effect.may_be_granted_standing(),
+        "a card for overwriting operator-owned guidance must not offer a standing scope"
+    );
+}
+
+/// The other side of the same boundary, so the feature is not proved dead:
+/// a write confined to the agent's **own** workspace parks the same way and
+/// *does* offer the scope.
+///
+/// Without this the test above would be satisfied by a gate that simply never
+/// offers a standing grant to anybody.
+#[tokio::test]
+async fn a_parked_write_to_the_agents_own_workspace_does_offer_a_standing_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _script) = spawn_script(vec![
+        Turn::Call {
+            tool: "file_write",
+            args: json!({ "path": "notes.md", "content": "draft" }),
+        },
+        Turn::Say("done"),
+    ])
+    .await;
+    let (_pool, deps, _record, _store) =
+        harness(base, "\"files\", \"workspace\"", dir.path()).await;
+    let (pool, record) = supervised(&deps, "\"files\", \"workspace\"").await;
+
+    let queued_before = deps.approval_requests.queued();
+    pool.run(&record.id, "ceo", "jot a note", &deps, None)
+        .await
+        .expect("the turn runs");
+    let parked = deps.approval_requests.take_from(queued_before);
+
+    assert_eq!(parked.len(), 1, "the sandboxed write parks");
+    assert_eq!(parked[0].tool, "file_write");
+    assert!(
+        parked[0].effect.may_be_granted_standing(),
+        "a write confined to the agent's own sandbox is exactly what a standing \
+         grant is for; refusing it would leave the feature with nothing to apply to"
+    );
+}
+
+/// Issue #443, through the turn loop: the reads that used to park.
+///
+/// `file_read` and `grep` are pure reads of the agent's own workspace, and both
+/// parked under the DEFAULT mode — not by anyone's decision, but because the
+/// read-only rule matched a name *prefix* and neither begins with a read-only
+/// word. Nobody had reported them. They were found by asking the same question
+/// of every registered tool, which is the mechanism this lane adds.
+#[tokio::test]
+async fn a_supervised_turn_reads_its_own_workspace_without_asking() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("seed.md"), "hello").ok();
+    let (base, script) = spawn_script(vec![
+        Turn::Call {
+            tool: "grep",
+            args: json!({ "pattern": "hello", "path": "." }),
+        },
+        Turn::Call {
+            tool: "file_read",
+            args: json!({ "path": "seed.md" }),
+        },
+        Turn::Say("done"),
+    ])
+    .await;
+    let (_pool, deps, _record, _store) = harness(base, "\"files\"", dir.path()).await;
+    let (pool, record) = supervised(&deps, "\"files\"").await;
+
+    let queued_before = deps.approval_requests.queued();
+    pool.run(&record.id, "ceo", "what do we have?", &deps, None)
+        .await
+        .expect("the turn runs");
+    let parked = deps.approval_requests.take_from(queued_before);
+
+    assert!(
+        parked.is_empty(),
+        "reading the agent's own workspace must not interrupt an operator: {:?}",
+        parked.iter().map(|r| r.tool.clone()).collect::<Vec<_>>()
+    );
+    // Not vacuous: both reads were genuinely offered to the model and both
+    // came back with a result, so the calls reached the gate and returned.
+    let offered = advertised_tools(&script);
+    for tool in ["grep", "file_read"] {
+        assert!(
+            offered.contains(&tool.to_string()),
+            "`{tool}` was never on the belt, so this proves nothing: {offered:?}"
+        );
+    }
+    // `tool_results` reads every request body the stub saw, and each body
+    // repeats the conversation so far — so this counts cumulatively rather
+    // than once per call. Two distinct calls is the floor.
+    assert!(
+        tool_results(&script).len() >= 2,
+        "both reads must have run and fed a result back"
     );
 }

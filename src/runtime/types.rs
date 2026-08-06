@@ -161,11 +161,15 @@ pub struct ApprovalSummary {
     /// Whether the operator may grant this tool **broadly** — one standing
     /// permission covering any arguments until a deadline (issue #374).
     ///
-    /// `true` exactly when the effect came from a harness tool call *and* its
-    /// group is
-    /// [`EffectGroup::Other`](crate::ports::types::EffectGroup::Other). The
-    /// console renders the scope control only then, so the operator is never
-    /// offered a choice the host would refuse.
+    /// `true` exactly when the effect came from a harness tool call *and* the
+    /// tool cannot reach further than a standing permission can honestly
+    /// describe — [`Effect::may_be_granted_standing`](crate::ports::types::Effect::may_be_granted_standing),
+    /// issue #444. The console renders the scope control only then, so the
+    /// operator is never offered a choice the host would refuse.
+    ///
+    /// It is per-*card*, not per-tool: the same `composio_execute` shows the
+    /// control when it is listing a repository's pull requests and not when it
+    /// is sending mail, because the effect carries the action that was called.
     ///
     /// **This flag is UX, not enforcement.** The host re-checks the same rule
     /// when the resolve arrives, and answers 400 — a console that ignored this

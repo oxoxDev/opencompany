@@ -141,12 +141,48 @@ operator notice; it is never the enforcement, or "for one hour" would mean
 
 #### What can never be granted broadly
 
-Exactly the tools whose consequence group is the catch-all `Other`. Anything the
-classifier calls **Spend, Send, Sign, Publish, Hire or Identity** stays a
-per-call decision, forever, with nobody having to remember to add it to a list —
-the rule delegates to the taxonomy at the top of this document rather than
-keeping a second hand-written set of "safe" tools, which would be written once
-and then silently accrue every new tool by omission.
+Decided by what a tool can **reach**, not by what it is called.
+
+This used to be "exactly the tools whose consequence group is the catch-all
+`Other`", on the reasoning that delegating to the taxonomy beat keeping a second
+hand-written set of safe tools. The reasoning was right and the measurement was
+wrong. `Other` is where a tool lands when the classifier finds no consequence
+word *in its name*, so the three broadest capabilities in the system —
+running an arbitrary command, reaching an arbitrary address, and overwriting the
+guidance the operator wrote — were all grantable, while a repository read scoped
+to one connected account was not. The bucket also conferred membership by
+omission: adding a tool and not thinking about it handed it the longest
+permission available.
+
+So the two questions are now separate answers from one declaration
+(`src/policy/consequence.rs`), one entry per tool:
+
+- **may it run unattended?** — `readonly` denies anything that mutates or
+  reaches outside; `supervised` parks it. This is what the approval card is for.
+- **may an operator hand it over for a stretch of time?** — refused for anything
+  that can execute arbitrary code (`shell`), reach an arbitrary address
+  (`http_request`, `curl`, `web_fetch`, `git_operations`), act through a
+  third-party server (`mcp_call_tool`), overwrite operator-owned guidance
+  (`workspace_write`), or run a saved workflow; refused for every named
+  consequence — Spend, Send, Sign, Publish, Hire, Identity; and refused for any
+  tool nobody has declared.
+
+What stays grantable is the low-consequence middle the feature exists for:
+writes confined to the agent's own sandboxed workspace (`file_write`, `edit`,
+`apply_patch`, `csv_export`, `memory_store`), and **Composio reads**.
+
+`composio_execute` is the reason arguments are part of the question. Every
+Composio action arrives under that one tool name, so classifying the name
+collapsed "list a repository's pull requests" and "send an email" into one
+verdict, and the cautious answer had to win for both. The action slug in the
+arguments is classified instead, against the provider's own curated catalogue —
+a read is grantable, a send is not, and **anything the catalogue does not name
+is a send**. That last part is not a detail: an action nobody has classified
+might do anything.
+
+Because a standing grant carries no arguments, the policy re-classifies the live
+call before honouring one, so a scope granted on a GitHub read cannot admit an
+outgoing email on the same tool name.
 
 The console hides the control for a card it cannot be used on; that is UX. The
 **enforcement** is host-side at mint time, so a hand-rolled request for a
@@ -157,11 +193,11 @@ this teammate" names neither of the two things it needs.
 A refused scope changes nothing at all — the approval stays parked and no
 verdict is journaled — so the operator can simply approve it once instead.
 
-Known and deliberate: `shell` classifies as `Other` and is therefore grantable.
-Narrowing it belongs in the classifier — giving shell a consequence class — not
-in a second ad-hoc exclusion list, which is the drift this design exists to
-avoid. It is operator opt-in, time-boxed, revocable, and both `never_do` and the
-`readonly` brake outrank it.
+**Not yet as narrow as it should be.** A standing grant records a tool, not a
+toolkit, so "this teammate may read from GitHub for eight hours" is expressed as
+"may make Composio reads for eight hours". Reads only, never sends — but broader
+than the sentence an operator actually consented to. Narrowing it needs a scope
+field on the grant record.
 
 #### Listing and revoking
 
@@ -183,8 +219,8 @@ cannot hand the permission back on boot.
 
 Per-use auditing is tracing-only in v1: mint, revoke and expiry are journaled
 with actor and timestamps, but each admitted call writes no journal record.
-Defensible because a standing grant only ever admits `Other`-group tools and
-never a priced call; a per-use record is additive later.
+Defensible because a standing grant only ever admits tools declared grantable
+and never a priced call; a per-use record is additive later.
 
 ### Precedence at the tool gate
 
@@ -202,7 +238,9 @@ A tool call is decided in this order:
    still *burns*: masking it would leave the operator's one-off approval to
    expire and be announced as "the agent didn't act", about a call that ran.
    This arm refuses a **priced** call (a declared amount, a metered read), so a
-   standing grant can never admit money by placement rather than by promise.
+   standing grant can never admit money by placement rather than by promise —
+   and it re-checks the live arguments, so a grant minted on a Composio read
+   cannot admit a Composio send.
 4. `[policy].always_approve` → park.
 5. mode dispatch (`readonly` / `supervised` / `full`).
 
