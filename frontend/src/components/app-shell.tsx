@@ -15,6 +15,7 @@ import {
   ApiError,
   type ApprovalSummary,
   type CompanyStatus,
+  type GrantScope,
   type TurnStep,
   type Verdict,
 } from "@/api/types";
@@ -772,11 +773,18 @@ export function AppShell({
    * called from an event handler, so a `useCallback` here would buy a stale
    * closure and nothing else.
    */
-  const decideApproval = async (approval: ApprovalSummary, verdict: Verdict) => {
+  const decideApproval = async (
+    approval: ApprovalSummary,
+    verdict: Verdict,
+    scope: GrantScope = { kind: "once" },
+  ) => {
     if (decidingApprovals.has(approval.id)) return;
     markDeciding(approval.id, verdict);
     try {
-      await client.resolveApproval(approval.id, verdict, undefined, company, { detach: true });
+      await client.resolveApproval(approval.id, verdict, undefined, company, {
+        detach: true,
+        scope,
+      });
       setDecidedApprovals((prev) => ({ ...prev, [approval.id]: { verdict, approval } }));
       toast.success(
         verdict === "approve"
@@ -918,7 +926,9 @@ export function AppShell({
               approvals={feed.approvals}
               chatChannelByThread={chatChannelByThread}
               now={feed.now}
-              onDecideApproval={(approval, verdict) => void decideApproval(approval, verdict)}
+              onDecideApproval={(approval, verdict, scope) =>
+                void decideApproval(approval, verdict, scope)
+              }
               decidingApprovals={decidingApprovals}
               decidedApprovals={decidedApprovals}
             />
