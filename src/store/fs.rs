@@ -4,7 +4,7 @@
 //! manifest, JSONL for append-only logs, content-addressed blobs for context).
 //! Appends are the hot path and never rewrite the whole file; per-path
 //! `tokio::sync::Mutex` locks serialize concurrent writers within a process.
-//! Those locks live in one process-wide registry ([`path_lock`]) rather than on
+//! Those locks live in one process-wide registry (`path_lock`) rather than on
 //! each store, so two instances over one bundle actually meet (issue #388).
 
 use std::collections::HashMap;

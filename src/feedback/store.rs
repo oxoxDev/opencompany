@@ -19,11 +19,10 @@ use crate::store::paths::Bundle;
 /// A per-company append-only store of [`FeedbackItem`]s.
 ///
 /// Holds no lock of its own. Writes serialise on the process-wide, **path-keyed**
-/// registry in [`store::fs`](crate::store::fs) (issue #388) — see
-/// [`path_lock`](crate::store::fs::path_lock) for the two limits that registry
-/// accepts by construction (absolutising is not canonicalising; a second process
-/// is outside any in-process lock's reach, and write atomicity is what keeps
-/// that case safe).
+/// registry in `store::fs` (issue #388) — see `store::fs::path_lock` for the two
+/// limits that registry accepts by construction (absolutising is not
+/// canonicalising; a second process is outside any in-process lock's reach, and
+/// write atomicity is what keeps that case safe).
 ///
 /// It used to hold a bare `TokioMutex<()>` field, which is a weaker thing than
 /// it looks: [`new`](Self::new) mints a fresh mutex per call, so two stores over
