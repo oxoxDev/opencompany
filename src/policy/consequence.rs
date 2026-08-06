@@ -526,7 +526,13 @@ mod tests {
 
     /// Issue #441: the consequence of a Composio call is a property of the
     /// action, not of the one tool name every action arrives under.
+    ///
+    /// Gated on the harness feature because the read verdict comes from the
+    /// vendored provider catalogue, which is only linked in there — the
+    /// default build's cautious fallback is pinned separately by
+    /// [`without_the_catalogue_every_composio_action_is_a_send`].
     #[test]
+    #[cfg(feature = "openhuman")]
     fn a_composio_read_is_grantable_and_a_send_is_not() {
         let read = consequence_of(
             COMPOSIO_EXECUTE,
@@ -563,6 +569,23 @@ mod tests {
                 "an unclassifiable action must read as a send: {args}"
             );
             assert_eq!(verdict.standing, Standing::PerCall, "{args}");
+        }
+    }
+
+    /// The seam, pinned from the other side. Without the harness feature the
+    /// curated catalogue is not linked in, and the mint path still has to
+    /// answer the grantability question — so it answers it the cautious way,
+    /// for a read as much as for a send. A default build can only ever see a
+    /// `composio_execute` effect replayed from a journal line an openhuman
+    /// build wrote, so refusing the standing scope there costs an operator one
+    /// approve-once and never a wrong grant.
+    #[test]
+    #[cfg(not(feature = "openhuman"))]
+    fn without_the_catalogue_every_composio_action_is_a_send() {
+        for slug in ["GITHUB_LIST_PULL_REQUESTS", "GMAIL_SEND_EMAIL"] {
+            let verdict = consequence_of(COMPOSIO_EXECUTE, &json!({ "tool": slug }));
+            assert_eq!(verdict.group, EffectGroup::Send, "{slug}");
+            assert_eq!(verdict.standing, Standing::PerCall, "{slug}");
         }
     }
 
@@ -675,13 +698,22 @@ mod tests {
     fn lookup_ignores_case() {
         assert_eq!(c("SHELL").standing, Standing::PerCall);
         assert_eq!(c("Workspace_Read").reach, Reach::Internal);
+        // `composio_execute` is matched by the same lowercasing pass, so an
+        // upper-cased tool name still reaches the argument classifier rather
+        // than falling through to the undeclared heuristics.
+        assert_eq!(
+            consequence_of("COMPOSIO_EXECUTE", &json!({ "tool": "GMAIL_SEND_EMAIL" })).group,
+            EffectGroup::Send
+        );
+        #[cfg(feature = "openhuman")]
         assert_eq!(
             consequence_of(
                 "COMPOSIO_EXECUTE",
-                &json!({ "tool": "GITHUB_LIST_BRANCHES" })
+                &json!({ "tool": "github_list_branches" })
             )
             .standing,
-            Standing::Grantable
+            Standing::Grantable,
+            "the curated lookup is case-insensitive on the slug too"
         );
     }
 

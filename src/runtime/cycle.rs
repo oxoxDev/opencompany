@@ -623,15 +623,15 @@ working on):\n{}\n]",
     /// * **native** (`agent: None`) — there is no tool and no agent to grant to.
     ///   The runtime performs these itself; "this tool, for this teammate" names
     ///   neither of the two things it needs.
-    /// * **not broadly grantable** — the effect's group is not
-    ///   [`EffectGroup::Other`](crate::ports::types::EffectGroup::Other), so it
-    ///   is a consequence the operator has to see per call.
+    /// * **not broadly grantable** — the tool can reach further than a standing
+    ///   grant can honestly describe (issue #444), so it is a decision the
+    ///   operator has to take per call.
     ///
-    /// The group is read off the **parked effect** rather than re-derived from
-    /// the tool name, which is both cheaper and more honest: it is the
-    /// classification the card showed the operator, so what they see is what is
-    /// checked. It is also what lets this run in the default build, where the
-    /// harness classifier does not compile.
+    /// The verdict is read off the **parked effect** rather than re-derived from
+    /// a live tool call, which is both cheaper and more honest: the effect
+    /// carries the tool name and the arguments the card showed the operator, so
+    /// what they see is what is checked. It is also what lets this run in the
+    /// default build, where the harness classifier does not compile.
     ///
     /// An unknown or already-resolved id falls through to the ordinary
     /// already-resolved path rather than erroring here — a double-click on the
@@ -647,11 +647,11 @@ working on):\n{}\n]",
                 effect.kind
             )));
         }
-        if !effect.group.is_broadly_grantable() {
+        if !effect.may_be_granted_standing() {
             return Err(OpenCompanyError::InvalidRequest(format!(
-                "'{}' cannot be granted for a period — it is a {:?} action, which stays a \
-                 per-call decision; approve it once instead",
-                effect.kind, effect.group
+                "'{}' cannot be granted for a period — it can reach further than a standing \
+                 permission can describe, so it stays a per-call decision; approve it once instead",
+                effect.kind
             )));
         }
         Ok(())
@@ -4916,12 +4916,22 @@ mod test {
     // Standing grants (issue #374)
     // -----------------------------------------------------------------------
 
-    /// A harness tool call the operator IS allowed to grant broadly: an
-    /// `EffectGroup::Other` effect with no declared amount.
+    /// A harness tool call the operator IS allowed to grant broadly.
     ///
     /// `harness_effect` deliberately uses `Sign` and a real amount, because it
     /// exists to prove the effect was not executed. Both would refuse a broad
     /// scope, so the grantable case needs its own fixture.
+    ///
+    /// **The tool passed in is now load-bearing** (issue #444). These tests
+    /// used to grant a standing scope on `workspace_write` — which was
+    /// grantable only because its name contains no consequence word, while the
+    /// parking side of the same gate refused to exempt it precisely because it
+    /// overwrites guidance the operator wrote. That contradiction is what #444
+    /// is about, and it is resolved in the direction the parking side already
+    /// argued: `workspace_write` stays a per-call decision. `file_write` is the
+    /// honest fixture — it mutates, so it still parks, but what it mutates is
+    /// the agent's own sandboxed workspace, which is exactly the low-consequence
+    /// shape a standing grant is for.
     fn grantable_effect(agent: &str, tool: &str, args: serde_json::Value) -> Effect {
         Effect {
             kind: tool.into(),
@@ -4989,7 +4999,7 @@ mod test {
         let home_dir = tmp_home();
         let (rt, id) = park_one_blocked_tool_call(
             home_dir.path().to_path_buf(),
-            grantable_effect("ops", "workspace_write", serde_json::json!({ "path": "a" })),
+            grantable_effect("ops", "file_write", serde_json::json!({ "path": "a" })),
         )
         .await;
 
@@ -5006,7 +5016,7 @@ mod test {
             "no single-use grant is left behind to expire noisily"
         );
         let listed = rt.standing_grants();
-        assert_eq!(listed[0].tool, "workspace_write");
+        assert_eq!(listed[0].tool, "file_write");
         assert_eq!(listed[0].agent, "ops");
         assert_eq!(listed[0].approval_id, id, "provenance back to the card");
         assert_eq!(
@@ -5082,7 +5092,7 @@ mod test {
     async fn repeated_ordinary_approvals_never_infer_a_standing_grant() {
         let home_dir = tmp_home();
         let home = home_dir.path().to_path_buf();
-        let effect = grantable_effect("ops", "workspace_write", serde_json::json!({ "path": "a" }));
+        let effect = grantable_effect("ops", "file_write", serde_json::json!({ "path": "a" }));
 
         let rt = Arc::new(
             RuntimeBuilder::new(home, manifest("supervised"))
@@ -5124,7 +5134,7 @@ mod test {
         let home = home_dir.path().to_path_buf();
         let (rt, id) = park_one_blocked_tool_call(
             home.clone(),
-            grantable_effect("ops", "workspace_write", serde_json::json!({ "path": "a" })),
+            grantable_effect("ops", "file_write", serde_json::json!({ "path": "a" })),
         )
         .await;
 
@@ -5180,7 +5190,7 @@ mod test {
         let home_dir = tmp_home();
         let (rt, id) = park_one_blocked_tool_call(
             home_dir.path().to_path_buf(),
-            grantable_effect("ops", "workspace_write", serde_json::json!({})),
+            grantable_effect("ops", "file_write", serde_json::json!({})),
         )
         .await;
 
@@ -5204,18 +5214,21 @@ mod test {
     }
 
     /// The summary carries the flag only where the control is actually
-    /// offerable — and the card's own classification is what decides it.
+    /// offerable — and what the tool can reach is what decides it.
     #[tokio::test]
     async fn the_summary_marks_only_broadly_grantable_cards() {
         let home_dir = tmp_home();
         let (rt, _) = park_one_blocked_tool_call(
             home_dir.path().to_path_buf(),
-            grantable_effect("ops", "workspace_write", serde_json::json!({})),
+            grantable_effect("ops", "file_write", serde_json::json!({})),
         )
         .await;
         assert!(rt.pending_approvals()[0].broadly_grantable);
 
-        // A named consequence group is not offerable.
+        // A Composio call with no action slug the classifier recognises reads
+        // as a send, so no scope control is offered (issue #441's cautious
+        // direction — before it, *every* Composio call landed here, including
+        // the reads).
         let home_dir = tmp_home();
         let (rt, _) = park_one(
             home_dir.path().to_path_buf(),
@@ -5223,5 +5236,70 @@ mod test {
         )
         .await;
         assert!(!rt.pending_approvals()[0].broadly_grantable);
+
+        // Issue #444: `workspace_write` used to be marked grantable, because
+        // its name carries no consequence word. It overwrites guidance the
+        // operator wrote, so it stays a per-call decision — the same answer
+        // the parking side of the gate has always given for it.
+        let home_dir = tmp_home();
+        let (rt, _) = park_one_blocked_tool_call(
+            home_dir.path().to_path_buf(),
+            grantable_effect("ops", "workspace_write", serde_json::json!({ "path": "a" })),
+        )
+        .await;
+        assert!(
+            !rt.pending_approvals()[0].broadly_grantable,
+            "overwriting operator-owned guidance is not a week-long permission"
+        );
+
+        // And neither is running an arbitrary command, which is where an
+        // operator on staging *could* get a standing grant before #444.
+        let home_dir = tmp_home();
+        let (rt, _) = park_one_blocked_tool_call(
+            home_dir.path().to_path_buf(),
+            grantable_effect("ops", "shell", serde_json::json!({ "command": "ls" })),
+        )
+        .await;
+        assert!(!rt.pending_approvals()[0].broadly_grantable);
+    }
+
+    /// Issue #441, from the mint side: the same tool, two different answers,
+    /// decided by the action in the arguments rather than the name they share.
+    ///
+    /// This is the whole shape of the bug — an operator could grant a standing
+    /// scope on running arbitrary terminal commands, and could not grant one on
+    /// reading a repository's pull requests.
+    #[tokio::test]
+    #[cfg(feature = "openhuman")]
+    async fn a_composio_read_is_offerable_and_a_composio_send_is_not() {
+        let home_dir = tmp_home();
+        let (rt, _) = park_one_blocked_tool_call(
+            home_dir.path().to_path_buf(),
+            grantable_effect(
+                "ops",
+                "composio_execute",
+                serde_json::json!({ "tool": "GITHUB_LIST_PULL_REQUESTS" }),
+            ),
+        )
+        .await;
+        assert!(
+            rt.pending_approvals()[0].broadly_grantable,
+            "a repository read scoped to a connected account is grantable"
+        );
+
+        let home_dir = tmp_home();
+        let (rt, _) = park_one_blocked_tool_call(
+            home_dir.path().to_path_buf(),
+            grantable_effect(
+                "ops",
+                "composio_execute",
+                serde_json::json!({ "tool": "GMAIL_SEND_EMAIL" }),
+            ),
+        )
+        .await;
+        assert!(
+            !rt.pending_approvals()[0].broadly_grantable,
+            "sending mail stays a per-call decision"
+        );
     }
 }

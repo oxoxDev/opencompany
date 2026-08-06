@@ -1248,13 +1248,14 @@ impl CompanyRuntime {
                 agent: p.effect.agent.clone(),
                 payload: crate::runtime::approval_display::display_payload(&p.effect),
                 thread: p.thread,
-                // Issue #374. Both halves matter: a native effect has no
-                // teammate and no tool to grant, and a named consequence group
-                // stays a per-call decision. Read off the parked effect, so the
-                // control is offered on exactly the classification the card
-                // itself is showing.
-                broadly_grantable: p.effect.agent.is_some()
-                    && p.effect.group.is_broadly_grantable(),
+                // Issues #374, #444. Both halves matter: a native effect has no
+                // teammate and no tool to grant, and a tool that can reach
+                // further than a standing permission can describe stays a
+                // per-call decision. Read off the parked effect, so the control
+                // is offered on exactly the call the card itself is showing —
+                // which matters for `composio_execute`, where the same tool is
+                // grantable reading a repository and not grantable sending mail.
+                broadly_grantable: p.effect.agent.is_some() && p.effect.may_be_granted_standing(),
             })
             .collect()
     }
