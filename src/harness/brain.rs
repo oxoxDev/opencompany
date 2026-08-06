@@ -1390,6 +1390,19 @@ impl HarnessBrain {
     /// `run_id` stamps the revision this call writes (#242) so a run row can
     /// point at what it actually produced. An earlier attempt's version keeps
     /// the attempt that wrote *it*.
+    ///
+    /// # Authorship is per file, not per call (issue #463)
+    ///
+    /// Each revision records the agent that published **that file**, read from
+    /// [`PendingPublish::agent`]. `responder` is only the fallback, for a value
+    /// built by hand rather than by the tool.
+    ///
+    /// One drain can hold publishes from more than one agent — the desk lead's
+    /// turn and the orchestrator's own turn both run with the full toolbelt
+    /// under a single `Conversation` claim — so a single author applied to the
+    /// batch stamps one agent's name on another's file. The card above still
+    /// takes one owner, because a card has one; a revision is a different
+    /// question with a different answer.
     async fn record_published_artifacts(
         &self,
         card: &TaskRecord,
@@ -1417,6 +1430,13 @@ impl HarnessBrain {
         let mut written = Vec::with_capacity(published.len());
         for pending in published {
             let at = now_millis();
+            // Issue #463: whoever published THIS file. `responder` is the
+            // fallback for a `PendingPublish` not built by the tool — the tool
+            // always stamps its own agent.
+            let author = match pending.agent.trim() {
+                "" => responder,
+                agent => agent,
+            };
             // Identity, not recency: the record whose `source` is this exact
             // path, or a new one.
             let existing = on_card
@@ -1431,7 +1451,7 @@ impl HarnessBrain {
                     version = found.push_version(
                         &pending.body,
                         ArtifactAuthor::Agent,
-                        responder,
+                        author,
                         at,
                         pending.note.clone(),
                     );
@@ -1450,7 +1470,7 @@ impl HarnessBrain {
                         &pending.title,
                         pending.kind,
                         &pending.body,
-                        responder,
+                        author,
                         at,
                     )
                     .with_source(pending.source.clone());
@@ -3097,6 +3117,96 @@ members = ["engineer"]
         let cards = TaskStore::list(&*ops, &company).await.expect("list");
         assert_eq!(cards.len(), 1, "the deliverable still has a card");
         assert_eq!(cards[0].assignee, "writer");
+    }
+
+    /// Each artifact records the agent that published **it** (#463 review).
+    ///
+    /// One drain can hold publishes from more than one agent — the desk lead's
+    /// turn and the orchestrator's own turn both run with the full toolbelt
+    /// under a single `Conversation` claim. Collapsing the batch to one author
+    /// stamps the writer's name on the orchestrator's file and the reverse.
+    #[tokio::test]
+    async fn each_published_artifact_records_its_own_author() {
+        use crate::harness::publish::PendingPublish;
+        use crate::ports::artifacts::ArtifactStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, ops) = brain_with_artifacts(dir.path());
+        let company = CompanyId::new("acme");
+        let publish = |agent: &str, source: &str| PendingPublish {
+            agent: agent.to_string(),
+            source: source.to_string(),
+            title: source.to_string(),
+            kind: crate::ports::artifacts::ArtifactKind::Markdown,
+            note: None,
+            body: format!("# {source}"),
+        };
+
+        brain
+            .record_published_artifacts(
+                &card("t-1", "maya"),
+                // The batch-level fallback, which must NOT win over the
+                // per-item agents below.
+                "maya",
+                vec![publish("writer", "memo.md"), publish("ceo", "notes.md")],
+                None,
+            )
+            .await
+            .expect("records");
+
+        let mut authors: Vec<(String, String)> = ArtifactStore::list(&*ops, &company, Some("t-1"))
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|a| {
+                (
+                    a.source.clone().unwrap_or_default(),
+                    a.versions[0].author_id.clone(),
+                )
+            })
+            .collect();
+        authors.sort();
+        assert_eq!(
+            authors,
+            vec![
+                ("memo.md".to_string(), "writer".to_string()),
+                ("notes.md".to_string(), "ceo".to_string()),
+            ]
+        );
+    }
+
+    /// …and a `PendingPublish` built by hand — not by the tool, which always
+    /// stamps its agent — still falls back to the caller's responder rather
+    /// than recording a blank author.
+    #[tokio::test]
+    async fn a_publish_with_no_agent_falls_back_to_the_responder() {
+        use crate::harness::publish::PendingPublish;
+        use crate::ports::artifacts::ArtifactStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, ops) = brain_with_artifacts(dir.path());
+
+        brain
+            .record_published_artifacts(
+                &card("t-1", "maya"),
+                "maya",
+                vec![PendingPublish {
+                    agent: String::new(),
+                    source: "memo.md".to_string(),
+                    title: "Memo".to_string(),
+                    kind: crate::ports::artifacts::ArtifactKind::Markdown,
+                    note: None,
+                    body: "# Memo".to_string(),
+                }],
+                None,
+            )
+            .await
+            .expect("records");
+
+        let listed = ArtifactStore::list(&*ops, &CompanyId::new("acme"), Some("t-1"))
+            .await
+            .expect("list");
+        assert_eq!(listed[0].versions[0].author_id, "maya");
     }
 
     /// The other half: a run that did NOT succeed records nothing either, and
