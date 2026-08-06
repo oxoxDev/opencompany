@@ -29,6 +29,11 @@ pub mod approval_display;
 pub mod assignee;
 pub mod builder;
 pub mod channel;
+/// Issue #469: one turn, one continuation. Tracks how many of a turn's parked
+/// approvals are still undecided, so resolving several sign-offs raised by the
+/// same turn re-runs that turn **once** — after the last decision — rather than
+/// once per decision. See [`continuation`].
+pub mod continuation;
 pub mod cron;
 pub mod cycle;
 /// Brain-agnostic delegation seam (issue #176): the [`RunTurn`] trait +
