@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 
-import type { ApprovalSummary, TurnStep, Verdict } from "@/api/types";
+import type { ApprovalSummary, GrantScope, TurnStep, Verdict } from "@/api/types";
 import { cn } from "@/lib/utils";
 import { ApprovalRow } from "./ApprovalRow";
 import { Avatar } from "./Avatar";
@@ -35,7 +35,7 @@ interface Props {
   askerNames?: Map<string, string>;
   /** The verdict each inline card is currently waiting on. */
   decidingApprovals?: ReadonlyMap<string, Verdict>;
-  onDecideApproval?: (approval: ApprovalSummary, verdict: Verdict) => void;
+  onDecideApproval?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
 }
 
 /**
@@ -94,7 +94,7 @@ export function MessageTimeline({
               askerNames={askerNames ?? EMPTY_NAMES}
               deciding={decidingApprovals?.get(item.approval.id) ?? null}
               decided={item.decided}
-              onDecide={(verdict) => onDecideApproval?.(item.approval, verdict)}
+              onDecide={(verdict, scope) => onDecideApproval?.(item.approval, verdict, scope)}
             />
           ),
         )}
