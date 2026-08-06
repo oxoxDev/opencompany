@@ -684,6 +684,33 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             o["taskId"] = json!(task_id);
             o
         }
+        // Issue #464: the frame the board was missing. Every other task event
+        // here describes a card that already exists, so a card *opened* — by
+        // chat intake, a delegation, the publish drain, the REST route —
+        // reached the console only on its next reload.
+        //
+        // Three keys, all structural, and every one of them already reachable
+        // by the same operator through `GET {scope}/tasks`. There is
+        // deliberately no title and no note: a card's text is operator- or
+        // agent-authored free text, and this frame's whole job is to say
+        // *something moved*, not to carry the board. The console reacts by
+        // re-reading the board it already knows how to read, which keeps the
+        // card's content on exactly one route instead of two.
+        CompanyEvent::TaskCardChanged {
+            task_id,
+            change,
+            column,
+        } => {
+            let mut o = envelope("task_card_changed");
+            o["taskId"] = json!(task_id);
+            o["change"] = json!(change);
+            // Omitted rather than null on a removal, so "gone" is a presence
+            // check on the console rather than a null check.
+            if let Some(column) = column {
+                o["column"] = json!(column);
+            }
+            o
+        }
         // `message` is scrubbed at the source (`OcMcpCallTool` → `HarnessBrain`
         // drain), so it can never carry a credential, response body, or URL query
         // string — safe to forward verbatim. See `CompanyEvent::McpCallFailed`.
@@ -3584,6 +3611,26 @@ mod test {
         }
     }
 
+    /// A tool call an operator MAY grant a standing permission for (issue
+    /// #431), which `gated_tool_call` deliberately is not: its Composio payload
+    /// names no action slug, so `consequence_of` cannot classify it as a read
+    /// and it stays a per-call decision. `file_write` is declared grantable in
+    /// `src/policy/consequence.rs` and carries an agent, so it satisfies both
+    /// halves of `check_broadly_grantable` — it mutates, but only the agent's
+    /// own sandboxed workspace.
+    fn grantable_tool_call() -> crate::ports::types::Effect {
+        crate::ports::types::Effect {
+            kind: "file_write".into(),
+            group: crate::ports::types::EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::json!({ "path": "notes/a.md", "body": "one" }),
+            agent: Some("ceo".into()),
+            run_id: None,
+        }
+    }
+
     /// The dotted kind the stalled brain parks once its follow-up turn gets
     /// past the barrier. Parking journals durably (`record_parked`), so its
     /// presence in `pending_approvals()` is proof the continuation reached the
@@ -3600,6 +3647,10 @@ mod test {
         entered: Arc<tokio::sync::Notify>,
         /// The test's permission for the turn to finish.
         release: Arc<tokio::sync::Notify>,
+        /// The effect parked for the operator's sign-off. Whether it may be
+        /// granted a standing permission is a property of this effect, so the
+        /// scope tests supply their own rather than sharing one fixture.
+        parked: crate::ports::types::Effect,
     }
 
     #[async_trait::async_trait]
@@ -3612,7 +3663,7 @@ mod test {
             for event in &req.events {
                 match event {
                     CompanyEvent::OperatorMessage { .. } => {
-                        host.park_effect(gated_tool_call()).await?;
+                        host.park_effect(self.parked.clone()).await?;
                     }
                     CompanyEvent::ApprovalResolved { .. } => {
                         self.entered.notify_one();
@@ -3707,6 +3758,15 @@ mod test {
     }
 
     async fn stalled_company(home: &std::path::Path) -> StalledCompany {
+        stalled_company_parking(home, gated_tool_call()).await
+    }
+
+    /// `stalled_company`, with the parked effect chosen by the caller — because
+    /// whether a scope may be granted is decided by the effect, not the route.
+    async fn stalled_company_parking(
+        home: &std::path::Path,
+        parked: crate::ports::types::Effect,
+    ) -> StalledCompany {
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let state = build_state_with_brain(
@@ -3716,6 +3776,7 @@ mod test {
             Some(Arc::new(StalledContinuationBrain {
                 entered: entered.clone(),
                 release: release.clone(),
+                parked,
             })),
         )
         .await;
@@ -3911,6 +3972,89 @@ mod test {
             "a detached continuation must still land"
         );
         assert_eq!(c.runtime.grants.live_count(), 1);
+    }
+
+    /// **Issue #431.** A *detached* resolve — the verb the inline chat card
+    /// uses — mints a standing grant when one was asked for, and that grant is
+    /// visible on the one list both surfaces read.
+    ///
+    /// This pairing had no coverage before this test, which is why it looked
+    /// covered: its neighbour above sends `detach` with no scope, so the grant
+    /// it asserts is the single-use one, while every standing-grant test
+    /// resolves *without* `detach`. Until #431 the console could not ask for
+    /// this combination at all, so nothing exercised it; now the chat card can,
+    /// it is the console's only way to mint a standing grant.
+    ///
+    /// It holds because `run_resolve` computes the scope and hands it to
+    /// `resolve_approval_spawned` *before* it branches on `detach` — statement
+    /// ordering inside one function, which a refactor could reverse without a
+    /// single existing test going red. Hence asserting it rather than reading it.
+    #[tokio::test]
+    async fn a_detached_resolve_mints_a_standing_grant_and_lists_it() {
+        let home_dir = home();
+        let c = stalled_company_parking(home_dir.path(), grantable_tool_call()).await;
+
+        // The same flag the inline card gates its scope control on: if this is
+        // false the console offers no choice, and the rest of this is moot.
+        assert!(
+            c.runtime.pending_approvals()[0].broadly_grantable,
+            "the fixture must be an approval a standing scope may be asked for"
+        );
+
+        let response = c
+            .app
+            .clone()
+            .oneshot(resolve_request(
+                &c.approval_id,
+                serde_json::json!({
+                    "verdict": "approve",
+                    "detach": true,
+                    "scope": "tool",
+                    "expires_in_millis": 60 * 60 * 1000,
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Minted by the time the detached answer is written, not merely promised
+        // by it — the receipt says `recorded`, so a grant that appeared later
+        // would make that a lie.
+        assert_eq!(
+            c.runtime.grants.standing_count(),
+            1,
+            "a detached resolve carrying a tool scope must mint a standing grant"
+        );
+
+        // And visible on the one list route both surfaces read, described the
+        // same way — this is what "appears in the same list as one granted from
+        // the page" means, there being only one list.
+        let listed = c
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/company/grants")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let bytes = to_bytes(listed.into_body(), usize::MAX).await.unwrap();
+        let rows: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        assert_eq!(rows[0]["tool"], "file_write");
+        assert_eq!(rows[0]["agent"], "ceo");
+
+        // The continuation still lands, so the scope did not cost the detach.
+        c.entered.notified().await;
+        c.release.notify_one();
+        assert!(
+            await_continuation(&c.runtime).await,
+            "a detached continuation must still land when a scope was granted"
+        );
     }
 
     /// The default is unchanged: no `detach` key means the response still
@@ -4330,6 +4474,40 @@ mod test {
         .expect("task_dispatched is an attention signal");
         assert_eq!(v["type"], "task_dispatched");
         assert_eq!(v["taskId"], "t-42");
+    }
+
+    /// Issue #464: an opened card reaches the console as its own frame. This is
+    /// the half a unit test can prove — that the projection exists and carries
+    /// the card; that the *board* redraws off it is a browser fact.
+    #[test]
+    fn projects_task_card_changed() {
+        let v = super::project_event(&stored(CompanyEvent::TaskCardChanged {
+            task_id: "t-77".into(),
+            change: crate::runtime::CHANGE_OPENED.into(),
+            column: Some("todo".into()),
+        }))
+        .expect("a board write is an attention signal");
+        assert_eq!(v["type"], "task_card_changed");
+        assert_eq!(v["taskId"], "t-77");
+        assert_eq!(v["change"], "opened");
+        assert_eq!(v["column"], "todo");
+    }
+
+    /// A removed card is projected without a column — the console's "is it
+    /// gone?" check is a presence check, never a null one.
+    #[test]
+    fn projects_a_removed_card_without_a_column() {
+        let v = super::project_event(&stored(CompanyEvent::TaskCardChanged {
+            task_id: "t-77".into(),
+            change: crate::runtime::CHANGE_REMOVED.into(),
+            column: None,
+        }))
+        .expect("a board write is an attention signal");
+        assert_eq!(v["change"], "removed");
+        assert!(
+            v.get("column").is_none(),
+            "a removed card is in no column: {v}"
+        );
     }
 
     #[test]

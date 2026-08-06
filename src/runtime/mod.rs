@@ -27,6 +27,12 @@ pub mod approval_display;
 /// harness dispatch path and the REST write boundary so the board's assignee
 /// means one thing. See [`assignee`].
 pub mod assignee;
+/// Issue #464: [`BoardAnnouncer`] — the [`TaskStore`](crate::ports::tasks::TaskStore)
+/// decorator that announces a board write on the company event log, so a card
+/// opened by *anything* reaches a watching console without a reload. Emitted at
+/// the store rather than at the callers, which is what stops the next writer
+/// from silently announcing nothing. See [`board_events`].
+pub mod board_events;
 pub mod builder;
 pub mod channel;
 /// Issue #469: one turn, one continuation. Tracks how many of a turn's parked
@@ -92,6 +98,7 @@ pub mod workflow_scheduler;
 pub mod workflow_spawn;
 
 pub use advance::{SYSTEM_ATTRIBUTION, advance_settled_card, append_result};
+pub use board_events::{BoardAnnouncer, CHANGE_OPENED, CHANGE_REMOVED, CHANGE_UPDATED};
 pub use builder::{RuntimeBuilder, company_id_from_name};
 pub use channel::{OPERATOR_CHANNEL, OperatorChannel};
 pub use cron::{CivilTime, CronExpr};

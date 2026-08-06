@@ -161,6 +161,30 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             format!("Dispatched task {task_id}"),
             "task.dispatched",
         ),
+        // Issue #464. Written for completeness, not for a live path — the same
+        // standing as the reaction arm above: this normalizes a cycle's *input*
+        // events, and a board announcement is appended by the task store after
+        // a write it did not start. It drives no cycle, so a brain never sees
+        // one here. Spelled out rather than swept into a wildcard so the next
+        // variant that IS a stimulus cannot inherit a silent default.
+        //
+        // Structural only. The card's title and note stay off this wire for the
+        // same reason they stay off the operator SSE projection: this body is
+        // sent to the inference sidecar, and a board write is not a place to
+        // hand it operator-authored text nobody asked to send.
+        CompanyEvent::TaskCardChanged {
+            task_id,
+            change,
+            column,
+        } => (
+            Role::System,
+            "board".to_string(),
+            match column {
+                Some(column) => format!("Task {task_id} {change} → {column}"),
+                None => format!("Task {task_id} {change}"),
+            },
+            "task.card_changed",
+        ),
         CompanyEvent::McpCallFailed {
             server,
             tool,

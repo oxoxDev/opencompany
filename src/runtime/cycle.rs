@@ -1278,6 +1278,12 @@ fn cycle_task_id(
             | CompanyEvent::WorkflowNodeFinished { .. }
             | CompanyEvent::TaskSteered { .. }
             | CompanyEvent::TaskDiscussionPosted { .. }
+            // Issue #464: a board write announcing itself. Emphatically a
+            // record — it is appended by the store *after* the write it
+            // describes, so treating it as a trigger would let a card start
+            // work merely by existing, and that work's own card writes would
+            // announce again.
+            | CompanyEvent::TaskCardChanged { .. }
             | CompanyEvent::DeskTaskCompleted { .. } => continue,
         };
         let Some(candidate) = candidate else { continue };
@@ -1382,6 +1388,12 @@ fn cycle_thread_id(
             | CompanyEvent::WorkflowNodeFinished { .. }
             | CompanyEvent::TaskSteered { .. }
             | CompanyEvent::TaskDiscussionPosted { .. }
+            // Issue #464: a board write announcing itself. Emphatically a
+            // record — it is appended by the store *after* the write it
+            // describes, so treating it as a trigger would let a card start
+            // work merely by existing, and that work's own card writes would
+            // announce again.
+            | CompanyEvent::TaskCardChanged { .. }
             | CompanyEvent::DeskTaskCompleted { .. } => continue,
         };
         let Some(candidate) = candidate else { continue };

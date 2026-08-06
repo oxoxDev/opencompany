@@ -33,6 +33,41 @@ export type CompanyStreamEvent =
     }
   | { type: "task_dispatched"; seq: number; atMillis: number; taskId: string }
   | { type: "task_steered"; seq: number; atMillis: number; taskId: string; action: string }
+  // A board card was written (issue #464) — the frame the board had no way to
+  // learn about anything from. Emitted by the host's task store, so it fires
+  // for a card opened from chat intake, from a delegation, from the publish
+  // drain and from the REST route alike, rather than for whichever paths
+  // somebody remembered to instrument.
+  //
+  // Deliberately thin, like `approval_parked`: an id, what happened, and where
+  // the card sits. There is **no title and no note** on purpose — the card's
+  // text lives on `GET …/tasks`, and a console reacts to this frame by
+  // re-reading that, so the board's content has exactly one source.
+  | {
+      type: "task_card_changed";
+      seq: number;
+      atMillis: number;
+      taskId: string;
+      /** `opened` | `updated` | `removed`, widened so an unknown word from a
+       *  newer host is not a type error. */
+      change: string;
+      /** Absent on a removed card, which is in no column. */
+      column?: string;
+    }
+  // A dispatched card's run finished (issue #185). The host has projected this
+  // since #185; the console named no type for it, so it fell through to
+  // `default:` and was dropped — the same "the view does not subscribe" half of
+  // #464, one event over. A settle moves the card between columns, so the board
+  // wants it.
+  | {
+      type: "desk_task_completed";
+      seq: number;
+      atMillis: number;
+      taskId: string;
+      desk: string;
+      output: string;
+      column: string;
+    }
   | {
       type: "mcp_call_failed";
       seq: number;
@@ -179,9 +214,18 @@ interface Options {
    */
   onAgentReply?: (event: AgentReplyEvent) => void;
   /**
-   * Called for each task-lifecycle event (`task_dispatched`, `task_steered`) so
-   * a surface showing in-flight runs — the company-chat steer strip (issue #111)
-   * — can refetch live off the existing SSE stream instead of only on a poll.
+   * Called for each task-lifecycle event (`task_dispatched`, `task_steered`,
+   * `task_card_changed`, `desk_task_completed`) so a surface showing board work
+   * — the company-chat steer strip (issue #111) and the board itself (issue
+   * #464) — can refetch live off the existing SSE stream instead of only on a
+   * poll.
+   *
+   * Subscribers here take a **counter**, not the payload: they re-read the
+   * board, and the board's content has one source (`GET …/tasks`). That is also
+   * why they are immune to the frame-loss trap that made
+   * {@link Options.onWorkflowRunEvent}'s consumer fold a *window* of events —
+   * two ticks collapsing inside one React batch still means "re-read", whereas
+   * two payloads collapsing means one is lost.
    */
   onTaskEvent?: (event: CompanyStreamEvent) => void;
   /**
@@ -360,6 +404,20 @@ function handleEvent(
       toast("A task was steered", {
         description: `Your company ${steeredVerb(event.action)} a task.`,
       });
+      onTaskEvent?.(event);
+      break;
+    // Issue #464. Both route to the board's subscriber and **neither toasts**,
+    // which is the deliberate half.
+    //
+    // A card opened from chat is already announced where the operator is
+    // looking — the reply says "Card opened" — so a toast for it would be the
+    // second notification for one action that #379 argues against. And a board
+    // write is not rare: every column move, every settle, every note the run
+    // appends is one. Toasting those would train the operator to dismiss the
+    // toasts that do matter. The card appearing on the board IS the
+    // notification.
+    case "task_card_changed":
+    case "desk_task_completed":
       onTaskEvent?.(event);
       break;
     case "agent_reply":

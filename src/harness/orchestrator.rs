@@ -651,6 +651,19 @@ fn summarize_event(event: &CompanyEvent) -> String {
         CompanyEvent::OperatorMessage { .. } => "operator message".to_string(),
         CompanyEvent::AgentReply { agent_id, .. } => format!("reply from {agent_id}"),
         CompanyEvent::TaskDispatched { task_id, .. } => format!("task dispatched: {task_id}"),
+        // Issue #464. Structural only, like every arm here: the id, the change
+        // word (fixed vocabulary) and the column (one of six). The card's title
+        // is deliberately not named — it is operator- or agent-authored free
+        // text, and this string is a non-sensitive one-liner for the insight
+        // surface, which is exactly where free text does not belong.
+        CompanyEvent::TaskCardChanged {
+            task_id,
+            change,
+            column,
+        } => match column {
+            Some(column) => format!("card {change}: {task_id} → {column}"),
+            None => format!("card {change}: {task_id}"),
+        },
         CompanyEvent::ScheduleFired { cron, .. } => format!("schedule fired: {cron}"),
         CompanyEvent::WebhookReceived { channel, .. } => format!("webhook on {channel}"),
         CompanyEvent::A2aTaskReceived { from, .. } => format!("A2A task from {from}"),
