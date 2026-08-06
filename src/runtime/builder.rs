@@ -44,6 +44,7 @@ use crate::ports::{
     FactStore, InboxStore, LoginCodeStore, MemoryStore, RunStore, SecretStore, SessionStore,
     SkillStateStore, TaskStore, ToolProvider, UsageMeter, UserStore, WorkspaceStore,
 };
+use crate::runtime::board_events::BoardAnnouncer;
 use crate::runtime::channel::{OPERATOR_CHANNEL, OperatorChannel};
 use crate::runtime::handover::RuntimeHandover;
 use crate::runtime::journal::RuntimeJournal;
@@ -786,9 +787,19 @@ impl RuntimeBuilder {
         // The WS3 console ports default to a single shared fs backend.
         let fs_ops = Arc::new(FsOps::new(home.clone()));
         let ops = match handover.as_ref() {
+            // A rebuild inherits the ops it was handed, announcer and all — the
+            // wrap below happens once, at first construction. Re-wrapping an
+            // inherited board would announce every write twice.
             Some(h) => h.ops.clone(),
             None => OpsStores {
-                tasks: self.tasks.unwrap_or_else(|| fs_ops.clone()),
+                // Issue #464: the board announces its own writes. Wrapped here,
+                // at the single place the store is chosen, so *every* writer —
+                // REST, the cycle, a delegation, the settle mover — announces
+                // without knowing it does. See [`BoardAnnouncer`].
+                tasks: Arc::new(BoardAnnouncer::new(
+                    self.tasks.unwrap_or_else(|| fs_ops.clone()),
+                    events.clone(),
+                )),
                 workspace: self.workspace.unwrap_or_else(|| fs_ops.clone()),
                 facts: self.facts.unwrap_or_else(|| fs_ops.clone()),
                 artifacts: self.artifacts.unwrap_or_else(|| fs_ops.clone()),

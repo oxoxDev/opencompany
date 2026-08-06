@@ -616,6 +616,49 @@ pub enum CompanyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<Actor>,
     },
+    /// A board card was written (issue #464) — opened, changed, or removed.
+    ///
+    /// The board's *announcement*, and the thing that was missing: every other
+    /// task event here describes a card that already exists
+    /// ([`TaskDispatched`](Self::TaskDispatched) fires on the `in_progress`
+    /// edge, [`DeskTaskCompleted`](Self::DeskTaskCompleted) on the settle), so
+    /// nothing said a card had come into being. A card opened from chat intake,
+    /// from a delegation, or from the publish drain left no trace on the feed at
+    /// all, and a console watching the board had nothing to react to.
+    ///
+    /// **Emitted from the store, not from the callers.** It is appended by the
+    /// [`BoardAnnouncer`](crate::runtime::BoardAnnouncer) decorator wrapping the
+    /// company's [`TaskStore`](crate::ports::tasks::TaskStore), which is the one
+    /// place every writer already passes through. Emitting it per call site
+    /// would have meant one arm per creation path — and the next path added
+    /// would silently have none, which is the shape of the bug this fixes.
+    ///
+    /// **A record, never a stimulus.** It is appended after the write it
+    /// describes and is never fed into a cycle; the cycle's own trigger
+    /// classification treats it as a pass-through, like every other record.
+    /// Announcing a write must not start work — a card that opened a cycle by
+    /// existing would re-enter this same store and announce again.
+    ///
+    /// Additive: old logs never carry it, and its presence doesn't change how
+    /// any existing variant serializes.
+    TaskCardChanged {
+        /// The written card's id.
+        task_id: String,
+        /// What happened to it, as a stable wire word: `opened` (the write
+        /// brought the card into existence), `updated` (it changed an existing
+        /// one), or `removed` (it was deleted).
+        ///
+        /// A word rather than a `bool`, following
+        /// [`ToolAccessChanged`](Self::ToolAccessChanged)'s `change`: there are
+        /// three outcomes, not two, and a flag would have had to grow a second
+        /// one to say a card is gone.
+        change: String,
+        /// The column the card sits in after the write. `None` on a `removed`
+        /// card, which is no longer in one — omitted rather than an empty
+        /// string, so "gone" cannot be mistaken for a column whose id is blank.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        column: Option<String>,
+    },
     /// A dispatched board task finished its run (issue #185) — the terminal
     /// anchor a per-task timeline ends on and a lineage rollup counts.
     ///
