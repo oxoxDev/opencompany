@@ -123,8 +123,13 @@ impl JournalRoot {
 /// An operator-set root wins so a self-hoster keeps an existing OpenHuman
 /// workspace. A missing — or blank — value falls back to the data directory,
 /// the one location a tenant container is guaranteed to be able to write.
+///
+/// Trimming decides only whether a value is blank; a value that survives that
+/// test is used **verbatim**. Leading and trailing spaces are legal in a POSIX
+/// path, so silently stripping them would resolve somewhere the operator did
+/// not configure — the same class of surprise this module exists to remove.
 pub fn resolve(env_value: Option<&str>, data_dir: &Path) -> JournalRoot {
-    match env_value.map(str::trim).filter(|value| !value.is_empty()) {
+    match env_value.filter(|value| !value.trim().is_empty()) {
         Some(value) => JournalRoot {
             root: PathBuf::from(value),
             source: RootSource::Env,
@@ -240,6 +245,22 @@ mod test {
             resolved.store_root(),
             Path::new("/srv/openhuman/workspace/tinyagents_store")
         );
+    }
+
+    #[test]
+    fn a_padded_root_is_used_exactly_as_configured() {
+        // Spaces are legal in a POSIX path, so a value that is not blank must
+        // survive verbatim — trimming it would resolve somewhere the operator
+        // never named.
+        for padded in [" /srv/oh ", "/srv/oh ", " /srv/oh", "/srv/my oh"] {
+            let resolved = resolve(Some(padded), Path::new("/data"));
+            assert_eq!(
+                resolved.root(),
+                Path::new(padded),
+                "{padded:?} must not be rewritten"
+            );
+            assert_eq!(resolved.source(), RootSource::Env);
+        }
     }
 
     #[test]
