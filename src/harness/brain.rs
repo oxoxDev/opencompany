@@ -1771,7 +1771,7 @@ impl HarnessBrain {
     ) -> Result<delegation::DelegationOutcome> {
         let run_turn = HarnessRunTurn::new(&self.pool, &self.deps);
         self.delegation_runner(&run_turn)
-            .run_delegation(delegation, chat_id)
+            .run_delegation(delegation, chat_id, false)
             .await
     }
 
