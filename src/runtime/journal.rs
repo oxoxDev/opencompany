@@ -112,6 +112,26 @@ enum JournalRecord {
         /// `#[serde(default)]` is what lets a pre-#379 line replay.
         #[serde(default)]
         thread: Option<String>,
+        /// Which **cycle** parked it (issue #469) — the turn key.
+        ///
+        /// The three keys above all answer "what is this approval about". This
+        /// one answers "what is waiting on it", and only it can: a single turn
+        /// can park several calls, and each of the others is either shared by
+        /// turns that are not blocked on each other (a thread hosts many turns)
+        /// or absent for the case that matters most (a chat turn has no card and
+        /// no run).
+        ///
+        /// Without it, resolving four sign-offs from one turn re-ran that turn
+        /// four times, because nothing could say the four belonged together.
+        /// With it, the runtime holds the continuation until the last of a
+        /// turn's approvals is decided and then runs it once — see
+        /// [`ContinuationQueue`](crate::runtime::continuation::ContinuationQueue).
+        ///
+        /// `None` means a line written before this field existed, and falls back
+        /// to the pre-#469 behaviour of continuing that approval on its own.
+        /// `#[serde(default)]` is what lets those lines replay.
+        #[serde(default)]
+        cycle: Option<String>,
     },
     /// A parked approval that has since been resolved (approved or denied).
     ApprovalResolved {
@@ -294,6 +314,13 @@ pub struct ApprovalOrigin {
     /// still recoverable — which is what lets a follow-up cycle's own re-park
     /// stay in the channel the first sign-off was asked in.
     pub thread: Option<String>,
+    /// The **turn** that parked it: the id of the parking cycle (issue #469).
+    ///
+    /// The key that groups the several approvals one turn can raise, so the
+    /// turn is continued once — after the last of them is decided — instead of
+    /// once per decision. `None` for a pre-#469 journal line, which continues
+    /// on its own exactly as it used to.
+    pub cycle: Option<String>,
 }
 
 /// One approval currently waiting in the in-memory queue.
@@ -306,6 +333,10 @@ struct ParkedApproval {
     /// The chat thread that parked it (issue #379); `None` when no conversation
     /// produced it, or on a pre-#379 line.
     thread: Option<String>,
+    /// The turn that parked it (issue #469); `None` on a pre-#469 line. Held on
+    /// the live entry, not only in `origins`, because recovery has to re-arm the
+    /// continuation queue from exactly the approvals that are *still* waiting.
+    cycle: Option<String>,
 }
 
 /// A side effect that was **committed to run** (issue #351): what it was, which
@@ -620,6 +651,7 @@ impl RuntimeJournal {
                 at_millis,
                 task,
                 thread,
+                cycle,
             } => {
                 state.retain_approval_effect(&id, &effect);
                 state.origins.insert(
@@ -630,6 +662,7 @@ impl RuntimeJournal {
                         task: task.clone(),
                         run_id: effect.run_id.clone(),
                         thread: thread.clone(),
+                        cycle: cycle.clone(),
                     },
                 );
                 state.parked.insert(
@@ -639,6 +672,7 @@ impl RuntimeJournal {
                         at_millis,
                         task,
                         thread,
+                        cycle,
                     },
                 );
             }
@@ -726,6 +760,11 @@ impl RuntimeJournal {
     /// this" from "this host does not record conversations". Both mean no
     /// channel owns the approval, and both correctly leave it on the Approvals
     /// page alone.
+    ///
+    /// `cycle` is the parking turn (issue #469), and is what lets the runtime
+    /// continue a turn once rather than once per approval it raised. `Option`
+    /// on the same terms as `thread`: absent means "this host did not record a
+    /// turn", which falls back to continuing the approval on its own.
     pub async fn record_parked(
         &self,
         id: &ApprovalId,
@@ -733,6 +772,7 @@ impl RuntimeJournal {
         at_millis: u64,
         task: TaskLink,
         thread: Option<String>,
+        cycle: Option<String>,
     ) -> Result<()> {
         {
             let mut state = self.state.lock().expect("journal state poisoned");
@@ -744,6 +784,7 @@ impl RuntimeJournal {
                     task: Some(task.clone()),
                     run_id: effect.run_id.clone(),
                     thread: thread.clone(),
+                    cycle: cycle.clone(),
                 },
             );
             state.parked.insert(
@@ -753,6 +794,7 @@ impl RuntimeJournal {
                     at_millis,
                     task: Some(task.clone()),
                     thread: thread.clone(),
+                    cycle: cycle.clone(),
                 },
             );
             state.retain_approval_effect(id, effect);
@@ -763,8 +805,44 @@ impl RuntimeJournal {
             at_millis,
             task: Some(task),
             thread,
+            cycle,
         })
         .await
+    }
+
+    /// The turn key of every approval **still parked**, one entry per approval
+    /// (issue #469).
+    ///
+    /// Read once, at recovery, to re-arm the
+    /// [`ContinuationQueue`](crate::runtime::continuation::ContinuationQueue):
+    /// a restart in the middle of a partly-decided turn must come back still
+    /// knowing that turn is blocked, or its continuation would either fire early
+    /// or never fire at all. Approvals with no turn key (pre-#469 lines) are
+    /// omitted — they continue on their own and are never gated.
+    pub fn parked_turns(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .parked
+            .values()
+            .filter_map(|p| p.cycle.clone())
+            .collect()
+    }
+
+    /// The turn that parked `id`, if it is one this journal recorded
+    /// (issue #469).
+    ///
+    /// Two levels of absence, and they mean different things — the same shape
+    /// [`approval_thread`](Self::approval_thread) uses. `None`: nothing was ever
+    /// parked under this id. `Some(None)`: parked, by a line written before the
+    /// turn key existed.
+    pub fn approval_cycle(&self, id: &ApprovalId) -> Option<Option<String>> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .origins
+            .get(id)
+            .map(|o| o.cycle.clone())
     }
 
     /// The effect an approval was parked with, payload scrubbed (issue #351).
@@ -1417,6 +1495,7 @@ mod test {
                 1_000,
                 TaskLink::Task { id: "t-1".into() },
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1479,7 +1558,7 @@ mod test {
         };
 
         journal
-            .record_parked(&id, &parked, 1_000, TaskLink::Unlinked, None)
+            .record_parked(&id, &parked, 1_000, TaskLink::Unlinked, None, None)
             .await
             .unwrap();
         journal.record_resolved(&id).await.unwrap();
@@ -1521,6 +1600,7 @@ mod test {
                 1_000,
                 TaskLink::Unlinked,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1552,7 +1632,7 @@ mod test {
         let journal = RuntimeJournal::new(&path);
         let id = ApprovalId::new("appr-1");
         journal
-            .record_parked(&id, &effect(), now_millis(), TaskLink::Unlinked, None)
+            .record_parked(&id, &effect(), now_millis(), TaskLink::Unlinked, None, None)
             .await
             .unwrap();
         assert_eq!(journal.pending().len(), 1);
@@ -1595,6 +1675,7 @@ mod test {
                 1_000,
                 TaskLink::Task { id: "t-1".into() },
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1605,12 +1686,13 @@ mod test {
                 1_100,
                 TaskLink::Task { id: "t-2".into() },
                 None,
+                None,
             )
             .await
             .unwrap();
         // No card behind it (a workflow delivery, an operator-chat turn).
         journal
-            .record_parked(&orphan, &effect(), 1_200, TaskLink::Unlinked, None)
+            .record_parked(&orphan, &effect(), 1_200, TaskLink::Unlinked, None, None)
             .await
             .unwrap();
 
@@ -1638,6 +1720,7 @@ mod test {
                 task: Some(TaskLink::Task { id: "t-1".into() }),
                 run_id: None,
                 thread: None,
+                cycle: None,
             }),
         );
         assert_eq!(
@@ -1690,7 +1773,7 @@ mod test {
         // fact, written explicitly, and must not read back as the legacy shape.
         let fresh = ApprovalId::new("appr-new");
         journal
-            .record_parked(&fresh, &effect(), 5_000, TaskLink::Unlinked, None)
+            .record_parked(&fresh, &effect(), 5_000, TaskLink::Unlinked, None, None)
             .await
             .unwrap();
         assert_eq!(
@@ -1758,6 +1841,7 @@ mod test {
                 5_000,
                 TaskLink::Unlinked,
                 Some("desk-finance".to_string()),
+                None,
             )
             .await
             .unwrap();
@@ -1806,7 +1890,7 @@ mod test {
         let journal = RuntimeJournal::new(&path);
         let id = ApprovalId::new("appr-exp");
         journal
-            .record_parked(&id, &effect(), now_millis(), TaskLink::Unlinked, None)
+            .record_parked(&id, &effect(), now_millis(), TaskLink::Unlinked, None, None)
             .await
             .unwrap();
         assert_eq!(journal.pending().len(), 1);
@@ -1830,7 +1914,7 @@ mod test {
         let journal = RuntimeJournal::new(&path);
         let id = ApprovalId::new("appr-amend");
         journal
-            .record_parked(&id, &effect(), now_millis(), TaskLink::Unlinked, None)
+            .record_parked(&id, &effect(), now_millis(), TaskLink::Unlinked, None, None)
             .await
             .unwrap();
 
@@ -1871,11 +1955,11 @@ mod test {
         let resolved = ApprovalId::new("appr-resolved");
         let expired = ApprovalId::new("appr-expired");
         journal
-            .record_parked(&resolved, &effect(), 1_000, TaskLink::Unlinked, None)
+            .record_parked(&resolved, &effect(), 1_000, TaskLink::Unlinked, None, None)
             .await
             .unwrap();
         journal
-            .record_parked(&expired, &effect(), 2_000, TaskLink::Unlinked, None)
+            .record_parked(&expired, &effect(), 2_000, TaskLink::Unlinked, None, None)
             .await
             .unwrap();
 
@@ -2100,6 +2184,7 @@ mod test {
                 500,
                 TaskLink::Unlinked,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -2130,7 +2215,7 @@ mod test {
 
         let parked_id = ApprovalId::new("appr-parked");
         journal
-            .record_parked(&parked_id, &effect(), 500, TaskLink::Unlinked, None)
+            .record_parked(&parked_id, &effect(), 500, TaskLink::Unlinked, None, None)
             .await
             .unwrap();
         journal

@@ -700,7 +700,19 @@ impl DeliveryParking {
         let approval_id = self.approvals.park(company, effect.clone()).await?;
         if let Err(err) = self
             .journal
-            .record_parked(&approval_id, &effect, now_millis(), task_link, thread)
+            .record_parked(
+                &approval_id,
+                &effect,
+                now_millis(),
+                task_link,
+                thread,
+                // No turn key (issue #469): a workflow node's request is not
+                // raised by a cycle, so there is no turn holding a continuation
+                // for it. It resolves and continues on its own, exactly as it
+                // always has — the gate only ever groups approvals a single
+                // cycle parked together.
+                None,
+            )
             .await
         {
             // Roll back to "never parked". Both steps deliberately swallow their

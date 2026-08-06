@@ -4156,6 +4156,7 @@ async fn task_timeline_reports_the_wait_an_approval_actually_caused() {
             parked_at,
             TaskLink::Task { id: "t-1".into() },
             None,
+            None,
         )
         .await
         .unwrap();
@@ -4238,6 +4239,7 @@ async fn expired_approval_is_labelled_as_an_expiry_and_carries_its_wait() {
             parked_at,
             TaskLink::Task { id: "t-1".into() },
             None,
+            None,
         )
         .await
         .unwrap();
@@ -4292,6 +4294,7 @@ async fn a_wait_that_began_before_dispatch_is_clamped_to_the_run_window() {
             &parked_effect(),
             dispatched_at - 3_600_000,
             TaskLink::Task { id: "t-1".into() },
+            None,
             None,
         )
         .await
@@ -4353,6 +4356,7 @@ async fn a_currently_parked_approval_surfaces_as_a_live_wait() {
             &parked_effect(),
             parked_at,
             TaskLink::Task { id: "t-1".into() },
+            None,
             None,
         )
         .await
@@ -4455,6 +4459,7 @@ async fn a_parked_approval_appears_on_its_own_task() {
             parked_at,
             TaskLink::Task { id: "t-1".into() },
             None,
+            None,
         )
         .await
         .unwrap();
@@ -4542,6 +4547,7 @@ async fn a_second_task_in_the_same_window_does_not_absorb_the_first_s_approvals(
                 dispatched_at + 5,
                 TaskLink::Task { id: owner.into() },
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -4617,6 +4623,7 @@ async fn a_resolved_approval_reports_its_verdict_and_wait_on_the_tab() {
             parked_at,
             TaskLink::Task { id: "t-1".into() },
             None,
+            None,
         )
         .await
         .unwrap();
@@ -4687,6 +4694,7 @@ async fn a_task_with_no_approvals_of_its_own_reports_an_empty_list() {
                 id: "t-other".into(),
             },
             None,
+            None,
         )
         .await
         .unwrap();
@@ -4732,6 +4740,7 @@ async fn an_unlinked_approval_is_not_absorbed_by_the_running_card() {
             &parked_effect(),
             dispatched_at + 5,
             TaskLink::Unlinked,
+            None,
             None,
         )
         .await
@@ -4805,6 +4814,7 @@ async fn the_attempt_id_outranks_the_card_link_when_both_are_present() {
             dispatched_at + 5,
             TaskLink::Unlinked,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -4817,6 +4827,7 @@ async fn the_attempt_id_outranks_the_card_link_when_both_are_present() {
             &under_run("run-c"),
             dispatched_at + 6,
             TaskLink::Task { id: "t-1".into() },
+            None,
             None,
         )
         .await
