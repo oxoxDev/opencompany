@@ -33,6 +33,7 @@ use crate::ports::tasks::COLUMN_TODO;
 use crate::ports::types::{CompanyId, CompanyRecord, OutboundMessage, TurnStep};
 use crate::ports::{TaskRecord, TaskStore, generate_id, now_millis};
 use crate::runtime::assignee;
+use crate::runtime::cycle::OPEN_WORK_ANNOTATION;
 
 /// One agent turn, abstracted so delegation orchestration never touches the
 /// harness-specific [`HarnessDeps`](crate::harness::HarnessDeps).
@@ -294,6 +295,16 @@ impl<'a> DelegationRunner<'a> {
         // responder's turn (metered behind the `RunTurn` impl), then drain
         // whatever it queued.
         self.queue.clear();
+        // Issue #442, path one: a desk lead or teammate asked DIRECTLY carries
+        // no delegation tools — the card-opening tools are wired only onto the
+        // orchestrator — so it has no way to open a card even if it wanted one
+        // and does the only thing available: the work itself, inline, untracked.
+        // Opening the card here, before their turn, is what closes that path:
+        // the tracking decision stops depending on which agent answered or which
+        // tools it happens to carry.
+        let mut direct_card = self
+            .open_direct_work_card(responder, message, chat_id)
+            .await?;
         let outcome = self
             .run_turn
             .run(self.company, responder, message, chat_id)
@@ -303,6 +314,16 @@ impl<'a> DelegationRunner<'a> {
         // case the relay turn's reply replaces it (below).
         let mut operator_steps = outcome.steps;
         let mut operator_reply = outcome.reply;
+        // Settle the direct-answer card from the turn that just ran. Done before
+        // the delegation drain because a direct responder queues nothing — it
+        // has no delegation tools — so there is no relay turn coming that could
+        // change the answer this card records.
+        let mut direct_card_id = None;
+        if let Some(card) = direct_card.as_mut() {
+            self.settle_work_card(card, responder, TaskRunEnd::Completed, &operator_reply)
+                .await?;
+            direct_card_id = Some(card.id.clone());
+        }
         // A `spawn_task` opens a card silently; a `delegate_to_desk` runs the desk
         // lead and hands its answer back to RELAY rather than surfacing as a
         // disconnected sibling bubble. Any future delegation that surfaces its own
@@ -314,7 +335,7 @@ impl<'a> DelegationRunner<'a> {
         // it the FIRST — a later spawn must not overwrite the id an earlier one
         // already claimed, or the reported card would be whichever the model
         // happened to queue last.
-        let mut spawned_task: Option<String> = None;
+        let mut spawned_task: Option<String> = direct_card_id;
         for delegation in self.queue.drain(self.max_delegations) {
             let out = self.run_delegation(delegation, chat_id).await?;
             if let Some(id) = out.spawned_task {
@@ -342,9 +363,52 @@ impl<'a> DelegationRunner<'a> {
                 .run_turn
                 .run(self.company, responder, &relay_prompt, chat_id)
                 .await?;
-            // Discard anything the relay turn queued — it can only relay, never
-            // re-delegate.
-            let _ = self.queue.drain(self.max_delegations);
+            // The relay turn may only relay — a second hand-off from here is the
+            // re-delegation loop this drain exists to stop, and it is dropped.
+            //
+            // But dropping *everything* was over-broad (issue #442): a card the
+            // relay turn opened is not a re-delegation, it is the orchestrator
+            // deciding — having now seen what came back — that this should be
+            // tracked. Discarding that meant a card could be lost purely because
+            // the turn that wanted it happened to be a relay, which is invisible
+            // from the operator's side. Board writes are executed; hand-offs are
+            // still dropped, so the bound stays exactly one extra turn.
+            for delegation in self.queue.drain(self.max_delegations) {
+                if let Delegation::DelegateToDesk { desk, .. } = &delegation {
+                    tracing::debug!(
+                        company = %self.company,
+                        desk = %desk,
+                        "[delegation] dropped a hand-off queued by the relay turn: a relay may only \
+                         relay"
+                    );
+                    continue;
+                }
+                let out = self.run_delegation(delegation, chat_id).await?;
+                if let Some(id) = out.spawned_task {
+                    spawned_task.get_or_insert(id);
+                }
+                if let Some(bubble) = out.bubble {
+                    bubbles.push(bubble);
+                }
+            }
+            // A hand-off the relay turn's tool refused is dropped with the
+            // hand-offs themselves — there is no card in scope to record it on,
+            // and the drain would otherwise leak it into the next turn.
+            //
+            // Dropped, but not in silence. `push_refusal` exists precisely so
+            // the board carries the fact independently of what the turn says
+            // about it (issue #272); on this one path that independent record
+            // has nowhere to go, so the log is the record.
+            let refused = self.queue.drain_refusals(self.max_delegations);
+            if !refused.is_empty() {
+                tracing::warn!(
+                    company = %self.company,
+                    refused = refused.len(),
+                    "[delegation] the relay turn attempted hand-offs to desks this company does not \
+                     have; they are dropped with the relay's other delegations and recorded nowhere \
+                     but here"
+                );
+            }
             operator_reply = relay.reply;
             operator_steps.extend(relay.steps);
         }
@@ -510,6 +574,164 @@ impl<'a> DelegationRunner<'a> {
         Ok(handoff)
     }
 
+    /// Opens the board card that tracks a piece of work, **before** the turn
+    /// that does it runs (issue #442).
+    ///
+    /// This is the whole fix in one method: the card is opened by the runner as
+    /// a structural consequence of work being handed to an agent, rather than
+    /// by the model happening to reach for the card-shaped tool. Every caller
+    /// that is about to run somebody's turn goes through here first, so there is
+    /// no path on which work starts and the board stays empty.
+    ///
+    /// Returns `None` — no card, nothing to settle — in exactly four cases:
+    ///
+    /// * **no task store wired**, the silent no-op every task path on this seam
+    ///   takes;
+    /// * **already inside a dispatched card** (`for_task`), which is the card;
+    ///   opening a second one would double-count one piece of work;
+    /// * **nothing substantial was asked** — see [`is_trackable_work`]; this is
+    ///   the carve-out that keeps a trivial question from minting a card;
+    /// * the write failed, which propagates rather than returning `None`.
+    ///
+    /// The write goes through the [`TaskStore`] port rather than
+    /// `CompanyRuntime::upsert_task`, so landing the card straight in
+    /// [`COLUMN_IN_PROGRESS`](lifecycle::COLUMN_IN_PROGRESS) cannot re-fire the
+    /// `column → in_progress` dispatch edge — the agent is already running it.
+    async fn open_work_card(
+        &self,
+        assignee: &str,
+        request: &str,
+        chat_id: Option<&str>,
+    ) -> Result<Option<TaskRecord>> {
+        let Some(tasks) = self.tasks else {
+            return Ok(None);
+        };
+        if self.task.is_some() {
+            return Ok(None);
+        }
+        // What the operator actually asked for, without the open-work briefing
+        // the cycle appends to a desk-addressed message. Everything below reads
+        // this rather than `request`: the decision, the title, and the note —
+        // a card whose title was half a listing of other cards is the same bug
+        // wearing a different hat.
+        let request = operator_words(request).trim();
+        if !is_trackable_work(request) {
+            tracing::debug!(
+                company = %self.company,
+                assignee = %assignee,
+                "[delegation] not opening a card: nothing substantial was asked"
+            );
+            return Ok(None);
+        }
+        let card = TaskRecord {
+            id: generate_id(),
+            title: card_title(request),
+            note: Some(append_note(None, "operator", request)),
+            // The agent runs it in this turn, so the board shows it in progress
+            // while that happens — the same window `hand_card_over` opens for a
+            // dispatched card's delegate.
+            column: lifecycle::COLUMN_IN_PROGRESS.to_string(),
+            priority: "medium".to_string(),
+            assignee: assignee.to_string(),
+            updated_at_millis: now_millis(),
+            origin_chat_id: chat_id.map(str::to_string),
+            parent_task_id: None,
+            output: None,
+            plan: None,
+        };
+        tasks.upsert(self.company, &card).await?;
+        tracing::debug!(
+            company = %self.company,
+            task_id = %card.id,
+            assignee = %assignee,
+            "[delegation] opened a card for work handed to an agent"
+        );
+        Ok(Some(card))
+    }
+
+    /// The card for a **desk lead or teammate asked directly** (issue #442,
+    /// path one), or `None` when this turn is not that.
+    ///
+    /// The orchestrator's own chat turn is deliberately excluded. It is the
+    /// operator's front door — every message arrives there, most of them are
+    /// answered in a line, and tracking all of them would bury the board. What
+    /// the orchestrator does with work is *hand it off*, and each hand-off opens
+    /// its own card in [`run_delegation`](Self::run_delegation). A desk thread
+    /// or a teammate DM is the opposite case: nothing downstream of it opens a
+    /// card, because the agent answering carries no tool that could.
+    ///
+    /// # It defers to the card the chat handler already opened
+    ///
+    /// The REST chat handler runs
+    /// [`detect_task_intent`](crate::company::task_intent::detect_task_intent)
+    /// over the same message **before** the cycle starts, and opens a To-do card
+    /// when it reads as a leading imperative ("draft the launch plan"). That is
+    /// the deterministic half that already existed; #442 is about everything it
+    /// does not catch. So when it has already fired, this opens nothing — one
+    /// message must not become two cards.
+    ///
+    /// Found live: without this, three consecutive desk messages opened four
+    /// cards, one of them a duplicate of the request beside it. The two
+    /// detectors are deliberately not merged here — they answer different
+    /// questions with opposite defaults (that one asks "is this unambiguously an
+    /// instruction?", this one asks "is there any reason NOT to track it?") —
+    /// but exactly one of them may open the card.
+    async fn open_direct_work_card(
+        &self,
+        responder: &str,
+        message: &str,
+        chat_id: Option<&str>,
+    ) -> Result<Option<TaskRecord>> {
+        if responder == self.orchestrator_id() {
+            return Ok(None);
+        }
+        // The same input the chat handler classified: it saw the operator's text
+        // before the cycle appended its open-work briefing.
+        if crate::company::task_intent::detect_task_intent(operator_words(message)).is_some() {
+            tracing::debug!(
+                company = %self.company,
+                responder = %responder,
+                "[delegation] not opening a card: the chat handler already opened one for this \
+                 message"
+            );
+            return Ok(None);
+        }
+        self.open_work_card(responder, message, chat_id).await
+    }
+
+    /// Settles a card [`open_work_card`](Self::open_work_card) opened, once the
+    /// turn it was tracking has ended.
+    ///
+    /// The landing column comes from [`lifecycle::landing_column`] like every
+    /// other settle on this seam, so a card opened by construction is finished
+    /// by the same rule as one that came off the board: a produced answer stops
+    /// in In Review for a person, a cancelled run goes back to To-do.
+    async fn settle_work_card(
+        &self,
+        card: &mut TaskRecord,
+        responder: &str,
+        end: TaskRunEnd,
+        body: &str,
+    ) -> Result<()> {
+        card.note = Some(append_note(
+            card.note.as_deref(),
+            &lifecycle::note_attribution(end, responder),
+            body,
+        ));
+        card.column = lifecycle::landing_column(end).to_string();
+        card.updated_at_millis = now_millis();
+        if let Some(tasks) = self.tasks {
+            tasks.upsert(self.company, card).await?;
+        }
+        tracing::debug!(
+            company = %self.company,
+            task_id = %card.id,
+            column = %card.column,
+            "[delegation] settled the card opened for this turn"
+        );
+        Ok(())
+    }
+
     /// Reassigns a dispatched card to the delegate taking it over and persists
     /// it, so the board shows them working it *while* they work rather than
     /// only once they are done (issue #204).
@@ -626,6 +848,19 @@ impl<'a> DelegationRunner<'a> {
                     );
                     return Ok(DelegationOutcome::default());
                 };
+                // Issue #442, path two: the card is opened HERE, before the desk
+                // lead runs, as a consequence of work being handed off — not
+                // because the model reached for `spawn_task` instead of this
+                // tool. `spawn_task` and `delegate_to_desk` were both described
+                // to the model as delegation and only one of them touched the
+                // board, so a hand-off produced a real deliverable and left
+                // nothing behind. Both now do.
+                //
+                // Nothing is opened when the drain is already running inside a
+                // dispatched card (that card *is* the tracking, and #204 hands it
+                // over to this delegate below) or when the instruction is not a
+                // piece of work — see `is_trackable_work`.
+                let mut card = self.open_work_card(&member, &instruction, chat_id).await?;
                 // Register the delegated turn so an operator can CANCEL it
                 // mid-flight (cancel-only in v1 — pause/redirect are rejected at
                 // the route). RAII guard deregisters on every exit path.
@@ -662,10 +897,28 @@ impl<'a> DelegationRunner<'a> {
                 // has to explain the empty result can name the cause instead of
                 // guessing at it (issue #213 review).
                 if matches!(control.take(), Some(SteerAction::Cancel)) {
+                    // The card this hand-off opened outlives the cancellation:
+                    // settling it returns it to To-do with the cancellation on
+                    // its note, so an operator sees the work was asked for and
+                    // stopped rather than the card vanishing with the reply.
+                    if let Some(card) = card.as_mut() {
+                        self.settle_work_card(
+                            card,
+                            &member,
+                            TaskRunEnd::Cancelled,
+                            "the run was cancelled mid-flight",
+                        )
+                        .await?;
+                    }
                     return Ok(DelegationOutcome {
                         cancelled: true,
+                        spawned_task: card.map(|c| c.id),
                         ..DelegationOutcome::default()
                     });
+                }
+                if let Some(card) = card.as_mut() {
+                    self.settle_work_card(card, &member, TaskRunEnd::Completed, &outcome.reply)
+                        .await?;
                 }
                 // Hand the teammate's answer back to RELAY through a second
                 // orchestrator turn (the CEO-relay hand-back). Their steps ride
@@ -678,7 +931,12 @@ impl<'a> DelegationRunner<'a> {
                         steps: outcome.steps,
                     }),
                     cancelled: false,
-                    spawned_task: None,
+                    // Issue #442: the hand-off's own card, reported the same way
+                    // a `spawn_task` reports its card — so the operator bubble
+                    // says a card was opened whichever hand-off the orchestrator
+                    // chose. This is the field the console's "Card opened" chip
+                    // renders from.
+                    spawned_task: card.map(|c| c.id),
                 })
             }
             // ── Issue #186 part b: orchestrator lifecycle authority ─────────
@@ -845,5 +1103,883 @@ fn append_note(prev: Option<&str>, responder: &str, body: &str) -> String {
     match prev.filter(|p| !p.is_empty()) {
         Some(p) => format!("{p}\n\n{block}"),
         None => block,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Is this substantial enough to be tracked? (issue #442)
+// ---------------------------------------------------------------------------
+//
+// A card is the DEFAULT for anything substantial. That is the whole product
+// promise — ask for something, watch it become work with an output you can open
+// — and #442 is what happens when it is not: an agent reads a repository,
+// writes the file you asked for, and the board stays empty because the work only
+// ever existed as a conversation.
+//
+// So this is not a "should I open a card?" judgement handed to the model. It is
+// a **carve-out**: everything is tracked unless there is positive evidence that
+// nothing was asked for. The bias is deliberate and one-directional — a
+// spurious card is visible on the board and can be dismissed in one click; a
+// missing card is invisible, and every downstream station (planning, the
+// prerequisite check, the gate, the settled-run mover, the deliverable link)
+// hangs off it.
+
+/// Past this many words, a request is substantial no matter what it says. A
+/// genuinely trivial question is short; nothing this long is "just asking".
+const TRACK_ALWAYS_WORDS: usize = 25;
+
+/// The longest an utterance opening with small talk may run before it stops
+/// being small talk. "thanks!" is chatter; "thanks — now pull together the Q3
+/// numbers, the deck and the board memo" is not.
+const SMALLTALK_MAX_WORDS: usize = 6;
+
+/// Verbs that name something being **produced or changed**. Their presence is
+/// decisive: whatever else the sentence is doing, it is asking for work.
+///
+/// Deliberately excludes words that are far more often nouns in this domain —
+/// `build`, `report`, `plan`, `review`, `design`, `check`, `update`, `test` —
+/// because "what's the status of the build?" is a question, not a request, and
+/// a classifier that mints a card for it is the fix becoming its own bug.
+const WORK_VERBS: &[&str] = &[
+    "analyse",
+    "analyze",
+    "assemble",
+    "audit",
+    "author",
+    "collate",
+    "compile",
+    "compose",
+    "draft",
+    "implement",
+    "investigate",
+    "migrate",
+    "prepare",
+    "produce",
+    "refactor",
+    "rewrite",
+    "summarise",
+    "summarize",
+    "write",
+];
+
+/// Wh-words that open a request **to know** rather than a request to do. Only
+/// the unambiguous ones: `do` / `can` / `is` open questions *and* imperatives
+/// ("do the quarterly close"), so they are read as interrogative only when the
+/// text actually ends in a question mark.
+const INTERROGATIVE_OPENERS: &[&str] = &[
+    "what", "who", "whom", "whose", "when", "where", "which", "why", "how",
+];
+
+/// Openers that mark an utterance as conversation rather than a request.
+const SMALLTALK_OPENERS: &[&str] = &[
+    "hi",
+    "hello",
+    "hey",
+    "yo",
+    "morning",
+    "afternoon",
+    "evening",
+    "gm",
+    "thanks",
+    "thank",
+    "thx",
+    "ty",
+    "cheers",
+    "ok",
+    "okay",
+    "k",
+    "cool",
+    "great",
+    "nice",
+    "perfect",
+    "awesome",
+    "lovely",
+    "yes",
+    "yeah",
+    "yep",
+    "yup",
+    "no",
+    "nope",
+    "sure",
+    "noted",
+    "understood",
+    "bye",
+    "sounds",
+    "got",
+    "haha",
+    "lol",
+];
+
+/// The lowercase alphanumeric word tokens of `text`.
+///
+/// Splitting on every non-alphanumeric character is what makes `what's` open
+/// with `what` and `modules.md` two tokens — the classifier only ever asks
+/// *which words are present*, so over-splitting costs nothing and under-
+/// splitting would hide an opener behind an apostrophe.
+fn work_words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// The operator's own words, with anything the cycle appended stripped off.
+///
+/// A desk-addressed operator message does not reach the brain as typed: the
+/// cycle folds a briefing of the target's open cards onto the end of it
+/// ([`OPEN_WORK_ANNOTATION`]) so a direct "what are you working on?" is answered
+/// truthfully. Everything downstream that reasons about *what the operator
+/// asked for* has to cut that off first.
+///
+/// Found live, not by a unit test: without this, "thanks!" in a desk thread
+/// scored as a substantial request — the appended card list is long, and length
+/// is evidence of substance — and opened a card. Which then lengthened the
+/// briefing on the next message. Each card made the next one likelier.
+///
+/// Splits on the shared constant rather than a transcribed copy of it, so the
+/// two sides cannot drift.
+pub(crate) fn operator_words(message: &str) -> &str {
+    match message.find(OPEN_WORK_ANNOTATION) {
+        Some(at) => &message[..at],
+        None => message,
+    }
+}
+
+/// Whether `text` asks for something substantial enough that the board should
+/// carry it — the single decision behind every card this seam opens by
+/// construction (issue #442).
+///
+/// Reads as a ladder of carve-outs over a `true` default:
+///
+/// 1. **Nothing was said** — empty, or punctuation/emoji only. No work.
+/// 2. **Long** — past [`TRACK_ALWAYS_WORDS`]. Work.
+/// 3. **Names a deliverable** — any [`WORK_VERBS`] entry appears. Work.
+/// 4. **A plain question** — ends in `?`, or opens with a wh-word. No work.
+/// 5. **Small talk** — opens with a greeting/acknowledgement and stays short.
+///    No work.
+/// 6. **Anything else** — work.
+///
+/// Rung 3 runs before rung 4 on purpose: "can you write up the Q3 numbers?" is
+/// a question in shape and a request for work in substance, and the substance
+/// wins. The known cost is that a genuine question *about* a deliverable
+/// ("what should I write here?") is tracked. That is the bias pointing the way
+/// it was chosen to point.
+pub(crate) fn is_trackable_work(text: &str) -> bool {
+    let trimmed = text.trim();
+    let words = work_words(trimmed);
+    if words.is_empty() {
+        return false;
+    }
+    if words.len() > TRACK_ALWAYS_WORDS {
+        return true;
+    }
+    if words.iter().any(|w| WORK_VERBS.contains(&w.as_str())) {
+        return true;
+    }
+    if trimmed.ends_with('?') || INTERROGATIVE_OPENERS.contains(&words[0].as_str()) {
+        return false;
+    }
+    if words.len() <= SMALLTALK_MAX_WORDS && SMALLTALK_OPENERS.contains(&words[0].as_str()) {
+        return false;
+    }
+    true
+}
+
+/// How many characters of a request survive into the card's title.
+const TITLE_CHARS: usize = 80;
+
+/// A one-line card title from the request that opened it.
+///
+/// Collapses whitespace, then truncates on a **character** boundary — never a
+/// byte one — and prefers the last whole word so a title never breaks mid-word.
+/// The ellipsis is budgeted inside [`TITLE_CHARS`], so the result is never
+/// longer than the cap it advertises.
+fn card_title(text: &str) -> String {
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= TITLE_CHARS {
+        return one_line;
+    }
+    let head: String = one_line.chars().take(TITLE_CHARS - 1).collect();
+    let head = match head.rsplit_once(' ') {
+        Some((whole, _)) if !whole.is_empty() => whole,
+        _ => head.as_str(),
+    };
+    format!("{head}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use crate::ports::TaskStore;
+    use crate::ports::tasks::{COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_TODO};
+    use crate::ports::types::LedgerEntry;
+    use crate::store::FsOps;
+
+    // ── the substantial / trivial line (issue #442) ──────────────────────────
+
+    /// A card is the default. Anything that asks for something to be produced,
+    /// or that is too long to be "just asking", is tracked.
+    #[test]
+    fn a_request_for_work_is_tracked() {
+        for request in [
+            "Read the pricing repository and write a summary of its module layout to modules.md",
+            "draft the Q3 board memo",
+            "Can you write up the revenue numbers for me?",
+            "investigate why the nightly job keeps timing out",
+            "prepare the onboarding pack for the two new hires",
+            "do the quarterly close",
+            "pull the last six months of churn out of the warehouse and tell me what changed, \
+             then take a view on whether the pricing move in April is the cause",
+        ] {
+            assert!(is_trackable_work(request), "should be tracked: {request:?}");
+        }
+    }
+
+    /// The constraint that stops the fix becoming its own bug: asking a question
+    /// is not commissioning work, and must not mint a card.
+    #[test]
+    fn a_trivial_question_is_not_tracked() {
+        for question in [
+            "what's our runway?",
+            "What's the status of the build?",
+            "who leads the engineering desk",
+            "how many cards are in review?",
+            "which workflows do we have?",
+            "why did that fail?",
+            "is the deploy done?",
+        ] {
+            assert!(
+                !is_trackable_work(question),
+                "should NOT be tracked: {question:?}"
+            );
+        }
+    }
+
+    /// Neither is small talk, which is most of what actually lands in a desk
+    /// thread between pieces of work.
+    #[test]
+    fn small_talk_is_not_tracked() {
+        for chatter in [
+            "hi",
+            "hello there",
+            "hey, how's it going",
+            "thanks!",
+            "thank you, that's perfect",
+            "ok",
+            "sounds good to me",
+            "got it",
+            "",
+            "   ",
+            "👍",
+        ] {
+            assert!(
+                !is_trackable_work(chatter),
+                "should NOT be tracked: {chatter:?}"
+            );
+        }
+    }
+
+    /// Small talk that turns into a request stops being small talk — the opener
+    /// is not a licence to skip the board for whatever follows it.
+    #[test]
+    fn a_greeting_in_front_of_a_request_does_not_hide_it() {
+        assert!(is_trackable_work("hi — please draft the investor update"));
+        assert!(is_trackable_work(
+            "thanks! now write that up as a one-pager"
+        ));
+    }
+
+    /// The bias is one-directional and deliberate: an unclassifiable request
+    /// falls through to *tracked*, because a spurious card is visible and a
+    /// missing one is not.
+    #[test]
+    fn an_ambiguous_request_falls_through_to_tracked() {
+        assert!(is_trackable_work("look into the churn spike"));
+        assert!(is_trackable_work("the quarterly numbers, by Friday"));
+    }
+
+    /// The bug live testing found and the unit tests above could not: a
+    /// desk-addressed message reaches this seam with the cycle's open-work
+    /// briefing already appended, so "thanks!" arrived as a long block of card
+    /// titles and scored as substantial work.
+    ///
+    /// Self-amplifying, which is what made it worse than a stray card: every
+    /// card it opened lengthened the briefing on the next message, making the
+    /// next card likelier still. Three consecutive messages to one desk —
+    /// including "thanks!" — opened three cards on a live host.
+    ///
+    /// The input here is built from the **same constant** the cycle writes, so a
+    /// change to that wording fails this test rather than silently restoring the
+    /// bug.
+    #[test]
+    fn the_cycles_open_work_briefing_is_not_the_operators_request() {
+        let briefed = format!(
+            "thanks!{OPEN_WORK_ANNOTATION} (answer truthfully if asked what you are working \
+on):\n- Read the pricing repository and write a summary of its module layout\n- Draft the \
+investor update for the quarter\n]"
+        );
+        assert_eq!(operator_words(&briefed), "thanks!");
+        assert!(
+            !is_trackable_work(operator_words(&briefed)),
+            "small talk stays small talk however much context is folded onto it"
+        );
+        // The briefing is long and full of work verbs, so scoring the whole
+        // thing is what opened the card. This pins the failure it caused.
+        assert!(
+            is_trackable_work(&briefed),
+            "the unstripped message really does read as work — which is why the \
+             strip has to happen, not merely why it is tidy"
+        );
+        // An un-annotated message (the orchestrator's own thread) is untouched.
+        assert_eq!(operator_words("draft the memo"), "draft the memo");
+    }
+
+    /// A title never breaks a character in half (the byte-slice trap) and never
+    /// exceeds the cap it advertises — the ellipsis is budgeted inside it.
+    #[test]
+    fn a_card_title_is_bounded_and_utf8_safe() {
+        let long = "рынок ".repeat(60);
+        let title = card_title(&long);
+        assert!(title.chars().count() <= TITLE_CHARS, "{title}");
+        assert!(title.ends_with('…'), "{title}");
+        assert_eq!(card_title("  keep   it   short  "), "keep it short");
+    }
+
+    // ── harness ─────────────────────────────────────────────────────────────
+
+    /// One scripted turn: what the agent replies, what its turn queues onto the
+    /// shared delegation queue, and whether an operator cancels it mid-flight.
+    #[derive(Default)]
+    struct Turn {
+        reply: String,
+        queues: Vec<Delegation>,
+        cancel: bool,
+    }
+
+    impl Turn {
+        fn reply(reply: &str) -> Self {
+            Self {
+                reply: reply.to_string(),
+                ..Self::default()
+            }
+        }
+
+        fn queueing(reply: &str, queues: Vec<Delegation>) -> Self {
+            Self {
+                reply: reply.to_string(),
+                queues,
+                cancel: false,
+            }
+        }
+
+        fn cancelled(reply: &str) -> Self {
+            Self {
+                reply: reply.to_string(),
+                queues: Vec::new(),
+                cancel: true,
+            }
+        }
+    }
+
+    /// A [`RunTurn`] that plays a fixed script of turns and records who was
+    /// asked to run what, so a test can assert on the *sequence* of turns a
+    /// drain produced without a harness pool or a live model.
+    struct ScriptedTurns {
+        queue: DelegationQueue,
+        script: Mutex<VecDeque<Turn>>,
+        calls: Mutex<Vec<(String, String)>>,
+        /// The board as it looked at the START of each turn, so a test can prove
+        /// a card existed *while* an agent worked rather than only afterwards.
+        board_at_turn: Mutex<Vec<Vec<(String, String)>>>,
+        tasks: Arc<dyn TaskStore>,
+        company: CompanyId,
+    }
+
+    impl ScriptedTurns {
+        fn new(fx: &Fixture, turns: Vec<Turn>) -> Self {
+            Self {
+                queue: fx.queue.clone(),
+                script: Mutex::new(turns.into()),
+                calls: Mutex::new(Vec::new()),
+                board_at_turn: Mutex::new(Vec::new()),
+                tasks: fx.tasks.clone(),
+                company: fx.record.id.clone(),
+            }
+        }
+
+        /// `(agent_id, message)` for every turn run, in order.
+        fn calls(&self) -> Vec<(String, String)> {
+            self.calls.lock().expect("calls").clone()
+        }
+
+        /// `(assignee, column)` for every card on the board when turn `n`
+        /// started.
+        fn board_at_turn(&self, n: usize) -> Vec<(String, String)> {
+            self.board_at_turn.lock().expect("board")[n].clone()
+        }
+
+        async fn next(
+            &self,
+            agent_id: &str,
+            message: &str,
+            control: Option<&SteerControl>,
+        ) -> TurnOutcome {
+            self.calls
+                .lock()
+                .expect("calls")
+                .push((agent_id.to_string(), message.to_string()));
+            let board = self
+                .tasks
+                .list(&self.company)
+                .await
+                .expect("list cards")
+                .into_iter()
+                .map(|c| (c.assignee, c.column))
+                .collect();
+            self.board_at_turn.lock().expect("board").push(board);
+            let turn = self
+                .script
+                .lock()
+                .expect("script")
+                .pop_front()
+                .unwrap_or_else(|| panic!("unscripted turn: {agent_id} <- {message}"));
+            for delegation in turn.queues {
+                self.queue.push(delegation);
+            }
+            if turn.cancel
+                && let Some(control) = control
+            {
+                control.request(SteerAction::Cancel);
+            }
+            TurnOutcome {
+                reply: turn.reply,
+                steps: Vec::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl RunTurn for ScriptedTurns {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            agent_id: &str,
+            message: &str,
+            _chat_id: Option<&str>,
+        ) -> Result<TurnOutcome> {
+            Ok(self.next(agent_id, message, None).await)
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            agent_id: &str,
+            message: &str,
+            control: &SteerControl,
+            _chat_id: Option<&str>,
+            _run_sink: Option<Arc<RunTraceSink>>,
+        ) -> Result<TurnOutcome> {
+            Ok(self.next(agent_id, message, Some(control)).await)
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            agent_id: &str,
+            message: &str,
+            control: &SteerControl,
+            _run_sink: Option<Arc<RunTraceSink>>,
+        ) -> Result<TurnOutcome> {
+            Ok(self.next(agent_id, message, Some(control)).await)
+        }
+    }
+
+    /// `chief` is the orchestrator; `engineer` leads the `eng_desk` desk.
+    fn record() -> CompanyRecord {
+        let manifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "chief"
+role = "Chief of Staff"
+tier = "orchestrator"
+
+[[agent]]
+id = "engineer"
+role = "Engineer"
+
+[[group_chat]]
+id = "eng_desk"
+name = "Engineering"
+members = ["engineer"]
+"#,
+        )
+        .expect("valid manifest");
+        CompanyRecord {
+            id: CompanyId::new("acme"),
+            manifest,
+            ledger: Vec::<LedgerEntry>::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            template_provenance: None,
+        }
+    }
+
+    /// The wired pieces one drain needs: the company record, a real task store
+    /// over a temp dir, the shared queue, and the steer registry.
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        record: CompanyRecord,
+        tasks: Arc<dyn TaskStore>,
+        queue: DelegationQueue,
+        steer: InflightRegistry,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("tempdir");
+            Self {
+                tasks: Arc::new(FsOps::new(dir.path())) as Arc<dyn TaskStore>,
+                _dir: dir,
+                record: record(),
+                queue: DelegationQueue::default(),
+                steer: InflightRegistry::default(),
+            }
+        }
+
+        fn runner<'a>(&'a self, turns: &'a ScriptedTurns) -> DelegationRunner<'a> {
+            DelegationRunner::new(
+                turns,
+                &self.record,
+                Some(&self.tasks),
+                &self.steer,
+                &self.record.id,
+                &self.queue,
+                orchestrator::MAX_DELEGATIONS_PER_TURN,
+            )
+        }
+
+        async fn cards(&self) -> Vec<TaskRecord> {
+            self.tasks.list(&self.record.id).await.expect("list cards")
+        }
+    }
+
+    fn handoff(instruction: &str) -> Delegation {
+        Delegation::DelegateToDesk {
+            desk: "eng_desk".to_string(),
+            instruction: instruction.to_string(),
+        }
+    }
+
+    // ── path two: the orchestrator hands off ────────────────────────────────
+
+    /// The crux of #442. `delegate_to_desk` ran the desk lead's turn inline and
+    /// created no card at all, so a request that produced a real deliverable
+    /// left the board empty. The card is now opened by the runner as a
+    /// consequence of the hand-off — the model never chose it.
+    #[tokio::test]
+    async fn a_desk_hand_off_opens_a_card_by_construction() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::queueing(
+                    "on it",
+                    vec![handoff("Read the pricing repo and write modules.md")],
+                ),
+                Turn::reply("here is what engineering produced"),
+                Turn::reply("relayed"),
+            ],
+        );
+
+        let turn = fx
+            .runner(&turns)
+            .handle_operator_message("chief", "map out the pricing repo", Some("general"))
+            .await
+            .expect("operator message handled");
+
+        let cards = fx.cards().await;
+        assert_eq!(
+            cards.len(),
+            1,
+            "exactly one card for one hand-off: {cards:?}"
+        );
+        let card = &cards[0];
+        assert_eq!(
+            card.assignee, "engineer",
+            "the card belongs to the delegate"
+        );
+        assert_eq!(card.column, COLUMN_IN_REVIEW, "it settles for a person");
+        assert_eq!(card.origin_chat_id.as_deref(), Some("general"));
+        assert!(
+            card.note
+                .as_deref()
+                .unwrap_or_default()
+                .contains("engineer"),
+            "the delegate's answer is on the card: {:?}",
+            card.note
+        );
+        // And the operator's bubble says so, which is what renders the console's
+        // "Card opened" chip — the board and the conversation agree.
+        assert_eq!(turn.spawned_task.as_deref(), Some(card.id.as_str()));
+    }
+
+    /// "By construction" means the card is on the board **while** the delegate
+    /// works, not reconstructed once they are done. Proven by reading the board
+    /// from inside the delegate's own turn: it is already there, already theirs,
+    /// already In progress.
+    ///
+    /// This is the assertion that distinguishes the fix from a cosmetic one —
+    /// a card written only after the answer came back would satisfy every
+    /// count-based test above and still leave the work invisible for the whole
+    /// time it was actually happening.
+    #[tokio::test]
+    async fn the_hand_off_card_is_on_the_board_while_the_delegate_works() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("done")]);
+        let outcome = fx
+            .runner(&turns)
+            .run_delegation(handoff("draft the launch plan"), None)
+            .await
+            .expect("delegation runs");
+        assert!(outcome.spawned_task.is_some());
+        assert_eq!(turns.calls().len(), 1, "the delegate ran exactly once");
+        assert_eq!(
+            turns.board_at_turn(0),
+            vec![("engineer".to_string(), COLUMN_IN_PROGRESS.to_string())],
+            "the card is open, assigned and in progress before the delegate starts"
+        );
+        // …and settles for a person once they are done.
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].column, COLUMN_IN_REVIEW);
+    }
+
+    /// A hand-off an operator cancels mid-flight keeps its card and returns it
+    /// to To-do. The alternative — no card — would erase the fact that the work
+    /// was ever asked for.
+    #[tokio::test]
+    async fn a_cancelled_hand_off_returns_its_card_to_todo() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::cancelled("half-written")]);
+        let outcome = fx
+            .runner(&turns)
+            .run_delegation(handoff("write the migration plan"), None)
+            .await
+            .expect("delegation runs");
+        assert!(outcome.cancelled);
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].column, COLUMN_TODO);
+    }
+
+    /// The constraint that keeps the fix from becoming its own bug, on the
+    /// hand-off path: relaying a question to a desk is not commissioning work.
+    #[tokio::test]
+    async fn a_question_relayed_to_a_desk_mints_no_card() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::queueing("asking", vec![handoff("what's the status of the build?")]),
+                Turn::reply("engineering says it's green"),
+                Turn::reply("it's green"),
+            ],
+        );
+        let turn = fx
+            .runner(&turns)
+            .handle_operator_message("chief", "is the build ok?", None)
+            .await
+            .expect("operator message handled");
+        assert!(fx.cards().await.is_empty(), "a question is not work");
+        assert!(turn.spawned_task.is_none());
+    }
+
+    /// A hand-off made from inside a **dispatched card** must not open a second
+    /// one — that card already is the tracking, and #204 hands it to the
+    /// delegate.
+    #[tokio::test]
+    async fn a_hand_off_inside_a_dispatched_card_opens_no_second_card() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("done")]);
+        let outcome = fx
+            .runner(&turns)
+            .for_task("card-1")
+            .run_delegation(handoff("write the migration plan"), None)
+            .await
+            .expect("delegation runs");
+        assert!(outcome.spawned_task.is_none());
+        assert!(fx.cards().await.is_empty());
+    }
+
+    // ── path one: a desk asked directly ─────────────────────────────────────
+
+    /// Asking a desk lead directly used to be the one path with no way to reach
+    /// the board at all: the card-opening tools are wired only onto the
+    /// orchestrator, so the desk did the work inline and nothing tracked it.
+    #[tokio::test]
+    async fn a_desk_asked_directly_opens_its_own_card() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("modules.md is written")]);
+        let turn = fx
+            .runner(&turns)
+            .handle_operator_message(
+                "engineer",
+                "read the pricing repo and write modules.md",
+                Some("eng_desk"),
+            )
+            .await
+            .expect("operator message handled");
+
+        // The issue's requirement is that the tracking decision is settled
+        // BEFORE the work starts, so this reads the board from inside the desk's
+        // own turn rather than only afterwards.
+        assert_eq!(
+            turns.board_at_turn(0),
+            vec![("engineer".to_string(), COLUMN_IN_PROGRESS.to_string())],
+            "the card is open before the desk begins working"
+        );
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(cards[0].assignee, "engineer");
+        assert_eq!(cards[0].column, COLUMN_IN_REVIEW);
+        assert_eq!(cards[0].origin_chat_id.as_deref(), Some("eng_desk"));
+        assert_eq!(turn.spawned_task.as_deref(), Some(cards[0].id.as_str()));
+    }
+
+    /// One message, one card. The REST chat handler already opens a To-do card
+    /// for a leading-imperative message before the cycle starts, so this path
+    /// must stand down for exactly those — otherwise "draft the launch plan"
+    /// lands on the board twice.
+    ///
+    /// Found on a live host, not here: the unit tests above all used requests
+    /// the other detector is silent on, so nothing caught the overlap.
+    #[tokio::test]
+    async fn a_message_the_chat_handler_already_carded_opens_no_second_card() {
+        // A leading imperative — `detect_task_intent` fires on this, so the REST
+        // layer has already opened its card by the time the cycle runs.
+        let imperative = "draft the launch plan for next quarter";
+        assert!(
+            crate::company::task_intent::detect_task_intent(imperative).is_some(),
+            "fixture must be a message the chat handler cards, or this proves nothing"
+        );
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("planned")]);
+        let turn = fx
+            .runner(&turns)
+            .handle_operator_message("engineer", imperative, Some("eng_desk"))
+            .await
+            .expect("operator message handled");
+        assert!(
+            fx.cards().await.is_empty(),
+            "the chat handler's card is the card; this path opens none"
+        );
+        assert!(turn.spawned_task.is_none());
+    }
+
+    /// …and the same thread stays quiet for a question, so a desk chat does not
+    /// become a card mint.
+    #[tokio::test]
+    async fn a_desk_asked_a_question_directly_mints_no_card() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("green")]);
+        let turn = fx
+            .runner(&turns)
+            .handle_operator_message("engineer", "is the build green?", Some("eng_desk"))
+            .await
+            .expect("operator message handled");
+        assert!(fx.cards().await.is_empty());
+        assert!(turn.spawned_task.is_none());
+    }
+
+    /// The orchestrator's own chat turn is not tracked here. It is the front
+    /// door — every message arrives there — and what it does with *work* is hand
+    /// it off, which opens a card on the other path.
+    #[tokio::test]
+    async fn the_orchestrators_own_chat_turn_opens_no_card() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("noted")]);
+        fx.runner(&turns)
+            .handle_operator_message("chief", "draft the investor update", None)
+            .await
+            .expect("operator message handled");
+        assert!(fx.cards().await.is_empty());
+    }
+
+    // ── path three: the relay turn's discard ────────────────────────────────
+
+    /// A card the relay turn opens is no longer swallowed. The relay runs after
+    /// the desk answered, which is exactly when the orchestrator is best placed
+    /// to decide something should be followed up — and that decision used to be
+    /// dropped by design.
+    #[tokio::test]
+    async fn the_relay_turn_can_no_longer_lose_a_card() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::queueing("asking", vec![handoff("what's the status of the build?")]),
+                Turn::reply("it's red — someone should fix the flaky test"),
+                Turn::queueing(
+                    "it's red; I've opened a card",
+                    vec![Delegation::SpawnTask {
+                        title: "Fix the flaky test".to_string(),
+                        note: None,
+                        assignee: None,
+                    }],
+                ),
+            ],
+        );
+        let turn = fx
+            .runner(&turns)
+            .handle_operator_message("chief", "is the build ok?", None)
+            .await
+            .expect("operator message handled");
+
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "the relay's card survives: {cards:?}");
+        assert_eq!(cards[0].title, "Fix the flaky test");
+        assert_eq!(turn.spawned_task.as_deref(), Some(cards[0].id.as_str()));
+    }
+
+    /// …while the rule the discard existed for still holds: a relay may relay,
+    /// never re-delegate. A hand-off queued by the relay turn is dropped, so
+    /// there is no second desk turn and no loop.
+    #[tokio::test]
+    async fn the_relay_turn_still_cannot_re_delegate() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::queueing("asking", vec![handoff("what's the status of the build?")]),
+                Turn::reply("green"),
+                Turn::queueing("relaying", vec![handoff("now write the release notes")]),
+            ],
+        );
+        fx.runner(&turns)
+            .handle_operator_message("chief", "is the build ok?", None)
+            .await
+            .expect("operator message handled");
+
+        // Three turns total — orchestrator, desk, relay. A fourth would be the
+        // re-delegation the drain exists to prevent.
+        let calls = turns.calls();
+        assert_eq!(calls.len(), 3, "{calls:?}");
+        assert_eq!(calls[2].0, "chief", "the last turn is the relay: {calls:?}");
+        assert!(
+            fx.cards().await.is_empty(),
+            "a dropped hand-off opens no card either"
+        );
     }
 }
