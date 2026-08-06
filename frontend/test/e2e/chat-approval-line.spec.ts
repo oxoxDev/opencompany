@@ -31,6 +31,19 @@ const PARKED = [
     amount_usd: 42.5,
     at_millis: Date.now(),
     task: { link: "unlinked" },
+    // Present, and load-bearing since #395: `agent` is what makes this a
+    // blocked *harness tool call* rather than a native effect the runtime
+    // performs itself, and the console now words the confirmation differently
+    // for the two — "the agent is completing the action" only when there is an
+    // agent, "carrying it out now" when there is not.
+    //
+    // The fixture omitted it and so exercised the no-agent arm while the
+    // assertion below still named the agent one, which is why this spec went
+    // red: a deliberate copy change in #395, not a regression. A blocked tool
+    // call is also the representative case for this spec — it is the shape that
+    // actually parks in a channel — so naming the agent is the fixture getting
+    // more honest, not the assertion getting weaker.
+    agent: "ada",
   },
 ];
 

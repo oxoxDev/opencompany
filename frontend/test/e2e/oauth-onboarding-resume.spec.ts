@@ -79,11 +79,22 @@ test("the tour resumes on the Connections stop after a redirect", async ({ page 
   // Seed exactly what `armTourResume` writes just before ConnectionsView hands
   // the browser to the provider: mid-tour, on the Connections stop, no
   // completed/skipped flag (the tour never finished).
+  //
+  // `"settings"`, NOT `"connections"`. The marker stores the stop's `view`
+  // (`TourController`'s `before` hook publishes `stop.view` through
+  // `setActiveTourStop`), and Connections became a *page of the Settings
+  // section* — the stop is `{ view: "settings", sub: "connections" }`. This
+  // spec seeded the pre-move value, which no `TOUR` stop matches, so the
+  // controller's `findIndex` returned -1 and the resume was correctly skipped.
+  // The spec had gone stale against a deliberate product change; it was not
+  // catching a resume bug. See the unit suite's `tour-resume.test.ts`, which
+  // pins the stop-view ⇄ marker coupling directly so this cannot rot again
+  // without a fast test saying so.
   await page.evaluate(
     ([k]) =>
       window.localStorage.setItem(
         k,
-        JSON.stringify({ pendingResume: { view: "connections", at: Date.now() } }),
+        JSON.stringify({ pendingResume: { view: "settings", at: Date.now() } }),
       ),
     [key],
   );
@@ -109,13 +120,20 @@ test("a stale resume marker does not hijack a later visit", async ({ page }) => 
   const key = await tourKey(page);
 
   // Older than the 15-minute TTL.
+  //
+  // `"settings"` for the same reason as above, and here it is what gives the
+  // test any force at all: seeded with the stale `"connections"` this passed
+  // whether or not the TTL was honoured, because no stop matches that view and
+  // the tour would not have resumed either way. It asserted nothing. With a
+  // view that *would* resume, the age is the only thing standing between this
+  // marker and a hijacked visit — which is the property the test names.
   await page.evaluate(
     ([k]) =>
       window.localStorage.setItem(
         k,
         JSON.stringify({
           skipped: true,
-          pendingResume: { view: "connections", at: Date.now() - 60 * 60 * 1000 },
+          pendingResume: { view: "settings", at: Date.now() - 60 * 60 * 1000 },
         }),
       ),
     [key],
