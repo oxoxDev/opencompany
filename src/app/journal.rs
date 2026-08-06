@@ -52,6 +52,10 @@ const WORKSPACE_SUBDIR: &str = "workspace";
 /// The store subtree the journal and kv stores live in, under the workspace.
 const STORE_SUBDIR: &str = "tinyagents_store";
 
+/// Payload for the startup write probe. Non-empty on purpose — see
+/// [`ensure_writable`].
+const PROBE_BYTES: &[u8] = b"opencompany journal write probe\n";
+
 /// Where a resolved journal root came from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RootSource {
@@ -188,6 +192,11 @@ pub async fn prepare(data_dir: &Path) -> Result<JournalRoot> {
 /// process so two instances sharing a root cannot collide, and is removed
 /// again — a failure to remove it is not fatal, since the write already proved
 /// the point.
+///
+/// The probe carries real bytes rather than being empty. A zero-length write
+/// allocates no blocks, so it succeeds on a volume that is full or over quota
+/// while every subsequent journal append fails with `ENOSPC` — reintroducing
+/// the per-append failure this module exists to make impossible.
 async fn ensure_writable(root: &Path, source: RootSource) -> Result<()> {
     let fail = |stage: &str, error: std::io::Error| {
         OpenCompanyError::Config(format!(
@@ -206,7 +215,7 @@ async fn ensure_writable(root: &Path, source: RootSource) -> Result<()> {
         .map_err(|error| fail("create", error))?;
 
     let probe = root.join(format!(".opencompany-journal-probe-{}", std::process::id()));
-    tokio::fs::write(&probe, b"")
+    tokio::fs::write(&probe, PROBE_BYTES)
         .await
         .map_err(|error| fail("write", error))?;
     tokio::fs::remove_file(&probe).await.ok();
