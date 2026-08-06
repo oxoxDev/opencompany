@@ -130,6 +130,27 @@ function columnLabel(column: string): string {
 }
 
 /**
+ * The columns a card can sit in without any agent having run it yet — the only
+ * ones where "Not yet dispatched" is a true statement (issue #465).
+ *
+ * The worked figure is reconstructed from journaled `TaskDispatched` events, so
+ * a card that never went through the board's dispatch edge has no window to
+ * measure however much work it saw. That is most obviously the #442 card opened
+ * *by construction* for work handed straight to an agent: it is written through
+ * the task store rather than the dispatch path precisely so it cannot re-fire
+ * dispatch, so it is legitimately never "dispatched" — and it was worked all the
+ * same. Reading a missing window as "not yet dispatched" put that claim beside a
+ * status of In review, which is how the reported card managed to contradict
+ * itself in a single line.
+ *
+ * Past these columns the honest answer is that there is no timing to show, not
+ * that nothing has happened, so the slot is omitted rather than guessed at. The
+ * waiting figure beside it is unaffected and still says what the card is
+ * blocked on.
+ */
+const UNSTARTED_COLUMNS = new Set(["todo", "planning"]);
+
+/**
  * Extends a host-computed duration to `now` while its span is still open.
  *
  * The worked/waiting arithmetic — the dispatch-window pairing and the approval
@@ -593,6 +614,11 @@ function DetailHeader({
   waiting: { millis: number; live: boolean } | null;
 }) {
   const hasDispatch = worked !== null && (worked.millis > 0 || worked.live);
+  // Issue #465: "Not yet dispatched" is only sayable where it can still be true.
+  // A card past To-do/Planning has been worked whether or not a dispatch window
+  // was journaled for it, so claiming otherwise beside a settled status is the
+  // self-contradiction the report caught.
+  const neverStarted = !hasDispatch && UNSTARTED_COLUMNS.has(task.column);
   // `worked` is the whole elapsed run window; waiting sits *inside* it, so
   // working time is the remainder. Clamped at zero because the two figures come
   // from different sources (event log vs journal join) and a clock skew between
@@ -632,27 +658,29 @@ function DetailHeader({
             {task.assignee}
           </span>
         )}
-        <span className="inline-flex items-center gap-1.5">
-          <Clock className="size-3.5" />
-          {hasDispatch ? (
-            <>
-              <span className="font-medium text-foreground">
-                Worked {formatDuration(workingMs)}
-              </span>
-              {worked!.live && (
-                <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
-                  <span
-                    className="size-1.5 animate-pulse rounded-full bg-current"
-                    aria-hidden
-                  />
-                  live
+        {(hasDispatch || neverStarted) && (
+          <span className="inline-flex items-center gap-1.5">
+            <Clock className="size-3.5" />
+            {hasDispatch ? (
+              <>
+                <span className="font-medium text-foreground">
+                  Worked {formatDuration(workingMs)}
                 </span>
-              )}
-            </>
-          ) : (
-            <span>Not yet dispatched</span>
-          )}
-        </span>
+                {worked!.live && (
+                  <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+                    <span
+                      className="size-1.5 animate-pulse rounded-full bg-current"
+                      aria-hidden
+                    />
+                    live
+                  </span>
+                )}
+              </>
+            ) : (
+              <span>Not yet dispatched</span>
+            )}
+          </span>
+        )}
         {showWaiting && (
           <span className="inline-flex items-center gap-1.5">
             <Hourglass className="size-3.5 text-amber-600 dark:text-amber-400" />
