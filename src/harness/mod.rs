@@ -3759,4 +3759,195 @@ budget_usd_daily = 0.0
             "the cap resets at 00:00Z; yesterday's spend is spent: {reply:?}"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // The approval gate's coverage over the live toolbelt (issue #443)
+    // -----------------------------------------------------------------------
+
+    /// Build one agent and return the tools it actually received.
+    ///
+    /// A local mirror of `build`'s own `built_tool_names` — that one is private
+    /// to its test module, and this file owns `deps_with_plan`, which is the
+    /// expensive half.
+    fn belt(grants: &[&str], is_orchestrator: bool, wire_everything: bool) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut deps = deps_with_plan(dir.path(), Arc::new(MockContext::default()), None, None);
+        if wire_everything {
+            // The three tool families gated on a wired dependency rather than
+            // on a cargo feature. Without these the belt is missing exactly the
+            // tools most likely to be misclassified — the workspace writes and
+            // the priced search.
+            deps.workspace = Some(Arc::new(crate::store::FsOps::new(dir.path())));
+            deps.artifacts = Some(Arc::new(crate::store::FsOps::new(dir.path())));
+            deps.search = Some(crate::harness::search::SearchBackend::new(
+                "https://api.example.test".to_string(),
+                crate::company::credentials::Credential::from_value("managed-platform-token"),
+                crate::company::DEFAULT_SEARCH_DAILY_CALLS,
+            ));
+            // A registered MCP server is what puts `mcp_list_servers`,
+            // `mcp_list_tools` and `mcp_call_tool` on the belt — the three
+            // tools issue #443 is about. Without one the coverage check would
+            // pass while never having looked at them.
+            deps.mcp_servers = vec![McpServerDecl {
+                name: "notes".to_string(),
+                endpoint: "https://mcp.example.test".to_string(),
+                description: None,
+                allowed_tools: Vec::new(),
+                disallowed_tools: Vec::new(),
+                timeout_secs: 30,
+                enabled: true,
+                source: crate::company::mcp::McpSource::Runtime,
+                auth: crate::company::mcp::AuthMaterial::None,
+            }];
+        }
+        let manifest_agent = ManifestAgent {
+            id: "desk".to_string(),
+            role: "Desk Lead".to_string(),
+            description: None,
+            tier: None,
+            tools: Vec::new(),
+            budget_usd_daily: None,
+        };
+        let policy = ApprovalPolicy::new(&Policy::default(), None);
+        let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
+        let agent = build::build_agent(
+            &CompanyId::new("acme"),
+            "Acme",
+            &manifest_agent,
+            policy,
+            &deps,
+            &grants,
+            &[],
+            is_orchestrator,
+        )
+        .expect("agent builds");
+        agent.tools().iter().map(|t| t.name().to_string()).collect()
+    }
+
+    /// **The mechanism issue #443 asks for.** Every tool this crate can put in
+    /// front of an agent must be classified in
+    /// [`crate::policy::consequence`], or this fails.
+    ///
+    /// Three families had needed the same carve-out before it, each added after
+    /// somebody hit it, and what the gate did with the ones nobody hit was
+    /// silent: the tool simply started asking for permission, and whoever
+    /// noticed was an operator wondering why a read needed approving. That is
+    /// how `mcp_list_servers` — which the agent persona *instructs* every agent
+    /// to call — came to cost an approval, and how `file_read`, `glob` and
+    /// `grep` came to park with nobody reporting it.
+    ///
+    /// A tool declaring its own consequence to the gate at call time would be
+    /// better, and is not reachable: openhuman's `ToolPolicy` surface hands the
+    /// bridge a name and arguments, never the tool. So the declaration is
+    /// checked against the live belt here instead — the issue's own stated
+    /// fallback, "exhaustive by construction rather than by memory".
+    ///
+    /// Feature-aware by construction: it enumerates whatever this build wires,
+    /// so a family behind a cargo feature is covered by the lane that enables
+    /// it rather than by a `cfg` branch that has to be kept in step.
+    #[test]
+    fn every_registered_tool_is_declared() {
+        let declared: std::collections::BTreeSet<&str> =
+            crate::policy::consequence::declared_tools().collect();
+        let mut live: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (grants, orchestrator, everything) in [
+            (&["*"][..], false, false),
+            (&["*"][..], true, false),
+            (&["*"][..], false, true),
+            (&["*"][..], true, true),
+            (
+                &["workspace", "search", "media", "composio"][..],
+                false,
+                true,
+            ),
+        ] {
+            live.extend(belt(grants, orchestrator, everything));
+        }
+        // A vacuity guard with teeth. `!live.is_empty()` would not notice the
+        // belt quietly narrowing to the tools nobody was worried about, and
+        // three of the four names below are the ones the issues are about.
+        for expected in [
+            "shell",
+            "workspace_write",
+            "file_read",
+            #[cfg(feature = "mcp")]
+            "mcp_list_servers",
+            #[cfg(feature = "mcp")]
+            "mcp_call_tool",
+        ] {
+            assert!(
+                live.contains(expected),
+                "the belt builder stopped wiring `{expected}`, so this check has \
+                 narrowed without anyone deciding to narrow it: {live:?}"
+            );
+        }
+        let undeclared: Vec<&String> = live
+            .iter()
+            .filter(|name| !declared.contains(name.as_str()))
+            .collect();
+        assert!(
+            undeclared.is_empty(),
+            "these tools are wired onto a live agent but nobody has said what they can \
+             reach, so the gate is guessing from their names and they cannot be granted \
+             standing: {undeclared:?}. Add them to `crate::policy::consequence::DECLARED`."
+        );
+    }
+
+    /// The one-directional cross-check on the declaration.
+    ///
+    /// A tool's own `permission_level()` is NOT trustworthy as the authority —
+    /// it defaults to `ReadOnly`, and upstream tools that plainly mutate
+    /// (`git_operations`, `memory_store`) never override it, so believing a
+    /// `ReadOnly` claim would wave a write straight through the gate. But the
+    /// claims in the *other* direction are deliberate: nothing declares itself
+    /// `Execute` or `Dangerous` by accident. So those are checked, and a
+    /// `ReadOnly` claim is ignored.
+    #[test]
+    fn nothing_that_declares_itself_executable_is_internal_or_grantable() {
+        use oh::tools::traits::PermissionLevel;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let deps = deps_with_plan(dir.path(), Arc::new(MockContext::default()), None, None);
+        let manifest_agent = ManifestAgent {
+            id: "desk".to_string(),
+            role: "Desk Lead".to_string(),
+            description: None,
+            tier: None,
+            tools: Vec::new(),
+            budget_usd_daily: None,
+        };
+        let agent = build::build_agent(
+            &CompanyId::new("acme"),
+            "Acme",
+            &manifest_agent,
+            ApprovalPolicy::new(&Policy::default(), None),
+            &deps,
+            &["*".to_string()],
+            &[],
+            true,
+        )
+        .expect("agent builds");
+        let args = serde_json::json!({});
+        let mut checked = 0;
+        for tool in agent.tools() {
+            if !matches!(
+                tool.permission_level(),
+                PermissionLevel::Execute | PermissionLevel::Dangerous
+            ) {
+                continue;
+            }
+            checked += 1;
+            let verdict = crate::policy::consequence_of(tool.name(), &args);
+            assert!(
+                verdict.reach.is_external(),
+                "`{}` declares itself executable but the gate treats it as internal",
+                tool.name()
+            );
+            assert!(
+                !verdict.standing.is_grantable(),
+                "`{}` declares itself executable and must not be grantable",
+                tool.name()
+            );
+        }
+        assert!(checked > 0, "no executable tool was on the belt to check");
+    }
 }
