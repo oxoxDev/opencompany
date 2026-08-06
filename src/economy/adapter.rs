@@ -6,10 +6,11 @@
 //!   flag standing in for the Identity approval checkpoint) and funding covers
 //!   the registry fee — catching the `402` challenge, budget-checking, then
 //!   completing the paid registration;
-//! - publishes the Agent Card, queuing it to the [`Outbox`] (never erroring)
-//!   when tiny.place is unreachable;
+//! - publishes the Agent Card, parking it in the [`Outbox`] for the attached
+//!   replayer when tiny.place is unreachable — and erroring when no replayer is
+//!   attached, because then nothing would ever send it;
 //! - sends outbound A2A tasks, paying an x402 challenge under budget and
-//!   journaling the spend, or queuing the task when offline;
+//!   journaling the spend, and **failing** rather than queuing when offline;
 //! - quotes and pays firm requirements, **failing closed** the instant a
 //!   payment would exceed either the caller's [`BudgetScope`] or the company's
 //!   monthly ceiling, and journaling every in/out movement to the ledger.
@@ -207,6 +208,23 @@ impl AgentEconomy for TinyplaceEconomy {
         }
     }
 
+    /// Sends an outbound A2A task, and **fails** when tiny.place is unreachable
+    /// rather than deferring it.
+    ///
+    /// This is the deliberate other half of [`publish_card`](Self::publish_card)'s
+    /// contract, and the split is about money (issue #454). A card publish
+    /// degrades and replays: it is idempotent, it costs nothing, and the newest
+    /// card is always the right one to send whenever the network returns. A task
+    /// send does neither. It may carry an x402 payment, the budget scope that
+    /// authorised it belongs to the caller's cycle and is gone by flush time, and
+    /// a replay that lands after the caller already retried is a double-send —
+    /// which here means a double-spend. So the error goes back to the caller, who
+    /// is the only party holding the context to decide whether to retry it.
+    ///
+    /// Before #454 this arm did *both*: it pushed a copy onto the outbox **and**
+    /// returned the error. Nothing ever drained that copy, so it was pure
+    /// unreachable state; had anything drained it, it would have been a
+    /// background double-send with no budget behind it.
     async fn send_a2a_task(&self, to: &AgentAddr, task: A2aTask) -> Result<A2aTaskHandle> {
         let params = serde_json::json!({
             "id": generate_id(),
@@ -239,12 +257,8 @@ impl AgentEconomy for TinyplaceEconomy {
                 Ok(handle_from_response(&response, &rpc.id))
             }
             Err(OpenCompanyError::Tinyplace { code, message }) if code == "unreachable" => {
-                // Offline: queue the task and surface the error so the caller
-                // decides whether to retry.
-                self.outbox.enqueue(OutboxAction::SendTask {
-                    to: to.clone(),
-                    task,
-                });
+                // Offline: surface the error and queue nothing. The caller owns
+                // the retry decision for a task that may cost money.
                 Err(OpenCompanyError::tinyplace("unreachable", message))
             }
             Err(err) => Err(err),
@@ -638,8 +652,11 @@ mod test {
         assert_eq!(economy.outbox().len(), 1, "card queued to the outbox");
     }
 
+    /// Issue #454: an offline task send errors and queues **nothing**. The ghost
+    /// copy it used to push was unreachable state at best and a budget-less
+    /// background double-send at worst.
     #[tokio::test]
-    async fn unreachable_send_task_enqueues_and_errors() {
+    async fn unreachable_send_task_errors_without_queueing() {
         let company = CompanyId::new("acme");
         let (_dir, store) = seeded_store(&company).await;
         let mock = Arc::new(MockTinyplaceClient::new());
@@ -657,7 +674,10 @@ mod test {
             .await
             .unwrap_err();
         assert_eq!(err.code(), "tinyplace_unreachable");
-        assert_eq!(economy.outbox().len(), 1, "task queued despite the error");
+        assert!(
+            economy.outbox().is_empty(),
+            "a paid task is never deferred for background replay"
+        );
     }
 
     #[tokio::test]
