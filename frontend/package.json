@@ -10,6 +10,9 @@
     "preview": "vite preview",
     "typecheck": "tsc -b --noEmit",
     "typecheck:e2e": "tsc -p tsconfig.e2e.json",
+    "typecheck:unit": "tsc -p tsconfig.unit.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "e2e": "playwright test",
     "e2e:headed": "playwright test --headed"
   },
@@ -43,7 +46,9 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
+    "jsdom": "^27.0.1",
     "typescript": "^5.6.3",
-    "vite": "^5.4.11"
+    "vite": "^5.4.11",
+    "vitest": "^3.2.7"
   }
 }

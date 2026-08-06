@@ -40,5 +40,10 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["test", "playwright.config.ts"]
+  // `test/e2e`, NOT `test` — narrowed when the unit suite landed under
+  // `test/unit/` (issue #434). A bare `test` swept those files in here too,
+  // where they cannot compile: they import `vitest` and reach app modules
+  // through the `@/*` alias, and this project supplies neither. They have their
+  // own project, `tsconfig.unit.json`.
+  "include": ["test/e2e", "playwright.config.ts"]
 }

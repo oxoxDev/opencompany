@@ -1,0 +1,48 @@
+// Issue #434. Type-checks the unit suite under `test/unit/` and
+// `vitest.config.ts`.
+//
+// STANDALONE, for the same reason `tsconfig.e2e.json` is: not `composite`, and
+// deliberately NOT added to `tsconfig.json`'s `references`. A reference would
+// pull these tests into `npm run build`, so a broken test file would fail the
+// shippable console bundle. A test and the artifact it guards should be able to
+// fail independently, and CI reports them as separate steps for that reason.
+// `npm run typecheck:unit` runs this project on its own via `tsc -p`.
+//
+// Vitest itself strips types rather than checking them, so without this config
+// a test could call a helper with the wrong arity and still go green by
+// coincidence — the same blind spot #281 found in the Playwright specs, which
+// is why that suite got `tsconfig.e2e.json`.
+//
+// Unlike the e2e config this one DOES need `@/*` and the DOM lib: these tests
+// import app modules directly, and a couple of them run under jsdom (see the
+// `@vitest-environment` docblocks) to reach `localStorage`.
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "types": ["node", "vite/client"],
+    // Needed even though no test renders anything: `@/tour/steps` imports its
+    // `View` type from `components/app-shell.tsx`, and TypeScript refuses to
+    // read a `.tsx` at all without this.
+    "jsx": "react-jsx",
+
+    "strict": true,
+    // Matched to `tsconfig.app.json`, so the drift this config exists to catch
+    // fails loudly: a locator left behind by a rewritten assertion, or an
+    // argument dropped from a helper.
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["test/unit", "vitest.config.ts"]
+}
