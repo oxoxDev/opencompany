@@ -1528,11 +1528,19 @@ impl HarnessBrain {
     ///
     /// A card that has since been deleted falls back to minting, so the
     /// artifact stays reachable rather than being dropped for the sake of the
-    /// rule.
+    /// rule. **The returned id is the card the deliverable actually landed
+    /// on** — the replacement, on that path, not `card_id` — because the caller
+    /// links the operator's reply to it and sending them to an id that no
+    /// longer resolves is the bug this whole change is about.
+    ///
+    /// `chat_id` is carried into that fallback so a minted replacement points
+    /// back at the same conversation the no-card-in-scope path's card does;
+    /// two minting paths must not differ in where their card posts back.
     async fn file_publishes_on_card(
         &self,
         card_id: &str,
         agent: &str,
+        chat_id: Option<&str>,
         published: Vec<publish::PendingPublish>,
     ) -> Result<String> {
         let Some(tasks) = self.deps.tasks.as_ref() else {
@@ -1553,7 +1561,7 @@ impl HarnessBrain {
                  instead of dropping it"
             );
             return self
-                .record_conversation_publishes(agent, None, published)
+                .record_conversation_publishes(agent, chat_id, published)
                 .await;
         };
 
@@ -1992,6 +2000,11 @@ impl Brain for HarnessBrain {
                         // inside a hand-off used to be filed under the
                         // orchestrator that relayed for it — the card named the
                         // wrong person for work it did not do.
+                        //
+                        // The **card** takes one owner, so one agent is picked;
+                        // each artifact keeps its own author further down, in
+                        // `record_published_artifacts`, because a turn can stage
+                        // publishes from more than one agent.
                         let publisher = published
                             .first()
                             .map(|p| p.agent.clone())
@@ -2003,12 +2016,12 @@ impl Brain for HarnessBrain {
                         // card, from each hand-off's card and from the chat
                         // handler's — which is exactly why the reply linked
                         // there while the deliverable sat on a second, orphaned
-                        // card nothing pointed at. Minting is now the
-                        // no-card-in-scope case only, and the reply link stops
-                        // being a choice because only one card exists.
+                        // card nothing pointed at. Minting is the
+                        // no-card-in-scope case, and the fallback inside
+                        // `file_publishes_on_card` for a card deleted mid-turn.
                         let filed = match turn.spawned_task.as_deref() {
                             Some(card_id) => {
-                                self.file_publishes_on_card(card_id, &publisher, published)
+                                self.file_publishes_on_card(card_id, &publisher, chat_id, published)
                                     .await
                             }
                             None => {
@@ -2056,15 +2069,17 @@ impl Brain for HarnessBrain {
                         // minted, which is how the operator gets from "here is
                         // your deliverable" to the thing itself in one click.
                         //
-                        // Since #463 the `or` no longer picks a winner between
-                        // two cards, because there are never two: a publish made
-                        // with a card in scope is filed ONTO `spawned_task`, and
-                        // `published_card` is only ever set when there was no
-                        // card to file onto. The two arms are now the same card
-                        // or a single one, and the operator can no longer be
-                        // sent to an empty card while the deliverable sits on an
-                        // orphan.
-                        task_id: turn.spawned_task.or(published_card),
+                        // **`published_card` wins** (#463). It is `Some` only
+                        // when a publish landed, and it always names the card
+                        // the deliverable landed ON — usually `spawned_task`
+                        // itself, but the freshly minted replacement when that
+                        // card was deleted mid-turn. Preferring `spawned_task`
+                        // there would link the reply to an id that no longer
+                        // resolves while the file sits elsewhere, which is this
+                        // issue's own failure reached through the fallback added
+                        // to prevent it. With no publish this is `None` and the
+                        // turn's own card takes the slot exactly as before.
+                        task_id: published_card.or(turn.spawned_task),
                         channel: "operator".to_string(),
                         text: operator_reply,
                         reply_to: None,
@@ -3015,6 +3030,7 @@ members = ["engineer"]
             .file_publishes_on_card(
                 "t-open",
                 "writer",
+                None,
                 vec![PendingPublish {
                     agent: "writer".to_string(),
                     source: "memo.md".to_string(),
@@ -3071,6 +3087,7 @@ members = ["engineer"]
             .file_publishes_on_card(
                 "t-owned",
                 "writer",
+                None,
                 vec![PendingPublish {
                     agent: "writer".to_string(),
                     source: "memo.md".to_string(),
@@ -3101,6 +3118,7 @@ members = ["engineer"]
             .file_publishes_on_card(
                 "t-gone",
                 "writer",
+                Some("strategy"),
                 vec![PendingPublish {
                     agent: "writer".to_string(),
                     source: "memo.md".to_string(),
@@ -3113,10 +3131,20 @@ members = ["engineer"]
             .await
             .expect("mints a card instead");
 
-        assert_ne!(filed, "t-gone");
         let cards = TaskStore::list(&*ops, &company).await.expect("list");
         assert_eq!(cards.len(), 1, "the deliverable still has a card");
         assert_eq!(cards[0].assignee, "writer");
+        // The returned id must be the REPLACEMENT, not the id that is gone: the
+        // caller links the operator's reply to it (#463 review).
+        assert_eq!(
+            filed, cards[0].id,
+            "the returned id must name the card the deliverable landed on"
+        );
+        assert_ne!(filed, "t-gone");
+        // …and it belongs to the same conversation, like the card the
+        // no-card-in-scope path mints. Two minting paths must not disagree
+        // about where their card posts back.
+        assert_eq!(cards[0].origin_chat_id.as_deref(), Some("strategy"));
     }
 
     /// Each artifact records the agent that published **it** (#463 review).
