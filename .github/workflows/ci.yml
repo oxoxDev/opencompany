@@ -82,6 +82,26 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      # Issue #428. The `Console E2E` job drives a REAL host, so it needs a
+      # binary. Building one over there would mean a second submodule checkout
+      # and a second cold Rust compile — minutes of wall clock to produce a
+      # thing this job has already very nearly built. `cargo test` above
+      # compiled the same graph, so this step is a link and little else.
+      #
+      # The artifact, not a job-level cache: a cache is keyed on inputs and may
+      # legitimately miss, and a missing binary here has to be a hard failure
+      # rather than a silent rebuild somewhere it does not belong.
+      - name: Build the host binary for the e2e lane
+        run: cargo build --locked --bin opencompany
+
+      - name: Upload the host binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencompany-debug-binary
+          path: target/debug/opencompany
+          # Consumed minutes later by one job in the same run and never again.
+          retention-days: 1
+
   # Issue #202. The `Rust` job above builds DEFAULT FEATURES ONLY, so every line
   # behind `openhuman` (`src/harness/**`, `src/workflows/**`, `src/runtime/`
   # `delegation*`, and the `live_company_turn` example) and every line behind
@@ -271,9 +291,29 @@ jobs:
       # `typecheck:e2e` covers `frontend/test/e2e/` and `playwright.config.ts`,
       # which `tsc -b` does NOT reach — `tsconfig.app.json` is `include: ["src"]`
       # — so before this the Playwright specs were compiled by nothing at all.
-      # See the header of `frontend/tsconfig.e2e.json`. This does NOT run the
-      # suite: that needs a live host and is still out of CI, per #281.
+      # See the header of `frontend/tsconfig.e2e.json`. It still does not RUN
+      # the suite; the `Console E2E` job below does that now (issue #428).
       - run: npm run typecheck:e2e
+        working-directory: frontend
+
+      # Issue #434. Same argument one directory over: `tsconfig.app.json` and
+      # `tsconfig.e2e.json` between them reach `src` and `test/e2e`, and nothing
+      # reached `test/unit`. Vitest strips types rather than checking them, so
+      # without this step a unit test could call a helper with the wrong arity
+      # and go green by coincidence — a test that cannot fail correctly is worse
+      # than no test, because it reports coverage.
+      - run: npm run typecheck:unit
+        working-directory: frontend
+
+      # The unit suite itself (issue #434). Sub-second, so it costs this job
+      # nothing and there is never a reason to reach for `--no-verify` around
+      # it. `npm test` is `vitest run`, NOT bare `vitest` — the bare form is a
+      # WATCHER and would hang the runner until the job timeout.
+      #
+      # This is the first step in CI that can prove a console function returns
+      # the right answer. `typecheck` and `build` prove the code compiles; a
+      # helper that maps A to the wrong B compiles perfectly.
+      - run: npm test
         working-directory: frontend
 
       # `build` runs `tsc -b` again but then invokes Vite, which additionally
@@ -285,3 +325,91 @@ jobs:
 
       # No lint step: the package declares no lint script. Adding one is a
       # separate decision, not something to smuggle in here.
+
+  # Issue #428. The Playwright suite was type-checked by the `Console` job above
+  # and executed by NOTHING, which is a worse blind spot than having no suite at
+  # all: seventy passing specs that nobody runs look exactly like coverage.
+  #
+  # What that cost, concretely. `workflow-edit-delete.spec.ts` referenced a
+  # fixture that was never committed, so two of its eight tests had never passed
+  # in any environment since the day they merged. Two more specs were found red
+  # on this branch — one asserting an approval confirmation whose wording #395
+  # deliberately changed, one seeding a tour-resume marker whose value moved when
+  # Connections became a page of Settings. Both had been red for weeks, and one
+  # had been filed as a product bug that does not exist. Nothing reported any of
+  # it, because nothing ran it.
+  #
+  # A SEPARATE JOB, not steps on `Console`: that job is deliberately Node-only —
+  # no submodules, no Rust toolchain, no browser — and runs in parallel with the
+  # Rust jobs precisely because it shares no setup with them. This lane needs a
+  # built host and a browser, so folding it in would slow the fast console gate
+  # to the speed of the slowest thing in the repo.
+  #
+  # `needs: rust` for the binary, and that is the ONLY reason. The host is the
+  # default feature set, which is all this suite needs — the harness company
+  # boots on the offline echo brain. Four specs that need more than that skip
+  # themselves through `test/e2e/capabilities.ts`, each naming issue #467.
+  console-e2e:
+    name: Console E2E
+    runs-on: ubuntu-latest
+    needs: rust
+    # The suite is ~5 minutes locally against a warm host. The cap is here so a
+    # wedged browser or a host that never binds fails in a quarter hour rather
+    # than burning the runner's six-hour default.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          # No `submodules`, deliberately. The binary arrives prebuilt from the
+          # `rust` job and nothing here resolves a cargo manifest, so the large
+          # `vendor/openhuman` checkout would be pure cost.
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # `npm ci`, not `npm install` — same lockfile-fidelity argument as the
+      # `Console` job above.
+      - run: npm ci
+        working-directory: frontend
+
+      - name: Download the host binary
+        uses: actions/download-artifact@v4
+        with:
+          name: opencompany-debug-binary
+          path: target/debug
+
+      # `upload-artifact` does not preserve the executable bit, so the binary
+      # arrives as a plain file. `test/e2e/host.sh` tests for `-x` and exits
+      # with a build instruction, which would be a confusing way to learn this.
+      - name: Restore the executable bit
+        run: chmod +x target/debug/opencompany
+
+      # `--with-deps` installs the system libraries headless Chromium needs;
+      # the runner image ships neither. Chromium only: the suite pins no other
+      # engine, and installing three would triple this step for nothing.
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+
+      # `playwright.config.ts` brings the host up itself when `PW_BASE_URL` is
+      # unset (issue #406) — building the console bundle, wiping an isolated
+      # data root under `target/e2e/`, and signing in against the harness
+      # company. So this is the whole command.
+      - name: Run the end-to-end suite
+        run: npm run e2e
+        working-directory: frontend
+
+      # A failed browser run is close to undiagnosable from a log alone. The
+      # config captures a screenshot on failure and a trace on first retry;
+      # this is what makes them reachable from the run summary.
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-failures
+          path: frontend/test-results/
+          retention-days: 7
