@@ -438,7 +438,7 @@ fn the_scan_sees_new_and_modified_files_but_not_deletions() {
     std::fs::write(dir.path().join("fresh.md"), b"new").unwrap();
     std::fs::remove_file(dir.path().join("gone.md")).unwrap();
 
-    let changed = before.changed_since(dir.path());
+    let changed = before.changed_since(dir.path()).files;
     assert_eq!(
         changed,
         ["fresh.md", "keep.md"],
@@ -460,7 +460,7 @@ fn a_same_instant_rewrite_of_a_different_length_is_still_a_change() {
     file.set_modified(stat.modified().unwrap()).unwrap();
     drop(file);
 
-    assert_eq!(before.changed_since(dir.path()), ["spec.md"]);
+    assert_eq!(before.changed_since(dir.path()).files, ["spec.md"]);
 }
 
 #[test]
@@ -478,7 +478,7 @@ fn the_scan_skips_the_directories_an_exec_sandbox_fills() {
     // …and they are skipped on the diff side too, so a build never nudges.
     let before = WorkspaceSnapshot::take(dir.path());
     std::fs::write(dir.path().join("target/debug/build.log"), b"rebuilt").unwrap();
-    assert!(before.changed_since(dir.path()).is_empty());
+    assert!(before.changed_since(dir.path()).files.is_empty());
 }
 
 /// **The false-positive test that matters most.** The agent's `workspace_dir`
@@ -512,13 +512,13 @@ fn the_scan_ignores_what_the_runtime_itself_writes() {
     }
 
     assert!(
-        before.changed_since(dir.path()).is_empty(),
+        before.changed_since(dir.path()).files.is_empty(),
         "the runtime's own files must never look like unpublished agent work"
     );
 
     // The agent's actual file is still seen, so the exclusions did not blind it.
     std::fs::write(dir.path().join("spec.md"), b"one, revised").unwrap();
-    assert_eq!(before.changed_since(dir.path()), ["spec.md"]);
+    assert_eq!(before.changed_since(dir.path()).files, ["spec.md"]);
 }
 
 /// The entry cap. A truncated scan may only under-report — it feeds a warning,
@@ -540,7 +540,7 @@ fn a_workspace_that_does_not_exist_yet_has_changed_nothing() {
     let never = dir.path().join("no-such-agent/workspace");
     let snapshot = WorkspaceSnapshot::take(&never);
     assert!(snapshot.is_empty());
-    assert!(snapshot.changed_since(&never).is_empty());
+    assert!(snapshot.changed_since(&never).files.is_empty());
 }
 
 #[test]
@@ -576,6 +576,7 @@ fn the_nudge_carries_its_own_context() {
         "Draft the launch spec.",
         "Done — I've written it up.",
         &["specs/launch.md".to_string(), "scratch.txt".to_string()],
+        false,
     );
     assert!(
         instruction.contains("Draft the launch spec."),
@@ -595,7 +596,7 @@ fn the_nudge_carries_its_own_context() {
 /// never claim publishing is required.
 #[test]
 fn the_nudge_offers_the_decline_and_never_demands_a_publish() {
-    let instruction = nudge_instruction("Draft it.", "Done.", &["scratch.txt".to_string()]);
+    let instruction = nudge_instruction("Draft it.", "Done.", &["scratch.txt".to_string()], false);
     let lower = instruction.to_lowercase();
 
     assert!(
@@ -889,4 +890,66 @@ fn path_errors_call_the_sandbox_a_sandbox() {
             "{err:?} still says `your workspace`: {message}"
         );
     }
+}
+
+// ── Issue #420 item 3: a partial scan says it is partial ──────────────────
+
+/// The flag existed and nothing read it, so the nudge presented an arbitrary
+/// DFS prefix as the complete list of what the agent changed.
+#[test]
+fn a_truncated_scan_reports_that_its_diff_is_partial() {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..(MAX_SCAN_ENTRIES + 50) {
+        std::fs::write(dir.path().join(format!("f{i}.txt")), b"x").unwrap();
+    }
+    let before = WorkspaceSnapshot::take(dir.path());
+    assert!(before.truncated(), "the fixture must actually truncate");
+
+    let changed = before.changed_since(dir.path());
+    assert!(
+        changed.partial,
+        "a diff of truncated walks must admit it is a subset"
+    );
+}
+
+/// A scan that saw everything must NOT claim to be partial, or the caveat
+/// becomes noise the agent learns to ignore.
+#[test]
+fn a_complete_scan_is_not_reported_as_partial() {
+    let dir = workspace(&[("spec.md", b"one")]);
+    let before = WorkspaceSnapshot::take(dir.path());
+    std::fs::write(dir.path().join("spec.md"), b"one, revised").unwrap();
+
+    let changed = before.changed_since(dir.path());
+    assert_eq!(changed.files, ["spec.md"]);
+    assert!(!changed.partial);
+}
+
+/// The agent has to be told, or it declines on behalf of files the scan never
+/// reached — a completeness claim the scan cannot support.
+#[test]
+fn the_nudge_says_when_the_file_list_is_incomplete() {
+    let files = ["a.md".to_string()];
+
+    let complete = nudge_instruction("brief", "reply", &files, false);
+    assert!(
+        complete.contains("That is everything you changed."),
+        "{complete}"
+    );
+    assert!(
+        !complete.to_lowercase().contains("incomplete"),
+        "{complete}"
+    );
+
+    let partial = nudge_instruction("brief", "reply", &files, true);
+    assert!(
+        partial.to_lowercase().contains("incomplete"),
+        "a partial scan must say so: {partial}"
+    );
+    assert!(
+        !partial.contains("That is everything you changed."),
+        "a partial scan must not claim completeness: {partial}"
+    );
+    // The caveat must not turn the nudge coercive — #244's contract still holds.
+    assert!(!partial.to_lowercase().contains("you must"), "{partial}");
 }

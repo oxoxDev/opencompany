@@ -850,14 +850,45 @@ impl WorkspaceSnapshot {
     ///
     /// Deletions are deliberately not reported: a file the agent removed is not
     /// a deliverable it forgot to publish.
-    pub fn changed_since(&self, workspace: &Path) -> Vec<String> {
+    ///
+    /// # Why this returns whether it is complete (issue #420 item 3)
+    ///
+    /// Either snapshot may have stopped at [`MAX_SCAN_ENTRIES`], and a diff of
+    /// two partial walks is itself partial. The flag was already set on both
+    /// and [`truncated`](Self::truncated) had **no callers** — so the nudge took
+    /// an arbitrary DFS prefix and presented it to the agent as the complete
+    /// list of what it had changed, which is a quiet completeness claim the scan
+    /// cannot support. Returning the fact alongside the files is what makes it
+    /// impossible to keep ignoring: a caller has to destructure it.
+    pub fn changed_since(&self, workspace: &Path) -> WorkspaceChanges {
         let now = Self::take(workspace);
-        now.entries
+        // Either side truncating makes the *diff* partial: a baseline that
+        // stopped early can make an untouched file look new, and a current walk
+        // that stops early simply misses changes.
+        let partial = self.truncated || now.truncated;
+        let files = now
+            .entries
             .into_iter()
             .filter(|(path, stat)| self.entries.get(path) != Some(stat))
             .map(|(path, _)| path)
-            .collect()
+            .collect();
+        WorkspaceChanges { files, partial }
     }
+}
+
+/// What changed in a sandbox since a snapshot — and whether that list is the
+/// whole story (issue #420 item 3).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkspaceChanges {
+    /// Files added or modified, in path order.
+    pub files: Vec<String>,
+    /// The scan hit [`MAX_SCAN_ENTRIES`], so `files` is a subset of what
+    /// actually changed and nothing can say how large a subset.
+    ///
+    /// Only ever *under*-reports: a partial scan can miss a deliverable, never
+    /// invent one. That is the right direction for a heuristic, but it must be
+    /// said out loud rather than left for the agent to assume completeness.
+    pub partial: bool,
 }
 
 /// The changed files that were **not** staged for publication.
@@ -912,7 +943,24 @@ pub fn name_files(files: &[String]) -> String {
 ///
 /// Pure and stringly-typed on purpose, so its content is unit-testable without
 /// a model, a workspace or a turn.
-pub fn nudge_instruction(brief: &str, reply: &str, changed_files: &[String]) -> String {
+/// # Saying when the list is incomplete (issue #420 item 3)
+///
+/// `partial` marks a scan that hit [`MAX_SCAN_ENTRIES`]. The list is then a
+/// subset, so the sentence introducing it must not read as an inventory — an
+/// agent told "you changed these files" reasonably concludes those are the only
+/// ones, and would decline on behalf of a deliverable the scan never reached.
+pub fn nudge_instruction(
+    brief: &str,
+    reply: &str,
+    changed_files: &[String],
+    partial: bool,
+) -> String {
+    let completeness = if partial {
+        "Your sandbox holds more files than this check can read, so this list is incomplete — \
+         there may be other files you changed that are not named here."
+    } else {
+        "That is everything you changed."
+    };
     format!(
         "You have just finished this task and your reply has already been sent. This is a \
          follow-up question about the files, and nothing you say here changes the answer you \
@@ -926,6 +974,7 @@ pub fn nudge_instruction(brief: &str, reply: &str, changed_files: &[String]) -> 
          \n\
          You changed these files in your sandbox and published none of them:\n\
          {files}\n\
+         {completeness}\n\
          \n\
          If any of them is the deliverable this task was asking for, publish it now with \
          `{tool}`. If none of them is — scratch files, notes, intermediate output, work that is \

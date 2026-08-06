@@ -709,11 +709,16 @@ impl HarnessBrain {
         // spent redirect budget is not a moment to ask an agent about its files.
         let mut declined: Option<String> = None;
         let mut unpublished_before_nudge: Vec<String> = Vec::new();
+        // Issue #420 item 3: whether the scan below saw the whole sandbox. A
+        // partial scan can only under-report, but the nudge must say so rather
+        // than present a DFS prefix as the complete list of what changed.
+        let mut scan_partial = false;
         if run_end == TaskRunEnd::Completed {
             if responder == dispatched_responder {
                 let changed = workspace_at_dispatch.changed_since(&workspace);
+                scan_partial = changed.partial;
                 unpublished_before_nudge =
-                    publish::unpublished(&changed, &self.deps.pending_publishes.sources());
+                    publish::unpublished(&changed.files, &self.deps.pending_publishes.sources());
             } else {
                 // A hand-off reassigned the card, so the snapshot above is of
                 // the delegator's workspace and the work happened in the
@@ -740,6 +745,7 @@ impl HarnessBrain {
                     &base_instruction,
                     &result_text,
                     &unpublished_before_nudge,
+                    scan_partial,
                     &control,
                     sink.clone(),
                 )
@@ -771,6 +777,10 @@ impl HarnessBrain {
                 agent = %responder,
                 files = %publish::name_files(&still_unpublished),
                 declined = declined.is_some(),
+                // Issue #420 item 3: whoever reads this needs to know the file
+                // list is a floor, not an inventory — the agent may have
+                // declined about files this scan never reached.
+                partial_scan = scan_partial,
                 "[publish] the run changed sandbox files and published none of them; no \
                  artifact was recorded"
             );
@@ -1172,10 +1182,11 @@ impl HarnessBrain {
         brief: &str,
         reply: &str,
         unpublished: &[String],
+        scan_partial: bool,
         control: &crate::company::steer::SteerControl,
         sink: Option<Arc<RunTraceSink>>,
     ) -> Option<String> {
-        let instruction = publish::nudge_instruction(brief, reply, unpublished);
+        let instruction = publish::nudge_instruction(brief, reply, unpublished, scan_partial);
         let outcome = run_turn
             .run_steered_background(&self.record.id, responder, &instruction, control, sink)
             .await;
