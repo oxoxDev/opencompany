@@ -1889,6 +1889,12 @@ impl HarnessBrain {
     /// steer registry, the company id, and the shared delegation queue the turn
     /// pushes onto. `HarnessDeps` never crosses the seam; it stays behind
     /// `run_turn`.
+    ///
+    /// The approval queue rides along **read-only** (issue #465): a card the
+    /// runner opens by construction is settled from the turn that filled it, and
+    /// a turn that stopped at an unauthorised call produced nothing to review.
+    /// Wired here, at the one factory, so every runner the brain builds settles
+    /// by the same rule rather than each call site remembering to.
     fn delegation_runner<'a>(&'a self, run_turn: &'a HarnessRunTurn<'a>) -> DelegationRunner<'a> {
         DelegationRunner::new(
             run_turn,
@@ -1899,6 +1905,7 @@ impl HarnessBrain {
             &self.deps.delegations,
             orchestrator::MAX_DELEGATIONS_PER_TURN,
         )
+        .with_approvals(&self.deps.approval_requests)
     }
 }
 

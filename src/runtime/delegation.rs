@@ -28,6 +28,7 @@ use crate::company::steer::{
 use crate::harness::TurnOutcome;
 use crate::harness::lifecycle::{self, TaskRunEnd};
 use crate::harness::orchestrator::{self, Delegation, DelegationQueue};
+use crate::harness::policy::ApprovalRequestQueue;
 use crate::harness::run_trace::RunTraceSink;
 use crate::ports::tasks::COLUMN_TODO;
 use crate::ports::types::{CompanyId, CompanyRecord, OutboundMessage, TurnStep};
@@ -234,6 +235,16 @@ pub(crate) struct DelegationRunner<'a> {
     /// the record the moment the work changes hands. `None` for an operator chat
     /// turn, and for a dispatch whose run row could not be minted.
     run_sink: Option<Arc<RunTraceSink>>,
+    /// The cycle's approval queue, read (never written) to tell whether a turn
+    /// this runner drove parked an approval (issue #465).
+    ///
+    /// Only the count matters, taken either side of the turn: a card whose turn
+    /// stopped at an unauthorised call has produced nothing to review, and
+    /// [`settle_work_card`](Self::settle_work_card) needs to know that before it
+    /// picks a landing. Optional so the ~dozen `DelegationRunner::new` sites in
+    /// tests stay untouched; `None` reads as "nothing parked", which is the
+    /// pre-#465 behaviour and correct for any runner that cannot park.
+    approvals: Option<&'a ApprovalRequestQueue>,
 }
 
 impl<'a> DelegationRunner<'a> {
@@ -258,7 +269,25 @@ impl<'a> DelegationRunner<'a> {
             max_delegations,
             task: None,
             run_sink: None,
+            approvals: None,
         }
+    }
+
+    /// Wires the cycle's approval queue so a settle can tell whether the turn it
+    /// is recording parked an approval (issue #465).
+    ///
+    /// Without it a turn whose first tool call parked settled as a plain
+    /// success and its card landed in In Review — announcing a result to check
+    /// on work that had never started.
+    pub(crate) fn with_approvals(mut self, approvals: &'a ApprovalRequestQueue) -> Self {
+        self.approvals = Some(approvals);
+        self
+    }
+
+    /// How many approval requests are parked right now, or `0` when no queue is
+    /// wired. Differenced across a turn to attribute parks to *that* turn.
+    fn approvals_queued(&self) -> usize {
+        self.approvals.map_or(0, ApprovalRequestQueue::queued)
     }
 
     /// Scopes this runner to a dispatched card, so anything the turn spawns
@@ -326,10 +355,15 @@ impl<'a> DelegationRunner<'a> {
         let mut direct_card = self
             .open_direct_work_card(responder, message, chat_id, carded_by_handler)
             .await?;
+        // Issue #465: sampled either side of the turn so the settle below reads
+        // what *this* turn parked, not what the cycle was already holding from
+        // an earlier one.
+        let approvals_before = self.approvals_queued();
         let outcome = self
             .run_turn
             .run(self.company, responder, message, chat_id)
             .await?;
+        let parked = self.approvals_queued().saturating_sub(approvals_before);
         // The responder's own steps ride on the operator bubble; its reply is the
         // operator-facing text UNLESS a synchronous desk delegation runs, in which
         // case the relay turn's reply replaces it (below).
@@ -341,8 +375,14 @@ impl<'a> DelegationRunner<'a> {
         // change the answer this card records.
         let mut direct_card_id = None;
         if let Some(card) = direct_card.as_mut() {
-            self.settle_work_card(card, responder, TaskRunEnd::Completed, &operator_reply)
-                .await?;
+            self.settle_work_card(
+                card,
+                responder,
+                TaskRunEnd::Completed,
+                parked,
+                &operator_reply,
+            )
+            .await?;
             direct_card_id = Some(card.id.clone());
         }
         // A `spawn_task` opens a card silently; a `delegate_to_desk` runs the desk
@@ -788,15 +828,25 @@ impl<'a> DelegationRunner<'a> {
     /// Settles a card [`open_work_card`](Self::open_work_card) opened, once the
     /// turn it was tracking has ended.
     ///
-    /// The landing column comes from [`lifecycle::landing_column`] like every
-    /// other settle on this seam, so a card opened by construction is finished
-    /// by the same rule as one that came off the board: a produced answer stops
-    /// in In Review for a person, a cancelled run goes back to To-do.
+    /// The landing column comes from [`lifecycle::settled_landing_column`] like
+    /// every other settle on this seam, so a card opened by construction is
+    /// finished by the same rule as one that came off the board: a produced
+    /// answer stops in In Review for a person, a cancelled run goes back to
+    /// To-do, and a run that stopped at an unauthorised call parks.
+    ///
+    /// `parked_approvals` is how many approvals **the turn this card is
+    /// recording** left outstanding, differenced across that turn by the caller.
+    /// Issue #465: this used to be [`lifecycle::landing_column`] with a
+    /// hardcoded [`TaskRunEnd::Completed`], so a desk whose first tool call
+    /// parked settled as a plain success — the card announced a result to review
+    /// while the work had not started. The ending alone cannot see that; only
+    /// the count can.
     async fn settle_work_card(
         &self,
         card: &mut TaskRecord,
         responder: &str,
         end: TaskRunEnd,
+        parked_approvals: usize,
         body: &str,
     ) -> Result<()> {
         card.note = Some(append_note(
@@ -804,7 +854,7 @@ impl<'a> DelegationRunner<'a> {
             &lifecycle::note_attribution(end, responder),
             body,
         ));
-        card.column = lifecycle::landing_column(end).to_string();
+        card.column = lifecycle::settled_landing_column(end, parked_approvals).to_string();
         card.updated_at_millis = now_millis();
         if let Some(tasks) = self.tasks {
             tasks.upsert(self.company, card).await?;
@@ -975,6 +1025,10 @@ impl<'a> DelegationRunner<'a> {
                     },
                 );
                 let control = guard.control().clone();
+                // Issue #465, same sampling as the direct-answer path: a desk
+                // delegation whose first call parks has produced nothing to
+                // review either.
+                let approvals_before = self.approvals_queued();
                 let outcome = self
                     .run_turn
                     .run_steered(
@@ -990,6 +1044,7 @@ impl<'a> DelegationRunner<'a> {
                         self.run_sink.clone(),
                     )
                     .await?;
+                let parked = self.approvals_queued().saturating_sub(approvals_before);
                 // A cancel issued mid-flight discards the delegated reply —
                 // nothing is relayed. Flagged as a cancellation so a caller that
                 // has to explain the empty result can name the cause instead of
@@ -1004,6 +1059,7 @@ impl<'a> DelegationRunner<'a> {
                             card,
                             &member,
                             TaskRunEnd::Cancelled,
+                            parked,
                             "the run was cancelled mid-flight",
                         )
                         .await?;
@@ -1015,8 +1071,14 @@ impl<'a> DelegationRunner<'a> {
                     });
                 }
                 if let Some(card) = card.as_mut() {
-                    self.settle_work_card(card, &member, TaskRunEnd::Completed, &outcome.reply)
-                        .await?;
+                    self.settle_work_card(
+                        card,
+                        &member,
+                        TaskRunEnd::Completed,
+                        parked,
+                        &outcome.reply,
+                    )
+                    .await?;
                 }
                 // Hand the teammate's answer back to RELAY through a second
                 // orchestrator turn (the CEO-relay hand-back). Their steps ride
@@ -1413,7 +1475,7 @@ mod tests {
     use std::sync::Mutex;
 
     use crate::ports::TaskStore;
-    use crate::ports::tasks::{COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_TODO};
+    use crate::ports::tasks::{COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_TODO};
     use crate::ports::types::LedgerEntry;
     use crate::store::FsOps;
 
@@ -1556,6 +1618,10 @@ investor update for the quarter\n]"
         reply: String,
         queues: Vec<Delegation>,
         cancel: bool,
+        /// Tool calls this turn tried to make and had parked for approval
+        /// (issue #465), pushed onto the shared approval queue exactly as the
+        /// real [`ApprovalPolicy`](crate::harness::policy::ApprovalPolicy) does.
+        parks: Vec<String>,
     }
 
     impl Turn {
@@ -1570,15 +1636,26 @@ investor update for the quarter\n]"
             Self {
                 reply: reply.to_string(),
                 queues,
-                cancel: false,
+                ..Self::default()
             }
         }
 
         fn cancelled(reply: &str) -> Self {
             Self {
                 reply: reply.to_string(),
-                queues: Vec::new(),
                 cancel: true,
+                ..Self::default()
+            }
+        }
+
+        /// A turn whose **first** tool call parked for approval, so it produced
+        /// nothing: the reply is the agent saying it is blocked, not a result.
+        /// This is the shape in the issue #465 report.
+        fn parked(reply: &str, tool: &str) -> Self {
+            Self {
+                reply: reply.to_string(),
+                parks: vec![tool.to_string()],
+                ..Self::default()
             }
         }
     }
@@ -1588,6 +1665,9 @@ investor update for the quarter\n]"
     /// drain produced without a harness pool or a live model.
     struct ScriptedTurns {
         queue: DelegationQueue,
+        /// The same handle the runner reads, so a parked call is visible to the
+        /// settle exactly as it is in production (issue #465).
+        approvals: ApprovalRequestQueue,
         script: Mutex<VecDeque<Turn>>,
         calls: Mutex<Vec<(String, String)>>,
         /// The board as it looked at the START of each turn, so a test can prove
@@ -1601,6 +1681,7 @@ investor update for the quarter\n]"
         fn new(fx: &Fixture, turns: Vec<Turn>) -> Self {
             Self {
                 queue: fx.queue.clone(),
+                approvals: fx.approvals.clone(),
                 script: Mutex::new(turns.into()),
                 calls: Mutex::new(Vec::new()),
                 board_at_turn: Mutex::new(Vec::new()),
@@ -1647,6 +1728,23 @@ investor update for the quarter\n]"
                 .unwrap_or_else(|| panic!("unscripted turn: {agent_id} <- {message}"));
             for delegation in turn.queues {
                 self.queue.push(delegation);
+            }
+            for tool in turn.parks {
+                self.approvals
+                    .push(crate::harness::policy::ApprovalRequest {
+                        tool: tool.clone(),
+                        reason: "supervised".to_string(),
+                        effect: crate::ports::types::Effect {
+                            kind: tool,
+                            group: crate::ports::types::EffectGroup::Other,
+                            amount_usd: None,
+                            established_thread: false,
+                            first_time_counterparty: false,
+                            payload: serde_json::json!({}),
+                            agent: Some(agent_id.to_string()),
+                            run_id: None,
+                        },
+                    });
             }
             if turn.cancel
                 && let Some(control) = control
@@ -1742,6 +1840,10 @@ members = ["engineer"]
         tasks: Arc<dyn TaskStore>,
         queue: DelegationQueue,
         steer: InflightRegistry,
+        /// Wired into every runner, so the parked-approval overlay (issue #465)
+        /// is exercised by the whole existing suite rather than only by the
+        /// tests that park something.
+        approvals: ApprovalRequestQueue,
     }
 
     impl Fixture {
@@ -1753,6 +1855,7 @@ members = ["engineer"]
                 record: record(),
                 queue: DelegationQueue::default(),
                 steer: InflightRegistry::default(),
+                approvals: ApprovalRequestQueue::default(),
             }
         }
 
@@ -1766,6 +1869,7 @@ members = ["engineer"]
                 &self.queue,
                 orchestrator::MAX_DELEGATIONS_PER_TURN,
             )
+            .with_approvals(&self.approvals)
         }
 
         async fn cards(&self) -> Vec<TaskRecord> {
@@ -1954,6 +2058,137 @@ members = ["engineer"]
         assert_eq!(cards[0].column, COLUMN_IN_REVIEW);
         assert_eq!(cards[0].origin_chat_id.as_deref(), Some("eng_desk"));
         assert_eq!(turn.spawned_task.as_deref(), Some(cards[0].id.as_str()));
+    }
+
+    /// **Issue #465, the reported card.** A desk asked directly, whose first
+    /// tool call parks for approval, produced nothing — so its card must not
+    /// present as reviewable work.
+    ///
+    /// This path settled with a hardcoded [`TaskRunEnd::Completed`] and never
+    /// consulted the approval queue, so the card landed in In Review announcing
+    /// a result to check on work that had not started. It now parks, which is
+    /// where the operator can see it is blocked and where the console offers the
+    /// Resume that puts it back in flight once the call is authorised.
+    #[tokio::test]
+    async fn a_desk_whose_first_call_parks_leaves_its_card_blocked_not_reviewable() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::parked(
+                "I need approval before I can read the repo",
+                "fs_read",
+            )],
+        );
+        fx.runner(&turns)
+            .handle_operator_message(
+                "frontend_engineer",
+                "read the pricing repo and write modules.md",
+                Some("eng_desk"),
+            )
+            .await
+            .expect("operator message handled");
+
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(
+            cards[0].column, COLUMN_PAUSED,
+            "a turn that parked its first call produced nothing to review"
+        );
+        assert_ne!(
+            cards[0].column, COLUMN_IN_REVIEW,
+            "In Review is what a review verdict approves straight to Done — \
+             unstarted work must never sit there"
+        );
+    }
+
+    /// The other half of the same decision: parking is what moves the landing,
+    /// not the mere presence of an approval queue. A turn that ran clean still
+    /// reaches the reviewer.
+    ///
+    /// Paired with the test above so a fix that simply stopped writing In Review
+    /// would fail here.
+    #[tokio::test]
+    async fn a_desk_that_finished_cleanly_still_lands_in_review() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("modules.md is written")]);
+        fx.runner(&turns)
+            .handle_operator_message(
+                "frontend_engineer",
+                "read the pricing repo and write modules.md",
+                Some("eng_desk"),
+            )
+            .await
+            .expect("operator message handled");
+
+        let cards = fx.cards().await;
+        assert_eq!(cards[0].column, COLUMN_IN_REVIEW, "{cards:?}");
+        assert_eq!(fx.approvals.queued(), 0, "nothing was parked");
+    }
+
+    /// An approval left over from an *earlier* turn must not park this card.
+    /// The count is differenced across the turn precisely so a queue the cycle
+    /// was already holding cannot be misread as something this turn did.
+    #[tokio::test]
+    async fn an_approval_parked_before_this_turn_does_not_park_its_card() {
+        let fx = Fixture::new();
+        // Something a previous turn parked and nobody has resolved yet.
+        fx.approvals.push(crate::harness::policy::ApprovalRequest {
+            tool: "send_email".to_string(),
+            reason: "supervised".to_string(),
+            effect: crate::ports::types::Effect {
+                kind: "send_email".to_string(),
+                group: crate::ports::types::EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({}),
+                agent: Some("someone_else".to_string()),
+                run_id: None,
+            },
+        });
+
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("modules.md is written")]);
+        fx.runner(&turns)
+            .handle_operator_message(
+                "frontend_engineer",
+                "read the pricing repo and write modules.md",
+                Some("eng_desk"),
+            )
+            .await
+            .expect("operator message handled");
+
+        let cards = fx.cards().await;
+        assert_eq!(
+            cards[0].column, COLUMN_IN_REVIEW,
+            "this turn parked nothing of its own: {cards:?}"
+        );
+    }
+
+    /// A desk **hand-off** whose turn parks has the same shape as the direct
+    /// path, and settles the same way — the delegate stopped at an unauthorised
+    /// call, so its card is blocked rather than reviewable.
+    #[tokio::test]
+    async fn a_hand_off_whose_turn_parks_also_leaves_its_card_blocked() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::queueing("on it", vec![handoff("read the pricing repo")]),
+                Turn::parked("I need approval before I can read the repo", "fs_read"),
+                Turn::reply("relayed"),
+            ],
+        );
+        fx.runner(&turns)
+            .handle_operator_message("chief", "map out the pricing repo", Some("general"))
+            .await
+            .expect("operator message handled");
+
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(
+            cards[0].column, COLUMN_PAUSED,
+            "the delegate parked its first call: {cards:?}"
+        );
     }
 
     /// One message, one card. The REST chat handler already opens a To-do card
