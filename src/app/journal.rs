@@ -231,6 +231,18 @@ mod test {
         std::env::temp_dir().join(format!("oc-journal-{}-{tag}", std::process::id()))
     }
 
+    /// The child test the seam test re-invokes this binary to run.
+    #[cfg(feature = "openhuman")]
+    const SEAM_CHILD_TEST: &str = "app::journal::test::vendored_seam_child";
+
+    /// Which half of the seam the child should assert.
+    #[cfg(feature = "openhuman")]
+    const SEAM_ROLE_ENV: &str = "OC_JOURNAL_SEAM_ROLE";
+
+    /// The data dir the child compares against.
+    #[cfg(feature = "openhuman")]
+    const SEAM_DATA_DIR_ENV: &str = "OC_JOURNAL_SEAM_DATA_DIR";
+
     #[test]
     fn absent_env_roots_the_journal_in_the_data_dir() {
         let resolved = resolve(None, Path::new("/data"));
@@ -411,47 +423,116 @@ mod test {
     /// variable or changes its resolution, this fails instead of the journal
     /// silently reverting to `$HOME` in production.
     ///
-    /// Serialized and env-mutating, so it is `openhuman`-gated and deliberately
-    /// the only test here that touches the process environment.
+    /// Run in a **child process** rather than by mutating this process's
+    /// environment.
+    ///
+    /// `set_var` is process-global, and this library's test binary contains
+    /// unguarded environment readers and writers in several other modules
+    /// (`store::select`, `server::ops::connections`, `harness::composio`,
+    /// `server::ops::mailer`). A lock would only protect this test if every one
+    /// of those took the same lock, and nothing stops the next test from adding
+    /// an unguarded `set_var`. Handing the variable to a child at spawn time
+    /// removes the shared mutable state instead of scheduling around it, and
+    /// exercises the more faithful thing: a process that *starts* with the
+    /// environment a tenant container is given.
+    #[cfg(feature = "openhuman")]
+    #[test]
+    fn the_vendored_loader_still_honours_the_workspace_variable() {
+        let data_dir = scratch_root("vendored-seam");
+        // Deliberately outside the data dir, so "did the workspace land under
+        // the data dir?" cannot be satisfied by the home directory instead.
+        let home = scratch_root("vendored-seam-home");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+
+        let expected = resolve(None, &data_dir);
+        let run = |role: &str, export_seam: bool| {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([SEAM_CHILD_TEST, "--exact", "--ignored", "--nocapture"])
+                .env(SEAM_ROLE_ENV, role)
+                .env(SEAM_DATA_DIR_ENV, &data_dir)
+                .env("HOME", &home);
+            if export_seam {
+                command.env(OPENHUMAN_WORKSPACE_ENV, expected.root());
+            } else {
+                command.env_remove(OPENHUMAN_WORKSPACE_ENV);
+            }
+            command.output().expect("spawn the seam child process")
+        };
+
+        // A filter that stops matching (a rename, a moved module) makes libtest
+        // run nothing and still exit 0, so success alone would be a vacuous
+        // pass. Require that exactly one test actually ran.
+        let check = |what: &str, out: &std::process::Output| {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let detail = format!(
+                "{what}\n--- child stdout ---\n{stdout}\n--- child stderr ---\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(out.status.success(), "{detail}");
+            assert!(
+                stdout.contains("1 passed"),
+                "the child must have actually run the assertion, not filtered \
+                 it away — is {SEAM_CHILD_TEST} still the right path?\n{detail}"
+            );
+        };
+
+        // Exporting the variable puts the vendored workspace under the data dir.
+        check("the exported root must be honoured", &run("inside", true));
+
+        // Negative control: without it, the vendored runtime goes to $HOME. If
+        // this ever passes, the check above proves nothing.
+        check(
+            "without the variable the runtime must fall back to $HOME",
+            &run("outside", false),
+        );
+
+        std::fs::remove_dir_all(&data_dir).ok();
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The assertion half of the seam test, executed in the child process the
+    /// test above spawns. Ignored so a normal run never picks it up, and inert
+    /// unless the parent set the role, so a bare `cargo test -- --ignored`
+    /// cannot fail on a missing environment.
     #[cfg(feature = "openhuman")]
     #[tokio::test]
-    async fn the_vendored_loader_still_honours_the_workspace_variable() {
-        use openhuman_core::openhuman as oh;
+    #[ignore = "spawned by the_vendored_loader_still_honours_the_workspace_variable"]
+    async fn vendored_seam_child() {
+        let Ok(role) = std::env::var(SEAM_ROLE_ENV) else {
+            return;
+        };
+        let data_dir = PathBuf::from(std::env::var(SEAM_DATA_DIR_ENV).expect("parent sets this"));
+        let expected = resolve(None, &data_dir);
 
-        let data_dir = scratch_root("vendored-seam");
-        tokio::fs::create_dir_all(&data_dir).await.unwrap();
-        let resolved = resolve(None, &data_dir);
+        let config = openhuman_core::openhuman::config::Config::load_or_init()
+            .await
+            .expect("the vendored config must load");
 
-        let previous = std::env::var_os(OPENHUMAN_WORKSPACE_ENV);
-        // SAFETY: the variable is read by the vendored loader below and by no
-        // other test in this binary; the original value is restored before the
-        // test returns.
-        unsafe { std::env::set_var(OPENHUMAN_WORKSPACE_ENV, resolved.root()) };
-
-        let config = oh::config::Config::load_or_init().await;
-
-        // SAFETY: as above — restoring the environment we captured.
-        unsafe {
-            match previous {
-                Some(value) => std::env::set_var(OPENHUMAN_WORKSPACE_ENV, value),
-                None => std::env::remove_var(OPENHUMAN_WORKSPACE_ENV),
+        match role.as_str() {
+            "inside" => {
+                assert_eq!(
+                    config.workspace_dir,
+                    expected.root().join(WORKSPACE_SUBDIR),
+                    "the vendored runtime must place its workspace under the \
+                     root we export"
+                );
+                assert!(
+                    config.workspace_dir.starts_with(&data_dir),
+                    "the journal must resolve inside the data dir, got {}",
+                    config.workspace_dir.display()
+                );
             }
+            "outside" => assert!(
+                !config.workspace_dir.starts_with(&data_dir),
+                "without {OPENHUMAN_WORKSPACE_ENV} the runtime must not reach \
+                 the data dir on its own — the export is what does the work, \
+                 got {}",
+                config.workspace_dir.display()
+            ),
+            other => panic!("unknown seam role {other:?}"),
         }
-
-        let config = config.expect("the vendored config must load from the exported root");
-        assert_eq!(
-            config.workspace_dir,
-            resolved.root().join(WORKSPACE_SUBDIR),
-            "the vendored runtime must place its workspace under the root we \
-             export, not under $HOME"
-        );
-        assert!(
-            config.workspace_dir.starts_with(&data_dir),
-            "the journal must resolve inside the data dir, got {}",
-            config.workspace_dir.display()
-        );
-
-        tokio::fs::remove_dir_all(&data_dir).await.ok();
     }
 
     /// Puts an owner-writable mode back on `dir` so the test's own cleanup can
