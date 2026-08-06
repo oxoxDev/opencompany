@@ -389,8 +389,8 @@ impl PublishPathError {
                  a relative path like \"specs/launch.md\" — absolute paths and `..` are refused."
             ),
             Self::Missing => format!(
-                "There is no file at `{path}` in your sandbox. Check the path with `list_files` \
-                 or `glob`, and write the file before publishing it."
+                "There is no file at `{path}` in your sandbox. Check the path with `list` or \
+                 `glob`, and write the file before publishing it."
             ),
             Self::NotAFile => format!(
                 "`{path}` is not a regular file. Publish one file at a time — a folder cannot be a \

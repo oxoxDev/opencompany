@@ -953,3 +953,15 @@ fn the_nudge_says_when_the_file_list_is_incomplete() {
     // The caveat must not turn the nudge coercive — #244's contract still holds.
     assert!(!partial.to_lowercase().contains("you must"), "{partial}");
 }
+
+/// A refusal that names a tool the agent does not have costs it a turn.
+///
+/// The listing tool is advertised as `list` (openhuman's `ListFilesTool::name`);
+/// the message used to say `list_files`, which is the Rust type name and not
+/// anything the model can call.
+#[test]
+fn the_missing_file_message_names_a_tool_that_exists() {
+    let message = PublishPathError::Missing.message("specs/launch.md");
+    assert!(message.contains("`list`"), "{message}");
+    assert!(!message.contains("list_files"), "{message}");
+}
