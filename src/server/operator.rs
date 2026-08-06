@@ -684,6 +684,33 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             o["taskId"] = json!(task_id);
             o
         }
+        // Issue #464: the frame the board was missing. Every other task event
+        // here describes a card that already exists, so a card *opened* — by
+        // chat intake, a delegation, the publish drain, the REST route —
+        // reached the console only on its next reload.
+        //
+        // Three keys, all structural, and every one of them already reachable
+        // by the same operator through `GET {scope}/tasks`. There is
+        // deliberately no title and no note: a card's text is operator- or
+        // agent-authored free text, and this frame's whole job is to say
+        // *something moved*, not to carry the board. The console reacts by
+        // re-reading the board it already knows how to read, which keeps the
+        // card's content on exactly one route instead of two.
+        CompanyEvent::TaskCardChanged {
+            task_id,
+            change,
+            column,
+        } => {
+            let mut o = envelope("task_card_changed");
+            o["taskId"] = json!(task_id);
+            o["change"] = json!(change);
+            // Omitted rather than null on a removal, so "gone" is a presence
+            // check on the console rather than a null check.
+            if let Some(column) = column {
+                o["column"] = json!(column);
+            }
+            o
+        }
         // `message` is scrubbed at the source (`OcMcpCallTool` → `HarnessBrain`
         // drain), so it can never carry a credential, response body, or URL query
         // string — safe to forward verbatim. See `CompanyEvent::McpCallFailed`.
@@ -4330,6 +4357,40 @@ mod test {
         .expect("task_dispatched is an attention signal");
         assert_eq!(v["type"], "task_dispatched");
         assert_eq!(v["taskId"], "t-42");
+    }
+
+    /// Issue #464: an opened card reaches the console as its own frame. This is
+    /// the half a unit test can prove — that the projection exists and carries
+    /// the card; that the *board* redraws off it is a browser fact.
+    #[test]
+    fn projects_task_card_changed() {
+        let v = super::project_event(&stored(CompanyEvent::TaskCardChanged {
+            task_id: "t-77".into(),
+            change: crate::runtime::CHANGE_OPENED.into(),
+            column: Some("todo".into()),
+        }))
+        .expect("a board write is an attention signal");
+        assert_eq!(v["type"], "task_card_changed");
+        assert_eq!(v["taskId"], "t-77");
+        assert_eq!(v["change"], "opened");
+        assert_eq!(v["column"], "todo");
+    }
+
+    /// A removed card is projected without a column — the console's "is it
+    /// gone?" check is a presence check, never a null one.
+    #[test]
+    fn projects_a_removed_card_without_a_column() {
+        let v = super::project_event(&stored(CompanyEvent::TaskCardChanged {
+            task_id: "t-77".into(),
+            change: crate::runtime::CHANGE_REMOVED.into(),
+            column: None,
+        }))
+        .expect("a board write is an attention signal");
+        assert_eq!(v["change"], "removed");
+        assert!(
+            v.get("column").is_none(),
+            "a removed card is in no column: {v}"
+        );
     }
 
     #[test]
