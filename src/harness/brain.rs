@@ -61,7 +61,7 @@ use crate::harness::run_trace::RunTraceSink;
 use crate::ports::artifacts::{ArtifactAuthor, ArtifactRecord};
 use crate::ports::brain::{Brain, CycleHost};
 use crate::ports::runs::{RunOutcome, RunStatus};
-use crate::ports::tasks::{TaskOutput, TaskOutputArtifact};
+use crate::ports::tasks::{COLUMN_IN_REVIEW, TaskOutput, TaskOutputArtifact};
 use crate::ports::types::{
     CompanyEvent, CompanyRecord, CompressedTrace, CycleRequest, CycleResult, OutboundMessage,
     TokenUsage, TurnStep, TurnStepKind, TurnStepStatus, Verdict,
@@ -223,6 +223,17 @@ impl HarnessBrain {
         let control = guard.control().clone();
 
         let run_turn = HarnessRunTurn::new(&self.pool, &self.deps);
+        // Issue #445: this is a full agent turn with the whole toolbelt, so it
+        // can publish — and before this nothing drained it, exactly as on the
+        // chat path. It is a conversation continuation (it answers into the
+        // thread the approval was raised in), so it files the same way a chat
+        // turn does.
+        let publish_claim =
+            (self.deps.tasks.is_some() && self.deps.artifacts.is_some()).then(|| {
+                self.deps
+                    .pending_publishes
+                    .claim(publish::PublishDestination::Conversation)
+            });
         // Un-streamed, like a dispatched card: this turn is answered by the
         // bubble returned below, and its transient frames would otherwise
         // misattribute onto whichever chat thread the console is watching.
@@ -230,6 +241,26 @@ impl HarnessBrain {
             .run_steered_background(&self.record.id, &grant.agent, &instruction, &control, None)
             .await;
         drop(guard);
+
+        let published = self.deps.pending_publishes.drain();
+        if !published.is_empty()
+            && publish_claim.is_some()
+            && let Err(err) = self
+                .record_conversation_publishes(
+                    &grant.agent,
+                    grant.origin_thread.as_deref(),
+                    published,
+                )
+                .await
+        {
+            tracing::error!(
+                approval_id = %approval_id,
+                agent = %grant.agent,
+                error = %err,
+                "[publish] the re-issued call published files that could not be recorded"
+            );
+        }
+        drop(publish_claim);
 
         let text = match outcome {
             Ok(outcome) => outcome.reply,
@@ -396,10 +427,23 @@ impl HarnessBrain {
         let dispatched_responder = responder.clone();
         let workspace = agent_workspace(&self.deps.workspace_root, &self.record.id, &responder);
         let workspace_at_dispatch = WorkspaceSnapshot::take(&workspace);
-        // Start from an empty publish queue for the same reason the delegation
-        // queue is cleared per turn: a chat turn earlier in this cycle shares
-        // these deps, and its staged file must never be attributed to this card.
-        self.deps.pending_publishes.clear();
+        // Claim the publish queue for this dispatch (#445). The claim clears on
+        // the way in for the reason the bare `clear()` here always did — a chat
+        // turn earlier in this cycle shares these deps, and its staged file must
+        // never be attributed to this card — and now also tells the tool which
+        // destination to name in its receipt.
+        //
+        // Only when there is an artifact store to record into. Without one the
+        // drain below has nowhere to write and would log a warning while the
+        // agent was told its file was safe, so leaving the queue unclaimed
+        // turns that into an in-turn refusal the agent can actually report.
+        // `build_agent` already declines to wire the tool at all in that case;
+        // this makes the invariant local rather than borrowed from the builder.
+        let _publish_claim = self.deps.artifacts.as_ref().map(|_| {
+            self.deps
+                .pending_publishes
+                .claim(publish::PublishDestination::Task)
+        });
         // Issue #339, same argument for staged workflow references: an operator
         // chat turn earlier in this cycle may have run a workflow through the
         // orchestrator's tool, and that run belongs to the conversation, not to
@@ -727,7 +771,7 @@ impl HarnessBrain {
                 agent = %responder,
                 files = %publish::name_files(&still_unpublished),
                 declined = declined.is_some(),
-                "[publish] the run changed workspace files and published none of them; no \
+                "[publish] the run changed sandbox files and published none of them; no \
                  artifact was recorded"
             );
         }
@@ -1424,6 +1468,98 @@ impl HarnessBrain {
         Ok(written)
     }
 
+    /// Records what a **conversation** turn published, minting the card that
+    /// carries it (issue #445). Returns that card's id.
+    ///
+    /// # Why a card, rather than a company-level artifact
+    ///
+    /// The issue allows either: a chat deliverable becomes an artifact attached
+    /// to no card, or the act of publishing mints the card. This path takes the
+    /// second, and the deciding argument is *reachability* — which is, after
+    /// all, the entire bug.
+    ///
+    /// An [`ArtifactRecord`] carries a non-optional `task_id`, `(task_id,
+    /// source)` **is** its identity, the only route that lists artifacts is
+    /// `GET /tasks/{task_id}/artifacts`, and the only console surface that
+    /// renders one is the per-task Artifacts tab. A card-less artifact would
+    /// therefore need an optional `task_id` (breaking the identity contract), a
+    /// new company-scoped route, and a new console view — and until that last
+    /// piece shipped, the artifact would be recorded and still unreachable,
+    /// which is precisely the failure being fixed, merely moved one layer down.
+    /// Minting the card reuses a path the operator can already open today.
+    ///
+    /// It is also honest about what happened rather than a workaround: an agent
+    /// that produced a deliverable did a unit of work, and a board that shows it
+    /// is more accurate than one that does not. The card lands in
+    /// [`COLUMN_IN_REVIEW`] because that is where the lifecycle already puts
+    /// finished agent work awaiting a person — `COLUMN_DONE` is reached only by
+    /// a human accepting it, and this fix does not get to decide that on their
+    /// behalf.
+    ///
+    /// # What it deliberately does not do
+    ///
+    /// No `output` stamp. That field pins a `run_id` and an attempt ordinal, and
+    /// a chat turn has neither — inventing one would put a fabricated attempt on
+    /// a card to make a field look populated. The artifacts are reachable
+    /// through the tab regardless; an invented run id would not be true.
+    async fn record_conversation_publishes(
+        &self,
+        responder: &str,
+        chat_id: Option<&str>,
+        published: Vec<publish::PendingPublish>,
+    ) -> Result<String> {
+        let Some(tasks) = self.deps.tasks.as_ref() else {
+            // Unreachable while the claim is only taken with both stores wired,
+            // and an error rather than a silent `Ok` so it stays unreachable:
+            // the caller surfaces this to the operator instead of dropping the
+            // deliverable the way #445 did.
+            return Err(crate::OpenCompanyError::Harness(
+                "a conversation published a file but no task board is wired".to_string(),
+            ));
+        };
+
+        let card = TaskRecord {
+            id: generate_id(),
+            title: publish::conversation_card_title(&published),
+            note: Some(publish::conversation_card_note(responder, &published)),
+            // Finished agent work a person has not accepted yet — the same
+            // landing `column_for_settled_run(Succeeded)` gives a dispatched run.
+            column: COLUMN_IN_REVIEW.to_string(),
+            priority: "medium".to_string(),
+            assignee: responder.to_string(),
+            updated_at_millis: now_millis(),
+            // The conversation this came out of, so the card points back at the
+            // thread that produced it (#151 §3.2's field, same meaning).
+            origin_chat_id: chat_id.map(str::to_string),
+            // A chat turn has no card in scope, so this is a lineage root —
+            // the same `None` a `spawn_task` from an ordinary chat turn writes.
+            parent_task_id: None,
+            output: None,
+            plan: None,
+        };
+        // The card is written **first**: an artifact's `task_id` must name a
+        // card that exists. If the artifact writes then fail, the failure
+        // direction is a visible card whose note explains what it was for —
+        // recoverable, and the operator is told below. The reverse order would
+        // leave artifacts pointing at a card that was never created, which is
+        // unreachable by every route and indistinguishable from the original
+        // bug.
+        tasks.upsert(&self.record.id, &card).await?;
+
+        // No run id: there is no attempt row behind a chat turn, and
+        // `stamp_run` is skipped rather than given something invented.
+        let recorded = self
+            .record_published_artifacts(&card, responder, published, None)
+            .await?;
+        tracing::info!(
+            task_id = %card.id,
+            agent = %responder,
+            artifacts = recorded.len(),
+            "[publish] a conversation published files; minted a card to carry them"
+        );
+        Ok(card.id)
+    }
+
     /// Resolves which agent answers an operator message.
     ///
     /// Resolution order, and the order matters:
@@ -1706,6 +1842,19 @@ impl Brain for HarnessBrain {
                     // (the delegation queue is cleared inside the runner, right
                     // before the orchestrator turn).
                     self.deps.mcp_failures.clear();
+                    // Issue #445: claim the publish queue for this conversation,
+                    // so a file published in chat is drained below instead of
+                    // being staged into a queue nothing reaches. Claimed only
+                    // when both stores the drain needs are wired — the claim is
+                    // a promise to record, and one that cannot be kept must not
+                    // be made, or the tool goes back to issuing receipts nothing
+                    // honours.
+                    let publish_claim =
+                        (self.deps.tasks.is_some() && self.deps.artifacts.is_some()).then(|| {
+                            self.deps
+                                .pending_publishes
+                                .claim(publish::PublishDestination::Conversation)
+                        });
                     // Drive the brain-agnostic delegation seam (issue #176): the
                     // orchestrator turn, its queued delegations, and the CEO-relay
                     // hand-back all run behind the `RunTurn` impl. `HarnessDeps` is
@@ -1716,7 +1865,43 @@ impl Brain for HarnessBrain {
                         .handle_operator_message(&responder, text, chat_id)
                         .await?;
                     let mut operator_steps = turn.steps;
-                    let operator_reply = turn.reply;
+                    let mut operator_reply = turn.reply;
+
+                    // Drain what the conversation published (#445). Unconditional
+                    // so nothing survives into the next turn, and only *recorded*
+                    // when the claim was actually taken — an unclaimed queue can
+                    // only be empty here, because the tool refuses without one.
+                    let published = self.deps.pending_publishes.drain();
+                    let mut published_card = None;
+                    if !published.is_empty() && publish_claim.is_some() {
+                        let count = published.len();
+                        match self
+                            .record_conversation_publishes(&responder, chat_id, published)
+                            .await
+                        {
+                            Ok(card_id) => published_card = Some(card_id),
+                            Err(err) => {
+                                // The agent has already been told the file was
+                                // published, and that receipt is now wrong. This
+                                // is the one remaining way that can happen — a
+                                // store write failing under a claim that was
+                                // honestly made — so it is said out loud in the
+                                // conversation rather than left in a log the
+                                // operator will never read. Saying nothing here
+                                // would reproduce #445 exactly: a confident
+                                // delivery claim over nothing recorded.
+                                tracing::error!(
+                                    agent = %responder,
+                                    staged = count,
+                                    error = %err,
+                                    "[publish] a conversation published files but they could not \
+                                     be recorded; telling the operator in the reply"
+                                );
+                                operator_reply.push_str(&publish::recording_failed_notice(count));
+                            }
+                        }
+                    }
+                    drop(publish_claim);
                     // Re-skin any MCP tool-call failures (from the orchestrator
                     // turn, a delegated desk turn, or the relay turn) as error
                     // steps on the operator bubble — one surface, one renderer.
@@ -1728,7 +1913,17 @@ impl Brain for HarnessBrain {
                         // `spawn_task` was invisible in chat — the card landed
                         // on the board and the reply carried nothing tying the
                         // two together.
-                        task_id: turn.spawned_task,
+                        //
+                        // Issue #445 reuses that link for the card a publish
+                        // minted, which is how the operator gets from "here is
+                        // your deliverable" to the thing itself in one click.
+                        // A `spawn_task` still wins the slot: this field is a
+                        // single id (see `OperatorTurn::spawned_task` on why it
+                        // cannot be widened), so the rule is to never take a
+                        // link away from a turn that already had one. A publish
+                        // card that loses the slot is still on the board, in
+                        // review, carrying a note that explains what it is.
+                        task_id: turn.spawned_task.or(published_card),
                         channel: "operator".to_string(),
                         text: operator_reply,
                         reply_to: None,

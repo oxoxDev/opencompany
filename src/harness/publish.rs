@@ -38,6 +38,34 @@
 //! card, the responder and the store. One write site, and "the queue is empty"
 //! doubles as the detection signal the nudge reads.
 //!
+//! # Why staging must be *claimed* (issue #445)
+//!
+//! Staging has one failure mode, and it is the worst kind: a caller for whom
+//! **nothing drains**. The tool returned success and named a destination
+//! regardless, so a publish made during a chat turn was staged, never drained
+//! (no task settles), then cleared by the next turn — a silent no-op reported
+//! as a delivered deliverable. The agent then told the operator the file was
+//! ready, because it had been told exactly that. A tool that cannot fail
+//! launders the failure through the agent into a confident falsehood.
+//!
+//! So the queue carries a [`PublishDestination`] alongside the staged items,
+//! and a drain site **claims** it — [`PendingPublishQueue::claim`] — for the
+//! span in which it promises to drain. The claim is what the receipt is written
+//! from, so the sentence the agent reads describes that caller's actual
+//! destination rather than one case's sentence reused everywhere.
+//!
+//! The default is [`PublishDestination::Unclaimed`], and that direction is the
+//! whole guarantee. A turn run from a path that has not claimed a destination —
+//! including one written later, by someone who never read this module — gets an
+//! honest in-turn refusal instead of a success receipt nothing will honour. The
+//! invariant is enforced by construction rather than by remembering: *no claim,
+//! no publish*. It generalizes [`build_agent`]'s existing fail-closed gate (an
+//! agent with no artifact store is not offered the tool at all) from build time,
+//! where it could only ask "could anything ever drain?", to call time, where it
+//! can ask the question that actually matters — "will anything drain *this*?"
+//!
+//! [`build_agent`]: crate::harness::build::build_agent
+//!
 //! # What is validated, and when
 //!
 //! Everything, at `execute()` time, so the agent gets a truthful in-turn error
@@ -167,21 +195,112 @@ pub struct PendingPublish {
     pub body: String,
 }
 
+/// Where the publishes staged on a queue are going to be recorded — and
+/// therefore what the tool is entitled to tell the agent (issue #445).
+///
+/// Read at `execute()` time, so the receipt describes the caller that made the
+/// call. The variants are the *reachable destinations*, not the call sites: two
+/// paths that file into the same place share one variant, because the agent's
+/// receipt is about where its file lands, not about which function ran it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PublishDestination {
+    /// Nothing will drain. **The default, and deliberately so.**
+    ///
+    /// Any turn whose caller has not claimed a destination lands here and the
+    /// tool refuses in-turn. That is the fail-safe direction: a new turn-running
+    /// path added later inherits an honest refusal rather than the silent drop
+    /// that made #445 a lie told through the agent.
+    #[default]
+    Unclaimed,
+    /// A dispatched card's settle path drains this, filing each publish on that
+    /// card. The pre-#445 behaviour, unchanged.
+    Task,
+    /// A conversation turn drains this, and publishing **mints the card** that
+    /// carries the artifact — a chat deliverable is real work, so it gets the
+    /// board record the console can already open.
+    Conversation,
+}
+
+impl PublishDestination {
+    /// The sentence appended to a success receipt, or `None` when no publish
+    /// can succeed here at all.
+    ///
+    /// Returning `None` rather than a "sorry" string is what keeps the refusal
+    /// path and the success path from ever being confused: there is no receipt
+    /// to render, so the caller is forced to produce a tool **error** instead.
+    fn receipt_tail(self) -> Option<&'static str> {
+        match self {
+            Self::Unclaimed => None,
+            Self::Task => Some("It appears on this task's Artifacts tab when the run finishes."),
+            Self::Conversation => Some(
+                "Because this is a conversation and not a task, it is filed on a new board card \
+                 for this conversation when your turn finishes — the operator opens it from that \
+                 card's Artifacts tab.",
+            ),
+        }
+    }
+}
+
+/// The agent-facing refusal when nothing is in a position to record a publish.
+///
+/// It has to do two jobs. It must not read as a transient glitch worth
+/// retrying, and it must tell the agent what to say next — because the failure
+/// this replaces was one the agent could not detect, and an agent that thinks it
+/// published will report a delivery that did not happen.
+fn cannot_publish_here(path: &str) -> String {
+    format!(
+        "`{path}` was NOT published: nothing here can record a deliverable, so publishing is \
+         unavailable in this context. Do not retry — it will fail the same way, and do not tell \
+         anyone the file was delivered. The file is still in your sandbox; say plainly that you \
+         could not publish it."
+    )
+}
+
 /// A shared, in-memory queue of staged publishes — the exact
 /// [`McpFailureQueue`](crate::harness::mcp_probe::McpFailureQueue) pattern.
 ///
 /// Cheap to [`Clone`] (a shared handle); the tool built into the agent and the
 /// brain that drains it see the same queue because
 /// [`HarnessDeps`](crate::harness::HarnessDeps) clones share this handle.
+///
+/// The destination (#445) rides the **same handle** rather than sitting beside
+/// it in `HarnessDeps`, which is not a tidiness choice: `build_agent` hands the
+/// tool this one clone and nothing else, so carrying the claim here makes it
+/// impossible to wire a tool that cannot see where its publishes are going.
 #[derive(Clone, Default)]
 pub struct PendingPublishQueue {
     inner: Arc<Mutex<Vec<PendingPublish>>>,
+    destination: Arc<Mutex<PublishDestination>>,
 }
 
 impl PendingPublishQueue {
     /// Stages a publish.
     pub fn push(&self, publish: PendingPublish) {
         self.inner.lock().expect("publish queue").push(publish);
+    }
+
+    /// Where staged publishes are currently headed.
+    pub fn destination(&self) -> PublishDestination {
+        *self.destination.lock().expect("publish destination")
+    }
+
+    /// Claims this queue for a drain site that promises to drain it, for as long
+    /// as the returned [`PublishClaim`] lives.
+    ///
+    /// Clears on the way in for the reason the drain sites already cleared by
+    /// hand — a prior turn's staged file must never be attributed to this
+    /// caller — and, via [`PublishClaim`]'s `Drop`, on the way out too. The exit
+    /// half is the one that is new and load-bearing: an early return, a `?`, or
+    /// a panic mid-run used to leave items staged and the next caller to clear
+    /// them, so correctness depended on every future path remembering. Now the
+    /// claim's scope *is* the window in which publishing works.
+    #[must_use = "the claim releases on drop; dropping it immediately un-claims the queue"]
+    pub fn claim(&self, destination: PublishDestination) -> PublishClaim {
+        self.clear();
+        *self.destination.lock().expect("publish destination") = destination;
+        PublishClaim {
+            queue: self.clone(),
+        }
     }
 
     /// Empties the queue. Called before each turn so nothing a prior turn — an
@@ -216,6 +335,30 @@ impl PendingPublishQueue {
     }
 }
 
+/// The live claim on a [`PendingPublishQueue`] — proof that some drain site is
+/// listening (issue #445).
+///
+/// Held for the span in which a caller promises to drain; on `Drop` the queue
+/// returns to [`PublishDestination::Unclaimed`] and is emptied, so publishing is
+/// off again the moment that promise ends. Mirrors the RAII shape the in-flight
+/// steer guard already uses in the brain, for the same reason: the cleanup has
+/// to happen on **every** exit path, including the ones nobody wrote by hand.
+///
+/// Deliberately not [`Clone`] — two live claims would mean two owners of one
+/// promise, and the second to drop would un-claim the queue underneath the
+/// first.
+pub struct PublishClaim {
+    queue: PendingPublishQueue,
+}
+
+impl Drop for PublishClaim {
+    fn drop(&mut self) {
+        *self.queue.destination.lock().expect("publish destination") =
+            PublishDestination::Unclaimed;
+        self.queue.clear();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Path resolution
 // ---------------------------------------------------------------------------
@@ -238,15 +381,15 @@ impl PublishPathError {
     /// that only says "no" costs a whole turn to recover from.
     pub fn message(&self, path: &str) -> String {
         match self {
-            Self::Empty => "`path` is required: give the workspace-relative path of the file you \
-                            want to publish, e.g. \"specs/launch.md\"."
+            Self::Empty => "`path` is required: give the path of the file you want to publish, \
+                            relative to your sandbox, e.g. \"specs/launch.md\"."
                 .to_string(),
             Self::Outside => format!(
-                "`{path}` is outside your workspace. Publish only files you wrote inside it, using \
+                "`{path}` is outside your sandbox. Publish only files you wrote inside it, using \
                  a relative path like \"specs/launch.md\" — absolute paths and `..` are refused."
             ),
             Self::Missing => format!(
-                "There is no file at `{path}` in your workspace. Check the path with `list_files` \
+                "There is no file at `{path}` in your sandbox. Check the path with `list_files` \
                  or `glob`, and write the file before publishing it."
             ),
             Self::NotAFile => format!(
@@ -436,7 +579,7 @@ pub fn capture_body(
              bytes: {size}\n\
              sha256: {sha}\n\
              \n\
-             The file lives in the agent's workspace. Wiping the sandbox leaves this record \
+             The file lives in the agent's own sandbox. Wiping the sandbox leaves this record \
              intact and the payload unreachable."
         ),
         forced_kind: Some(forced),
@@ -472,13 +615,13 @@ impl Tool for PublishArtifactTool {
     }
 
     fn description(&self) -> &str {
-        "Publish a file you wrote in your workspace as a deliverable for this task. USE FOR the \
-         finished output somebody asked for — a spec, a draft, a report, an invoice, an exported \
-         dataset. The operator sees published files on the task's Artifacts tab, and republishing \
-         the same path on a later run adds a version rather than a duplicate. NOT for scratch \
-         files, notes to yourself, logs, or build output, and NOT a way to send a message — your \
-         reply already reaches the operator. Publishing nothing is a perfectly good outcome for a \
-         task that produced no file."
+        "Publish a file you wrote in your own sandbox as a deliverable. USE FOR the finished \
+         output somebody asked for — a spec, a draft, a report, an invoice, an exported dataset. \
+         Your sandbox is private to you and the operator cannot see into it, so publishing is the \
+         only thing that hands a file over; republishing the same path later adds a version \
+         rather than a duplicate. NOT for scratch files, notes to yourself, logs, or build \
+         output, and NOT a way to send a message — your reply already reaches the operator. \
+         Publishing nothing is a perfectly good outcome for work that produced no file."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -487,7 +630,7 @@ impl Tool for PublishArtifactTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Workspace-relative path of the file to publish, e.g. \"specs/launch.md\". Must be a file you wrote inside your own workspace."
+                    "description": "Path of the file to publish, relative to your own sandbox, e.g. \"specs/launch.md\". Must be a file you wrote inside your sandbox — not a path in the company workspace, which is a different place you reach with the workspace tools."
                 },
                 "title": {
                     "type": "string",
@@ -516,6 +659,21 @@ impl Tool for PublishArtifactTool {
 
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
         let raw_path = args.get("path").and_then(Value::as_str).unwrap_or_default();
+
+        // Issue #445: can anything record a publish made from *this* turn?
+        // Asked first, before the path is even resolved, because when the answer
+        // is no it is the only fact that matters — validating a path we are not
+        // going to publish would only produce a more specific way of being
+        // unable to publish.
+        let Some(receipt_tail) = self.queue.destination().receipt_tail() else {
+            tracing::warn!(
+                path = %raw_path.trim(),
+                "[publish] `publish_artifact` was called from a turn with no claimed \
+                 destination; refusing rather than staging into a queue nothing will drain"
+            );
+            return Ok(ToolResult::error(cannot_publish_here(raw_path.trim())));
+        };
+
         let (file, source) = match resolve_in_workspace(&self.workspace, raw_path) {
             Ok(resolved) => resolved,
             Err(err) => return Ok(ToolResult::error(err.message(raw_path.trim()))),
@@ -578,9 +736,12 @@ impl Tool for PublishArtifactTool {
         } else {
             "captured in full"
         };
+        // The tail comes from the claim (#445), so the destination named is the
+        // one this caller actually has. The single hard-coded task sentence is
+        // what told a chat turn its file would appear on a run that was never
+        // going to finish.
         Ok(ToolResult::success(format!(
-            "Published `{source}` as \"{title}\" ({kind}) — {how}. It appears on this task's \
-             Artifacts tab when the run finishes.",
+            "Published `{source}` as \"{title}\" ({kind}) — {how}. {receipt_tail}",
             kind = kind.as_str()
         )))
     }
@@ -763,7 +924,7 @@ pub fn nudge_instruction(brief: &str, reply: &str, changed_files: &[String]) -> 
          Your reply was:\n\
          {reply}\n\
          \n\
-         You changed these files in your workspace and published none of them:\n\
+         You changed these files in your sandbox and published none of them:\n\
          {files}\n\
          \n\
          If any of them is the deliverable this task was asking for, publish it now with \
@@ -789,19 +950,98 @@ pub fn nudge_instruction(brief: &str, reply: &str, changed_files: &[String]) -> 
 /// scratch notes, poisoning the churn signal the artifact port exists to
 /// measure. So this says what a deliverable *is*, says plainly that many tasks
 /// have none, and leaves the judgement where it belongs.
+///
+/// # Two different places called "workspace" (issue #445)
+///
+/// This paragraph and
+/// [`workspace_brief`](crate::harness::workspace_tools::workspace_brief) can sit
+/// in the same system prompt, and before #445 both called their own directory
+/// "your workspace" — the agent's private sandbox here, the operator-owned
+/// company note tree there. So "it's in the workspace" meant one place to the
+/// agent and a different one to the operator reading the console, and an
+/// operator sent to the obvious place correctly found nothing. That collision is
+/// how a lost deliverable stayed lost even once someone went looking, so the
+/// sandbox is named **sandbox** throughout this module and the distinction is
+/// stated outright below rather than left to be inferred.
 pub fn publish_brief() -> String {
     format!(
         "\n\n## Deliverables\n\
-         If this task asks you to produce something — a document, a report, a draft, an export — \
-         write it to a file in your workspace and then publish it with `{PUBLISH_ARTIFACT_TOOL}`. \
-         That is what puts it on the task's Artifacts tab where the operator can read, edit and \
-         version it; a file you merely wrote is invisible to them, and pasting the whole document \
-         into your reply is not the same thing. Republish the same path on a later run to add a \
-         version rather than a duplicate.\n\
+         The files you write live in your **sandbox** — your own private working directory. It is \
+         not the company workspace (the shared note tree you read with the workspace tools), and \
+         the operator cannot see into it. A file you merely wrote is therefore invisible to \
+         everyone but you, however finished it is.\n\
+         So if you are asked to produce something — a document, a report, a draft, an export — \
+         write it to a file in your sandbox and then hand it over with \
+         `{PUBLISH_ARTIFACT_TOOL}`. Publishing is what turns a file into a deliverable the \
+         operator can open, read, edit and version; pasting the whole document into your reply is \
+         not the same thing. Republish the same path later to add a version rather than a \
+         duplicate. The tool tells you where the file landed — say that, and nothing more \
+         confident than that. If it returns an error, the file was NOT delivered and you must not \
+         report it as though it was.\n\
          Publish only the finished thing somebody asked for. Scratch files, notes to yourself, \
-         logs and build output are not deliverables, and plenty of tasks — a question answered, a \
-         check run, a decision made — produce no file at all. Having nothing to publish is a \
+         logs and build output are not deliverables, and plenty of work — a question answered, a \
+         check run, a decision made — produces no file at all. Having nothing to publish is a \
          normal outcome, not a gap to fill."
+    )
+}
+
+/// The title of the board card a conversation's publish mints (issue #445).
+///
+/// Named from what was actually published rather than from the chat text: the
+/// card exists to carry these files, and a title lifted from conversation
+/// ("could you write that up?") would describe the request instead of the
+/// deliverable sitting on it. One file gives its own title; several give the
+/// first plus a count, which stays a fixed-width string no matter how many were
+/// published.
+///
+/// Empty input cannot occur — the card is only minted once there is something to
+/// put on it — but it degrades to a neutral title rather than panicking, because
+/// a card with a dull name is recoverable and a crashed cycle is not.
+pub fn conversation_card_title(published: &[PendingPublish]) -> String {
+    match published {
+        [] => "Deliverable from a conversation".to_string(),
+        [only] => only.title.clone(),
+        [first, rest @ ..] => format!("{} (+{} more)", first.title, rest.len()),
+    }
+}
+
+/// The note explaining why a card exists that nobody asked for (issue #445).
+///
+/// A card appearing on the board with no request behind it is otherwise a small
+/// mystery, so it says outright where it came from: an agent published during a
+/// conversation, and this card is the record that carries the result. Without
+/// this the honest fix for a silent drop would introduce its own small
+/// confusion.
+pub fn conversation_card_note(agent: &str, published: &[PendingPublish]) -> String {
+    let files: Vec<String> = published.iter().map(|p| p.source.clone()).collect();
+    format!(
+        "Opened to carry what {agent} published during a conversation: {files}. Chat turns run \
+         without a card, so this card was created by the act of publishing — it records a \
+         delivered file rather than a request somebody made.",
+        files = name_files(&files),
+    )
+}
+
+/// The line appended to an operator's reply when a publish was accepted in-turn
+/// but could not be recorded (issue #445).
+///
+/// The agent has already said the file is delivered — it was told so — and the
+/// receipt cannot be recalled. The remaining choice is whether the operator
+/// hears about it, and a log line is not hearing about it. So the correction
+/// goes where the false claim went: into the conversation, in the operator's own
+/// words rather than the agent's, immediately after the reply that promised the
+/// file.
+pub fn recording_failed_notice(count: usize) -> String {
+    let subject = if count == 1 {
+        "1 file was".to_string()
+    } else {
+        format!("{count} files were")
+    };
+    format!(
+        "\n\n---\n\n**Note from the system:** {subject} published during this turn but could NOT \
+         be recorded, so there is no card or artifact to open — treat any claim above that the \
+         work was delivered as incorrect. The file is still in the agent's sandbox. Ask for it \
+         again, and if this repeats, the artifact store needs looking at."
     )
 }
 
