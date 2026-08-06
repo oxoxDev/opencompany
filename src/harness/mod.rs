@@ -664,6 +664,58 @@ fn is_transient_empty_response(err: &anyhow::Error) -> bool {
         .contains("empty response")
 }
 
+/// What a workspace-ensure attempt should say, given what the last attempt for
+/// the same agent said (issue #449).
+///
+/// The attempt itself is per dispatch and stays that way — see
+/// [`note_workspace_attempt`](HarnessPool::note_workspace_attempt) for why
+/// memoising it is the wrong fix. Only the *reporting* is edge-triggered.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorkspaceReport {
+    /// The first failure since this agent was last healthy: report it.
+    Failed,
+    /// Still failing, and already reported: say nothing.
+    StillFailing,
+    /// Working again after a reported failure: say so once, so a reader who saw
+    /// the error learns it ended.
+    Recovered,
+    /// Working, and was already working: say nothing.
+    StillHealthy,
+}
+
+impl WorkspaceReport {
+    /// Whether this transition has anything to log at all.
+    pub(crate) fn is_silent(self) -> bool {
+        matches!(self, Self::StillFailing | Self::StillHealthy)
+    }
+}
+
+/// Folds one attempt's outcome into the set of currently-failing keys and
+/// returns what to report.
+///
+/// Pure but for the `failing` set it edits, so the whole state machine is
+/// testable without a model, a roster or a filesystem. `failing` holds exactly
+/// the keys whose last attempt failed **and** whose failure has been reported;
+/// `failed` is this attempt's outcome.
+fn workspace_report<K>(failing: &mut HashSet<K>, key: &K, failed: bool) -> WorkspaceReport
+where
+    K: std::hash::Hash + Eq + Clone,
+{
+    if failed {
+        // `insert` returns false when the key was already there — i.e. the
+        // previous attempt failed and was already reported.
+        if failing.insert(key.clone()) {
+            WorkspaceReport::Failed
+        } else {
+            WorkspaceReport::StillFailing
+        }
+    } else if failing.remove(key) {
+        WorkspaceReport::Recovered
+    } else {
+        WorkspaceReport::StillHealthy
+    }
+}
+
 /// A pool of live agents, one roster per company.
 pub struct HarnessPool {
     agents: RwLock<HashMap<CompanyId, Vec<Arc<CompanyAgent>>>>,
@@ -722,6 +774,19 @@ pub struct HarnessPool {
     /// A company that never sets an override keeps an empty set and a stable
     /// fingerprint — no rebuild, byte-identical to the pre-#343 behaviour.
     budget_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// The `(company, agent)` pairs whose last workspace-ensure failed and whose
+    /// failure has already been reported (issue #449).
+    ///
+    /// Not a memo of the *attempt* — see
+    /// [`note_workspace_attempt`](Self::note_workspace_attempt). Purely a record
+    /// of what has already been said, so an unmountable volume produces one
+    /// error line instead of one per turn forever.
+    ///
+    /// A `std::sync::Mutex` rather than a `tokio::sync::RwLock` like its
+    /// neighbours: the critical section is a single hash lookup with no `await`
+    /// in it, so the async lock would buy nothing and cost a scheduling point on
+    /// the dispatch path.
+    workspace_failures: std::sync::Mutex<HashSet<(CompanyId, String)>>,
 }
 
 impl Default for HarnessPool {
@@ -754,7 +819,42 @@ impl HarnessPool {
             composio_fingerprints: RwLock::new(HashMap::new()),
             skill_fingerprints: RwLock::new(HashMap::new()),
             budget_fingerprints: RwLock::new(HashMap::new()),
+            workspace_failures: std::sync::Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Records one workspace-ensure outcome for `(company, agent)` and returns
+    /// what it should say.
+    ///
+    /// **The attempt stays per dispatch.** The obvious fix for a repeating log
+    /// line — remember that this agent's workspace was already handled and stop
+    /// trying — is the wrong one in both directions, and this is why the
+    /// suppression is on the reporting rather than on the work:
+    ///
+    /// * Memoising **success** means a data dir wiped or restored *after* the
+    ///   first successful turn is never noticed again, and every relative file
+    ///   write is refused for the life of the process — the exact regression
+    ///   issue #409 added the per-dispatch retry to prevent.
+    /// * Memoising **failure** means a volume that mounts a second late never
+    ///   recovers, because nothing ever tries again.
+    ///
+    /// Both trade a noisy log for a broken agent. The retry is cheap (two
+    /// syscalls on the already-exists path, against a turn about to call a
+    /// model) and it is what makes the condition self-healing, so it keeps
+    /// running every time. What changes is that a persistent failure is stated
+    /// once rather than once per turn.
+    fn note_workspace_attempt(
+        &self,
+        company: &CompanyId,
+        agent_id: &str,
+        failed: bool,
+    ) -> WorkspaceReport {
+        let key = (company.clone(), agent_id.to_string());
+        let mut failing = self
+            .workspace_failures
+            .lock()
+            .expect("workspace-failure set poisoned");
+        workspace_report(&mut failing, &key, failed)
     }
 
     /// Ensures a company's roster is built and cached.
@@ -1230,15 +1330,38 @@ impl HarnessPool {
         // not: an agent with no file grant runs a perfectly good turn without
         // this directory. The `error!` (not `warn!`) records the one condition
         // under which the misdirecting guard message can still be reached, so it
-        // is greppable next to the refusal it explains.
-        if let Err(error) = build::ensure_agent_workspace(&deps.workspace_root, company, agent_id) {
-            tracing::error!(
-                company = %company,
-                agent = agent_id,
-                workspace = %build::agent_workspace(&deps.workspace_root, company, agent_id).display(),
-                %error,
-                "[harness] could not create the agent workspace before dispatch; relative file writes will be refused (the refusal will read as a workspace escape, but the cause is this missing directory)"
-            );
+        // is greppable next to the refusal it explains. Both of those are the
+        // right calls and issue #449 does not change either.
+        //
+        // What #449 changes is only how often it is *said*. A workspace root
+        // that cannot be written — a volume that failed to mount, a path that
+        // resolves onto a file — fails identically on every dispatch, so the
+        // unconditional `error!` emitted one byte-identical line per turn,
+        // forever, with nothing distinguishing the thousandth from the first.
+        // The state is edge-triggered instead: the first failure reads exactly
+        // as it did before, the repeats are silent, and a recovery gets one
+        // `info!` so a reader who saw the error learns when it ended. The
+        // attempt itself still runs every dispatch — see
+        // `note_workspace_attempt` for why memoising it would be a regression.
+        let attempt = build::ensure_agent_workspace(&deps.workspace_root, company, agent_id);
+        let report = self.note_workspace_attempt(company, agent_id, attempt.is_err());
+        if !report.is_silent() {
+            let workspace = build::agent_workspace(&deps.workspace_root, company, agent_id);
+            match attempt {
+                Err(error) => tracing::error!(
+                    company = %company,
+                    agent = agent_id,
+                    workspace = %workspace.display(),
+                    %error,
+                    "[harness] could not create the agent workspace before dispatch; relative file writes will be refused (the refusal will read as a workspace escape, but the cause is this missing directory)"
+                ),
+                Ok(_) => tracing::info!(
+                    company = %company,
+                    agent = agent_id,
+                    workspace = %workspace.display(),
+                    "[harness] agent workspace is available again; the earlier creation failure has cleared and relative file writes work"
+                ),
+            }
         }
 
         // Plan-level total-token ceiling (issue #188): a HARD dispatch refusal
@@ -2262,6 +2385,155 @@ description = "Builds the product."
         assert!(
             matches!(err, OpenCompanyError::CompanyNotFound(_)),
             "{err:?}"
+        );
+    }
+
+    // --- Workspace-ensure log edge-triggering (issue #449) -------------------
+
+    /// The whole transition table, exhaustively: a broken volume must produce
+    /// one error line and then nothing, and a recovery must be announced once.
+    #[test]
+    fn workspace_report_is_edge_triggered() {
+        let mut failing: HashSet<&str> = HashSet::new();
+
+        // First failure speaks.
+        assert_eq!(
+            workspace_report(&mut failing, &"a", true),
+            WorkspaceReport::Failed
+        );
+        // Every repeat is silent — this is the flood #449 is about.
+        for _ in 0..100 {
+            assert_eq!(
+                workspace_report(&mut failing, &"a", true),
+                WorkspaceReport::StillFailing
+            );
+        }
+        // Recovery speaks exactly once.
+        assert_eq!(
+            workspace_report(&mut failing, &"a", false),
+            WorkspaceReport::Recovered
+        );
+        assert_eq!(
+            workspace_report(&mut failing, &"a", false),
+            WorkspaceReport::StillHealthy
+        );
+        // A healthy agent that was never failing says nothing on its first
+        // attempt either — a working workspace has never been worth a line.
+        assert_eq!(
+            workspace_report(&mut failing, &"never-failed", false),
+            WorkspaceReport::StillHealthy
+        );
+        // And it can fail again later: the edge re-arms.
+        assert_eq!(
+            workspace_report(&mut failing, &"a", true),
+            WorkspaceReport::Failed
+        );
+
+        assert!(
+            WorkspaceReport::StillFailing.is_silent() && WorkspaceReport::StillHealthy.is_silent(),
+            "only the repeats are silent"
+        );
+        assert!(
+            !WorkspaceReport::Failed.is_silent() && !WorkspaceReport::Recovered.is_silent(),
+            "both edges must be reported"
+        );
+    }
+
+    /// Two agents interleaved: one failing, one healthy. Each key's edge is its
+    /// own — a second agent's failure must not be swallowed by the first's, and
+    /// a second agent's recovery must not clear the first's failure.
+    #[test]
+    fn workspace_report_tracks_each_key_separately() {
+        let mut failing: HashSet<&str> = HashSet::new();
+
+        assert_eq!(
+            workspace_report(&mut failing, &"ceo", true),
+            WorkspaceReport::Failed
+        );
+        // A different agent failing is its own first failure, not a repeat.
+        assert_eq!(
+            workspace_report(&mut failing, &"engineer", true),
+            WorkspaceReport::Failed
+        );
+        assert_eq!(
+            workspace_report(&mut failing, &"ceo", true),
+            WorkspaceReport::StillFailing
+        );
+        // One recovers; the other stays failing and stays silent.
+        assert_eq!(
+            workspace_report(&mut failing, &"engineer", false),
+            WorkspaceReport::Recovered
+        );
+        assert_eq!(
+            workspace_report(&mut failing, &"ceo", true),
+            WorkspaceReport::StillFailing
+        );
+        assert_eq!(
+            workspace_report(&mut failing, &"ceo", false),
+            WorkspaceReport::Recovered
+        );
+        assert!(failing.is_empty(), "a recovered key leaves no residue");
+    }
+
+    /// The real dispatch path against a workspace root that cannot hold a
+    /// directory, driven through [`HarnessPool::run`] rather than the helper.
+    ///
+    /// The root is pointed at a **file**, which makes `create_dir_all` fail
+    /// deterministically on every platform (`ENOTDIR` / its Windows equivalent)
+    /// without needing permission bits a CI root user would ignore.
+    ///
+    /// Asserts the reporting state, not the log text: this test binary already
+    /// installs a global `tracing` subscriber elsewhere
+    /// (`runtime::workflow_scheduler`) and asserts it wins that race, so a
+    /// second global capture here would make whichever test lost panic. The
+    /// state is what decides whether a line is emitted, so pinning it pins the
+    /// line count — three dispatches, one report.
+    #[tokio::test]
+    async fn a_broken_workspace_root_reports_once_across_repeated_dispatches() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A regular file where the workspace tree is expected.
+        let not_a_dir = dir.path().join("workspace-root");
+        std::fs::write(&not_a_dir, b"this is a file, not a directory").unwrap();
+
+        let mut fx = fixture();
+        fx.deps.workspace_root = not_a_dir.clone();
+        let pool = HarnessPool::new();
+        let rec = record();
+        pool.ensure(&rec, &fx.deps).await.expect("ensure");
+
+        // Sanity: the condition really is a hard, repeatable failure.
+        assert!(
+            build::ensure_agent_workspace(&not_a_dir, &rec.id, "ceo").is_err(),
+            "the test root must actually be unusable, or this proves nothing"
+        );
+
+        for turn in 0..3 {
+            pool.run(&rec.id, "ceo", "hi", &fx.deps, None)
+                .await
+                .unwrap_or_else(|e| panic!("turn {turn} still runs without a workspace: {e:?}"));
+        }
+
+        // The turns ran — a missing workspace is not fatal, which #449 does not
+        // change — and the failure is recorded exactly once.
+        let failing = pool.workspace_failures.lock().unwrap();
+        assert_eq!(
+            failing.len(),
+            1,
+            "one failing agent, tracked once, however many turns it takes"
+        );
+        assert!(failing.contains(&(rec.id.clone(), "ceo".to_string())));
+        drop(failing);
+
+        // The next dispatch after the first is silent: only turn 1 spoke.
+        assert_eq!(
+            pool.note_workspace_attempt(&rec.id, "ceo", true),
+            WorkspaceReport::StillFailing,
+            "dispatches after the first must not re-emit the error"
+        );
+        // And when the volume comes back, one line says so.
+        assert_eq!(
+            pool.note_workspace_attempt(&rec.id, "ceo", false),
+            WorkspaceReport::Recovered
         );
     }
 
