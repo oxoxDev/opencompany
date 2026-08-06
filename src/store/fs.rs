@@ -4,6 +4,8 @@
 //! manifest, JSONL for append-only logs, content-addressed blobs for context).
 //! Appends are the hot path and never rewrite the whole file; per-path
 //! `tokio::sync::Mutex` locks serialize concurrent writers within a process.
+//! Those locks live in one process-wide registry ([`path_lock`]) rather than on
+//! each store, so two instances over one bundle actually meet (issue #388).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -54,6 +56,56 @@ impl PathLocks {
         let mut map = self.inner.lock().expect("path-lock map poisoned");
         map.entry(path.to_path_buf()).or_default().clone()
     }
+}
+
+/// Every filesystem store's write locks, shared by every instance in the
+/// process (issue #388).
+///
+/// The locks these replaced were **fields** on `FsCompanyStore`, `FsEventLog`,
+/// `FsMemoryStore`, `FsContextStore`, `FsInboxStore` and `FsOps` — so two stores
+/// over one bundle serialised against nothing, which is the state those types
+/// have always been in and which nothing stopped a caller reaching: each
+/// constructor takes a root and builds a fresh registry. A `static` is the only
+/// thing two independently-constructed instances can share.
+///
+/// The damage that let through was not theoretical. `FsEventLog::append`
+/// derives the next sequence from the current line count and then appends, so
+/// two unsynchronised instances hand out the **same** `seq` — breaking every
+/// consumer that treats it as an identity. And the read-modify-write sites
+/// (`FsMemoryStore::evict`, `FsInboxStore::mark_read`, and the whole-file
+/// rewrites in [`FsOps`](crate::store::fs_ops::FsOps)) replace the file with a
+/// snapshot, so an append that raced one of them was simply erased.
+///
+/// Mirrors the precedent
+/// [`JOURNAL_WRITE_LOCKS`](crate::runtime::journal) set for the runtime journal
+/// in issue #386, deliberately including its caveats — see [`path_lock`].
+static FS_WRITE_LOCKS: std::sync::LazyLock<PathLocks> =
+    std::sync::LazyLock::new(PathLocks::default);
+
+/// The process-wide write lock for `path`.
+///
+/// Keyed on the **absolutised** path, so a relative and an absolute spelling of
+/// one file meet on the same lock instead of racing.
+///
+/// Two limits, both by construction rather than oversight:
+///
+/// * **Absolutising is not canonicalising.** `std::path::absolute` is purely
+///   lexical: it never touches the filesystem, so it does not resolve symlinks
+///   and it does not collapse `..` across one. Two spellings that differ by a
+///   symlinked ancestor therefore land on two different locks. Resolving that
+///   would mean a `canonicalize` syscall on every append — on the hot path, for
+///   a case no caller in this crate produces (every path is built by
+///   [`Bundle`] from one configured root). What keeps the missed case from
+///   tearing is [`append_line`]'s single `O_APPEND` write, not this lock.
+/// * **In-process only.** A second *process* over the same
+///   `OPENCOMPANY_DATA_DIR` is outside any in-process lock's reach, and no
+///   amount of `static` fixes that. Write atomicity is what keeps that case
+///   safe: appends are one `O_APPEND` write and rewrites go through
+///   [`write_atomic`]'s temp-file-plus-rename. That bounds the damage to a lost
+///   update, never a torn file. Real cross-process exclusion would need file
+///   locking, which is a separate change with a separate portability argument.
+pub(crate) fn path_lock(path: &Path) -> Arc<TokioMutex<()>> {
+    FS_WRITE_LOCKS.get(&std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()))
 }
 
 /// Appends one line (a `\n` is added) to `path`, creating the file if absent.
@@ -293,16 +345,12 @@ impl Default for Meta {
 #[derive(Clone)]
 pub struct FsCompanyStore {
     root: PathBuf,
-    locks: PathLocks,
 }
 
 impl FsCompanyStore {
     /// Creates a store rooted at `root` (the OpenCompany home).
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self {
-            root: root.into(),
-            locks: PathLocks::default(),
-        }
+        Self { root: root.into() }
     }
 
     fn bundle(&self, id: &CompanyId) -> Bundle {
@@ -444,7 +492,7 @@ impl CompanyStore for FsCompanyStore {
         let bundle = self.bundle(id);
         bundle.ensure_dirs().await?;
         let path = bundle.ledger_jsonl();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         append_line(&path, &serde_json::to_string(&entry)?).await
     }
@@ -459,7 +507,18 @@ impl CompanyStore for FsCompanyStore {
 #[derive(Clone)]
 pub struct FsEventLog {
     root: PathBuf,
-    locks: PathLocks,
+    /// Live subscribers, keyed by company.
+    ///
+    /// **Deliberately per-instance, and not part of issue #388's fix.** The
+    /// write locks moved to a process-wide registry because two instances over
+    /// one file must exclude each other. This map is the opposite kind of state:
+    /// it is a fan-out to the subscribers *this* instance handed streams to, and
+    /// nothing about durability or ordering depends on two instances sharing it.
+    /// A subscriber that misses an event because it subscribed through the other
+    /// instance is a delivery gap in a best-effort live feed, recoverable by
+    /// [`read_from`](EventLog::read_from) against the durable log — not the
+    /// silent write loss the lock change fixes. Making it global would give one
+    /// company's stream process-global lifetime for a much weaker reason.
     senders: Arc<StdMutex<HashMap<CompanyId, broadcast::Sender<StoredEvent>>>>,
 }
 
@@ -468,7 +527,6 @@ impl FsEventLog {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
-            locks: PathLocks::default(),
             senders: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
@@ -491,7 +549,7 @@ impl EventLog for FsEventLog {
         let bundle = self.bundle(id);
         bundle.ensure_dirs().await?;
         let path = bundle.events_jsonl();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
 
         // The next sequence is the current line count; held under the lock so
@@ -550,16 +608,12 @@ impl EventLog for FsEventLog {
 #[derive(Clone)]
 pub struct FsMemoryStore {
     root: PathBuf,
-    locks: PathLocks,
 }
 
 impl FsMemoryStore {
     /// Creates a memory store rooted at `root` (the OpenCompany home).
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self {
-            root: root.into(),
-            locks: PathLocks::default(),
-        }
+        Self { root: root.into() }
     }
 
     fn bundle(&self, id: &CompanyId) -> Bundle {
@@ -573,7 +627,7 @@ impl MemoryStore for FsMemoryStore {
         let bundle = self.bundle(id);
         bundle.ensure_dirs().await?;
         let path = bundle.traces_jsonl();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         append_line(&path, &serde_json::to_string(&trace)?).await
     }
@@ -590,7 +644,7 @@ impl MemoryStore for FsMemoryStore {
         let bundle = self.bundle(id);
         bundle.ensure_dirs().await?;
         let path = bundle.tasks_jsonl();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         append_line(&path, &serde_json::to_string(&result)?).await
     }
@@ -598,7 +652,7 @@ impl MemoryStore for FsMemoryStore {
     async fn evict(&self, id: &CompanyId, policy: EvictionPolicy) -> Result<u64> {
         let bundle = self.bundle(id);
         let path = bundle.traces_jsonl();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
 
         let all = read_jsonl::<CompressedTrace>(&path).await?;
@@ -653,16 +707,12 @@ struct IndexEntry {
 #[derive(Clone)]
 pub struct FsContextStore {
     root: PathBuf,
-    locks: PathLocks,
 }
 
 impl FsContextStore {
     /// Creates a context store rooted at `root` (the OpenCompany home).
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self {
-            root: root.into(),
-            locks: PathLocks::default(),
-        }
+        Self { root: root.into() }
     }
 
     fn bundle(&self, id: &CompanyId) -> Bundle {
@@ -683,7 +733,7 @@ impl ContextStore for FsContextStore {
             .map_err(|e| io_err(&blob_path, e))?;
 
         let index_path = bundle.context_index_jsonl();
-        let lock = self.locks.get(&index_path);
+        let lock = path_lock(&index_path);
         let _guard = lock.lock().await;
         let entry = IndexEntry {
             addr: addr.clone(),
@@ -816,16 +866,12 @@ impl SecretStore for FsSecretStore {
 #[derive(Clone)]
 pub struct FsInboxStore {
     root: PathBuf,
-    locks: PathLocks,
 }
 
 impl FsInboxStore {
     /// Creates an inbox store rooted at `root` (the OpenCompany home).
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self {
-            root: root.into(),
-            locks: PathLocks::default(),
-        }
+        Self { root: root.into() }
     }
 
     fn bundle(&self, id: &CompanyId) -> Bundle {
@@ -871,7 +917,7 @@ impl InboxStore for FsInboxStore {
         let bundle = self.bundle(company);
         bundle.ensure_dirs().await?;
         let path = bundle.inbox_meta_json();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut map = self.load_meta(company).await?;
         map.insert(key.to_string(), meta.clone());
@@ -899,7 +945,7 @@ impl InboxStore for FsInboxStore {
         bundle.ensure_dirs().await?;
         let path = bundle.inbox_jsonl();
         let line = serde_json::to_string(msg)?;
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         append_line(&path, &line).await
     }
@@ -911,7 +957,7 @@ impl InboxStore for FsInboxStore {
         ids: Option<&[String]>,
     ) -> Result<u64> {
         let path = self.bundle(company).inbox_jsonl();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut all = read_jsonl::<EmailRecord>(&path).await?;
         for record in all.iter_mut() {
@@ -1034,6 +1080,79 @@ mod test {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();
         conformance::assert_context_chunk_stamps(Arc::new(FsContextStore::new(&root))).await;
+    }
+
+    /// Two event logs over one data root must not hand out the same sequence
+    /// number (issue #388).
+    ///
+    /// `EventLog::append` computes the next `seq` by counting the lines already
+    /// in the file, then appends. That read-then-append is only atomic under a
+    /// lock, and the lock used to be a **field** on `FsEventLog` — so two
+    /// instances over one bundle serialised against nothing, both read the same
+    /// count, and both wrote the same `seq`. A duplicate sequence number breaks
+    /// every consumer that treats it as an identity: `read_from`'s `seq >=`
+    /// cursor silently replays, and the console's resume-from-seq skips.
+    ///
+    /// Nothing stops a second instance being constructed — `FsEventLog::new`
+    /// takes a root and is called wherever one is needed — so this is reachable
+    /// without any exotic setup, which is exactly what makes it worth a lock in
+    /// the registry rather than a convention.
+    #[tokio::test]
+    async fn two_event_logs_over_one_root_never_reuse_a_sequence() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        // Two independently-constructed logs over the same data root — the shape
+        // a second runtime, a maintenance task, or an export job produces.
+        let first = Arc::new(FsEventLog::new(&root));
+        let second = Arc::new(FsEventLog::new(&root));
+        let id = CompanyId::new("acme");
+
+        const N: u64 = 32;
+        let mut set = tokio::task::JoinSet::new();
+        for i in 0..N {
+            let log = if i % 2 == 0 {
+                first.clone()
+            } else {
+                second.clone()
+            };
+            let id = id.clone();
+            set.spawn(async move {
+                log.append(
+                    &id,
+                    CompanyEvent::OperatorMessage {
+                        parent: None,
+                        text: format!("event {i}"),
+                        by: None,
+                        chat: None,
+                    },
+                )
+                .await
+                .expect("append succeeds")
+            });
+        }
+        let mut handed_out = Vec::new();
+        while let Some(res) = set.join_next().await {
+            handed_out.push(res.expect("task joins").value());
+        }
+
+        handed_out.sort_unstable();
+        assert_eq!(
+            handed_out,
+            (0..N).collect::<Vec<_>>(),
+            "the sequences handed to callers must be unique and dense — a repeat \
+             means two instances read the same line count before either appended"
+        );
+
+        // And the same must hold for what actually landed on disk.
+        let stored = first.read_from(&id, EventSeq::new(0), 1024).await.unwrap();
+        assert_eq!(stored.len() as u64, N, "every append is on disk");
+        let mut persisted: Vec<u64> = stored.iter().map(|e| e.seq.value()).collect();
+        persisted.sort_unstable();
+        assert_eq!(
+            persisted,
+            (0..N).collect::<Vec<_>>(),
+            "the persisted sequences must be unique and dense too"
+        );
     }
 
     /// The fs backend's migration path: index lines written before
