@@ -226,11 +226,12 @@ async fn run_workflow_inner(
             // the end of its scope.
             let mut engine = Box::pin(tinyflows::engine::run(&compiled, input, &capabilities));
             tokio::select! {
-                outcome = &mut engine => outcome.map_err(map_engine_error)?,
+                biased;
                 () = ctx.cancel.cancelled() => {
                     drop(engine);
                     return Ok(cancelled_run());
                 }
+                outcome = &mut engine => outcome.map_err(map_engine_error)?,
             }
         }
         Some(events) => {
@@ -294,8 +295,9 @@ async fn run_workflow_inner(
                 &observer,
             ));
             let outcome = tokio::select! {
-                outcome = &mut engine => Some(outcome),
+                biased;
                 () = ctx.cancel.cancelled() => None,
+                outcome = &mut engine => Some(outcome),
             };
             // **Drop the engine future before the observer, on both arms.** The
             // engine holds observer `Arc` clones inside its per-node handlers;
@@ -1976,6 +1978,52 @@ to = "done"
         .expect("a cancelled run is Ok");
         assert!(run.cancelled);
         assert!(journal.pending().is_empty());
+    }
+
+    /// An already-cancelled run must report `cancelled` **every** time, not most
+    /// of the time.
+    ///
+    /// `tokio::select!` polls its branches in random order and picks among those
+    /// ready. On a token that is already cancelled, the `cancelled()` arm is
+    /// ready on the very first poll — so if the engine future is also ready on
+    /// that poll, which arm wins is a coin flip, and the losing half settles as a
+    /// completed run with `cancelled: false`. An operator's stop was reported as
+    /// a completion.
+    ///
+    /// Both `select!` sites are `biased;` with the cancel arm first, which makes
+    /// an already-signalled cancellation win deterministically.
+    ///
+    /// This runs the path repeatedly on purpose. A single iteration reproduced
+    /// the unbiased defect only about half the time — which is why it read as a
+    /// flaky test for as long as it did, and why anyone who re-ran it in
+    /// isolation concluded it was not real. At this iteration count a revert to
+    /// the unbiased form fails here essentially every time.
+    #[tokio::test]
+    async fn an_already_cancelled_run_always_reports_cancelled() {
+        for iteration in 0..16 {
+            let dir = tempfile::tempdir().unwrap();
+            let (deps, _journal) = deps_with_parking(dir.path());
+            let file = parse_workflow(GATED).expect("parses");
+            let ctx = WorkflowRunContext::new(false);
+            ctx.cancel.cancel();
+
+            let run = run_workflow(
+                Arc::new(HarnessPool::new()),
+                deps,
+                &tools_record(),
+                &file,
+                serde_json::json!({ "request": "x" }),
+                &ctx,
+            )
+            .await
+            .expect("a cancelled run is Ok");
+
+            assert!(
+                run.cancelled,
+                "iteration {iteration}: a run cancelled before it started reported \
+                 itself as not cancelled — the cancel arm lost the select race"
+            );
+        }
     }
 
     /// A graph with no gate parks nothing — the addition must be invisible to
