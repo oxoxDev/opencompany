@@ -282,49 +282,20 @@ impl HarnessBrain {
             }
         };
 
-        // Journal the reply so the transcript echo survives a console refresh.
-        // The bubble below is live-only — a reader that reloads the page rebuilds
-        // the thread from the event log, and without this the operator would
-        // approve, watch the agent answer, refresh, and find the answer gone.
+        // The reply is **not** journaled here (issue #469).
         //
-        // `chat_id` is the thread the approval was RAISED in (issue #379), not
-        // the agent id. Those agree for a direct message and diverge for a desk
-        // channel — a channel's request and a DM to that channel's lead are
-        // answered by the same teammate — so keying on the agent quietly
-        // delivered a channel's continuation into the lead's private line. The
-        // operator approved in one place and the work resumed in another they
-        // were not looking at, which is the whole failure this issue names.
+        // It used to be, because nothing else did: the resolve route dropped a
+        // continuation's replies on the floor, so this arm hand-wrote its own
+        // `AgentReply` to get the answer onto the event stream. That covered
+        // exactly one shape — a re-dispatch that found a grant to redeem — and
+        // left every other continuation reply invisible, including the ones this
+        // function returns `None` for and everything the default build produces.
         //
-        // Falls back to the agent when the grant carries no origin thread: a
-        // pre-#379 journal line, or an approval with no conversation behind it.
-        // That is exactly the previous behaviour, kept for exactly the cases it
-        // was already right for.
-        let reply_thread = grant
-            .origin_thread
-            .clone()
-            .unwrap_or_else(|| grant.agent.clone());
-        if let Some(events) = self.deps.events.as_ref()
-            && let Err(err) = events
-                .append(
-                    &self.record.id,
-                    CompanyEvent::AgentReply {
-                        parent: None,
-                        chat_id: reply_thread.clone(),
-                        agent_id: grant.agent.clone(),
-                        text: text.clone(),
-                        steps: Vec::new(),
-                        task_id: None,
-                    },
-                )
-                .await
-        {
-            tracing::warn!(
-                approval_id = %approval_id,
-                error = %err,
-                "[approval] failed to journal the re-issued call's reply; continuing"
-            );
-        }
-
+        // Journaling now happens once, for every continuation reply, in
+        // `CompanyRuntime::publish_continuation`, against the same thread this
+        // used (`journal.approval_thread`, issue #379's key) with the same
+        // fallback to the answering agent. Writing it here as well would post the
+        // agent's answer into the conversation twice.
         Ok(Some(OutboundMessage {
             message_id: None,
             task_id: None,
@@ -5093,114 +5064,37 @@ members = ["eng1", "eng2"]
             bubble.text
         );
 
-        // The reply is journaled under the agent's own chat thread, so the echo
-        // survives a console refresh rather than living only in this response.
-        let stored = log
-            .read_from(&CompanyId::new("acme"), crate::ports::EventSeq::new(0), 100)
+        // Journaling the reply is no longer this function's job (issue #469):
+        // the runtime journals every continuation reply once, in
+        // `CompanyRuntime::publish_continuation`, so that the answers of
+        // continuations this arm produces nothing for are not lost either. The
+        // round trip — reply journaled into the thread the sign-off was raised
+        // in, reaching the console's event stream — is covered end to end over
+        // the real router by
+        // `server::operator::test::a_continuation_answers_in_the_thread_the_sign_off_was_raised_in`.
+        assert!(
+            no_replies_journaled(&log).await,
+            "the brain must not journal the reply a second time; the runtime owns it"
+        );
+    }
+
+    /// No continuation reply was journaled by the brain itself (issue #469).
+    async fn no_replies_journaled(log: &Arc<dyn crate::ports::EventLog>) -> bool {
+        log.read_from(&CompanyId::new("acme"), crate::ports::EventSeq::new(0), 100)
             .await
-            .unwrap();
-        let replies: Vec<_> = stored
+            .unwrap()
             .iter()
-            .filter_map(|e| match &e.event {
-                CompanyEvent::AgentReply {
-                    chat_id,
-                    agent_id,
-                    text,
-                    ..
-                } => Some((chat_id.clone(), agent_id.clone(), text.clone())),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(replies.len(), 1, "the re-issued call's reply is journaled");
-        assert_eq!(
-            replies[0].0, "ceo",
-            "routed into the granting agent's thread"
-        );
-        assert_eq!(replies[0].1, "ceo");
-        assert_eq!(replies[0].2, bubble.text);
+            .all(|e| !matches!(e.event, CompanyEvent::AgentReply { .. }))
     }
 
-    /// Issue #379, and a live bug before it: the continuation must be journaled
-    /// into the thread the operator **asked in**, not the agent's own line.
-    ///
-    /// The two are the same string for a direct message and diverge for a desk
-    /// channel — the channel and a DM to that channel's lead are answered by the
-    /// same teammate — so keying on the agent quietly delivered a channel's
-    /// continuation into the lead's private DM. The operator approved in one
-    /// place and the work resumed somewhere they were not looking.
-    ///
-    /// Asserted in **both directions**, because one alone would pass on a
-    /// mistake: a desk-origin reply must not appear in the lead's DM history,
-    /// and a DM-origin reply must not appear in the desk's.
-    #[tokio::test]
-    async fn a_redeemed_grant_replies_in_the_thread_the_approval_was_raised_in() {
-        async fn replies_for(origin: Option<&str>) -> Vec<(String, String)> {
-            let dir = tempfile::tempdir().unwrap();
-            let log: Arc<dyn crate::ports::EventLog> =
-                Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf()));
-            let requests = crate::harness::policy::ApprovalRequestQueue::default();
-            requests
-                .grants()
-                .grant(crate::runtime::grants::GrantedCall {
-                    approval_id: ApprovalId::new("appr-1"),
-                    agent: "ceo".into(),
-                    tool: "composio_execute".into(),
-                    args: serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" }),
-                    at_millis: now_millis(),
-                    origin_thread: origin.map(str::to_string),
-                });
-            let brain = brain_with_queue_and_events(dir.path(), requests, log.clone());
-            brain
-                .run_cycle(
-                    cycle_over(vec![approval_resolved("appr-1", Verdict::Approve)]),
-                    &NoopHost,
-                )
-                .await
-                .expect("cycle runs");
-            log.read_from(&CompanyId::new("acme"), crate::ports::EventSeq::new(0), 100)
-                .await
-                .unwrap()
-                .iter()
-                .filter_map(|e| match &e.event {
-                    CompanyEvent::AgentReply {
-                        chat_id, agent_id, ..
-                    } => Some((chat_id.clone(), agent_id.clone())),
-                    _ => None,
-                })
-                .collect()
-        }
-
-        // Raised in a desk channel: the continuation belongs to the channel.
-        let desk = replies_for(Some("desk-finance")).await;
-        assert_eq!(desk.len(), 1);
-        assert_eq!(
-            desk[0].0, "desk-finance",
-            "a channel's approval must resume in that channel",
-        );
-        assert_ne!(
-            desk[0].0, "ceo",
-            "and must NOT land in the desk lead's private DM — the bug this fixes",
-        );
-        // The asker is still credited: only the destination changed.
-        assert_eq!(desk[0].1, "ceo");
-
-        // Raised in a direct message with that same lead: the mirror image. Same
-        // agent, different thread, and the desk channel must not see it.
-        let dm = replies_for(Some("ceo")).await;
-        assert_eq!(dm.len(), 1);
-        assert_eq!(dm[0].0, "ceo");
-        assert_ne!(
-            dm[0].0, "desk-finance",
-            "a private line's approval must not resume in the desk channel",
-        );
-
-        // No origin thread — a pre-#379 grant, or an approval with no
-        // conversation behind it. Falls back to the agent, which is exactly the
-        // previous behaviour, kept for the cases it was already right for.
-        let legacy = replies_for(None).await;
-        assert_eq!(legacy.len(), 1);
-        assert_eq!(legacy[0].0, "ceo");
-    }
+    // Issue #379's reply routing — a channel's continuation must resume in that
+    // channel and not in its lead's private DM, and the mirror — used to be
+    // pinned here, against a hand-built grant. It moved with the journaling
+    // (issue #469): the runtime journals every continuation reply once, for both
+    // grant scopes, from the same `journal.approval_thread` key this read off the
+    // grant. The both-directions mirror is now driven end to end over the real
+    // router by
+    // `server::operator::test::a_continuation_resumes_in_the_thread_it_was_raised_in_and_no_other`.
 
     /// Issue #374: a resolution that minted only a STANDING grant must still
     /// re-dispatch the agent.
@@ -5261,72 +5155,11 @@ members = ["eng1", "eng2"]
             bubble.text
         );
 
-        // And it is journaled, so the echo survives a refresh.
-        let stored = log
-            .read_from(&CompanyId::new("acme"), crate::ports::EventSeq::new(0), 100)
-            .await
-            .unwrap();
-        assert_eq!(
-            stored
-                .iter()
-                .filter(|e| matches!(e.event, CompanyEvent::AgentReply { .. }))
-                .count(),
-            1
-        );
-    }
-
-    /// The routing half of #379 holds for the broader scope too: the
-    /// continuation lands in the thread the operator asked in, not the agent's
-    /// own line.
-    #[tokio::test]
-    async fn a_standing_grant_replies_into_the_thread_it_was_raised_in() {
-        let dir = tempfile::tempdir().unwrap();
-        let log: Arc<dyn crate::ports::EventLog> =
-            Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf()));
-        let requests = crate::harness::policy::ApprovalRequestQueue::default();
-        requests
-            .grants()
-            .grant_standing(crate::runtime::grants::StandingGrant {
-                id: crate::runtime::grants::GrantId::new("g1"),
-                agent: "ceo".into(),
-                tool: "workspace_write".into(),
-                granted_by: crate::ports::types::Actor {
-                    kind: crate::ports::types::ActorKind::User,
-                    id: "user-1".into(),
-                },
-                approval_id: ApprovalId::new("appr-1"),
-                at_millis: now_millis(),
-                expires_at_millis: now_millis() + 60 * 60 * 1000,
-                // A DESK channel, whose lead is `ceo` — the exact pair that
-                // diverges.
-                origin_thread: Some("desk-ops".into()),
-            });
-        let brain = brain_with_queue_and_events(dir.path(), requests, log.clone());
-
-        brain
-            .run_cycle(
-                cycle_over(vec![approval_resolved("appr-1", Verdict::Approve)]),
-                &NoopHost,
-            )
-            .await
-            .expect("cycle runs");
-
-        let stored = log
-            .read_from(&CompanyId::new("acme"), crate::ports::EventSeq::new(0), 100)
-            .await
-            .unwrap();
-        let threads: Vec<String> = stored
-            .iter()
-            .filter_map(|e| match &e.event {
-                CompanyEvent::AgentReply { chat_id, .. } => Some(chat_id.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            threads,
-            vec!["desk-ops".to_string()],
-            "the work resumes where the operator approved it, not in the lead's DM"
-        );
+        // Journaling the reply belongs to the runtime now (issue #469), so the
+        // brain must not write a second copy. See
+        // `server::operator::test::a_continuation_answers_in_the_thread_the_sign_off_was_raised_in`
+        // for the round trip.
+        assert!(no_replies_journaled(&log).await);
     }
 
     /// A DENIED approval runs no turn. "No" must never re-dispatch anything.
