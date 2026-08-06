@@ -178,10 +178,18 @@ pub fn review_note(decision: ReviewDecision, note: Option<&str>) -> String {
 /// person still had to authorise the call it was waiting on.
 ///
 /// Now there is one table, keyed on the settled status, and this function is
-/// the thin adapter that reaches it: `end` → [`run_status_for`] →
-/// [`column_for_settled_run`]. The parked-approval overlay is applied by the
-/// caller through [`settled_run_status`], because only `run_task` knows how
-/// many approvals *this* attempt parked.
+/// the thin adapter that reaches it: `end` → [`settled_run_status`] →
+/// [`column_for_settled_run`].
+///
+/// # This overload assumes nothing was parked
+///
+/// `landing_column(end)` is [`settled_landing_column`]`(end, 0)`. It is the
+/// right call only where no approval can be outstanding, or where a later
+/// authoritative write will land the card again with the count in hand. **A
+/// settle that can park an approval must call [`settled_landing_column`]** —
+/// issue #465: reading the landing from the ending alone is what let a turn
+/// whose first call parked settle as a plain success and present as reviewable
+/// work it had never started.
 ///
 /// # Two deliberate losses, both wanted
 ///
@@ -201,18 +209,60 @@ pub fn review_note(decision: ReviewDecision, note: Option<&str>) -> String {
 ///
 /// [`column_for_settled_run`]: crate::ports::tasks::column_for_settled_run
 pub fn landing_column(end: TaskRunEnd) -> &'static str {
+    settled_landing_column(end, 0)
+}
+
+/// The board column a run lands its card in, given how it ended **and** whether
+/// it left an approval parked (issue #465).
+///
+/// This is [`landing_column`] with the parked-approval overlay applied — the
+/// same overlay [`settled_run_status`] applies to the attempt row, reached
+/// through the same one table. `landing_column(end)` is exactly
+/// `settled_landing_column(end, 0)`.
+///
+/// # Why the count has to reach the column
+///
+/// It already reached the *status*: a success that parked something settles
+/// [`RunStatus::WaitingApproval`]. The column was derived from
+/// [`run_status_for`] instead, which cannot produce that status, so the board
+/// was answering from an ending that had been overtaken — and a turn whose very
+/// first call parked, having produced nothing, landed in
+/// [`COLUMN_IN_REVIEW`] announcing work to check.
+///
+/// That was reachable two ways, and this closes both:
+///
+/// * `run_task`'s settle (`brain.rs`) *did* compute the parked count, but the
+///   break-point [`landing_column`] call ran first and the authoritative
+///   overwrite went to [`column_for_settled_run`] direct — correct only once
+///   that table stopped sending `WaitingApproval` to review.
+/// * the delegation seam's `settle_work_card` (issue #442's card, opened by
+///   construction for work handed to an agent) hardcoded
+///   [`Completed`](TaskRunEnd::Completed) and never consulted the count at all.
+///   That is the path in the report: a desk asked directly, its first call
+///   parked, and the card settled as a plain success.
+///
+/// Routing both through here keeps the landing one decision — the property
+/// issue #337 collapsed this module onto the port to get — rather than two
+/// call sites each remembering to apply an overlay.
+///
+/// [`column_for_settled_run`]: crate::ports::tasks::column_for_settled_run
+pub fn settled_landing_column(end: TaskRunEnd, parked_approvals: usize) -> &'static str {
     // A hand-off is explicitly NOT a settle: the delegate is running, so the
     // card keeps the column it was dispatched in and only lands once they come
     // back with something (issue #204). Handled here rather than in the mapping
     // because `run_status_for(Delegated)` is `Paused` — right for the attempt
     // row (it is waiting on something other than a person) and wrong for the
     // board (the work has changed hands, not stopped).
+    //
+    // It outranks the parked overlay too: a delegator that parked an approval
+    // still handed the work on, and the delegate is running it now.
     if matches!(end, TaskRunEnd::Delegated) {
         return COLUMN_IN_PROGRESS;
     }
     // Every other ending settles, so the mapping always answers. The fallback
     // is unreachable and exists only so this stays total without an `expect`.
-    crate::ports::tasks::column_for_settled_run(run_status_for(end)).unwrap_or(COLUMN_IN_PROGRESS)
+    crate::ports::tasks::column_for_settled_run(settled_run_status(end, parked_approvals))
+        .unwrap_or(COLUMN_IN_PROGRESS)
 }
 
 /// The [`RunStatus`] a run ending this way settles into (issue #242).
@@ -627,6 +677,95 @@ mod test {
                 "{end:?} must keep the reason it stopped rather than reading as a review"
             );
         }
+    }
+
+    /// **Issue #465.** A run that parked an approval has not produced a result,
+    /// so its card parks instead of presenting as reviewable work.
+    ///
+    /// The pairing with the row above is the whole point: the *attempt* still
+    /// settles `WaitingApproval` — "a person must act" is preserved exactly
+    /// where epic #183 decision 2 put it — while the *column* answers the other
+    /// question, has the work happened. One ending, two answers, two places.
+    #[test]
+    fn a_parked_approval_parks_the_card_instead_of_offering_it_for_review() {
+        assert_eq!(
+            settled_landing_column(TaskRunEnd::Completed, 1),
+            COLUMN_PAUSED
+        );
+        assert_eq!(
+            settled_landing_column(TaskRunEnd::RedirectsExhausted, 2),
+            COLUMN_PAUSED
+        );
+        // The run status is untouched, so the console still says who unblocks it.
+        assert_eq!(
+            settled_run_status(TaskRunEnd::Completed, 1),
+            RunStatus::WaitingApproval
+        );
+
+        // A turn that genuinely completed still reaches the reviewer.
+        assert_eq!(
+            settled_landing_column(TaskRunEnd::Completed, 0),
+            COLUMN_IN_REVIEW
+        );
+    }
+
+    /// `landing_column` is the zero-parked case of `settled_landing_column`, so
+    /// the two cannot drift into disagreeing about an ending.
+    #[test]
+    fn the_landing_is_one_decision_taken_with_or_without_a_parked_count() {
+        for end in ALL_ENDINGS {
+            assert_eq!(
+                landing_column(end),
+                settled_landing_column(end, 0),
+                "{end:?} disagrees with itself once the overlay is spelled out"
+            );
+        }
+    }
+
+    /// **The sibling sweep issue #465 asked for**, as a test rather than a note:
+    /// every ending answers *did the work happen?*, and only the ones that
+    /// answer yes may land where a reviewer can approve them to Done.
+    ///
+    /// `Delegated` is the deliberate exception — it is not an ending at all, so
+    /// it stays in progress under its delegate rather than settling anywhere.
+    #[test]
+    fn only_endings_that_produced_something_land_in_review() {
+        // Produced a result — reviewable.
+        for end in [TaskRunEnd::Completed, TaskRunEnd::RedirectsExhausted] {
+            assert_eq!(landing_column(end), COLUMN_IN_REVIEW, "{end:?}");
+        }
+        // Produced nothing to accept — must not read as reviewable work.
+        for end in [
+            TaskRunEnd::Failed,
+            TaskRunEnd::Cancelled,
+            TaskRunEnd::Paused,
+            TaskRunEnd::Delegated,
+        ] {
+            assert_ne!(
+                landing_column(end),
+                COLUMN_IN_REVIEW,
+                "{end:?} produced no result and must not offer one for review"
+            );
+        }
+        // …and neither may a success that stopped at an unauthorised call.
+        for end in ALL_ENDINGS {
+            assert_ne!(
+                settled_landing_column(end, 1),
+                COLUMN_IN_REVIEW,
+                "{end:?} left an approval outstanding and must not present as reviewable"
+            );
+        }
+    }
+
+    /// A hand-off outranks the parked overlay: the delegator may have parked an
+    /// approval, but it still handed the work on and the delegate is running it.
+    /// Parking the card here would stall a card somebody is actively working.
+    #[test]
+    fn a_hand_off_stays_in_progress_even_if_the_delegator_parked_something() {
+        assert_eq!(
+            settled_landing_column(TaskRunEnd::Delegated, 3),
+            COLUMN_IN_PROGRESS
+        );
     }
 
     /// The review stop is **not** terminal-by-accident: it is non-terminal and
