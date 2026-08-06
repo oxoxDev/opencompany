@@ -14,7 +14,14 @@ import { toast } from "sonner";
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { setInboxEnabled } from "@/api/inbox";
-import { ApiError, type ApprovalSummary, type TeamMemberDto, type TurnStep, type Verdict } from "@/api/types";
+import {
+  ApiError,
+  type ApprovalSummary,
+  type GrantScope,
+  type TeamMemberDto,
+  type TurnStep,
+  type Verdict,
+} from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -114,7 +121,7 @@ interface Props {
    * witnessed verdict survives this view unmounting — the operator can walk to
    * Approvals and back mid-turn.
    */
-  onDecideApproval?: (approval: ApprovalSummary, verdict: Verdict) => void;
+  onDecideApproval?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
   /** The verdict each card is waiting on, and the ones already witnessed. */
   decidingApprovals?: ReadonlyMap<string, Verdict>;
   decidedApprovals?: Record<string, DecidedApproval>;

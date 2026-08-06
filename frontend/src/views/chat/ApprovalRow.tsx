@@ -1,8 +1,10 @@
 // A parked approval, raised inside the conversation that produced it (#379).
 //
 // The same content the Approvals page shows — headline, payload, asker, waiting
-// time, all from `@/components/approval-card` — laid out as a channel row so it
-// reads as part of the thread rather than as a panel bolted beside it.
+// time, and the grant-scope choice (#431), all from `@/components/approval-card`
+// — laid out as a channel row so it reads as part of the thread rather than as a
+// panel bolted beside it. Sharing the scope control rather than restating it is
+// what keeps the two surfaces from offering different things for one approval.
 //
 // The one thing it does differently is how it resolves: **detached** (#391).
 // The default resolve answers with the follow-up turn's replies, and rendering
@@ -12,12 +14,14 @@
 // cannot exist here.
 
 import { Check, Loader2, X } from "lucide-react";
+import { useState } from "react";
 
-import type { ApprovalSummary, Verdict } from "@/api/types";
+import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
 import {
   ApprovalHeadline,
   ApprovalMeta,
   ApprovalPayload,
+  ApprovalScopeControl,
 } from "@/components/approval-card";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -47,8 +51,14 @@ export function ApprovalRow({
   deciding: Verdict | null;
   /** A verdict already witnessed — from this console or from the page. */
   decided: Verdict | null;
-  onDecide: (verdict: Verdict) => void;
+  onDecide: (verdict: Verdict, scope: GrantScope) => void;
 }) {
+  // Per-card, exactly as on the page: two approvals can be parked in one
+  // channel and each carries its own decision. Defaults to `once`, so a card
+  // decided without touching the control behaves as it did before #431 — the
+  // scope is opt-in here too.
+  const [scope, setScope] = useState<GrantScope>({ kind: "once" });
+
   return (
     <div className="px-4 py-2">
       <div
@@ -72,7 +82,9 @@ export function ApprovalRow({
                     variant="outline"
                     size="sm"
                     disabled={deciding !== null}
-                    onClick={() => onDecide("deny")}
+                    /* A decline never carries a scope — there is nothing to
+                       grant, and the host refuses the pairing anyway. */
+                    onClick={() => onDecide("deny", { kind: "once" })}
                   >
                     {deciding === "deny" ? (
                       <Loader2 className="size-4 animate-spin" />
@@ -84,7 +96,7 @@ export function ApprovalRow({
                   <Button
                     size="sm"
                     disabled={deciding !== null}
-                    onClick={() => onDecide("approve")}
+                    onClick={() => onDecide("approve", scope)}
                   >
                     {deciding === "approve" ? (
                       <Loader2 className="size-4 animate-spin" />
@@ -99,6 +111,23 @@ export function ApprovalRow({
           />
 
           <ApprovalPayload approval={approval} />
+
+          {/*
+           * The same control the page renders, from the same module — it
+           * self-gates on `broadly_grantable`, so an approval that may not be
+           * granted broadly shows nothing here for exactly the reason it shows
+           * nothing there. A settled card drops it: there is no decision left
+           * to scope.
+           */}
+          {!decided && (
+            <ApprovalScopeControl
+              approval={approval}
+              askerNames={askerNames}
+              scope={scope}
+              onChange={setScope}
+              disabled={deciding !== null}
+            />
+          )}
 
           <ApprovalMeta
             approval={approval}

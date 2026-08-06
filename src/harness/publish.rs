@@ -181,6 +181,19 @@ const MAX_NAMED_FILES: usize = 20;
 /// stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingPublish {
+    /// The agent that made the call (issue #463).
+    ///
+    /// The queue is shared by every turn a cycle runs, so "who published this"
+    /// is not answerable from the drain site: an operator message can be
+    /// answered by the orchestrator and handed to a desk, and the file comes
+    /// from whichever of them reached for the tool. Recording it at the call —
+    /// the tool is bound to exactly one agent's sandbox — is what stops the
+    /// card and the artifact being filed under the turn's responder when
+    /// somebody else did the work.
+    ///
+    /// Empty only for a value built by hand outside the tool; callers fall back
+    /// to the responder in that case rather than writing a blank author.
+    pub agent: String,
     /// The normalized workspace-relative path — the artifact's identity
     /// alongside its task id.
     pub source: String,
@@ -595,14 +608,23 @@ pub fn capture_body(
 /// shared queue the brain drains.
 pub struct PublishArtifactTool {
     workspace: PathBuf,
+    /// The agent this instance belongs to, stamped onto everything it stages
+    /// (issue #463) — the tool is built per agent, so this is the one place the
+    /// publisher's identity is known for certain.
+    agent: String,
     queue: PendingPublishQueue,
 }
 
 impl PublishArtifactTool {
-    /// Binds the tool to one agent's workspace and the shared queue.
-    pub fn new(workspace: impl Into<PathBuf>, queue: PendingPublishQueue) -> Self {
+    /// Binds the tool to one agent, its workspace, and the shared queue.
+    pub fn new(
+        workspace: impl Into<PathBuf>,
+        agent: impl Into<String>,
+        queue: PendingPublishQueue,
+    ) -> Self {
         Self {
             workspace: workspace.into(),
+            agent: agent.into(),
             queue,
         }
     }
@@ -721,6 +743,7 @@ impl Tool for PublishArtifactTool {
             .map(str::to_string);
 
         self.queue.push(PendingPublish {
+            agent: self.agent.clone(),
             source: source.clone(),
             title: title.clone(),
             kind,
@@ -1067,6 +1090,21 @@ pub fn conversation_card_note(agent: &str, published: &[PendingPublish]) -> Stri
         "Opened to carry what {agent} published during a conversation: {files}. Chat turns run \
          without a card, so this card was created by the act of publishing — it records a \
          delivered file rather than a request somebody made.",
+        files = name_files(&files),
+    )
+}
+
+/// The note line recording a publish filed onto the card the message already
+/// opened (issue #463).
+///
+/// Deliberately not [`conversation_card_note`]'s wording: that one explains why
+/// a card exists that nobody asked for, and this card exists because somebody
+/// asked for it. All this has to say is what landed on it and, through the
+/// attribution the note carries, who put it there.
+pub fn filed_on_card_note(published: &[PendingPublish]) -> String {
+    let files: Vec<String> = published.iter().map(|p| p.source.clone()).collect();
+    format!(
+        "published {files} onto this card — open the Artifacts tab to read the delivered file.",
         files = name_files(&files),
     )
 }

@@ -64,7 +64,20 @@ function readTaskDetailId(): string | null {
   }
 }
 
-/** How often to re-poll the board, so a dispatched card's result appears. */
+/**
+ * The board's fallback refresh interval.
+ *
+ * Since issue #464 this is **no longer how the board stays current** — the
+ * company SSE stream is, through `taskEventTick`. It stays as the degradation
+ * path, and only that: a host that does not serve `{scope}/events` (a 404 the
+ * events hook swallows by design) has no push, and without this the board there
+ * would go back to being a snapshot of its own mount. It is the same stance
+ * `use-events.ts` takes toward the 5s status poll.
+ *
+ * Left at its original cadence deliberately. Slowing it down would be paid for
+ * entirely by the hosts that have no push, and speeding it up is the polling
+ * answer #464 exists to replace.
+ */
 const POLL_MS = 4000;
 
 /**
@@ -117,10 +130,31 @@ function columnLabel(id: string): string {
 export function TasksView({
   client,
   company,
+  taskEventTick,
   onOpenThread,
 }: {
   client: OpenCompanyClient;
   company: string | null;
+  /**
+   * A counter the shell bumps on every task event off the company SSE stream
+   * (issue #464) — a card opened, moved, settled, dispatched or steered. The
+   * board re-reads itself whenever it changes, which is what makes *ask for
+   * something in chat, watch it become work on the board* true without a
+   * reload.
+   *
+   * A **counter, not the payload**, and that is the whole design. The board's
+   * cards come from one place (`GET …/tasks`); a frame only ever says
+   * "something moved". So this cannot suffer the frame-loss the workflow canvas
+   * had to fold an event *window* to avoid — two bumps collapsing inside one
+   * React batch still means exactly one thing: re-read. Carrying payloads here
+   * would inherit that problem for no gain, and would give the board's contents
+   * a second source that could disagree with the first.
+   *
+   * Absent when the board is rendered without a shell to subscribe for it, in
+   * which case the fallback poll is the only refresh — the same degradation a
+   * host with no `{scope}/events` gets.
+   */
+  taskEventTick?: number;
   /**
    * Opens the chat thread a card came from (issue #246). Absent when the board
    * is rendered somewhere with no conversation pane to jump to, in which case
@@ -179,6 +213,26 @@ export function TasksView({
       clearInterval(timer);
     };
   }, [refresh]);
+
+  // Issue #464: the push half. Re-read the board the moment the host says
+  // something on it moved, rather than up to a poll interval later.
+  //
+  // Its own effect rather than a dependency of the one above, on purpose:
+  // folding the tick in there would tear down and restart the fallback timer on
+  // every event, so a busy company — one event every few seconds — would keep
+  // resetting the interval and the fallback would effectively stop existing on
+  // exactly the companies that need it most.
+  //
+  // The ref is what keeps this to *changes*. The shell's counter starts at 0
+  // and keeps counting across route changes, so without it every mount — and
+  // every company switch, since `refresh` is a dependency — would fire a second
+  // load on top of the mount fetch above for a card nothing had announced.
+  const seenTick = useRef(taskEventTick);
+  useEffect(() => {
+    if (taskEventTick === undefined || taskEventTick === seenTick.current) return;
+    seenTick.current = taskEventTick;
+    void refresh();
+  }, [taskEventTick, refresh]);
 
   // Follow browser back/forward and manual edits of the `#/tasks/<id>` sub-hash.
   useEffect(() => {
