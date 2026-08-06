@@ -56,6 +56,7 @@ locations instead of ad-hoc paths:
   logs/        ← instance logs
   tmp/         ← ephemeral scratch, cleared on startup by default
   harness/     ← agent + workflow sandboxes (see below; minted on demand)
+  openhuman/   ← the embedded OpenHuman runtime's own root (see below)
 ```
 
 Per-company state (each bundle's own `memory/`/`context/`) lives under
@@ -65,6 +66,44 @@ the shared subdirectories and — unless `[workspace].clear_tmp_on_startup` is
 `false` — empties `tmp/` so no stale scratch survives a restart. Because the hosting model runs **one container per tenant** with its
 own `OPENCOMPANY_DATA_DIR`, this root *is* the per-tenant workspace — no separate
 per-tenant path prefix is needed.
+
+### The embedded runtime's root (`<data-dir>/openhuman`, `src/app/journal.rs`)
+
+The vendored OpenHuman runtime resolves its own workspace, and its default is a
+subdirectory of the user's **home directory** — which in a tenant container is
+the read-only root filesystem. Its durable agent journal
+(`{workspace}/tinyagents_store/`) therefore failed to create its store root on
+every append, and the vendored append worker reported that to stderr once per
+event with no dedup or backoff, burying every other line in the container log
+(issue #446).
+
+`serve` closes that gap before any agent exists.
+[`app::journal::prepare`](../../../src/app/journal.rs) resolves the root, proves
+it is writable, and exports it as `OPENHUMAN_WORKSPACE` — the one seam the
+vendored config loader consults ahead of its home-directory default:
+
+```text
+<OPENCOMPANY_DATA_DIR>/openhuman/            ← exported as OPENHUMAN_WORKSPACE
+<OPENCOMPANY_DATA_DIR>/openhuman/workspace/tinyagents_store/   ← the journal
+```
+
+| Precedence | Source | Root |
+|---|---|---|
+| 1 | `OPENHUMAN_WORKSPACE` (non-blank) | its value verbatim — a self-hoster keeps an existing workspace |
+| 2 | `OPENCOMPANY_DATA_DIR` | `<data-dir>/openhuman`, exported so the vendored loader finds it |
+
+`serve` prints the resolved store path at startup (`agent journal: … (root …,
+from …)`) so this class of problem is one line to diagnose rather than a code
+trace. Only the path is printed; no other environment value is read or echoed.
+
+An unwritable root **aborts boot** — the same precedent as a
+selected-but-unavailable storage backend. A tenant that answers but records
+nothing produces confident, unrecoverable work and reports the loss only at
+`debug` level; a tenant that refuses to start is one loud, attributable line.
+Because the check runs after `DataLayout::ensure` has already created the shared
+subdirectories, it can only fail on a genuinely broken mount or an explicitly
+misconfigured `OPENHUMAN_WORKSPACE`, so it cannot turn a healthy tenant into one
+that will not wake.
 
 ### Agent sandboxes (`<home>/harness`)
 

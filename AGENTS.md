@@ -79,7 +79,12 @@ injects its environment. When developing hosted behavior, know the seams:
 - The manager injects `OPENCOMPANY_COMPANY`, `OPENCOMPANY_BIND=0.0.0.0:8080`,
   `OPENCOMPANY_DATA_DIR=/data`, and `OPENCOMPANY_PUBLIC_URL` into every
   tenant container. `OPENCOMPANY_DATA_DIR` is the instance data root for
-  **both** the workspace layout and the company-bundle home; `docker/entrypoint.sh`
+  the workspace layout, the company-bundle home, **and** the embedded OpenHuman
+  runtime's own root: `serve` derives `<data-dir>/openhuman` and exports it as
+  `OPENHUMAN_WORKSPACE`, because the vendored runtime otherwise defaults its
+  durable agent journal into `$HOME` — the read-only root filesystem in a tenant
+  (issue #446). An unwritable journal root aborts boot; see
+  `docs/spec/runtime/storage.md`. `docker/entrypoint.sh`
   additionally forwards it as `--home "$OPENCOMPANY_DATA_DIR"`, which resolves
   identically (the flag outranks the variable). Locally it is the only knob that
   isolates two `serve` processes from each other — see
