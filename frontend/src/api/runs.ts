@@ -170,11 +170,22 @@ export function getRun(
 // Shared presentation helpers
 // ---------------------------------------------------------------------------
 
-/** A short, human word for a status. */
+/**
+ * A short, human word for a status.
+ *
+ * `waiting_approval` reads "Waiting on you" rather than "In review" (issue
+ * #465). The old wording came from the board column such an attempt used to
+ * land its card in; since that card now parks instead, "In review" here would
+ * both contradict the column beside it and repeat the claim the issue was
+ * about — that there is a result to look at, when the attempt stopped at a call
+ * it was not allowed to make. This is the wording the approvals tab and the
+ * step timeline's waiting band already use, and it is where the "who unblocks
+ * it" distinction now lives.
+ */
 export const RUN_STATUS_LABEL: Record<RunStatus, string> = {
   pending: "Queued",
   running: "Running",
-  waiting_approval: "In review",
+  waiting_approval: "Waiting on you",
   paused: "Paused",
   succeeded: "Succeeded",
   failed: "Failed",
