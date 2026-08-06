@@ -4974,4 +4974,424 @@ mod test {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
+
+    // ---------------------------------------------------------------------
+    // Issue #469 — a turn that parks several approvals.
+    //
+    // Every test above parks exactly one, which is the case that always
+    // worked. The failure the operator hit needs more than one: four
+    // `composio_execute` calls from a single turn, all approved, and then
+    // silence. These drive that shape end to end over the real router.
+    // ---------------------------------------------------------------------
+
+    /// A brain that parks `parks` gated tool calls on one operator message and
+    /// answers each `ApprovalResolved` it is told about.
+    ///
+    /// Deliberately shaped like `HarnessBrain`'s approval arm rather than like a
+    /// convenient stub: it consults the live grant set and produces **no reply
+    /// at all** when there is no grant left to redeem, because that silent
+    /// no-op is exactly what the later of several follow-up cycles used to hit.
+    struct MultiParkBrain {
+        parks: usize,
+        /// One entry per `ApprovalResolved` the brain was handed, across all
+        /// cycles.
+        decisions: Arc<std::sync::Mutex<Vec<String>>>,
+        /// How many cycles ran in total (the first is the chat turn).
+        cycles: Arc<std::sync::atomic::AtomicUsize>,
+        /// The runtime, so the brain can reach the grant set the way the
+        /// harness's re-dispatch does. Filled by the test after the build.
+        rt: Arc<std::sync::OnceLock<Arc<CompanyRuntime>>>,
+        /// Fail the continuation cycle, to exercise defect 4.
+        fail_continuation: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::brain::Brain for MultiParkBrain {
+        async fn run_cycle(
+            &self,
+            req: crate::ports::types::CycleRequest,
+            host: &dyn crate::ports::brain::CycleHost,
+        ) -> crate::Result<crate::ports::types::CycleResult> {
+            self.cycles
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut responses = Vec::new();
+            for event in &req.events {
+                match event {
+                    CompanyEvent::OperatorMessage { .. } => {
+                        for i in 0..self.parks {
+                            let mut effect = gated_tool_call();
+                            effect.payload = serde_json::json!({ "tool_slug": format!("T{i}") });
+                            host.park_effect(effect).await?;
+                        }
+                    }
+                    CompanyEvent::ApprovalResolved { approval_id, .. } => {
+                        if self.fail_continuation {
+                            return Err(crate::error::OpenCompanyError::BackgroundTask(
+                                "the continuation turn fell over".into(),
+                            ));
+                        }
+                        self.decisions.lock().unwrap().push(approval_id.to_string());
+                        let rt = self.rt.get().expect("the test wires the runtime");
+                        let Some(grant) = rt.grants.peek(approval_id) else {
+                            continue;
+                        };
+                        rt.grants.consume(&grant.agent, &grant.tool, &grant.args);
+                        responses.push(crate::ports::types::OutboundMessage {
+                            message_id: None,
+                            task_id: None,
+                            channel: grant.agent.clone(),
+                            text: format!("re-issued {approval_id}"),
+                            steps: Vec::new(),
+                            reply_to: None,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            Ok(crate::ports::types::CycleResult {
+                channel_responses: responses,
+                new_traces: vec![crate::ports::types::CompressedTrace::now(
+                    &req.cycle_id,
+                    "multi-park cycle",
+                )],
+                ledger_deltas: Vec::new(),
+                token_usage: crate::ports::types::TokenUsage::default(),
+            })
+        }
+    }
+
+    /// A company whose next turn parks four sign-offs.
+    struct MultiParkCompany {
+        app: axum::Router,
+        runtime: Arc<CompanyRuntime>,
+        approvals: Vec<ApprovalId>,
+        decisions: Arc<std::sync::Mutex<Vec<String>>>,
+        cycles: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    async fn multi_park_company(
+        home: &std::path::Path,
+        parks: usize,
+        chat: Option<&str>,
+        fail_continuation: bool,
+    ) -> MultiParkCompany {
+        let decisions = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cycles = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rt_slot: Arc<std::sync::OnceLock<Arc<CompanyRuntime>>> =
+            Arc::new(std::sync::OnceLock::new());
+        let state = build_state_with_brain(
+            home,
+            "running",
+            AppConfig::default(),
+            Some(Arc::new(MultiParkBrain {
+                parks,
+                decisions: decisions.clone(),
+                cycles: cycles.clone(),
+                rt: rt_slot.clone(),
+                fail_continuation,
+            })),
+        )
+        .await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let _ = rt_slot.set(runtime.clone());
+        let app = router(state);
+
+        let body = match chat {
+            Some(chat) => serde_json::json!({ "text": "do it", "chat": chat }),
+            None => serde_json::json!({ "text": "do it" }),
+        };
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let approvals: Vec<_> = runtime
+            .pending_approvals()
+            .iter()
+            .map(|a| a.id.clone())
+            .collect();
+        assert_eq!(approvals.len(), parks, "the turn parked {parks} sign-offs");
+
+        MultiParkCompany {
+            app,
+            runtime,
+            approvals,
+            decisions,
+            cycles,
+        }
+    }
+
+    /// Every `AgentReply` in the log, as `chat_id|text` — what the console's
+    /// event stream projects as an `agent_reply` frame and what a transcript
+    /// reload rebuilds from. An empty list means the operator saw nothing.
+    async fn agent_replies(runtime: &Arc<CompanyRuntime>) -> Vec<String> {
+        use crate::ports::types::EventSeq;
+        runtime
+            .events()
+            .read_from(runtime.id(), EventSeq::new(0), 10_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|s| match s.event {
+                CompanyEvent::AgentReply { text, chat_id, .. } => Some(format!("{chat_id}|{text}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn approve_detached(id: &ApprovalId) -> Request<Body> {
+        resolve_request(id, serde_json::json!({"verdict":"approve","detach":true}))
+    }
+
+    /// Waits for the follow-up work a detached resolve spawned to settle.
+    async fn settle(runtime: &Arc<CompanyRuntime>) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while runtime.continuations.waiting() > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the turn never unblocked");
+        // The continuation itself runs on a spawned task; let it finish.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
+
+    /// **The keystone (issue #469).** A turn that parks four sign-offs, all
+    /// approved, produces exactly ONE continuation — and an answer the operator
+    /// can actually see.
+    ///
+    /// Before this, each resolve spawned its own follow-up cycle: four full
+    /// re-runs of one turn, each told about one decision. They did not race —
+    /// the per-company serial lock made them queue — but the later ones found
+    /// the grants the earlier ones had redeemed and produced nothing at all.
+    /// And none of it reached the operator either way, because the resolve
+    /// route never journaled a continuation's replies, so no `agent_reply`
+    /// frame was ever projected. Four approvals, four wasted turns, silence.
+    #[tokio::test]
+    async fn four_sign_offs_from_one_turn_produce_one_continuation() {
+        let home_dir = home();
+        let c = multi_park_company(home_dir.path(), 4, None, false).await;
+        let before = c.cycles.load(std::sync::atomic::Ordering::SeqCst);
+
+        let mut handles = Vec::new();
+        for id in &c.approvals {
+            let app = c.app.clone();
+            let request = approve_detached(id);
+            handles.push(tokio::spawn(
+                async move { app.oneshot(request).await.unwrap() },
+            ));
+        }
+        for handle in handles {
+            assert_eq!(handle.await.unwrap().status(), StatusCode::OK);
+        }
+        settle(&c.runtime).await;
+
+        assert_eq!(
+            c.cycles.load(std::sync::atomic::Ordering::SeqCst) - before,
+            1,
+            "one turn owes one continuation, not one per approval"
+        );
+        assert_eq!(
+            c.decisions.lock().unwrap().len(),
+            4,
+            "the single continuation carries every decision, so the brain learns all four"
+        );
+        assert!(
+            c.runtime.pending_approvals().is_empty(),
+            "every sign-off was decided"
+        );
+        assert_eq!(
+            agent_replies(&c.runtime).await.len(),
+            4,
+            "the continuation's answers must reach the event stream, or the operator \
+             watches an approved action in silence"
+        );
+    }
+
+    /// The two orders an operator can decide in must end in the same place.
+    ///
+    /// Approving four at once and approving them one at a time are the same
+    /// request spread over a different span, and the gate is the last decision
+    /// rather than a time window — so neither can produce more continuations
+    /// than the other. A design that coalesced only what arrived together would
+    /// pass the test above and still re-run the turn four times here.
+    #[tokio::test]
+    async fn deciding_one_at_a_time_ends_where_deciding_all_at_once_does() {
+        let home_dir = home();
+        let c = multi_park_company(home_dir.path(), 4, None, false).await;
+        let before = c.cycles.load(std::sync::atomic::Ordering::SeqCst);
+
+        for (i, id) in c.approvals.iter().enumerate() {
+            let response = c.app.clone().oneshot(approve_detached(id)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let ran = c.cycles.load(std::sync::atomic::Ordering::SeqCst) - before;
+            if i < 3 {
+                assert_eq!(
+                    ran,
+                    0,
+                    "the turn is still blocked on {} more sign-off(s); continuing now \
+                     would re-park them",
+                    3 - i
+                );
+            }
+        }
+        settle(&c.runtime).await;
+
+        assert_eq!(
+            c.cycles.load(std::sync::atomic::Ordering::SeqCst) - before,
+            1,
+            "the last decision unblocks the turn, and it runs once"
+        );
+        assert_eq!(c.decisions.lock().unwrap().len(), 4);
+        assert_eq!(agent_replies(&c.runtime).await.len(), 4);
+    }
+
+    /// The continuation answers in the conversation the sign-off was raised in.
+    ///
+    /// Not on the answering agent's own line: a desk channel's request and a
+    /// direct message to that channel's lead are answered by the same teammate,
+    /// so keying the reply on the agent delivers a channel's continuation into a
+    /// private thread nobody is watching (issue #379's lesson, which the reply
+    /// path had never learned — only the re-park had).
+    #[tokio::test]
+    async fn a_continuation_answers_in_the_thread_the_sign_off_was_raised_in() {
+        let home_dir = home();
+        let c = multi_park_company(home_dir.path(), 2, Some("sales"), false).await;
+
+        for id in &c.approvals {
+            let response = c.app.clone().oneshot(approve_detached(id)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        settle(&c.runtime).await;
+
+        let replies = agent_replies(&c.runtime).await;
+        assert_eq!(replies.len(), 2, "both re-issues answered");
+        assert!(
+            replies.iter().all(|r| r.starts_with("sales|")),
+            "the continuation must land in the channel the approval was raised in, got {replies:?}"
+        );
+    }
+
+    /// **Issue #379's routing, re-homed (issue #469).** The continuation
+    /// resumes in the thread the sign-off was raised in — and in no other.
+    ///
+    /// Asserted in **both directions**, because either alone would pass on a
+    /// mistake. A desk channel's request and a direct message to that channel's
+    /// lead are answered by the same teammate, so a reply keyed on the agent
+    /// lands a channel's continuation in a private line nobody is watching, and
+    /// a reply keyed on the channel does the reverse.
+    ///
+    /// This used to be pinned inside the harness brain, against a hand-built
+    /// grant. It moved here with the journaling: the thread comes off the park
+    /// record now, so the strong version of the test is the one that lets a real
+    /// turn stamp it and a real resolve read it back.
+    #[tokio::test]
+    async fn a_continuation_resumes_in_the_thread_it_was_raised_in_and_no_other() {
+        async fn threads_for(chat: &str) -> Vec<String> {
+            let home_dir = home();
+            let c = multi_park_company(home_dir.path(), 1, Some(chat), false).await;
+            let response = c
+                .app
+                .clone()
+                .oneshot(approve_detached(&c.approvals[0]))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            settle(&c.runtime).await;
+            agent_replies(&c.runtime)
+                .await
+                .into_iter()
+                .map(|r| r.split('|').next().unwrap().to_string())
+                .collect()
+        }
+
+        // Raised in a desk channel: the continuation belongs to the channel.
+        let desk = threads_for("desk-finance").await;
+        assert_eq!(desk, vec!["desk-finance".to_string()]);
+        assert_ne!(
+            desk[0], "ceo",
+            "a channel's approval must not resume in the desk lead's private DM"
+        );
+
+        // Raised in a direct message with that same lead: the mirror image.
+        let dm = threads_for("ceo").await;
+        assert_eq!(dm, vec!["ceo".to_string()]);
+        assert_ne!(
+            dm[0], "desk-finance",
+            "a private line's approval must not resume in the desk channel"
+        );
+    }
+
+    /// A single-approval turn is unchanged: it continues on that one decision,
+    /// exactly as it did before the gate existed.
+    #[tokio::test]
+    async fn a_lone_sign_off_still_continues_on_its_own_decision() {
+        let home_dir = home();
+        let c = multi_park_company(home_dir.path(), 1, None, false).await;
+        let before = c.cycles.load(std::sync::atomic::Ordering::SeqCst);
+
+        let response = c
+            .app
+            .clone()
+            .oneshot(approve_detached(&c.approvals[0]))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        settle(&c.runtime).await;
+
+        assert_eq!(
+            c.cycles.load(std::sync::atomic::Ordering::SeqCst) - before,
+            1
+        );
+        assert_eq!(agent_replies(&c.runtime).await.len(), 1);
+    }
+
+    /// **Defect 4.** A continuation that fails tells the person waiting for it.
+    ///
+    /// The verdict and the grant are already durable at this point, so the
+    /// failure is recoverable — but only for somebody who knows it happened.
+    /// Before this the entire report was one `tracing::error!`: the agent was
+    /// not told the outcome, and neither was the operator, who saw an approval
+    /// they had granted produce nothing and had no way to tell a slow turn from
+    /// a dead one.
+    #[tokio::test]
+    async fn a_failed_continuation_tells_the_operator() {
+        let home_dir = home();
+        let c = multi_park_company(home_dir.path(), 2, Some("sales"), true).await;
+
+        for id in &c.approvals {
+            let response = c.app.clone().oneshot(approve_detached(id)).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "the verdict is durable regardless of what the turn then does"
+            );
+        }
+        settle(&c.runtime).await;
+
+        let replies = agent_replies(&c.runtime).await;
+        assert_eq!(
+            replies.len(),
+            1,
+            "the operator is told exactly once that the work did not resume, got {replies:?}"
+        );
+        assert!(
+            replies[0].starts_with("sales|"),
+            "and told in the thread they approved in, got {replies:?}"
+        );
+        assert!(
+            replies[0].contains("approving again is safe"),
+            "the notice has to say what to do about it, got {replies:?}"
+        );
+    }
 }
