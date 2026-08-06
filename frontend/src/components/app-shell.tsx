@@ -243,7 +243,13 @@ export function AppShell({
   const [threads, setThreads] = useState(defaultThreads);
   const [activeThreadId, setActiveThreadId] = useState("main");
   // A monotonic nonce bumped on every task-lifecycle SSE event, so the
-  // company-chat in-flight steer strip (issue #111) refetches live.
+  // company-chat in-flight steer strip (issue #111) and the board itself
+  // (issue #464) refetch live.
+  //
+  // A counter rather than the payload, and that is what makes it safe to share:
+  // both consumers re-read their own surface, so two events collapsing into one
+  // React batch still means "re-read" — the frame-loss the workflow canvas had
+  // to fold an event window to avoid cannot happen to a tick.
   const [taskEventTick, setTaskEventTick] = useState(0);
   // Issue #228: bumped on every `workflow_run_finished` so the Workflows view
   // refreshes its run history live. Same shape as `taskEventTick` — a counter,
@@ -943,6 +949,12 @@ export function AppShell({
             <TasksView
               client={client}
               company={company}
+              // Issue #464: the board learns that work appeared. The same
+              // counter the chat's in-flight strip reads — it is bumped by
+              // every task event, now including the host's board-write
+              // announcement — so a card opened from chat lands on the board
+              // without a reload rather than on the fallback poll's schedule.
+              taskEventTick={taskEventTick}
               // Issue #246: the card → chat half of the round trip. A card
               // opened from a conversation remembers which one, so its detail
               // screen can put the operator back in that thread.
