@@ -54,6 +54,7 @@ use crate::feedback::service::FeedbackFiler;
 use crate::feedback::store::FeedbackStore;
 use crate::policy::ManifestApprovalGate;
 use crate::ports::{CompanyStore, ContextStore, EventLog, InboxStore, MemoryStore, SecretStore};
+use crate::runtime::continuation::ContinuationQueue;
 use crate::runtime::grants::GrantSet;
 use crate::runtime::journal::RuntimeJournal;
 
@@ -80,6 +81,11 @@ pub struct RuntimeHandover {
     pub(crate) journal: Arc<RuntimeJournal>,
     pub(crate) approval_gate: Arc<ManifestApprovalGate>,
     pub(crate) grants: GrantSet,
+    /// Issue #469: the turns still blocked on a decision. Live per-instance
+    /// state like the grant set — a swap mid-turn that forgot which turns were
+    /// waiting would continue the next one on its first decision instead of its
+    /// last.
+    pub(crate) continuations: ContinuationQueue,
     pub(crate) serial: Arc<TokioMutex<()>>,
     pub(crate) task_writes: Arc<TokioMutex<()>>,
     #[cfg(feature = "openhuman")]
@@ -114,6 +120,7 @@ impl CompanyRuntime {
             journal: self.journal.clone(),
             approval_gate: self.approval_gate.clone(),
             grants: self.grants.clone(),
+            continuations: self.continuations.clone(),
             serial: self.serial.clone(),
             task_writes: self.task_writes.clone(),
             #[cfg(feature = "openhuman")]

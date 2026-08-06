@@ -1163,6 +1163,20 @@ impl RuntimeBuilder {
             }
         };
 
+        // Issue #469: which turns are still blocked on a decision, on exactly
+        // the same terms. A boot rebuilds it from the approvals the replay left
+        // parked; a rebuild inherits the live one, because that one also knows
+        // about decisions taken since the replay and a fresh count would ask a
+        // turn to wait for them all over again.
+        let continuations = match handover.as_ref() {
+            Some(h) => h.continuations.clone(),
+            None => {
+                let continuations = crate::runtime::continuation::ContinuationQueue::default();
+                continuations.rearm(journal.parked_turns());
+                continuations
+            }
+        };
+
         // Brain selection, in precedence order:
         //   1. an explicit brain (test injection) always wins;
         //   2. under the `openhuman` feature, an attached harness pool + a
@@ -1744,6 +1758,7 @@ impl RuntimeBuilder {
         if let Some(h) = handover.as_ref() {
             runtime.adopt_locks(h.serial.clone(), h.task_writes.clone());
         }
+        runtime.adopt_continuations(continuations);
 
         // MCP uses OpenHuman's process-global live connection registry. Keep a
         // runtime-owned config for this OpenCompany home so REST and agents see

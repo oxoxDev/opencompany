@@ -944,6 +944,11 @@ working on):\n{}\n]",
         self.rt
             .grants
             .rehydrate_standing(self.rt.journal.replayed_standing_grants(now_millis()));
+        // Issue #469: and the turns still blocked on a decision. A restart in
+        // the middle of a partly-decided turn must come back knowing it is
+        // blocked, or its continuation fires on the next decision as though the
+        // others had never been owed.
+        self.rt.continuations.rearm(self.rt.journal.parked_turns());
         Ok(())
     }
 
@@ -1492,8 +1497,20 @@ impl<'a> CycleHostImpl<'a> {
                 now_millis(),
                 TaskLink::from_task_id(self.task_id.as_deref()),
                 self.thread_id.clone(),
+                // Issue #469: which turn is blocked on this. Recorded here
+                // because this is the one write path into the approval queue, so
+                // the count the continuation queue keeps below cannot describe a
+                // different set of approvals from the one that is parked.
+                Some(self.cycle_id.clone()),
             )
             .await?;
+        // …and armed on the live counter in the same breath. A turn that parks
+        // four calls is blocked on four decisions; the runtime holds its
+        // continuation until the last of them lands and then runs it once.
+        // Strictly after the journal write, so a crash between the two replays
+        // as "still parked" and is re-armed by recovery rather than leaving a
+        // counter for an approval no record describes.
+        self.rt.continuations.arm(&self.cycle_id);
         // Issue #379: tell every subscribed console a request just parked, so an
         // inline card can appear in the conversation *as it happens* rather than
         // on the next poll of the approvals feed.
@@ -3310,14 +3327,16 @@ mod test {
         let gate = Arc::new(
             ManifestApprovalGate::new(manifest("supervised").policy.clone()).with_ttl_millis(0),
         );
-        let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
-            .with_brain(Arc::new(EffectBrain {
-                effect: sign_effect,
-            }))
-            .with_approvals(gate)
-            .build()
-            .await
-            .unwrap();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home.clone(), manifest("supervised"))
+                .with_brain(Arc::new(EffectBrain {
+                    effect: sign_effect,
+                }))
+                .with_approvals(gate)
+                .build()
+                .await
+                .unwrap(),
+        );
 
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
@@ -3754,6 +3773,7 @@ mod test {
                 now_millis(),
                 TaskLink::Unlinked,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -3827,6 +3847,7 @@ mod test {
                 now_millis(),
                 TaskLink::Unlinked,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -3877,7 +3898,7 @@ mod test {
                 .unwrap();
             let id = rt.approvals.park(rt.id(), effect.clone()).await.unwrap();
             rt.journal
-                .record_parked(&id, &effect, now_millis(), TaskLink::Unlinked, None)
+                .record_parked(&id, &effect, now_millis(), TaskLink::Unlinked, None, None)
                 .await
                 .unwrap();
             id
