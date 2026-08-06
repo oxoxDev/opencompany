@@ -1767,6 +1767,16 @@ struct StandingGrantDto {
     at_millis: u64,
     /// Epoch-millis it stops admitting calls.
     expires_at_millis: u64,
+    /// The slice of the tool it is confined to, when the tool's name is not the
+    /// whole of what it can do (issue #457) — a Composio toolkit, or absent.
+    ///
+    /// On the wire because a permission an operator cannot read is a permission
+    /// they cannot decide to revoke: a row saying only "act in one of its
+    /// connected accounts" does not tell them the grant reaches GitHub and not
+    /// their mailbox. Absent — not `null` — when there is nothing to narrow, so
+    /// the pre-#457 shape is byte-identical for every other tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
 }
 
 impl From<crate::runtime::grants::StandingGrant> for StandingGrantDto {
@@ -1778,6 +1788,7 @@ impl From<crate::runtime::grants::StandingGrant> for StandingGrantDto {
             granted_by: g.granted_by,
             at_millis: g.at_millis,
             expires_at_millis: g.expires_at_millis,
+            scope: g.scope,
         }
     }
 }
@@ -5094,6 +5105,7 @@ mod test {
                 at_millis: 1_000,
                 expires_at_millis: crate::ports::now_millis() + 60 * 60 * 1000,
                 origin_thread: None,
+                scope: None,
             });
 
         // Both addressing forms list it.

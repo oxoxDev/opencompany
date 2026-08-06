@@ -5133,6 +5133,7 @@ members = ["eng1", "eng2"]
                 at_millis: now_millis(),
                 expires_at_millis: now_millis() + 60 * 60 * 1000,
                 origin_thread: None,
+                scope: None,
             });
         let brain = brain_with_queue_and_events(dir.path(), requests, log.clone());
 
