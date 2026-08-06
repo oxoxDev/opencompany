@@ -271,7 +271,7 @@ fn the_reference_digest_tracks_the_bytes() {
 async fn publishing_stages_the_file_and_reports_what_was_captured() {
     let dir = workspace(&[("specs/launch.md", b"# Spec\nShip it.")]);
     let (queue, _claim) = claimed(PublishDestination::Task);
-    let tool = PublishArtifactTool::new(dir.path(), queue.clone());
+    let tool = PublishArtifactTool::new(dir.path(), "maya", queue.clone());
 
     let result = run(&tool, json!({ "path": "specs/launch.md" })).await;
     assert!(!result.is_error, "{}", text_of(&result));
@@ -286,11 +286,30 @@ async fn publishing_stages_the_file_and_reports_what_was_captured() {
     assert_eq!(staged[0].note, None);
 }
 
+/// Issue #463: the staged item names **who published it**.
+///
+/// The queue is shared by every turn a cycle runs, so the drain site cannot
+/// answer this — an operator message answered by the orchestrator and handed to
+/// a desk stages a file from whichever of them reached for the tool. Without the
+/// stamp the card and the artifact were filed under the turn's responder, so a
+/// deliverable the writer produced was recorded as the orchestrator's.
+#[tokio::test]
+async fn a_staged_publish_names_the_agent_that_called_the_tool() {
+    let dir = workspace(&[("memo.md", b"# Memo")]);
+    let (queue, _claim) = claimed(PublishDestination::Conversation);
+    let tool = PublishArtifactTool::new(dir.path(), "writer", queue.clone());
+
+    run(&tool, json!({ "path": "memo.md" })).await;
+
+    let staged = queue.drain();
+    assert_eq!(staged[0].agent, "writer");
+}
+
 #[tokio::test]
 async fn an_explicit_title_kind_and_note_are_carried_through() {
     let dir = workspace(&[("out.dat", b"plain text really")]);
     let (queue, _claim) = claimed(PublishDestination::Task);
-    let tool = PublishArtifactTool::new(dir.path(), queue.clone());
+    let tool = PublishArtifactTool::new(dir.path(), "maya", queue.clone());
 
     run(
         &tool,
@@ -322,7 +341,7 @@ async fn an_explicit_title_kind_and_note_are_carried_through() {
 async fn the_body_is_captured_at_publish_time_not_at_drain_time() {
     let dir = workspace(&[("spec.md", b"# The version I published")]);
     let (queue, _claim) = claimed(PublishDestination::Task);
-    let tool = PublishArtifactTool::new(dir.path(), queue.clone());
+    let tool = PublishArtifactTool::new(dir.path(), "maya", queue.clone());
 
     run(&tool, json!({ "path": "spec.md" })).await;
     // The agent's next step scribbles over the file.
@@ -336,7 +355,7 @@ async fn the_body_is_captured_at_publish_time_not_at_drain_time() {
 async fn a_bad_path_is_a_truthful_tool_error_and_stages_nothing() {
     let dir = workspace(&[("spec.md", b"# Spec")]);
     let (queue, _claim) = claimed(PublishDestination::Task);
-    let tool = PublishArtifactTool::new(dir.path(), queue.clone());
+    let tool = PublishArtifactTool::new(dir.path(), "maya", queue.clone());
 
     for path in ["../escape.md", "/etc/hosts", "nope.md", ""] {
         let result = run(&tool, json!({ "path": path })).await;
@@ -351,7 +370,7 @@ async fn a_bad_path_is_a_truthful_tool_error_and_stages_nothing() {
 async fn an_unknown_kind_is_refused_by_name() {
     let dir = workspace(&[("spec.md", b"# Spec")]);
     let (queue, _claim) = claimed(PublishDestination::Task);
-    let tool = PublishArtifactTool::new(dir.path(), queue.clone());
+    let tool = PublishArtifactTool::new(dir.path(), "maya", queue.clone());
 
     let result = run(&tool, json!({ "path": "spec.md", "kind": "spreadsheet" })).await;
     assert!(result.is_error);
@@ -366,6 +385,7 @@ async fn an_unknown_kind_is_refused_by_name() {
 fn the_queue_drains_fifo_and_empties() {
     let queue = PendingPublishQueue::default();
     let publish = |source: &str| PendingPublish {
+        agent: "maya".to_string(),
         source: source.to_string(),
         title: source.to_string(),
         kind: ArtifactKind::Text,
@@ -396,6 +416,7 @@ fn the_queue_drains_fifo_and_empties() {
 fn clear_drops_what_a_prior_turn_staged() {
     let queue = PendingPublishQueue::default();
     queue.push(PendingPublish {
+        agent: "maya".to_string(),
         source: "leftover.md".to_string(),
         title: "leftover".to_string(),
         kind: ArtifactKind::Text,
@@ -418,7 +439,7 @@ fn clear_drops_what_a_prior_turn_staged() {
 async fn a_cloned_handle_sees_the_same_queue() {
     let dir = workspace(&[("spec.md", b"# Spec")]);
     let queue = PendingPublishQueue::default();
-    let tool = PublishArtifactTool::new(dir.path(), queue.clone());
+    let tool = PublishArtifactTool::new(dir.path(), "maya", queue.clone());
 
     let _claim = queue.claim(PublishDestination::Task);
     run(&tool, json!({ "path": "spec.md" })).await;
@@ -655,7 +676,7 @@ fn a_decline_is_recorded_with_both_the_files_and_the_reason() {
 async fn an_unclaimed_queue_refuses_to_publish_and_stages_nothing() {
     let dir = workspace(&[("specs/launch.md", b"# Spec")]);
     let queue = PendingPublishQueue::default();
-    let tool = PublishArtifactTool::new(dir.path(), queue.clone());
+    let tool = PublishArtifactTool::new(dir.path(), "maya", queue.clone());
 
     let result = run(&tool, json!({ "path": "specs/launch.md" })).await;
 
@@ -707,7 +728,7 @@ fn a_fresh_queue_is_unclaimed_by_default() {
 async fn dropping_the_claim_stops_publishing_again() {
     let dir = workspace(&[("spec.md", b"# Spec")]);
     let queue = PendingPublishQueue::default();
-    let tool = PublishArtifactTool::new(dir.path(), queue.clone());
+    let tool = PublishArtifactTool::new(dir.path(), "maya", queue.clone());
 
     let claim = queue.claim(PublishDestination::Task);
     assert!(!run(&tool, json!({ "path": "spec.md" })).await.is_error);
@@ -737,6 +758,7 @@ fn claiming_clears_whatever_a_previous_caller_left_staged() {
     let queue = PendingPublishQueue::default();
     let claim = queue.claim(PublishDestination::Task);
     queue.push(PendingPublish {
+        agent: "maya".to_string(),
         source: "stale.md".to_string(),
         title: "stale".to_string(),
         kind: ArtifactKind::Text,
@@ -758,11 +780,11 @@ async fn the_receipt_names_the_destination_the_caller_actually_has() {
     let dir = workspace(&[("spec.md", b"# Spec")]);
 
     let (task_queue, _task_claim) = claimed(PublishDestination::Task);
-    let task_tool = PublishArtifactTool::new(dir.path(), task_queue);
+    let task_tool = PublishArtifactTool::new(dir.path(), "maya", task_queue);
     let task_receipt = text_of(&run(&task_tool, json!({ "path": "spec.md" })).await);
 
     let (chat_queue, _chat_claim) = claimed(PublishDestination::Conversation);
-    let chat_tool = PublishArtifactTool::new(dir.path(), chat_queue);
+    let chat_tool = PublishArtifactTool::new(dir.path(), "maya", chat_queue);
     let chat_receipt = text_of(&run(&chat_tool, json!({ "path": "spec.md" })).await);
 
     assert!(
@@ -788,6 +810,7 @@ async fn the_receipt_names_the_destination_the_caller_actually_has() {
 #[test]
 fn a_minted_card_is_titled_from_what_was_published() {
     let publish = |title: &str, source: &str| PendingPublish {
+        agent: "maya".to_string(),
         source: source.to_string(),
         title: title.to_string(),
         kind: ArtifactKind::Markdown,
@@ -820,6 +843,7 @@ fn a_minted_card_explains_why_it_exists() {
     let note = conversation_card_note(
         "ceo",
         &[PendingPublish {
+            agent: "maya".to_string(),
             source: "specs/launch.md".to_string(),
             title: "Launch spec".to_string(),
             kind: ArtifactKind::Markdown,

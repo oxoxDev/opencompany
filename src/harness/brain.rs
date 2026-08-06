@@ -1479,6 +1479,87 @@ impl HarnessBrain {
         Ok(written)
     }
 
+    /// Files what a conversation turn published onto the card that turn already
+    /// opened (issue #463). Returns that card's id.
+    ///
+    /// # Why this exists at all
+    ///
+    /// #445 made a chat publish mint a card, which was right for a publish with
+    /// nothing else in scope and wrong the moment #442 started opening a card
+    /// for the work itself: one substantial ask that ended in a published file
+    /// produced two cards, and the reply linked to the one with no artifacts on
+    /// it. Both fixes were correct alone. Together they doubled, and the
+    /// deliverable ended up on the card nothing pointed at.
+    ///
+    /// So a publish files onto the card in scope instead of opening a rival to
+    /// it. The card already carries the request and the answer; this adds the
+    /// artifact and says who delivered it.
+    ///
+    /// # What it changes on the card, and what it leaves alone
+    ///
+    /// The note gains a line naming the published files. The column moves to
+    /// [`COLUMN_IN_REVIEW`] — a deliverable was produced and a person has not
+    /// accepted it yet, the same landing `record_conversation_publishes` gives
+    /// its minted card and the same one a settled run gets. A card with **no
+    /// assignee** — the To-do card the REST chat handler opens, which has never
+    /// belonged to anybody — is assigned to the publisher; a card that already
+    /// has an owner keeps them, because filing a file must not quietly take
+    /// somebody's work away from them.
+    ///
+    /// A card that has since been deleted falls back to minting, so the
+    /// artifact stays reachable rather than being dropped for the sake of the
+    /// rule.
+    async fn file_publishes_on_card(
+        &self,
+        card_id: &str,
+        agent: &str,
+        published: Vec<publish::PendingPublish>,
+    ) -> Result<String> {
+        let Some(tasks) = self.deps.tasks.as_ref() else {
+            return Err(crate::OpenCompanyError::Harness(
+                "a conversation published a file but no task board is wired".to_string(),
+            ));
+        };
+        let Some(mut card) = tasks
+            .list(&self.record.id)
+            .await?
+            .into_iter()
+            .find(|card| card.id == card_id)
+        else {
+            tracing::warn!(
+                task_id = %card_id,
+                agent = %agent,
+                "[publish] the card this turn opened is gone; minting one for the deliverable \
+                 instead of dropping it"
+            );
+            return self
+                .record_conversation_publishes(agent, None, published)
+                .await;
+        };
+
+        let recorded = self
+            .record_published_artifacts(&card, agent, published.clone(), None)
+            .await?;
+        card.note = Some(append_result(
+            card.note.as_deref(),
+            agent,
+            &publish::filed_on_card_note(&published),
+        ));
+        card.column = COLUMN_IN_REVIEW.to_string();
+        if card.assignee.is_empty() {
+            card.assignee = agent.to_string();
+        }
+        card.updated_at_millis = now_millis();
+        tasks.upsert(&self.record.id, &card).await?;
+        tracing::info!(
+            task_id = %card.id,
+            agent = %agent,
+            artifacts = recorded.len(),
+            "[publish] a conversation published files onto the card this message already opened"
+        );
+        Ok(card.id)
+    }
+
     /// Records what a **conversation** turn published, minting the card that
     /// carries it (issue #445). Returns that card's id.
     ///
@@ -1886,10 +1967,36 @@ impl Brain for HarnessBrain {
                     let mut published_card = None;
                     if !published.is_empty() && publish_claim.is_some() {
                         let count = published.len();
-                        match self
-                            .record_conversation_publishes(&responder, chat_id, published)
-                            .await
-                        {
+                        // Issue #463: the agent that actually called the tool,
+                        // not the turn's responder. A desk lead publishing
+                        // inside a hand-off used to be filed under the
+                        // orchestrator that relayed for it — the card named the
+                        // wrong person for work it did not do.
+                        let publisher = published
+                            .first()
+                            .map(|p| p.agent.clone())
+                            .filter(|agent| !agent.is_empty())
+                            .unwrap_or_else(|| responder.clone());
+                        // Issue #463: file onto the card THIS message already
+                        // opened when there is one. `turn.spawned_task` holds it
+                        // by construction — it is seeded from the direct-answer
+                        // card, from each hand-off's card and from the chat
+                        // handler's — which is exactly why the reply linked
+                        // there while the deliverable sat on a second, orphaned
+                        // card nothing pointed at. Minting is now the
+                        // no-card-in-scope case only, and the reply link stops
+                        // being a choice because only one card exists.
+                        let filed = match turn.spawned_task.as_deref() {
+                            Some(card_id) => {
+                                self.file_publishes_on_card(card_id, &publisher, published)
+                                    .await
+                            }
+                            None => {
+                                self.record_conversation_publishes(&publisher, chat_id, published)
+                                    .await
+                            }
+                        };
+                        match filed {
                             Ok(card_id) => published_card = Some(card_id),
                             Err(err) => {
                                 // The agent has already been told the file was
@@ -1928,12 +2035,15 @@ impl Brain for HarnessBrain {
                         // Issue #445 reuses that link for the card a publish
                         // minted, which is how the operator gets from "here is
                         // your deliverable" to the thing itself in one click.
-                        // A `spawn_task` still wins the slot: this field is a
-                        // single id (see `OperatorTurn::spawned_task` on why it
-                        // cannot be widened), so the rule is to never take a
-                        // link away from a turn that already had one. A publish
-                        // card that loses the slot is still on the board, in
-                        // review, carrying a note that explains what it is.
+                        //
+                        // Since #463 the `or` no longer picks a winner between
+                        // two cards, because there are never two: a publish made
+                        // with a card in scope is filed ONTO `spawned_task`, and
+                        // `published_card` is only ever set when there was no
+                        // card to file onto. The two arms are now the same card
+                        // or a single one, and the operator can no longer be
+                        // sent to an empty card while the deliverable sits on an
+                        // orphan.
                         task_id: turn.spawned_task.or(published_card),
                         channel: "operator".to_string(),
                         text: operator_reply,
@@ -2672,6 +2782,7 @@ members = ["engineer"]
         let company = CompanyId::new("acme");
         let c = card("t-1", "maya");
         let publish = |source: &str, body: &str| PendingPublish {
+            agent: "maya".to_string(),
             source: source.to_string(),
             title: source.to_string(),
             kind: crate::ports::artifacts::ArtifactKind::Markdown,
@@ -2781,6 +2892,7 @@ members = ["engineer"]
         let (brain, ops) = brain_with_artifacts(dir.path());
         let c = card("t-1", "maya");
         let publish = |body: &str| PendingPublish {
+            agent: "maya".to_string(),
             source: "spec.md".to_string(),
             title: "spec.md".to_string(),
             kind: crate::ports::artifacts::ArtifactKind::Markdown,
@@ -2842,6 +2954,7 @@ members = ["engineer"]
                 &card("t-1", "maya"),
                 "maya",
                 vec![PendingPublish {
+                    agent: "maya".to_string(),
                     source: "spec.md".to_string(),
                     title: "spec.md".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
@@ -2853,6 +2966,137 @@ members = ["engineer"]
             .await
             .expect_err("a lost deliverable must not read as a success");
         assert!(err.to_string().contains("the disk is full"), "{err}");
+    }
+
+    /// Issue #463, the headline. A publish made when this message already has a
+    /// card files **onto that card** rather than minting a second one beside it.
+    ///
+    /// #445 minted unconditionally, which was right on its own and wrong beside
+    /// #442's card-by-construction: one substantial ask that ended in a
+    /// published file left two cards, and the reply bubble linked to the empty
+    /// one because that is the card the turn opened.
+    #[tokio::test]
+    async fn a_publish_with_a_card_in_scope_files_onto_it_instead_of_minting() {
+        use crate::harness::publish::PendingPublish;
+        use crate::ports::artifacts::ArtifactStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, ops) = brain_with_artifacts(dir.path());
+        let company = CompanyId::new("acme");
+        // The card #442 opens for the work — no owner yet, exactly like the
+        // To-do card the REST chat handler writes.
+        let mut open = card("t-open", "");
+        open.column = COLUMN_TODO.to_string();
+        TaskStore::upsert(&*ops, &company, &open)
+            .await
+            .expect("seed");
+
+        let filed = brain
+            .file_publishes_on_card(
+                "t-open",
+                "writer",
+                vec![PendingPublish {
+                    agent: "writer".to_string(),
+                    source: "memo.md".to_string(),
+                    title: "Q3 board memo".to_string(),
+                    kind: crate::ports::artifacts::ArtifactKind::Markdown,
+                    note: None,
+                    body: "# Memo".to_string(),
+                }],
+            )
+            .await
+            .expect("files onto the card");
+
+        assert_eq!(filed, "t-open", "no second card was minted");
+        let cards = TaskStore::list(&*ops, &company).await.expect("list");
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(
+            cards[0].column, COLUMN_IN_REVIEW,
+            "a delivered file lands for a person to accept"
+        );
+        assert_eq!(
+            cards[0].assignee, "writer",
+            "an unowned card becomes the publisher's"
+        );
+        assert!(
+            cards[0]
+                .note
+                .as_deref()
+                .unwrap_or_default()
+                .contains("memo.md"),
+            "the note names what landed: {:?}",
+            cards[0].note
+        );
+        let artifacts = ArtifactStore::list(&*ops, &company, Some("t-open"))
+            .await
+            .expect("list artifacts");
+        assert_eq!(artifacts.len(), 1, "the deliverable is ON the card");
+        assert_eq!(artifacts[0].title, "Q3 board memo");
+    }
+
+    /// …but filing a file never takes somebody's card away from them. Only an
+    /// **unowned** card is claimed by the publisher.
+    #[tokio::test]
+    async fn filing_a_publish_leaves_an_owned_card_with_its_owner() {
+        use crate::harness::publish::PendingPublish;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, ops) = brain_with_artifacts(dir.path());
+        let company = CompanyId::new("acme");
+        ops.upsert(&company, &card("t-owned", "maya"))
+            .await
+            .expect("seed");
+
+        brain
+            .file_publishes_on_card(
+                "t-owned",
+                "writer",
+                vec![PendingPublish {
+                    agent: "writer".to_string(),
+                    source: "memo.md".to_string(),
+                    title: "Memo".to_string(),
+                    kind: crate::ports::artifacts::ArtifactKind::Markdown,
+                    note: None,
+                    body: "# Memo".to_string(),
+                }],
+            )
+            .await
+            .expect("files onto the card");
+
+        assert_eq!(only_card(&ops).await.assignee, "maya");
+    }
+
+    /// A card that vanished between the turn and the drain falls back to
+    /// minting. The rule exists to stop a second card, not to lose a
+    /// deliverable — dropping the artifact would be #445 all over again.
+    #[tokio::test]
+    async fn a_publish_onto_a_card_that_vanished_mints_one_rather_than_dropping_it() {
+        use crate::harness::publish::PendingPublish;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, ops) = brain_with_artifacts(dir.path());
+        let company = CompanyId::new("acme");
+
+        let filed = brain
+            .file_publishes_on_card(
+                "t-gone",
+                "writer",
+                vec![PendingPublish {
+                    agent: "writer".to_string(),
+                    source: "memo.md".to_string(),
+                    title: "Memo".to_string(),
+                    kind: crate::ports::artifacts::ArtifactKind::Markdown,
+                    note: None,
+                    body: "# Memo".to_string(),
+                }],
+            )
+            .await
+            .expect("mints a card instead");
+
+        assert_ne!(filed, "t-gone");
+        let cards = TaskStore::list(&*ops, &company).await.expect("list");
+        assert_eq!(cards.len(), 1, "the deliverable still has a card");
+        assert_eq!(cards[0].assignee, "writer");
     }
 
     /// The other half: a run that did NOT succeed records nothing either, and
