@@ -50,46 +50,52 @@
 
 use crate::ports::types::EffectGroup;
 
-/// Does a call mutate state or reach outside the company?
+/// What a call **costs the company** — the axis the two policy tiers cut on.
 ///
-/// The two policy tiers want different cuts of this, which is why it is three
-/// values and not a bool:
+/// Named for consequence rather than for topology, because topology is the
+/// wrong question and asking it is what produced the bug this module exists to
+/// fix. Several tools make a real network request and are nonetheless
+/// [`Nothing`](Self::Nothing): `composio_list_tools`, `media_list_models` and
+/// `mcp_list_tools` all fetch a catalogue over the wire with the tenant's own
+/// credential, change no state anywhere, and are billed for nothing. A tier
+/// that denied them would be denying a company the ability to find out what it
+/// can do.
 ///
-/// * `readonly` denies everything that is not [`Internal`](Self::Internal) —
-///   that tier's contract is that nothing moves and nothing is spent.
-/// * `supervised` parks only [`External`](Self::External).
-///   [`Metered`](Self::Metered) is the third bucket `web_search` needed (issue
-///   #238): it reaches a third party and costs money but changes nothing, and
-///   parking it would be worse than useless — openhuman resolves a
-///   `RequireApproval` inline, so a parked search is a search that never
-///   happens.
+/// * `readonly` denies anything that is not [`Nothing`](Self::Nothing) — that
+///   tier's contract is that nothing changes and nothing is spent.
+/// * `supervised` parks only [`Consequence`](Self::Consequence).
+///   [`Money`](Self::Money) is the third bucket `web_search` needed (issue
+///   #238): it changes nothing but the backend bills per request, and parking
+///   it would be worse than useless — openhuman resolves a `RequireApproval`
+///   inline, so a parked search is a search that never happens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reach {
-    /// Touches only this company's own runtime state, or reads inside the
-    /// agent's own sandboxed workspace. Never parks, never denied.
-    Internal,
-    /// Reaches outside and is billed, but changes nothing anywhere. Allowed
-    /// under `supervised`, denied under `readonly`.
-    Metered,
-    /// Mutates state, reaches a counterparty, executes arbitrary code, reaches
-    /// an arbitrary address, or overwrites operator-owned guidance.
-    External,
+    /// Nothing changes and nothing is spent. Runs in every mode, `readonly`
+    /// included. May still read over the network — see the note above.
+    Nothing,
+    /// Nothing changes, but the call is billed. Runs under `supervised`,
+    /// denied under `readonly`.
+    Money,
+    /// State changes, a counterparty is reached, arbitrary code runs, an
+    /// arbitrary address is reached, or operator-owned guidance is overwritten.
+    /// Parks under `supervised`, denied under `readonly`.
+    Consequence,
 }
 
 impl Reach {
-    /// Does this mutate or reach outside — the `readonly` deny condition.
-    pub fn is_external(self) -> bool {
-        !matches!(self, Self::Internal)
+    /// Is this refused outright on a `readonly` desk?
+    pub fn denied_under_readonly(self) -> bool {
+        !matches!(self, Self::Nothing)
     }
 
-    /// Does this park under `supervised`?
+    /// Does this park for an operator under `supervised`?
     pub fn parks_under_supervision(self) -> bool {
-        matches!(self, Self::External)
+        matches!(self, Self::Consequence)
     }
 
-    /// Does this cost money to make, regardless of what it changes?
-    pub fn is_metered(self) -> bool {
-        matches!(self, Self::Metered)
+    /// Does making this call cost money, whatever it changes?
+    pub fn costs_money(self) -> bool {
+        matches!(self, Self::Money)
     }
 }
 
@@ -157,29 +163,29 @@ const DECLARED: &[Declared] = &[
     // an internal tool never parks, so its standing answer is unobservable
     // *unless* an operator puts it in `always_approve` — at which point
     // `PerCall` is the answer that respects what they asked for.
-    d("query_company", EffectGroup::Other, Reach::Internal),
-    d("spawn_task", EffectGroup::Other, Reach::Internal),
-    d("delegate_to_desk", EffectGroup::Other, Reach::Internal),
-    d("add_agent", EffectGroup::Other, Reach::Internal),
-    d("create_workflow", EffectGroup::Other, Reach::Internal),
-    d("assign_task", EffectGroup::Other, Reach::Internal),
-    d("review_task", EffectGroup::Other, Reach::Internal),
+    d("query_company", EffectGroup::Other, Reach::Nothing),
+    d("spawn_task", EffectGroup::Other, Reach::Nothing),
+    d("delegate_to_desk", EffectGroup::Other, Reach::Nothing),
+    d("add_agent", EffectGroup::Other, Reach::Nothing),
+    d("create_workflow", EffectGroup::Other, Reach::Nothing),
+    d("assign_task", EffectGroup::Other, Reach::Nothing),
+    d("review_task", EffectGroup::Other, Reach::Nothing),
     // Running a saved workflow performs whatever that workflow performs, which
     // this layer cannot see. It parks, and it stays a per-call decision.
-    d("run_workflow", EffectGroup::Other, Reach::External),
+    d("run_workflow", EffectGroup::Other, Reach::Consequence),
     // ---- The agent's own sandboxed workspace: reads ------------------------
     // All four are pure reads inside the workspace the agent is pinned to.
     // `file_read`, `glob`, `grep` and `image_info` PARKED before this table
     // existed — not by anyone's decision, but because the read-only-prefix
     // heuristic keys on the *start* of the name and none of them begins with
     // one. `list`, `read_workspace_state` and `memory_recall` happened to.
-    d("file_read", EffectGroup::Other, Reach::Internal),
-    d("glob", EffectGroup::Other, Reach::Internal),
-    d("grep", EffectGroup::Other, Reach::Internal),
-    d("list", EffectGroup::Other, Reach::Internal),
-    d("read_workspace_state", EffectGroup::Other, Reach::Internal),
-    d("memory_recall", EffectGroup::Other, Reach::Internal),
-    d("image_info", EffectGroup::Other, Reach::Internal),
+    d("file_read", EffectGroup::Other, Reach::Nothing),
+    d("glob", EffectGroup::Other, Reach::Nothing),
+    d("grep", EffectGroup::Other, Reach::Nothing),
+    d("list", EffectGroup::Other, Reach::Nothing),
+    d("read_workspace_state", EffectGroup::Other, Reach::Nothing),
+    d("memory_recall", EffectGroup::Other, Reach::Nothing),
+    d("image_info", EffectGroup::Other, Reach::Nothing),
     // ---- The agent's own sandboxed workspace: writes -----------------------
     // These mutate, so `readonly` must still deny them and `supervised` must
     // still park them. But what they mutate is the agent's own scratch space
@@ -187,86 +193,117 @@ const DECLARED: &[Declared] = &[
     // nothing an operator authored. They are the low-consequence tools the
     // standing grant exists for: without them the feature has almost nothing
     // left to apply to.
-    d_grantable("file_write", EffectGroup::Other, Reach::External),
-    d_grantable("edit", EffectGroup::Other, Reach::External),
-    d_grantable("apply_patch", EffectGroup::Other, Reach::External),
-    d_grantable("csv_export", EffectGroup::Other, Reach::External),
-    d_grantable("memory_store", EffectGroup::Other, Reach::External),
+    d_grantable("file_write", EffectGroup::Other, Reach::Consequence),
+    d_grantable("edit", EffectGroup::Other, Reach::Consequence),
+    d_grantable("apply_patch", EffectGroup::Other, Reach::Consequence),
+    d_grantable("csv_export", EffectGroup::Other, Reach::Consequence),
+    d_grantable("memory_store", EffectGroup::Other, Reach::Consequence),
     // `git_operations` is deliberately NOT grantable alongside its filesystem
     // siblings: it can push to a configured remote, so it reaches an address
     // this layer does not get to see.
-    d("git_operations", EffectGroup::Other, Reach::External),
+    d("git_operations", EffectGroup::Other, Reach::Consequence),
     // ---- Arbitrary code, arbitrary addresses -------------------------------
     // The three shapes issue #444 names, plus the two web tools that share
     // `http_request`'s shape. A standing grant on any of these is a standing
     // grant on "anything the sandbox permits", which is not a sentence an
     // operator can consent to.
-    d("shell", EffectGroup::Other, Reach::External),
-    d("http_request", EffectGroup::Other, Reach::External),
-    d("curl", EffectGroup::Other, Reach::External),
-    d("web_fetch", EffectGroup::Other, Reach::External),
+    d("shell", EffectGroup::Other, Reach::Consequence),
+    d("http_request", EffectGroup::Other, Reach::Consequence),
+    d("curl", EffectGroup::Other, Reach::Consequence),
+    d("web_fetch", EffectGroup::Other, Reach::Consequence),
     // ---- The company workspace: operator-owned guidance --------------------
     // Reads are free (issue #237). `workspace_write` overwrites guidance the
     // operator wrote, which is why `is_external_effect` has always refused to
     // exempt it — and why it is now also refused a standing grant. That
     // contradiction (park every time / grant for a week) is issue #444's
     // headline, resolved in the direction the parking side already argued.
-    d("workspace_list", EffectGroup::Other, Reach::Internal),
-    d("workspace_read", EffectGroup::Other, Reach::Internal),
-    d("workspace_write", EffectGroup::Other, Reach::External),
+    d("workspace_list", EffectGroup::Other, Reach::Nothing),
+    d("workspace_read", EffectGroup::Other, Reach::Nothing),
+    d("workspace_write", EffectGroup::Other, Reach::Consequence),
     // ---- Publishing --------------------------------------------------------
     // Externally visible and not reversible by the company alone.
-    d("publish_artifact", EffectGroup::Publish, Reach::External),
+    d("publish_artifact", EffectGroup::Publish, Reach::Consequence),
     // ---- Priced backend calls ----------------------------------------------
     // `web_search` is billed per request but changes nothing (issue #238).
     // Media generation moves real money on submit (issue #109); listing the
-    // catalogue is a free GET.
-    d("web_search", EffectGroup::Spend, Reach::Metered),
-    d("media_generate_image", EffectGroup::Spend, Reach::External),
-    d("media_generate_video", EffectGroup::Spend, Reach::External),
-    d("media_list_models", EffectGroup::Other, Reach::Internal),
-    // ---- MCP ---------------------------------------------------------------
-    // Listing servers and their tools reads local registration state with
-    // credentials redacted and reaches nothing (issue #443). The agent persona
-    // *instructs* every agent to call `mcp_list_servers` rather than answer a
-    // capability question from memory, so parking it made the guidance that
-    // exists to prevent stale answers cost an operator approval to follow.
+    // catalogue is a GET to the same backend that changes nothing and costs
+    // nothing.
+    d("web_search", EffectGroup::Spend, Reach::Money),
+    d(
+        "media_generate_image",
+        EffectGroup::Spend,
+        Reach::Consequence,
+    ),
+    d(
+        "media_generate_video",
+        EffectGroup::Spend,
+        Reach::Consequence,
+    ),
+    d("media_list_models", EffectGroup::Other, Reach::Nothing),
+    // ---- Skills / workflow catalogue ---------------------------------------
+    // The three OpenHuman skill *read* tools, scoped to this agent's own
+    // materialized skill tree under its workspace. All local, all reads.
     //
-    // Calling *through* a server stays external and per-call: it can perform
-    // any effect the third-party server advertises.
-    d("mcp_list_servers", EffectGroup::Other, Reach::Internal),
-    d("mcp_list_tools", EffectGroup::Other, Reach::Internal),
+    // `describe_workflow` PARKED before this table existed, for the same
+    // reason `file_read` did and with nobody reporting either: the read-only
+    // rule matched a name *prefix* and "describe" is not one of the words. The
+    // persona hands an agent all three in one sentence — "use `list_workflows`
+    // to enumerate them, `describe_workflow` to inspect one" — so two ran and
+    // the middle one interrupted an operator.
+    d("list_workflows", EffectGroup::Other, Reach::Nothing),
+    d("describe_workflow", EffectGroup::Other, Reach::Nothing),
+    d("read_workflow_resource", EffectGroup::Other, Reach::Nothing),
+    // ---- MCP ---------------------------------------------------------------
+    // The agent persona *instructs* every agent to call `mcp_list_servers` (and
+    // `mcp_list_tools` for a specific server) rather than answer a capability
+    // question from memory, so parking them made the guidance that exists to
+    // prevent stale answers cost an operator approval to follow (issue #443).
+    //
+    // `mcp_list_servers` and `mcp_registry_list_tools` read process-local
+    // registration state, credentials already redacted. `mcp_list_tools` is
+    // NOT local — it is a `tools/list` round trip to the operator-configured
+    // server. It is `Nothing` all the same: it changes nothing there or here
+    // and is billed for nothing, and a desk that cannot ask a server what it
+    // offers cannot use one. Whether a call *reaches* is the question this
+    // module stopped asking; what it costs is the question it asks instead.
+    //
+    // Calling *through* a server is a consequence and stays per-call: it can
+    // perform any effect the third-party server advertises.
+    d("mcp_list_servers", EffectGroup::Other, Reach::Nothing),
+    d("mcp_list_tools", EffectGroup::Other, Reach::Nothing),
     d(
         "mcp_registry_list_tools",
         EffectGroup::Other,
-        Reach::Internal,
+        Reach::Nothing,
     ),
-    d("mcp_call_tool", EffectGroup::Other, Reach::External),
+    d("mcp_call_tool", EffectGroup::Other, Reach::Consequence),
     d(
         "mcp_registry_tool_call",
         EffectGroup::Other,
-        Reach::External,
+        Reach::Consequence,
     ),
     // ---- Composio ----------------------------------------------------------
-    // The three list tools are read-only GETs against the tenant's own
-    // Composio surface (issue #110). Authorizing begins an OAuth handoff that
-    // establishes an account identity for the company.
+    // The three list tools are authenticated GETs to the managed backend with
+    // the tenant's own bearer (issue #110) — over the wire, but changing
+    // nothing and billed for nothing, so they run in every mode. Authorizing
+    // begins an OAuth handoff that establishes an account identity for the
+    // company, which is a change, so it parks.
     //
     // `composio_execute` is NOT here: one name carries every action, so its
     // consequence is read from the action slug in its arguments — see
     // `composio_execute_consequence`.
-    d(
-        "composio_list_toolkits",
-        EffectGroup::Other,
-        Reach::Internal,
-    ),
+    d("composio_list_toolkits", EffectGroup::Other, Reach::Nothing),
     d(
         "composio_list_connections",
         EffectGroup::Other,
-        Reach::Internal,
+        Reach::Nothing,
     ),
-    d("composio_list_tools", EffectGroup::Other, Reach::Internal),
-    d("composio_authorize", EffectGroup::Identity, Reach::External),
+    d("composio_list_tools", EffectGroup::Other, Reach::Nothing),
+    d(
+        "composio_authorize",
+        EffectGroup::Identity,
+        Reach::Consequence,
+    ),
 ];
 
 /// A per-call declaration — the default. `const fn` so [`DECLARED`] stays a
@@ -351,7 +388,7 @@ pub fn consequence_of(tool: &str, args: &serde_json::Value) -> Consequence {
 fn composio_execute_consequence(args: &serde_json::Value) -> Consequence {
     let send = Consequence {
         group: EffectGroup::Send,
-        reach: Reach::External,
+        reach: Reach::Consequence,
         standing: Standing::PerCall,
     };
     let Some(slug) = args.get(COMPOSIO_ACTION_KEY).and_then(|v| v.as_str()) else {
@@ -364,7 +401,7 @@ fn composio_execute_consequence(args: &serde_json::Value) -> Consequence {
         // offers a standing scope, and the reads stop asking for its duration.
         Consequence {
             group: EffectGroup::Other,
-            reach: Reach::External,
+            reach: Reach::Consequence,
             standing: Standing::Grantable,
         }
     } else {
@@ -429,9 +466,9 @@ fn undeclared(name: &str) -> Consequence {
     Consequence {
         group: undeclared_group(name),
         reach: if reads {
-            Reach::Internal
+            Reach::Nothing
         } else {
-            Reach::External
+            Reach::Consequence
         },
         standing: Standing::PerCall,
     }
@@ -520,7 +557,7 @@ mod tests {
         // Including one that reads — not grantable is about standing, not about
         // whether it parks.
         let read = c("list_something_undeclared");
-        assert_eq!(read.reach, Reach::Internal);
+        assert_eq!(read.reach, Reach::Nothing);
         assert_eq!(read.standing, Standing::PerCall);
     }
 
@@ -541,12 +578,12 @@ mod tests {
         assert_eq!(read.group, EffectGroup::Other);
         assert_eq!(read.standing, Standing::Grantable);
         // …and it still parks the first time, because it does reach GitHub.
-        assert_eq!(read.reach, Reach::External);
+        assert_eq!(read.reach, Reach::Consequence);
 
         let send = consequence_of(COMPOSIO_EXECUTE, &json!({ "tool": "GMAIL_SEND_EMAIL" }));
         assert_eq!(send.group, EffectGroup::Send);
         assert_eq!(send.standing, Standing::PerCall);
-        assert_eq!(send.reach, Reach::External);
+        assert_eq!(send.reach, Reach::Consequence);
     }
 
     /// The cautious direction, four ways. An action the catalogue does not
@@ -619,7 +656,7 @@ mod tests {
             "mcp_list_tools",
             "mcp_registry_list_tools",
         ] {
-            assert_eq!(c(tool).reach, Reach::Internal, "`{tool}` reads local state");
+            assert_eq!(c(tool).reach, Reach::Nothing, "`{tool}` reads local state");
         }
         for tool in ["mcp_call_tool", "mcp_registry_tool_call"] {
             assert!(
@@ -649,7 +686,7 @@ mod tests {
             "composio_list_connections",
             "composio_list_tools",
         ] {
-            assert_eq!(c(tool).reach, Reach::Internal, "`{tool}` is a read");
+            assert_eq!(c(tool).reach, Reach::Nothing, "`{tool}` is a read");
         }
     }
 
@@ -676,10 +713,10 @@ mod tests {
     #[test]
     fn a_metered_read_is_allowed_under_supervision_and_denied_under_readonly() {
         let search = c("web_search");
-        assert_eq!(search.reach, Reach::Metered);
+        assert_eq!(search.reach, Reach::Money);
         assert!(!search.reach.parks_under_supervision());
-        assert!(search.reach.is_external());
-        assert!(search.reach.is_metered());
+        assert!(search.reach.denied_under_readonly());
+        assert!(search.reach.costs_money());
         assert_eq!(search.group, EffectGroup::Spend);
         assert_eq!(search.standing, Standing::PerCall);
     }
@@ -697,7 +734,7 @@ mod tests {
     #[test]
     fn lookup_ignores_case() {
         assert_eq!(c("SHELL").standing, Standing::PerCall);
-        assert_eq!(c("Workspace_Read").reach, Reach::Internal);
+        assert_eq!(c("Workspace_Read").reach, Reach::Nothing);
         // `composio_execute` is matched by the same lowercasing pass, so an
         // upper-cased tool name still reaches the argument classifier rather
         // than falling through to the undeclared heuristics.

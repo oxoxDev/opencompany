@@ -3788,6 +3788,18 @@ budget_usd_daily = 0.0
             // `mcp_list_tools` and `mcp_call_tool` on the belt — the three
             // tools issue #443 is about. Without one the coverage check would
             // pass while never having looked at them.
+            // A skills source dir is what puts `list_workflows`,
+            // `describe_workflow` and `read_workflow_resource` on the belt.
+            // Leaving it `None` is how those three stayed invisible to this
+            // check while `describe_workflow` parked in production.
+            let company_src = dir.path().join("company-src");
+            std::fs::create_dir_all(company_src.join("skills").join("brief")).expect("skill dir");
+            std::fs::write(
+                company_src.join("skills").join("brief").join("SKILL.md"),
+                "---\nname: brief\ndescription: Write a brief\n---\n\nWrite one.\n",
+            )
+            .expect("skill file");
+            deps.skills_source_dir = Some(company_src);
             deps.mcp_servers = vec![McpServerDecl {
                 name: "notes".to_string(),
                 endpoint: "https://mcp.example.test".to_string(),
@@ -3870,6 +3882,7 @@ budget_usd_daily = 0.0
             "shell",
             "workspace_write",
             "file_read",
+            "describe_workflow",
             #[cfg(feature = "mcp")]
             "mcp_list_servers",
             #[cfg(feature = "mcp")]
@@ -3938,8 +3951,8 @@ budget_usd_daily = 0.0
             checked += 1;
             let verdict = crate::policy::consequence_of(tool.name(), &args);
             assert!(
-                verdict.reach.is_external(),
-                "`{}` declares itself executable but the gate treats it as internal",
+                verdict.reach.denied_under_readonly(),
+                "`{}` declares itself executable but a read-only desk would allow it",
                 tool.name()
             );
             assert!(

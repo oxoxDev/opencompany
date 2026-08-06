@@ -543,20 +543,24 @@ impl ApprovalPolicy {
     ///
     /// * the call **declares** an amount (`amount_usd` / `amount`) — the only
     ///   pre-flight signal there is for an x402 payment;
-    /// * it is a [metered read](is_metered_read) — `web_search` changes nothing
-    ///   but the backend charges per request;
-    /// * it projects onto [`EffectGroup::Spend`] — `media_generate_*`,
-    ///   `pay_*`/`transfer_*`, and anything else the group classifier already
-    ///   calls spend.
+    /// * it projects onto [`EffectGroup::Spend`] — `web_search`, whose backend
+    ///   charges per request, plus `media_generate_*`, `pay_*`/`transfer_*`,
+    ///   and anything else the group classifier already calls spend.
+    ///
+    /// A separate "is it a metered read" arm used to sit between those two.
+    /// It was subsumed the moment the declaration named a group and a reach
+    /// together: the only `Reach::Money` tool is `web_search`, and its group is
+    /// `Spend`, so the arm could only ever fire where the one below already
+    /// had. `web_search_is_still_a_priced_call` pins that, so a future
+    /// `Reach::Money` tool that is *not* `Spend` fails a test rather than
+    /// silently escaping the cap.
     ///
     /// Everything else — a read, a send, a publish, a workspace write — is
     /// **untouched at cap**. A spend cap caps spend; making a teammate unable to
     /// answer a question because it spent its budget this morning would be a
     /// different feature, and a worse one.
     fn is_priced_call(tool: &str, args: &serde_json::Value, declared_amount: Option<f64>) -> bool {
-        declared_amount.is_some()
-            || is_metered_read(tool, args)
-            || classify_group(tool, args) == EffectGroup::Spend
+        declared_amount.is_some() || classify_group(tool, args) == EffectGroup::Spend
     }
 
     /// The per-agent daily spend cap (issue #304): `Some(decision)` when this
@@ -836,17 +840,26 @@ impl ToolPolicy for ApprovalPolicy {
             return ToolPolicyDecision::Allow;
         }
 
-        let external = is_external_effect(tool, &request.arguments);
-        // A *metered read* (issue #238) is external — it reaches a third party
-        // and spends real money — but it changes nothing anywhere, so under
-        // `supervised` the consent already given at grant time is enough and
-        // the daily call cap is the boundary. Under `readonly` it is still
-        // denied: that tier's contract is that nothing is spent.
-        let metered_read = is_metered_read(tool, &request.arguments);
+        // One value, two questions. `readonly`'s contract is that nothing
+        // changes and nothing is spent, so it denies anything but `Nothing`.
+        // `supervised` parks only a consequence — which leaves the `Money`
+        // bucket (`web_search`, issue #238) allowed here and denied there,
+        // the split the old boolean could not express.
+        //
+        // Parking a metered read would also be *useless* rather than merely
+        // annoying: openhuman resolves a `RequireApproval` inline and never
+        // re-dispatches the call, so a parked search is a search that never
+        // happens, and an agent with no search invents citations. Consent for
+        // it happens once, at grant time — an explicit `search` grant a `*`
+        // cannot confer — and the per-company daily cap is the boundary. An
+        // operator who does want a per-call gate has
+        // `[policy].always_approve = ["web_search"]`, which wins over every
+        // tier including `full`.
+        let reach = crate::policy::consequence_of(tool, &request.arguments).reach;
         match self.mode {
             PolicyMode::Full => ToolPolicyDecision::Allow,
             PolicyMode::Supervised => {
-                if external && !metered_read {
+                if reach.parks_under_supervision() {
                     self.require_approval(
                         tool,
                         &request.arguments,
@@ -857,7 +870,7 @@ impl ToolPolicy for ApprovalPolicy {
                 }
             }
             PolicyMode::Readonly => {
-                if external {
+                if reach.denied_under_readonly() {
                     ToolPolicyDecision::deny(format!(
                         "'{tool}' mutates or reaches outside; this desk is read-only"
                     ))
@@ -867,41 +880,6 @@ impl ToolPolicy for ApprovalPolicy {
             }
         }
     }
-}
-
-/// Does this tool reach outside and spend money, while changing nothing?
-///
-/// A third bucket the original binary could not express, added for `web_search`
-/// (issue #238). The existing classifier conflates two questions —
-/// *does it change anything / reach a counterparty* and *does it cost money* —
-/// which is fine while every tool answers both the same way. `media_list_models`
-/// is free, so waving it through in every mode is safe.
-/// [`crate::harness::search`]'s `web_search` is not: the backend charges per
-/// request.
-///
-/// The two modes therefore want different answers, and this is what lets them
-/// have them:
-///
-/// * **`supervised`** — allowed. The issue's #188 sign-off is explicit that
-///   individual searches must not park: consent happens once, at grant time (an
-///   explicit `search` grant a `*` cannot confer), and the per-company daily
-///   cap is the boundary. Parking each call would also be *useless* here rather
-///   than merely annoying — openhuman resolves a `RequireApproval` inline and
-///   never re-dispatches the call (see the module docs), so a parked search is
-///   a search that never happens, and an agent with no search does the exact
-///   thing this feature exists to stop: it invents citations.
-/// * **`readonly`** — still denied, via the ordinary external-effect path.
-///   A read-only desk is one that spends nothing, and this spends. That is a
-///   deliberate divergence from the issue text, which would have made a paid
-///   call unstoppable in the one tier whose whole promise is that nothing
-///   moves.
-///
-/// An operator who *does* want a per-call gate has one: `[policy].always_approve
-/// = ["web_search"]` wins over every tier, including `full`.
-fn is_metered_read(tool_name: &str, args: &serde_json::Value) -> bool {
-    crate::policy::consequence_of(tool_name, args)
-        .reach
-        .is_metered()
 }
 
 /// Does this tool call mutate state or reach an external counterparty?
@@ -922,7 +900,7 @@ fn is_metered_read(tool_name: &str, args: &serde_json::Value) -> bool {
 fn is_external_effect(tool_name: &str, args: &serde_json::Value) -> bool {
     crate::policy::consequence_of(tool_name, args)
         .reach
-        .is_external()
+        .denied_under_readonly()
 }
 
 /// The top-level keys of a tool-argument object, for a mismatch diagnostic.
@@ -2685,6 +2663,33 @@ mod tests {
                 classify_group(tool, &args),
                 "the parked effect's group for `{tool}` is not the one the classifier gave"
             );
+        }
+    }
+
+    /// The arm `is_priced_call` dropped, pinned from the other side.
+    ///
+    /// Removing the metered-read arm was safe only because the one
+    /// `Reach::Money` tool is also `EffectGroup::Spend`. If a future tool is
+    /// billed without being classified as spend, it would slip the daily cap
+    /// silently — so this fails instead.
+    #[test]
+    fn web_search_is_still_a_priced_call() {
+        let args = serde_json::json!({});
+        assert!(ApprovalPolicy::is_priced_call(
+            crate::harness::search::WEB_SEARCH_TOOL,
+            &args,
+            None
+        ));
+        for tool in crate::policy::consequence::declared_tools() {
+            let verdict = crate::policy::consequence_of(tool, &args);
+            if verdict.reach.costs_money() {
+                assert_eq!(
+                    verdict.group,
+                    EffectGroup::Spend,
+                    "`{tool}` is billed but is not classified as spend, so the daily \
+                     budget arm would never see it"
+                );
+            }
         }
     }
 
