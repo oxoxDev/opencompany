@@ -295,6 +295,27 @@ impl<'a> DelegationRunner<'a> {
         // responder's turn (metered behind the `RunTurn` impl), then drain
         // whatever it queued.
         self.queue.clear();
+        // Issue #463: did the REST chat handler already card this message?
+        //
+        // Evaluated ONCE, here, and for one reason: this is the only place the
+        // operator's OWN words are still in scope. `run_delegation` receives the
+        // instruction the model wrote, which is a different sentence — a guard
+        // placed there would be asking the detector about the model's prose
+        // rather than about the message the handler classified. #442 put the
+        // stand-down in `open_direct_work_card` only, so a recognised imperative
+        // the orchestrator handed off produced the REST card AND the delegation
+        // card. One message, one card — so every card-opening path below reads
+        // this same answer.
+        let carded_by_handler =
+            crate::company::task_intent::detect_task_intent(operator_words(message)).is_some();
+        // …and *which* card that is, when it is still on the board. Adopting it
+        // is what carries "one message, one card" through the publish drain too:
+        // the caller files a published deliverable onto `spawned_task` rather
+        // than minting a second card beside this one (issue #463).
+        let handler_card = match carded_by_handler {
+            true => self.chat_handler_card(message).await?,
+            false => None,
+        };
         // Issue #442, path one: a desk lead or teammate asked DIRECTLY carries
         // no delegation tools — the card-opening tools are wired only onto the
         // orchestrator — so it has no way to open a card even if it wanted one
@@ -303,7 +324,7 @@ impl<'a> DelegationRunner<'a> {
         // the tracking decision stops depending on which agent answered or which
         // tools it happens to carry.
         let mut direct_card = self
-            .open_direct_work_card(responder, message, chat_id)
+            .open_direct_work_card(responder, message, chat_id, carded_by_handler)
             .await?;
         let outcome = self
             .run_turn
@@ -335,9 +356,17 @@ impl<'a> DelegationRunner<'a> {
         // it the FIRST — a later spawn must not overwrite the id an earlier one
         // already claimed, or the reported card would be whichever the model
         // happened to queue last.
-        let mut spawned_task: Option<String> = direct_card_id;
+        //
+        // The chat handler's card comes first when it opened one: it predates
+        // every card this turn could open, so it IS the first card for this
+        // message (issue #463). Before this it was invisible from here, which is
+        // why the operator bubble linked to nothing on a recognised imperative
+        // even though the board carried a card for it.
+        let mut spawned_task: Option<String> = handler_card.or(direct_card_id);
         for delegation in self.queue.drain(self.max_delegations) {
-            let out = self.run_delegation(delegation, chat_id).await?;
+            let out = self
+                .run_delegation(delegation, chat_id, carded_by_handler)
+                .await?;
             if let Some(id) = out.spawned_task {
                 spawned_task.get_or_insert(id);
             }
@@ -383,7 +412,9 @@ impl<'a> DelegationRunner<'a> {
                     );
                     continue;
                 }
-                let out = self.run_delegation(delegation, chat_id).await?;
+                let out = self
+                    .run_delegation(delegation, chat_id, carded_by_handler)
+                    .await?;
                 if let Some(id) = out.spawned_task {
                     spawned_task.get_or_insert(id);
                 }
@@ -508,7 +539,11 @@ impl<'a> DelegationRunner<'a> {
                 // fact instead of inferring it from an absence. Every other
                 // delegation kind carries no desk and is unaffected.
                 let desk = desk_of(&delegation).map(str::to_string);
-                self.run_delegation(delegation, None).await?;
+                // `false`: a dispatched card's drain has no operator message and
+                // therefore no chat-handler card to defer to. It opens no card
+                // of its own regardless — `for_task` is set, which
+                // `open_work_card` refuses on first.
+                self.run_delegation(delegation, None, false).await?;
                 if let Some(desk) = desk {
                     card.note = Some(append_note(
                         card.note.as_deref(),
@@ -535,7 +570,7 @@ impl<'a> DelegationRunner<'a> {
                 self.hand_card_over(card, delegator, &member, instruction_of(&delegation))
                     .await?;
             }
-            let outcome = self.run_delegation(delegation, None).await?;
+            let outcome = self.run_delegation(delegation, None, false).await?;
             match (owns_card, outcome.desk_reply, outcome.cancelled) {
                 // The delegate answered: they own the card and it settles from
                 // their output.
@@ -583,12 +618,14 @@ impl<'a> DelegationRunner<'a> {
     /// that is about to run somebody's turn goes through here first, so there is
     /// no path on which work starts and the board stays empty.
     ///
-    /// Returns `None` — no card, nothing to settle — in exactly four cases:
+    /// Returns `None` — no card, nothing to settle — in exactly five cases:
     ///
     /// * **no task store wired**, the silent no-op every task path on this seam
     ///   takes;
     /// * **already inside a dispatched card** (`for_task`), which is the card;
     ///   opening a second one would double-count one piece of work;
+    /// * **the chat handler already carded this message** (`carded_by_handler`,
+    ///   issue #463) — see [`handle_operator_message`](Self::handle_operator_message);
     /// * **nothing substantial was asked** — see [`is_trackable_work`]; this is
     ///   the carve-out that keeps a trivial question from minting a card;
     /// * the write failed, which propagates rather than returning `None`.
@@ -602,11 +639,26 @@ impl<'a> DelegationRunner<'a> {
         assignee: &str,
         request: &str,
         chat_id: Option<&str>,
+        carded_by_handler: bool,
     ) -> Result<Option<TaskRecord>> {
         let Some(tasks) = self.tasks else {
             return Ok(None);
         };
         if self.task.is_some() {
+            return Ok(None);
+        }
+        // Issue #463: the REST chat handler read the operator's original words
+        // and already opened a To-do card for them. One message must not become
+        // two cards, whichever of the two card-opening paths below is running —
+        // #442 guarded only the direct path, and a recognised imperative that
+        // was handed off doubled through this one.
+        if carded_by_handler {
+            tracing::debug!(
+                company = %self.company,
+                assignee = %assignee,
+                "[delegation] not opening a card: the chat handler already opened one for this \
+                 message"
+            );
             return Ok(None);
         }
         // What the operator actually asked for, without the open-work briefing
@@ -672,31 +724,65 @@ impl<'a> DelegationRunner<'a> {
     ///
     /// Found live: without this, three consecutive desk messages opened four
     /// cards, one of them a duplicate of the request beside it. The two
-    /// detectors are deliberately not merged here — they answer different
-    /// questions with opposite defaults (that one asks "is this unambiguously an
+    /// detectors are deliberately not merged — they answer different questions
+    /// with opposite defaults (that one asks "is this unambiguously an
     /// instruction?", this one asks "is there any reason NOT to track it?") —
     /// but exactly one of them may open the card.
+    ///
+    /// The stand-down itself now lives in
+    /// [`open_work_card`](Self::open_work_card), reached through
+    /// `carded_by_handler`, because the hand-off path needed the same guard and
+    /// only [`handle_operator_message`](Self::handle_operator_message) can
+    /// answer the question (issue #463).
     async fn open_direct_work_card(
         &self,
         responder: &str,
         message: &str,
         chat_id: Option<&str>,
+        carded_by_handler: bool,
     ) -> Result<Option<TaskRecord>> {
         if responder == self.orchestrator_id() {
             return Ok(None);
         }
-        // The same input the chat handler classified: it saw the operator's text
-        // before the cycle appended its open-work briefing.
-        if crate::company::task_intent::detect_task_intent(operator_words(message)).is_some() {
-            tracing::debug!(
-                company = %self.company,
-                responder = %responder,
-                "[delegation] not opening a card: the chat handler already opened one for this \
-                 message"
-            );
+        self.open_work_card(responder, message, chat_id, carded_by_handler)
+            .await
+    }
+
+    /// The To-do card the REST chat handler opened for this message, when it
+    /// opened one and it is still on the board (issue #463).
+    ///
+    /// Only ever called once [`detect_task_intent`] has already fired, so the
+    /// title it derives is byte-for-byte the one the handler wrote — the handler
+    /// runs the same detector over the same words moments earlier. The match is
+    /// deliberately narrow, and every clause is a property of a card **that
+    /// handler** writes: To-do, no assignee, no origin chat. `list` is
+    /// newest-first, so the first match is the one just written rather than a
+    /// months-old card that happens to share a title.
+    ///
+    /// `None` when no store is wired, or when nothing matches — which is the
+    /// honest answer for a handler write that failed (it is best-effort there)
+    /// and for every non-REST caller of this seam, none of which have a chat
+    /// handler in front of them. Callers must not read `None` as "the handler
+    /// did not fire": the stand-down is keyed on the detector, not on this.
+    async fn chat_handler_card(&self, message: &str) -> Result<Option<String>> {
+        let Some(tasks) = self.tasks else {
             return Ok(None);
-        }
-        self.open_work_card(responder, message, chat_id).await
+        };
+        let Some(title) = crate::company::task_intent::detect_task_intent(operator_words(message))
+        else {
+            return Ok(None);
+        };
+        Ok(tasks
+            .list(self.company)
+            .await?
+            .into_iter()
+            .find(|card| {
+                card.title == title
+                    && card.column == COLUMN_TODO
+                    && card.assignee.is_empty()
+                    && card.origin_chat_id.is_none()
+            })
+            .map(|card| card.id))
     }
 
     /// Settles a card [`open_work_card`](Self::open_work_card) opened, once the
@@ -784,10 +870,18 @@ impl<'a> DelegationRunner<'a> {
     /// unknown desk (no roster-backed lead) or a cancelled run yields nothing to
     /// relay. No sub-agent re-delegation in v1: desk members carry no delegation
     /// tools, so their turns queue nothing.
+    ///
+    /// `carded_by_handler` is [`handle_operator_message`](Self::handle_operator_message)'s
+    /// answer to "did the REST chat handler already card the operator message
+    /// this drain belongs to?" (issue #463). It is threaded in rather than
+    /// recomputed because the only text in scope here is the instruction the
+    /// model wrote, which is not what the handler classified. A dispatched
+    /// card's drain has no operator message and passes `false`.
     pub(crate) async fn run_delegation(
         &self,
         delegation: Delegation,
         chat_id: Option<&str>,
+        carded_by_handler: bool,
     ) -> Result<DelegationOutcome> {
         match delegation {
             Delegation::SpawnTask {
@@ -858,9 +952,13 @@ impl<'a> DelegationRunner<'a> {
                 //
                 // Nothing is opened when the drain is already running inside a
                 // dispatched card (that card *is* the tracking, and #204 hands it
-                // over to this delegate below) or when the instruction is not a
-                // piece of work — see `is_trackable_work`.
-                let mut card = self.open_work_card(&member, &instruction, chat_id).await?;
+                // over to this delegate below), when the REST chat handler
+                // already carded the operator message this hand-off came out of
+                // (issue #463), or when the instruction is not a piece of work —
+                // see `is_trackable_work`.
+                let mut card = self
+                    .open_work_card(&member, &instruction, chat_id, carded_by_handler)
+                    .await?;
                 // Register the delegated turn so an operator can CANCEL it
                 // mid-flight (cancel-only in v1 — pause/redirect are rejected at
                 // the route). RAII guard deregisters on every exit path.
@@ -1750,7 +1848,7 @@ members = ["engineer"]
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("done")]);
         let outcome = fx
             .runner(&turns)
-            .run_delegation(handoff("draft the launch plan"), None)
+            .run_delegation(handoff("draft the launch plan"), None, false)
             .await
             .expect("delegation runs");
         assert!(outcome.spawned_task.is_some());
@@ -1775,7 +1873,7 @@ members = ["engineer"]
         let turns = ScriptedTurns::new(&fx, vec![Turn::cancelled("half-written")]);
         let outcome = fx
             .runner(&turns)
-            .run_delegation(handoff("write the migration plan"), None)
+            .run_delegation(handoff("write the migration plan"), None, false)
             .await
             .expect("delegation runs");
         assert!(outcome.cancelled);
@@ -1816,7 +1914,7 @@ members = ["engineer"]
         let outcome = fx
             .runner(&turns)
             .for_task("card-1")
-            .run_delegation(handoff("write the migration plan"), None)
+            .run_delegation(handoff("write the migration plan"), None, false)
             .await
             .expect("delegation runs");
         assert!(outcome.spawned_task.is_none());
@@ -1886,6 +1984,87 @@ members = ["engineer"]
             "the chat handler's card is the card; this path opens none"
         );
         assert!(turn.spawned_task.is_none());
+    }
+
+    /// The same stand-down on the **hand-off** path (issue #463). #442 guarded
+    /// only the direct path, so a recognised imperative the orchestrator handed
+    /// off produced the handler's card AND the delegation's — measured on a live
+    /// host as two cards for one message.
+    ///
+    /// The guard cannot live in `run_delegation`: what reaches there is the
+    /// instruction the model wrote, not the operator's words, and the handler
+    /// classified the latter.
+    #[tokio::test]
+    async fn a_hand_off_of_a_message_the_chat_handler_carded_opens_no_second_card() {
+        let imperative = "draft the launch plan for next quarter";
+        let title = crate::company::task_intent::detect_task_intent(imperative)
+            .expect("fixture must be a message the chat handler cards");
+        let fx = Fixture::new();
+        // The card the REST handler wrote moments before the cycle started.
+        fx.tasks
+            .upsert(
+                &fx.record.id,
+                &TaskRecord {
+                    id: "handler-card".to_string(),
+                    title,
+                    note: None,
+                    column: COLUMN_TODO.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: String::new(),
+                    updated_at_millis: now_millis(),
+                    origin_chat_id: None,
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                },
+            )
+            .await
+            .expect("seed the handler's card");
+
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::queueing("on it", vec![handoff("Draft the launch plan.")]),
+                Turn::reply("drafted"),
+                Turn::reply("the desk drafted it"),
+            ],
+        );
+        let turn = fx
+            .runner(&turns)
+            .handle_operator_message("chief", imperative, None)
+            .await
+            .expect("operator message handled");
+
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "one message, one card: {cards:?}");
+        assert_eq!(cards[0].id, "handler-card");
+        // …and the turn ADOPTS it, which is what lets a publish later in the
+        // same message file onto it instead of minting a rival beside it.
+        assert_eq!(turn.spawned_task.as_deref(), Some("handler-card"));
+    }
+
+    /// The stand-down is keyed on the **detector**, not on finding the card:
+    /// the handler's write is best-effort, so a missing card must not be read as
+    /// "the handler did not fire" and re-open one. `spawned_task` is then
+    /// honestly empty — there is no card to point at.
+    #[tokio::test]
+    async fn the_stand_down_holds_even_when_the_handlers_card_cannot_be_found() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::queueing("on it", vec![handoff("Draft the launch plan.")]),
+                Turn::reply("drafted"),
+                Turn::reply("relayed"),
+            ],
+        );
+        let turn = fx
+            .runner(&turns)
+            .handle_operator_message("chief", "draft the launch plan for next quarter", None)
+            .await
+            .expect("operator message handled");
+        assert!(fx.cards().await.is_empty(), "no second card is opened");
+        assert!(turn.spawned_task.is_none(), "and none is claimed");
     }
 
     /// …and the same thread stays quiet for a question, so a desk chat does not

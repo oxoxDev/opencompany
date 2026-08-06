@@ -229,6 +229,7 @@ pub fn build_agent(
     if publishing {
         tools.push(Box::new(crate::harness::publish::PublishArtifactTool::new(
             workspace.clone(),
+            manifest_agent.id.clone(),
             deps.pending_publishes.clone(),
         )));
     } else if wants_files {
