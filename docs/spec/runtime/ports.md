@@ -682,6 +682,20 @@ at least one approval finishes `waiting_approval`, not `succeeded` — a person
 must act. A failed, cancelled or paused run keeps the reason it stopped;
 relabelling it "waiting on you" would hide that reason.
 
+**…and its card parks rather than landing in review (issue #465).** The status
+answers *who unblocks this*; the column answers *has the work happened yet*.
+`column_for_settled_run` therefore maps `waiting_approval` to `paused`: a run
+stopped at a call it was not allowed to make has produced nothing to accept —
+in the reported case, a desk whose *first* tool call parked, nothing at all.
+The teeth are that `in_review` is defined by the verdict consuming it
+(`review_landing_column(Approve)` writes `done`, the only route there), so a
+parked card sat one gesture from being filed as finished; #337 closed the
+automatic route to that state and this closes the manual one. The
+parked-vs-review distinction survives on `RunStatus`, which is where the console
+reads it ("Waiting on you"). This *narrows* epic #183 decision 2 rather than
+overturning it: that rule splits waiting-on-a-person from waiting-on-a-system,
+and never claimed the work had finished.
+
 **A runtime being replaced is a fifth writer.** Writer 1 mints the row before
 writer 2 can start it, so a runtime swapped in between refuses the cycle and
 settles the row itself — and the boot reaper is *not* a safe fallback mid-life.
