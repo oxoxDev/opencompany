@@ -82,6 +82,7 @@ pub(crate) async fn join_follow_up(
     }
 }
 use crate::runtime::CycleRunner;
+use crate::runtime::continuation::ContinuationQueue;
 use crate::runtime::cycle::ResolveReceipt;
 use crate::runtime::grants::{GRANT_TTL_MILLIS, GrantId, GrantScope, GrantSet, StandingGrant};
 use crate::runtime::journal::{ApprovalOrigin, ExecutedEffect, RuntimeJournal};
@@ -202,6 +203,16 @@ pub struct CompanyRuntime {
     /// ever mints, so the set stays empty and every approval keeps its
     /// pre-#243 native-execute behaviour.
     pub(crate) grants: GrantSet,
+    /// Issue #469: how many of each turn's parked approvals are still
+    /// undecided, so a turn that raised several sign-offs is continued **once**
+    /// — after the last of them lands — instead of once per decision.
+    ///
+    /// Live per-instance state, like [`grants`](Self::grants), and inherited by
+    /// a rebuilt runtime through [`RuntimeHandover`](crate::runtime::handover::RuntimeHandover)
+    /// for the same reason: a swap in the middle of a partly-decided turn must
+    /// not forget that the turn is blocked, or the next decision continues it as
+    /// though the others had never been owed.
+    pub(crate) continuations: ContinuationQueue,
     /// Held for the duration of a cycle so cycles never interleave per company.
     ///
     /// `Arc`-shared rather than owned so a rebuilt runtime can inherit the *same*
@@ -303,6 +314,7 @@ impl CompanyRuntime {
             steer: crate::company::steer::InflightRegistry::new(),
             run_supervisor: crate::runtime::RunSupervisor::new(),
             grants,
+            continuations: ContinuationQueue::default(),
             serial: Arc::new(TokioMutex::new(())),
             task_writes: Arc::new(TokioMutex::new(())),
             quiesced: Arc::new(AtomicBool::new(false)),
@@ -835,6 +847,16 @@ impl CompanyRuntime {
         self.task_writes = task_writes;
     }
 
+    /// Installs the continuation queue the builder prepared (issue #469) —
+    /// re-armed from the journal on a boot, inherited live on a rebuild.
+    ///
+    /// Set through the builder rather than [`new`](Self::new) so the ~30 direct
+    /// `CompanyRuntime::new` call sites do not each have to learn about a queue
+    /// only the approval path reads, matching how the locks are handed over.
+    pub fn adopt_continuations(&mut self, continuations: ContinuationQueue) {
+        self.continuations = continuations;
+    }
+
     /// Rejects a cycle on a runtime that is being replaced.
     ///
     /// Separate from [`ensure_running`](Self::ensure_running): that one reads a
@@ -963,11 +985,15 @@ impl CompanyRuntime {
     /// keeps every caller on one path instead of branching on a case that only
     /// arises from a double-click.
     ///
-    /// A failed follow-up is logged here rather than swallowed, because the
-    /// detached caller has nowhere to put it. It is genuinely recoverable: the
-    /// verdict and the grant are already durable, and re-approving is a safe
-    /// no-op (`ResolveOutcome::NotParked` → the already-resolved report, per
-    /// issue #243), so the operator can retry without minting a second grant.
+    /// A failed follow-up is **told to the operator**, not only logged
+    /// (issue #469, defect 4). It is genuinely recoverable: the verdict and the
+    /// grant are already durable, and re-approving is a safe no-op
+    /// (`ResolveOutcome::NotParked` → the already-resolved report, per issue
+    /// #243), so the operator can retry without minting a second grant. But
+    /// that is only useful to somebody who knows it happened, and before this
+    /// the whole report was one `tracing::error!` on a stream nobody watches:
+    /// the agent was not told the outcome and neither was the person waiting
+    /// for it.
     fn spawn_follow_up(
         self: &Arc<Self>,
         receipt: ResolveReceipt,
@@ -980,19 +1006,234 @@ impl CompanyRuntime {
                 }
                 ResolveReceipt::Settled(event) => event,
             };
-            let report = CycleRunner::new(&rt).run(vec![event]).await;
-            if let Err(error) = &report {
+            rt.continue_turn(event).await
+        })
+    }
+
+    /// Runs the continuation a settled verdict owes — **once per turn, not once
+    /// per approval** (issue #469).
+    ///
+    /// A turn that parked four calls is blocked on four decisions. Before this,
+    /// each decision spawned its own cycle, so approving all four re-ran the
+    /// same turn four times: four full agent turns over one turn's work, each
+    /// told about one decision and blind to the other three, with the later ones
+    /// finding the grants the earlier ones had already redeemed and quietly
+    /// producing nothing. The operator approved four times and got silence.
+    ///
+    /// So the decision is banked instead, and the cycle runs when the **last**
+    /// one lands, carrying every `ApprovalResolved` the turn accumulated. The
+    /// trigger is the last decision rather than a window, which is what makes
+    /// approving four at once and approving them one at a time over a minute end
+    /// in the same place. An approval whose journal line predates the turn key
+    /// is not gated and continues on its own, exactly as it used to.
+    async fn continue_turn(&self, event: CompanyEvent) -> Result<CycleReport> {
+        let CompanyEvent::ApprovalResolved { approval_id, .. } = &event else {
+            // Not a resolution, so no turn owns it. Run it as its own cycle.
+            return CycleRunner::new(self).run(vec![event]).await;
+        };
+        let approval_id = approval_id.clone();
+
+        // `Some(None)` is a park recorded before the turn key existed; `None` is
+        // an id this journal never parked. Neither is gated.
+        let turn = self.journal.approval_cycle(&approval_id).flatten();
+        let batch = match &turn {
+            Some(turn) => match self.continuations.decide(turn, Some(event)) {
+                Some(batch) => batch,
+                None => {
+                    tracing::debug!(
+                        company = %self.id,
+                        approval_id = %approval_id,
+                        turn = %turn,
+                        outstanding = self.continuations.outstanding(turn),
+                        "[approval] decision recorded; the turn is still waiting on another"
+                    );
+                    return Ok(self.still_waiting_report(turn));
+                }
+            },
+            None => vec![event],
+        };
+        if batch.is_empty() {
+            // Every approval the turn raised expired rather than being decided.
+            // The sweep already appended each `ApprovalResolved` itself, so
+            // there is nothing left to tell the brain.
+            return Ok(CycleRunner::new(self).already_resolved_report());
+        }
+        self.run_continuation(&approval_id, batch).await
+    }
+
+    /// Runs one turn's continuation over the decisions it was blocked on, and
+    /// makes sure its answer — or its failure — reaches the operator
+    /// (issue #469).
+    ///
+    /// Split from [`continue_turn`](Self::continue_turn) because the release can
+    /// also come from the TTL sweep, and a turn released by an expiry owes
+    /// exactly the same continuation, delivered exactly the same way, as one
+    /// released by the operator's last click.
+    async fn run_continuation(
+        &self,
+        approval_id: &ApprovalId,
+        batch: Vec<CompanyEvent>,
+    ) -> Result<CycleReport> {
+        match CycleRunner::new(self).run(batch).await {
+            Ok(mut report) => {
+                self.publish_continuation(approval_id, &mut report).await;
+                Ok(report)
+            }
+            Err(error) => {
                 tracing::error!(
-                    company = %rt.id,
+                    company = %self.id,
                     %error,
                     "[approval] the follow-up cycle after a resolved approval failed; \
                      the verdict and the grant are already durable, so the agent was \
                      not told the outcome — re-approving is a safe no-op and will \
                      re-run it"
                 );
+                self.announce_continuation_failure(approval_id).await;
+                Err(error)
             }
-            report
-        })
+        }
+    }
+
+    /// Journals the continuation's replies into the conversation the sign-off
+    /// was asked in, so the agent's answer actually reaches the operator
+    /// (issue #469, defect 1).
+    ///
+    /// **This is where the answer used to be lost.** The chat route journals
+    /// every reply a cycle produces as an
+    /// [`AgentReply`](CompanyEvent::AgentReply), which is what the console's
+    /// event stream projects as an `agent_reply` frame and what a reload
+    /// rebuilds the transcript from. The resolve route never did. It emitted
+    /// webhooks and, on the un-detached path, handed the replies back on the
+    /// response body — but the console's inline approval card resolves with
+    /// `detach: true`, so the body is a receipt and the replies went nowhere at
+    /// all. Nothing was broken about the cycle; its answer simply had no way to
+    /// become visible.
+    ///
+    /// The thread is the one the approval was **raised** in, not the answering
+    /// agent: a desk channel's request and a direct message to that channel's
+    /// lead are answered by the same teammate, so keying on the agent delivers a
+    /// channel's continuation into a private line nobody is watching
+    /// (issue #379's lesson, applied to the reply as well as the re-park). Every
+    /// approval in a batch came from one cycle, and that cycle had one thread,
+    /// so one lookup answers for the whole batch. Falling back to the responding
+    /// agent when the turn had no conversation behind it is the pre-existing
+    /// behaviour for exactly the cases it was already right for.
+    ///
+    /// Best-effort per reply, exactly as on the chat route: a journal failure
+    /// must not sink an answer the operator can already read on the response
+    /// body. It costs the bubble its durable id, which the console reads as "not
+    /// saved" and refuses to thread or react on — the honest degradation.
+    async fn publish_continuation(&self, approval_id: &ApprovalId, report: &mut CycleReport) {
+        let thread = self.journal.approval_thread(approval_id).flatten();
+        for response in &mut report.responses {
+            let chat_id = thread.clone().unwrap_or_else(|| response.channel.clone());
+            match self
+                .events
+                .append(
+                    &self.id,
+                    CompanyEvent::AgentReply {
+                        parent: None,
+                        chat_id,
+                        agent_id: response.channel.clone(),
+                        text: response.text.clone(),
+                        steps: response.steps.clone(),
+                        task_id: response.task_id.clone(),
+                    },
+                )
+                .await
+            {
+                Ok(seq) => response.message_id = Some(seq.value().to_string()),
+                Err(err) => tracing::warn!(
+                    company = %self.id,
+                    approval_id = %approval_id,
+                    error = %err,
+                    "[approval] the continuation answered but its reply could not be \
+                     journaled; the bubble has no durable id"
+                ),
+            }
+        }
+    }
+
+    /// Tells the operator, in the conversation they are waiting in, that the
+    /// continuation failed (issue #469, defect 4).
+    ///
+    /// Journaled as an [`AgentReply`](CompanyEvent::AgentReply) rather than sent
+    /// through [`announce_to_operator`](Self::announce_to_operator), because the
+    /// latter is a bare channel send with no event behind it — it reaches an
+    /// adapter, not the console's event stream, and not a transcript reload. The
+    /// person this is for is watching the thread they approved in.
+    ///
+    /// The wording says what is true and what to do: the decision stuck, the
+    /// work did not, and re-approving is safe.
+    async fn announce_continuation_failure(&self, approval_id: &ApprovalId) {
+        let thread = self
+            .journal
+            .approval_thread(approval_id)
+            .flatten()
+            .unwrap_or_else(|| crate::runtime::channel::OPERATOR_CHANNEL.to_string());
+        if let Err(err) = self
+            .events
+            .append(
+                &self.id,
+                CompanyEvent::AgentReply {
+                    parent: None,
+                    chat_id: thread,
+                    agent_id: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
+                    text: "Your approval was recorded, but the agent could not pick the work \
+                           back up. Nothing was half-done — approving again is safe and will \
+                           retry it."
+                        .to_string(),
+                    steps: Vec::new(),
+                    task_id: None,
+                },
+            )
+            .await
+        {
+            tracing::warn!(
+                company = %self.id,
+                approval_id = %approval_id,
+                error = %err,
+                "[approval] a failed continuation could not be reported to the operator"
+            );
+        }
+    }
+
+    /// The answer to a decision that lands while its turn is still blocked on
+    /// another (issue #469).
+    ///
+    /// Synthetic, like [`already_resolved_report`](CycleRunner::already_resolved_report),
+    /// and for the same reason: nothing ran, so there is nothing to report but
+    /// the fact itself. It carries a line rather than an empty body because the
+    /// un-detached caller — the Approvals page — renders the response, and
+    /// "recorded, still waiting on the rest" is the honest thing to show
+    /// somebody who has just approved one of four and would otherwise be told
+    /// nothing at all.
+    ///
+    /// Deliberately **not** journaled: it is a receipt for one request, not an
+    /// agent's reply, and four of them in a conversation would be noise over a
+    /// state the approval cards already show.
+    fn still_waiting_report(&self, turn: &str) -> CycleReport {
+        let outstanding = self.continuations.outstanding(turn);
+        CycleReport {
+            cycle_id: crate::ports::generate_id(),
+            responses: vec![crate::ports::types::OutboundMessage {
+                message_id: None,
+                task_id: None,
+                channel: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
+                text: format!(
+                    "Recorded. The agent picks this back up once the remaining {outstanding} \
+                     sign-off{} on this step {} decided.",
+                    if outstanding == 1 { "" } else { "s" },
+                    if outstanding == 1 { "is" } else { "are" },
+                ),
+                steps: Vec::new(),
+                reply_to: None,
+            }],
+            executed_effects: Vec::new(),
+            parked: Vec::new(),
+            persisted_seq: None,
+            input_seqs: Vec::new(),
+        }
     }
 
     /// Sweeps every parked approval past its TTL, resolving each to a
@@ -1007,11 +1248,38 @@ impl CompanyRuntime {
     /// append is best-effort for the same reason steer's audit is: a sweep that
     /// already denied the effect must not be undone by a log write, and the
     /// journal remains the binding audit trail either way.
-    pub async fn sweep_expired_approvals(&self) -> Result<Vec<ApprovalId>> {
+    ///
+    /// An expiry is also a **decision** as far as issue #469's continuation gate
+    /// is concerned, and has to be, or a turn that raised four sign-offs and
+    /// only ever got three would wait for a fourth that is never coming. The
+    /// turn is released here; the `ApprovalResolved` this appends is the event
+    /// the brain gets, so the release contributes no second one.
+    pub async fn sweep_expired_approvals(self: &Arc<Self>) -> Result<Vec<ApprovalId>> {
         let now = now_millis();
         let expired = self.approval_gate.sweep_expired(now);
         for id in &expired {
             self.journal.record_expired(id, now).await?;
+            // Issue #469: releasing the turn this approval was blocking, and
+            // running its continuation when this expiry was the last thing it
+            // waited on. Spawned rather than awaited: the continuation is a full
+            // agent turn behind the per-company cycle lock, and the maintenance
+            // tick this runs on fires on a minute boundary for every company.
+            if let Some(turn) = self.journal.approval_cycle(id).flatten()
+                && let Some(batch) = self.continuations.decide(&turn, None)
+                && !batch.is_empty()
+            {
+                let rt = Arc::clone(self);
+                let released = id.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = rt.run_continuation(&released, batch).await {
+                        tracing::error!(
+                            company = %rt.id,
+                            %error,
+                            "[approval] the continuation released by an expiry failed"
+                        );
+                    }
+                });
+            }
             if let Err(e) = self
                 .events
                 .append(
