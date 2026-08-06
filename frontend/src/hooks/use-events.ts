@@ -190,6 +190,16 @@ export interface AgentReplyEvent {
   chatId: string;
   agentId: string;
   text: string;
+  /**
+   * The **host-side** id of this message (issue #483) — the stream envelope's
+   * `seq`. `chat/history` projects its own `id` from the same `StoredEvent`
+   * sequence, so a live line stamped with this carries the identity a later
+   * rehydration will mint for it, and the two can be recognised as one message
+   * instead of both being rendered.
+   *
+   * Namespaced into a console id by the injector, same as {@link parentId}.
+   */
+  seq: number;
   /** The board card this reply opened (issue #246), when it opened one. */
   taskId?: string;
   /**
@@ -425,6 +435,9 @@ function handleEvent(
         chatId: event.chatId,
         agentId: event.agentId,
         text: event.text,
+        // Issue #483: the host's own id for this message. Carried so the
+        // injected line and its later rehydrated twin share an identity.
+        seq: event.seq,
         // Issue #246: a reply injected from the stream — one this console did
         // not POST for, e.g. an inbound Telegram turn — carries its "card
         // opened" chip too, rather than only the locally-awaited copy.

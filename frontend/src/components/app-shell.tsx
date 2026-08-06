@@ -46,7 +46,13 @@ import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hook
 import { useHashView } from "@/hooks/use-hash-view";
 import { toast } from "sonner";
 
-import { type ChatMessage, fromHistory, hostMessageId, makeMessage } from "@/lib/chat";
+import {
+  type ChatMessage,
+  fromHistory,
+  hostMessageId,
+  liveReplyIdentity,
+  makeMessage,
+} from "@/lib/chat";
 import { CONNECTION_PROVIDERS } from "@/lib/connections";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { writeLastChannel } from "@/lib/last-channel";
@@ -615,6 +621,8 @@ export function AppShell({
               makeMessage("company", event.text, {
                 channel: event.agentId,
                 taskId: event.taskId,
+                // Issue #483 — see `liveReplyIdentity`.
+                ...liveReplyIdentity(event),
               }),
             ],
           };
@@ -634,11 +642,18 @@ export function AppShell({
       if (!channelId) return;
       setTranscripts((t) => {
         const existing = t[channelId] ?? [];
-        // The same recent-tail content dedupe the thread store uses, and for
-        // the same reason: local ids are ephemeral counters and rehydrated ones
-        // are `h`-prefixed, so neither side of the race can be matched by id.
-        // The cost is that two genuinely identical company lines inside eight
-        // messages collapse into one — a price the thread store already pays.
+        // The same recent-tail content dedupe the thread store uses. It still
+        // earns its place: the operator's own turn is rendered locally by the
+        // awaited POST under an ephemeral `m<seq>` id, so a late echo of that
+        // reply can only be matched by content.
+        //
+        // It is no longer the ONLY guard, and issue #483 is why. This line now
+        // carries the host's id (below), so `hydrateChannel`'s id dedupe can
+        // recognise it — which the content check could never do from the other
+        // side, because hydration prepends history rather than appending to the
+        // recent tail this scans. Live-then-hydrate was the one route neither
+        // guard covered, and it doubled every reply that arrived while its
+        // channel was closed.
         const dup = existing
           .slice(-8)
           .some((m) => m.from === "company" && m.text === event.text);
@@ -650,6 +665,10 @@ export function AppShell({
             makeMessage("company", event.text, {
               channel: event.agentId,
               taskId: event.taskId,
+              // Issue #483: same identity as the thread store above. This is
+              // the store `hydrateChannel` writes into, so this is where the
+              // duplicate was visible.
+              ...liveReplyIdentity(event),
               // Issue #364: a reply to a thread joins that thread live, instead
               // of appearing in the channel and moving on the next reload. The
               // host names the parent by its own id, so it takes the same
