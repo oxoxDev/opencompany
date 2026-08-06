@@ -437,7 +437,7 @@ impl ApprovalPolicy {
     pub fn effect_for(&self, tool_name: &str, args: &serde_json::Value) -> Effect {
         Effect {
             kind: tool_name.to_string(),
-            group: classify_group(tool_name),
+            group: classify_group(tool_name, args),
             amount_usd: Self::amount_usd(args),
             established_thread: false,
             first_time_counterparty: false,
@@ -486,18 +486,38 @@ impl ApprovalPolicy {
     ///   short-circuit [`consume_grant`](Self::consume_grant) takes, so every
     ///   non-harness construction site behaves exactly as it did before.
     /// * **A priced call is refused outright**, even holding a grant. The mint
-    ///   side already refuses to grant anything outside
-    ///   [`EffectGroup::Other`](crate::ports::types::EffectGroup::Other), so a
+    ///   side already refuses to grant anything that is not
+    ///   [`Standing::Grantable`](crate::policy::Standing::Grantable), so a
     ///   `Spend`-group tool can never reach here; this covers the *other* way a
-    ///   call becomes priced, which the tool name cannot predict — an `Other`
+    ///   call becomes priced, which the tool name cannot predict — a grantable
     ///   tool invoked with a declared `amount_usd`. Refusing here means the call
     ///   falls through to the budget and mode arms below and parks, so a
     ///   standing grant cannot admit money **by placement**, not by promise.
+    /// * **The call being made must itself be grantable**, re-checked here
+    ///   rather than trusted from mint time (issue #441). A standing grant
+    ///   matches on `(agent, tool, unexpired)` and admits *any* arguments,
+    ///   which was a fair summary of a tool's consequence while consequence was
+    ///   a property of the tool name. It is not one for `composio_execute`:
+    ///   every Composio action arrives under that name, so a grant minted on a
+    ///   repository read would otherwise admit an outgoing email on the same
+    ///   handle. Re-classifying the live arguments keeps the grant to the shape
+    ///   the operator was shown. It also means a grant replayed from a journal
+    ///   line written before this change cannot admit a send.
     fn standing_grant_allows(&self, tool: &str, args: &serde_json::Value) -> bool {
         let Some(agent) = self.agent.as_deref() else {
             return false;
         };
-        if Self::is_priced_call(tool, Self::amount_usd(args)) {
+        if Self::is_priced_call(tool, args, Self::amount_usd(args)) {
+            return false;
+        }
+        if !crate::policy::consequence_of(tool, args)
+            .standing
+            .is_grantable()
+        {
+            log::debug!(
+                "[approval] tool '{tool}' holds a standing grant for agent '{agent}' but this \
+                 call is not grantable on its own arguments; parking it"
+            );
             return false;
         }
         let Some(grant) =
@@ -533,10 +553,10 @@ impl ApprovalPolicy {
     /// **untouched at cap**. A spend cap caps spend; making a teammate unable to
     /// answer a question because it spent its budget this morning would be a
     /// different feature, and a worse one.
-    fn is_priced_call(tool: &str, declared_amount: Option<f64>) -> bool {
+    fn is_priced_call(tool: &str, args: &serde_json::Value, declared_amount: Option<f64>) -> bool {
         declared_amount.is_some()
-            || is_metered_read(tool)
-            || classify_group(tool) == EffectGroup::Spend
+            || is_metered_read(tool, args)
+            || classify_group(tool, args) == EffectGroup::Spend
     }
 
     /// The per-agent daily spend cap (issue #304): `Some(decision)` when this
@@ -607,7 +627,7 @@ impl ApprovalPolicy {
     ) -> Option<ToolPolicyDecision> {
         let cap = self.budget_usd_daily?;
         let agent = self.agent.as_deref()?;
-        if !Self::is_priced_call(tool, declared_amount) {
+        if !Self::is_priced_call(tool, args, declared_amount) {
             return None;
         }
         let Some(spend) = self.spend.as_ref() else {
@@ -732,7 +752,7 @@ impl ToolPolicy for ApprovalPolicy {
         // The grant is left UNCONSUMED here: this call never ran, so the
         // operator's approval stays redeemable if the brake is released inside
         // the TTL. It expires on its own otherwise.
-        if self.mode == PolicyMode::Readonly && is_external_effect(tool) {
+        if self.mode == PolicyMode::Readonly && is_external_effect(tool, &request.arguments) {
             return ToolPolicyDecision::deny(format!(
                 "'{tool}' mutates or reaches outside; this desk is read-only, \
                  so an earlier approval does not apply"
@@ -774,13 +794,14 @@ impl ToolPolicy for ApprovalPolicy {
         // `readonly` brake denies before either is consulted, leaving the grant
         // intact for when the brake is released.
         //
-        // What keeps this narrow is decided at MINT time, not here:
-        // `broadly_grantable` refuses to grant anything outside
-        // `EffectGroup::Other`, so no Spend / Send / Sign / Publish / Hire /
-        // Identity tool can have a standing grant to match. The one thing the
-        // tool name cannot predict — an `Other` tool carrying a declared amount
-        // — is refused inside `standing_grant_allows`, so this arm can never
-        // admit money.
+        // What keeps this narrow is decided at MINT time and re-checked here.
+        // The mint side refuses to grant anything the declaration does not call
+        // grantable, so no Spend / Send / Sign / Publish / Hire / Identity tool
+        // can have a standing grant to match. Two things the tool NAME cannot
+        // predict are refused inside `standing_grant_allows`: a grantable tool
+        // carrying a declared amount, so this arm can never admit money; and a
+        // `composio_execute` call whose action is a send, so a grant minted on
+        // a repository read cannot admit an outgoing email (issue #441).
         if self.standing_grant_allows(tool, &request.arguments) {
             return ToolPolicyDecision::Allow;
         }
@@ -815,13 +836,13 @@ impl ToolPolicy for ApprovalPolicy {
             return ToolPolicyDecision::Allow;
         }
 
-        let external = is_external_effect(tool);
+        let external = is_external_effect(tool, &request.arguments);
         // A *metered read* (issue #238) is external — it reaches a third party
         // and spends real money — but it changes nothing anywhere, so under
         // `supervised` the consent already given at grant time is enough and
         // the daily call cap is the boundary. Under `readonly` it is still
         // denied: that tier's contract is that nothing is spent.
-        let metered_read = is_metered_read(tool);
+        let metered_read = is_metered_read(tool, &request.arguments);
         match self.mode {
             PolicyMode::Full => ToolPolicyDecision::Allow,
             PolicyMode::Supervised => {
@@ -877,92 +898,31 @@ impl ToolPolicy for ApprovalPolicy {
 ///
 /// An operator who *does* want a per-call gate has one: `[policy].always_approve
 /// = ["web_search"]` wins over every tier, including `full`.
-fn is_metered_read(tool_name: &str) -> bool {
-    tool_name.eq_ignore_ascii_case(crate::harness::search::WEB_SEARCH_TOOL)
+fn is_metered_read(tool_name: &str, args: &serde_json::Value) -> bool {
+    crate::policy::consequence_of(tool_name, args)
+        .reach
+        .is_metered()
 }
 
-/// Heuristic: does this tool mutate state or reach an external counterparty?
+/// Does this tool call mutate state or reach an external counterparty?
 ///
-/// Best-effort classification by name — openhuman's [`ToolPolicy`] surface hands
-/// the bridge only the tool name and arguments, not the tool's own
-/// external-effect flag. Unknown tools are treated as external (fail-safe).
-fn is_external_effect(tool_name: &str) -> bool {
-    // The orchestrator's in-cycle delegation tools (`spawn_task`,
-    // `delegate_to_desk`) enqueue internal work the harness brain drains this
-    // turn — a task card or a hand-off to a desk's lead — never an external
-    // effect. Without this, the default `supervised` policy would park them and
-    // `readonly` would deny them, breaking in-cycle delegation. (Issue #53.)
-    if crate::harness::orchestrator::is_delegation_tool(tool_name) {
-        return false;
-    }
-    // An MCP tool call can perform any effect advertised by a third-party
-    // server. Treat it as external even if future prefix rules become broader.
-    if tool_name.eq_ignore_ascii_case("mcp_registry_tool_call") {
-        return true;
-    }
-    // The media catalog is a read-only GET (issue #109): listing models spends
-    // nothing and must never park for approval, even though its name does not
-    // start with a read-only prefix. The `media_generate_*` tools are NOT listed
-    // here — they spend real money and fall through to the external-effect
-    // default, so they park under supervised / deny under readonly.
-    if tool_name.eq_ignore_ascii_case("media_list_models") {
-        return false;
-    }
-    // The Composio read tools (issue #110) are read-only GETs: listing toolkits,
-    // connections, or action schemas reaches no third party and must never park
-    // for approval, even though the `composio_*` name has no read-only prefix.
-    // `composio_authorize` / `composio_execute` are NOT listed here — they begin
-    // an OAuth handoff / run a real action, so they fall through to the external-
-    // effect default (park under supervised, deny under readonly).
-    if matches!(
-        tool_name.to_ascii_lowercase().as_str(),
-        "composio_list_toolkits" | "composio_list_connections" | "composio_list_tools"
-    ) {
-        return false;
-    }
-    // The company-workspace read tools (issue #237) only read this company's
-    // own note tree — no state changes and no counterparty is reached — but
-    // their names begin with the namespace rather than a read-only prefix, so
-    // without this arm the fail-safe default would park them under the DEFAULT
-    // `supervised` mode and deny them outright under `readonly`. That would
-    // make the workspace unreadable in exactly the mode whose point is that
-    // reads are fine.
-    //
-    // `workspace_write` is deliberately NOT listed: it overwrites
-    // operator-owned guidance, so it falls through to the external-effect
-    // default and parks under supervised / is denied under readonly. That —
-    // not the tool's declared `PermissionLevel::Write` — is what gates the
-    // write; openhuman's `ToolPolicy` surface never sees a permission level.
-    // The tests below pin all three classifications so renaming a tool cannot
-    // silently move it across the gate.
-    if matches!(
-        tool_name.to_ascii_lowercase().as_str(),
-        "workspace_list" | "workspace_read"
-    ) {
-        return false;
-    }
-    // `web_search` (issue #238) is deliberately NOT carved out here. It reaches
-    // a third party and the managed backend charges for it, so it must stay on
-    // the external side and be DENIED under `readonly`. What keeps it from
-    // parking under `supervised` is `is_metered_read`, which is a narrower claim
-    // ("costs money but changes nothing") than the one this function answers.
-    // Note also that it would not have matched a read-only prefix by accident:
-    // the list below starts `search`, but the tool is `web_search`.
-    const READ_ONLY_PREFIXES: &[&str] = &[
-        "read",
-        "list",
-        "get",
-        "search",
-        "recall",
-        "query",
-        "peek",
-        "inspect",
-        "view",
-        "memory_recall",
-        "memory_search",
-    ];
-    let name = tool_name.to_ascii_lowercase();
-    !READ_ONLY_PREFIXES.iter().any(|p| name.starts_with(p))
+/// A thin reader of [`crate::policy::consequence_of`], which is where the
+/// answer is actually declared. It used to be a hand-maintained carve-out list
+/// bolted onto a read-only-*prefix* heuristic, and it drifted the way such
+/// lists do: three separate families needed the same exemption for the same
+/// reason, each added after somebody hit it, and the ones nobody hit stayed
+/// broken. `mcp_list_servers` — which the agent persona *instructs* every agent
+/// to call rather than answer a capability question from memory — parked for
+/// operator approval (issue #443), and so did `file_read`, `glob` and `grep`,
+/// because the prefix rule keys on the start of a name and none of them begins
+/// with a read-only word.
+///
+/// `args` are consulted because one tool name does not always mean one
+/// consequence: every Composio action arrives as `composio_execute`.
+fn is_external_effect(tool_name: &str, args: &serde_json::Value) -> bool {
+    crate::policy::consequence_of(tool_name, args)
+        .reach
+        .is_external()
 }
 
 /// The top-level keys of a tool-argument object, for a mismatch diagnostic.
@@ -974,72 +934,22 @@ fn top_level_keys(args: &serde_json::Value) -> Vec<&str> {
     }
 }
 
-/// Map a tool name onto the supervised [`EffectGroup`] taxonomy.
+/// Map a tool call onto the supervised [`EffectGroup`] taxonomy — the
+/// consequence class the operator's approval card names.
 ///
-/// Since issue #374 this classification decides one more thing: whether a tool
-/// can be given a **standing** grant. The rule is
-/// [`EffectGroup::is_broadly_grantable`] — only the catch-all `Other` — and it
-/// is applied to the group recorded on the *parked effect*, which is the value
-/// this function produced at projection time. So there is one classifier and
-/// one rule, and the operator is checked against the same classification their
-/// card was showing.
+/// A thin reader of [`crate::policy::consequence_of`]. Since issue #444 this
+/// classification decides *only* what the card says: whether the call may be
+/// granted standing is a separate answer from the same declaration
+/// ([`Effect::may_be_granted_standing`](crate::ports::types::Effect::may_be_granted_standing)),
+/// because one enum answering both questions is how the residual `Other` bucket
+/// came to mean "nothing in particular to name" and "safe for a week" at the
+/// same time.
 ///
-/// That also means a tool landing in `Other` by omission now grants more than
-/// it used to. The `deploy` and `filing` arms below exist because of exactly
-/// that; a misclassification *toward* a consequence group is the safe
-/// direction, and the tests pin both.
-fn classify_group(tool_name: &str) -> EffectGroup {
-    let name = tool_name.to_ascii_lowercase();
-    if name == "mcp_registry_tool_call" {
-        EffectGroup::Other
-    } else if name == "composio_authorize" {
-        // Beginning an OAuth handoff establishes an account identity for the
-        // company (issue #110) — an identity effect, parked before it lands.
-        EffectGroup::Identity
-    } else if name == "composio_execute" {
-        // Running a Composio action reaches a third-party account (send an
-        // email, post a message, open a PR) — a send effect. Placed before the
-        // generic `contains` heuristics so the slug can't be misclassified.
-        EffectGroup::Send
-    } else if name == crate::harness::search::WEB_SEARCH_TOOL {
-        // A metered search is billed by the backend per request (issue #238), so
-        // when it *does* park — an operator listing it in `always_approve` — the
-        // Approvals page must say "spend", not the catch-all "other". An
-        // operator approving a paid call deserves to be told it is one.
-        EffectGroup::Spend
-    } else if name.starts_with("media_generate") {
-        // Image/video generation is billed by the backend on submit (issue
-        // #109), so it is a spend effect — parked for approval before money
-        // moves. (`media_list_models` is read-only and never reaches here.)
-        EffectGroup::Spend
-    } else if name.contains("pay") || name.contains("transfer") || name.starts_with("spend") {
-        EffectGroup::Spend
-    } else if name.contains("email") || name.contains("send") || name.contains("message") {
-        EffectGroup::Send
-    } else if name.contains("sign") || name.contains("file") || name.contains("filing") {
-        // `filing` is the second arm issue #374 adds, found the same way as
-        // `deploy` and for the same reason. `approvals.md` lists `filing.submit`
-        // under Sign, but the substring above is `file`, which `filing` does not
-        // contain — so a `filing_submit` tool classified as `Other`, and `Other`
-        // now means "may be granted for a week". No such tool exists today, so
-        // this closes the gap before it can be walked into rather than after.
-        EffectGroup::Sign
-    } else if name.contains("publish") || name.contains("post") || name.contains("deploy") {
-        // `deploy` is new with issue #374 and closes the one consequence class
-        // the heuristics missed. `approvals.md` has always listed website
-        // deploys under Publish, but no arm matched the word, so a `deploy_site`
-        // tool classified as `Other` — which now means something it did not
-        // before: `Other` is exactly the set that can be granted standing. A
-        // deploy is externally visible and not reversible by the company alone,
-        // so it stays a per-call decision.
-        EffectGroup::Publish
-    } else if name.contains("hire") || name.contains("contract") {
-        EffectGroup::Hire
-    } else if name.contains("identity") || name.contains("handle") {
-        EffectGroup::Identity
-    } else {
-        EffectGroup::Other
-    }
+/// `args` matter: `composio_execute` carries every Composio action under one
+/// name, so the group is read from the action rather than from the tool that
+/// delivers it (issue #441).
+fn classify_group(tool_name: &str, args: &serde_json::Value) -> EffectGroup {
+    crate::policy::consequence_of(tool_name, args).group
 }
 
 #[cfg(test)]
@@ -1059,6 +969,15 @@ mod tests {
     fn request(tool: &str, args: serde_json::Value) -> ToolPolicyRequest {
         let ctx = ToolCallContext::session("s", "chat", "ceo", "call-1", 0);
         ToolPolicyRequest::new(tool, args, ctx)
+    }
+
+    /// May this call be granted standing? The rule as the mint path asks it,
+    /// so a test here and the enforcement in the default build cannot answer
+    /// differently.
+    fn grantable(tool: &str, args: &serde_json::Value) -> bool {
+        crate::policy::consequence_of(tool, args)
+            .standing
+            .is_grantable()
     }
 
     #[test]
@@ -2442,6 +2361,15 @@ mod tests {
     // -----------------------------------------------------------------------
     // Standing grants (issue #374)
     // -----------------------------------------------------------------------
+    //
+    // These tests granted a standing scope on `workspace_write` until issue
+    // #444. That tool was never a fair fixture: it is grantable only under the
+    // rule that read grantability off a name's vocabulary, and the parking side
+    // of this same gate has always refused to exempt it because it overwrites
+    // guidance the operator wrote. The two halves of one gate disagreed about
+    // one tool, and the tests pinned the half that was wrong. `file_write` is
+    // the honest stand-in — it mutates, so it still parks the first time, but
+    // what it mutates is the agent's own sandboxed workspace.
 
     fn standing(
         agent: &str,
@@ -2473,7 +2401,7 @@ mod tests {
     #[tokio::test]
     async fn a_standing_grant_admits_repeat_calls_with_any_arguments() {
         let (p, grants) = granting_policy("supervised", &[], "ops");
-        grants.grant_standing(standing("ops", "workspace_write", far_future()));
+        grants.grant_standing(standing("ops", "file_write", far_future()));
 
         for args in [
             serde_json::json!({ "path": "notes/a.md", "body": "one" }),
@@ -2481,7 +2409,7 @@ mod tests {
             serde_json::json!({}),
         ] {
             assert_eq!(
-                p.check(&request("workspace_write", args.clone())).await,
+                p.check(&request("file_write", args.clone())).await,
                 ToolPolicyDecision::Allow,
                 "a standing grant admits any arguments: {args}"
             );
@@ -2503,11 +2431,10 @@ mod tests {
         let (p, grants) = granting_policy("supervised", &[], "ops");
         // Already past — and deliberately left in the set, so this proves the
         // redemption check rather than the sweep.
-        grants.grant_standing(standing("ops", "workspace_write", 1));
+        grants.grant_standing(standing("ops", "file_write", 1));
 
         assert!(matches!(
-            p.check(&request("workspace_write", serde_json::json!({})))
-                .await,
+            p.check(&request("file_write", serde_json::json!({}))).await,
             ToolPolicyDecision::RequireApproval { .. }
         ));
         assert_eq!(grants.standing_count(), 1, "the sweep did not run here");
@@ -2517,15 +2444,14 @@ mod tests {
     async fn a_standing_grant_is_scoped_to_its_agent_and_tool() {
         let (p, grants) = granting_policy("supervised", &[], "marketing");
         // Granted to a different teammate.
-        grants.grant_standing(standing("ops", "workspace_write", far_future()));
+        grants.grant_standing(standing("ops", "file_write", far_future()));
         assert!(matches!(
-            p.check(&request("workspace_write", serde_json::json!({})))
-                .await,
+            p.check(&request("file_write", serde_json::json!({}))).await,
             ToolPolicyDecision::RequireApproval { .. }
         ));
 
         let (p, grants) = granting_policy("supervised", &[], "ops");
-        grants.grant_standing(standing("ops", "workspace_write", far_future()));
+        grants.grant_standing(standing("ops", "file_write", far_future()));
         // A different tool for the right teammate.
         assert!(matches!(
             p.check(&request("send_email", serde_json::json!({}))).await,
@@ -2544,11 +2470,11 @@ mod tests {
     async fn the_single_use_grant_is_consumed_first() {
         let (p, grants) = granting_policy("supervised", &[], "ops");
         let args = serde_json::json!({ "path": "notes/a.md" });
-        grants.grant(granted("ops", "workspace_write", args.clone()));
-        grants.grant_standing(standing("ops", "workspace_write", far_future()));
+        grants.grant(granted("ops", "file_write", args.clone()));
+        grants.grant_standing(standing("ops", "file_write", far_future()));
 
         assert_eq!(
-            p.check(&request("workspace_write", args)).await,
+            p.check(&request("file_write", args)).await,
             ToolPolicyDecision::Allow
         );
         assert_eq!(grants.live_count(), 0, "the single-use grant burned");
@@ -2562,29 +2488,26 @@ mod tests {
 
     /// A standing grant can never admit money — by placement, not by promise.
     ///
-    /// The mint side refuses to grant anything outside `EffectGroup::Other`, so
-    /// no Spend-group tool can have one. This covers the other way a call
-    /// becomes priced, which the tool name cannot predict: an `Other` tool
-    /// invoked with a declared amount. It must fall through to the budget and
-    /// mode arms and park.
+    /// The mint side refuses to grant anything the declaration does not call
+    /// grantable, so no Spend-group tool can have one. This covers the other way
+    /// a call becomes priced, which the tool name cannot predict: a grantable
+    /// tool invoked with a declared amount. It must fall through to the budget
+    /// and mode arms and park.
     #[tokio::test]
     async fn a_standing_grant_refuses_a_priced_call() {
         let (p, grants) = granting_policy("supervised", &[], "ops");
-        grants.grant_standing(standing("ops", "workspace_write", far_future()));
+        grants.grant_standing(standing("ops", "file_write", far_future()));
 
         // Same tool, same grant — the only difference is a declared amount.
         assert_eq!(
-            p.check(&request(
-                "workspace_write",
-                serde_json::json!({ "path": "a" })
-            ))
-            .await,
+            p.check(&request("file_write", serde_json::json!({ "path": "a" })))
+                .await,
             ToolPolicyDecision::Allow
         );
         assert!(
             matches!(
                 p.check(&request(
-                    "workspace_write",
+                    "file_write",
                     serde_json::json!({ "path": "a", "amount_usd": 25.0 })
                 ))
                 .await,
@@ -2622,11 +2545,10 @@ mod tests {
     #[tokio::test]
     async fn readonly_outranks_a_standing_grant_and_leaves_it_intact() {
         let (p, grants) = granting_policy("readonly", &[], "ops");
-        grants.grant_standing(standing("ops", "workspace_write", far_future()));
+        grants.grant_standing(standing("ops", "file_write", far_future()));
 
         assert!(matches!(
-            p.check(&request("workspace_write", serde_json::json!({})))
-                .await,
+            p.check(&request("file_write", serde_json::json!({}))).await,
             ToolPolicyDecision::Deny { .. }
         ));
         assert_eq!(
@@ -2649,31 +2571,31 @@ mod tests {
         ));
     }
 
-    /// What may be granted broadly is exactly `EffectGroup::Other`, derived —
-    /// never listed. A second hand-kept list is the drift the issue forbids.
+    /// What may be granted standing is decided by what a tool can **reach**,
+    /// never by the vocabulary of its name (issue #444).
+    ///
+    /// The list below is the before/after of the boundary. Every tool in the
+    /// first group used to be grantable — `shell` and `web_fetch` and
+    /// `mcp_registry_tool_call` because their names carry no consequence word,
+    /// and `workspace_write` in flat contradiction of the parking side of this
+    /// same gate, which has always refused to exempt it on the grounds that it
+    /// overwrites operator-owned guidance. An operator on staging really did
+    /// get a standing grant on running arbitrary terminal commands while being
+    /// refused one on reading a repository.
     #[test]
-    fn what_may_be_granted_broadly_is_exactly_the_other_group() {
+    fn what_may_be_granted_standing_is_what_a_tool_can_reach() {
+        let args = serde_json::json!({});
         for tool in [
-            "workspace_write",
-            "workspace_read",
+            // Arbitrary code, arbitrary address, operator-owned guidance.
             "shell",
-            "mcp_registry_tool_call",
+            "http_request",
+            "curl",
             "web_fetch",
-        ] {
-            assert!(
-                classify_group(tool).is_broadly_grantable(),
-                "{tool} classifies as Other and is grantable"
-            );
-        }
-        // The classifier is substring heuristics, and it errs toward a
-        // consequence group — `read_file` matches the `file` arm and lands in
-        // `Sign` despite being a pure read. That is the SAFE direction: a
-        // misclassified tool loses the broader scope and keeps asking, rather
-        // than gaining a scope it should not have. Pinned so the asymmetry is
-        // deliberate rather than discovered.
-        assert!(!classify_group("read_file").is_broadly_grantable());
-        for tool in [
-            "composio_execute",
+            "workspace_write",
+            // Anything a remote server chooses to advertise.
+            "mcp_registry_tool_call",
+            "mcp_call_tool",
+            // Named consequences, unchanged.
             "composio_authorize",
             "pay_invoice",
             "transfer_funds",
@@ -2685,24 +2607,204 @@ mod tests {
             "handle_register",
             "filing_submit",
             "deploy_site",
+            // A tool nobody has classified. Landing in the residual bucket no
+            // longer confers the longest permission available.
+            "some_tool_nobody_declared",
         ] {
             assert!(
-                !classify_group(tool).is_broadly_grantable(),
-                "{tool} carries a consequence group and must stay a per-call decision"
+                !grantable(tool, &args),
+                "{tool} can reach further than a standing grant can describe"
+            );
+        }
+        // The feature keeps its point: writes confined to the agent's own
+        // sandbox stay grantable, so a stretch of unattended autonomy is still
+        // worth granting.
+        for tool in ["file_write", "edit", "apply_patch", "memory_store"] {
+            assert!(grantable(tool, &args), "{tool} stays grantable");
+        }
+    }
+
+    /// Issue #441's headline, at the gate rather than at the card: the same
+    /// tool, two verdicts, decided by the action in the arguments.
+    #[test]
+    fn a_composio_read_may_be_granted_standing_and_a_send_may_not() {
+        assert!(grantable(
+            "composio_execute",
+            &serde_json::json!({ "tool": "GITHUB_LIST_PULL_REQUESTS" })
+        ));
+        assert!(!grantable(
+            "composio_execute",
+            &serde_json::json!({ "tool": "GMAIL_SEND_EMAIL" })
+        ));
+        // The cautious fallback: an action the provider catalogue does not name
+        // is a send, so it neither loses its per-call decision nor its `Send`
+        // label on the card.
+        assert!(!grantable(
+            "composio_execute",
+            &serde_json::json!({ "tool": "GITHUB_INVENT_A_NEW_VERB" })
+        ));
+        assert_eq!(
+            classify_group(
+                "composio_execute",
+                &serde_json::json!({ "tool": "GITHUB_INVENT_A_NEW_VERB" })
+            ),
+            EffectGroup::Send
+        );
+    }
+
+    /// The grantability answer and the parking answer are read from one
+    /// declaration, so an effect the policy projects and the effect the mint
+    /// path inspects can never disagree — for every tool, and for both shapes
+    /// of a Composio call.
+    #[test]
+    fn the_projected_effect_and_the_mint_rule_agree_about_every_tool() {
+        let p = policy("supervised", &[], None).with_agent("ops");
+        let cases: Vec<(&str, serde_json::Value)> = crate::policy::consequence::declared_tools()
+            .map(|t| (t, serde_json::json!({})))
+            .chain([
+                (
+                    "composio_execute",
+                    serde_json::json!({ "tool": "GITHUB_LIST_PULL_REQUESTS" }),
+                ),
+                (
+                    "composio_execute",
+                    serde_json::json!({ "tool": "GMAIL_SEND_EMAIL" }),
+                ),
+                ("some_tool_nobody_declared", serde_json::json!({})),
+            ])
+            .collect();
+        for (tool, args) in cases {
+            let effect = p.effect_for(tool, &args);
+            assert_eq!(
+                effect.may_be_granted_standing(),
+                grantable(tool, &args),
+                "the parked effect for `{tool}` disagrees with the declaration it came from"
+            );
+            assert_eq!(
+                effect.group,
+                classify_group(tool, &args),
+                "the parked effect's group for `{tool}` is not the one the classifier gave"
             );
         }
     }
 
-    /// Issue #374 adds the `deploy` arm. `approvals.md` has always listed
-    /// website deploys under Publish, but no arm matched the word, so a deploy
-    /// tool classified as `Other` — which now means something it did not before:
-    /// `Other` is exactly the set that can be granted standing.
+    /// Issue #443: the persona instructs every agent to call these rather than
+    /// answer a capability question from memory, and under the DEFAULT
+    /// supervised mode that instruction used to cost an operator approval to
+    /// follow. Calling *through* a server still parks.
+    #[tokio::test]
+    async fn listing_mcp_servers_and_tools_runs_without_asking() {
+        let p = policy("supervised", &[], None);
+        for tool in [
+            "mcp_list_servers",
+            "mcp_list_tools",
+            "mcp_registry_list_tools",
+        ] {
+            assert_eq!(
+                p.check(&request(tool, serde_json::json!({}))).await,
+                ToolPolicyDecision::Allow,
+                "`{tool}` reads local registration state and reaches nothing"
+            );
+        }
+        for tool in ["mcp_call_tool", "mcp_registry_tool_call"] {
+            assert!(
+                matches!(
+                    p.check(&request(tool, serde_json::json!({}))).await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "`{tool}` can perform any effect the remote server advertises"
+            );
+        }
+    }
+
+    /// The sibling defects the same sweep turned up. Four pure reads of the
+    /// agent's own workspace parked under the default mode, because the
+    /// read-only rule matched a *prefix* and none of these names begins with a
+    /// read-only word. Nobody had reported them; they were found by asking the
+    /// same question of every registered tool.
+    #[tokio::test]
+    async fn a_workspace_read_runs_without_asking_whatever_its_name_begins_with() {
+        let p = policy("supervised", &[], None);
+        for tool in [
+            "file_read",
+            "glob",
+            "grep",
+            "image_info",
+            "list",
+            "read_workspace_state",
+            "memory_recall",
+        ] {
+            assert_eq!(
+                p.check(&request(tool, serde_json::json!({}))).await,
+                ToolPolicyDecision::Allow,
+                "`{tool}` reads the agent's own workspace"
+            );
+        }
+    }
+
+    /// A standing grant admits any arguments, which was a fair summary of a
+    /// tool's consequence while consequence was a property of the tool name.
+    /// It is not one for `composio_execute`, so the grant is re-checked against
+    /// the live call: a scope granted on a repository read must not admit an
+    /// outgoing email on the same handle.
+    #[tokio::test]
+    async fn a_standing_grant_on_a_composio_read_does_not_admit_a_send() {
+        let queue = ApprovalRequestQueue::default();
+        let grants = queue.grants();
+        let p = policy("supervised", &[], None)
+            .with_requests(queue)
+            .with_agent("ops");
+        grants.grant_standing(standing("ops", "composio_execute", far_future()));
+
+        assert_eq!(
+            p.check(&request(
+                "composio_execute",
+                serde_json::json!({ "tool": "GITHUB_LIST_PULL_REQUESTS" })
+            ))
+            .await,
+            ToolPolicyDecision::Allow,
+            "the read the operator granted keeps running"
+        );
+        assert!(
+            matches!(
+                p.check(&request(
+                    "composio_execute",
+                    serde_json::json!({ "tool": "GMAIL_SEND_EMAIL" })
+                ))
+                .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "a send on the same tool name parks despite the grant"
+        );
+    }
+
+    /// Issue #374 added the `deploy` arm. It still applies — to tools with no
+    /// declaration, which is now the only place the name heuristics run.
     #[test]
-    fn a_deploy_classifies_as_publish() {
-        assert_eq!(classify_group("deploy_site"), EffectGroup::Publish);
-        assert_eq!(classify_group("website_deploy"), EffectGroup::Publish);
-        // And the arms it sits beside are unmoved.
-        assert_eq!(classify_group("publish_post"), EffectGroup::Publish);
-        assert_eq!(classify_group("workspace_write"), EffectGroup::Other);
+    fn an_undeclared_deploy_still_classifies_as_publish() {
+        let args = serde_json::json!({});
+        assert_eq!(classify_group("deploy_site", &args), EffectGroup::Publish);
+        assert_eq!(
+            classify_group("website_deploy", &args),
+            EffectGroup::Publish
+        );
+        assert_eq!(classify_group("publish_post", &args), EffectGroup::Publish);
+        // …but it no longer decides grantability, so a deploy tool nobody has
+        // declared is refused a standing scope by the undeclared rule as well
+        // as by its group.
+        assert!(!grantable("deploy_site", &args));
+    }
+
+    /// `workspace_write` keeps its `Other` label on the card — there is no
+    /// consequence word to name — while being refused a standing scope. That
+    /// separation is the point of issue #444: the label and the permission are
+    /// different questions.
+    #[test]
+    fn workspace_write_is_labelled_other_and_is_still_not_grantable() {
+        let args = serde_json::json!({});
+        assert_eq!(classify_group("workspace_write", &args), EffectGroup::Other);
+        assert!(classify_group("workspace_write", &args).is_unclassified());
+        assert!(!grantable("workspace_write", &args));
+        assert!(is_external_effect("workspace_write", &args));
     }
 }
