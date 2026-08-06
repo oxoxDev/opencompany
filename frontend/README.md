@@ -101,19 +101,50 @@ Everything is decoupled so you can embed parts elsewhere:
 ## Build
 
 ```sh
-npm run build         # tsc typecheck + vite bundle -> dist/
-npm run preview       # serve the production build
-npm run typecheck     # tsc only, over src/
-npm run typecheck:e2e # tsc only, over test/ + playwright.config.ts
+npm run build          # tsc typecheck + vite bundle -> dist/
+npm run preview        # serve the production build
+npm run typecheck      # tsc only, over src/
+npm run typecheck:e2e  # tsc only, over test/e2e/ + playwright.config.ts
+npm run typecheck:unit # tsc only, over test/unit/ + vitest.config.ts
 ```
 
-CI runs `npm ci` and all three of `typecheck`, `typecheck:e2e` and `build` in
-the `Console` job of `.github/workflows/ci.yml`.
+CI runs `npm ci`, then `typecheck`, `typecheck:e2e`, `typecheck:unit`, `test`
+and `build`, in the `Console` job of `.github/workflows/ci.yml`.
 
 `typecheck` covers `src/` and nothing else — `tsconfig.app.json` is
-`include: ["src"]`. The end-to-end suite is a separate TypeScript project
-([`tsconfig.e2e.json`](tsconfig.e2e.json)) with its own script, so a broken spec
-fails on its own rather than blocking `npm run build`.
+`include: ["src"]`. Each test suite is a separate TypeScript project with its
+own script ([`tsconfig.e2e.json`](tsconfig.e2e.json),
+[`tsconfig.unit.json`](tsconfig.unit.json)), so a broken test fails on its own
+rather than blocking `npm run build`.
+
+## Unit suite
+
+```sh
+npm test              # vitest, once — this is what CI runs
+npm run test:watch    # re-runs on change while you work
+```
+
+Pure functions only, under [`test/unit/`](test/unit). The whole suite is
+sub-second, so it runs on every push and there is never a reason to skip it.
+
+**What belongs here versus in the browser suite.** This runner is for a helper
+that maps A to B with no document, no host and no React — id reconciliation,
+channel-id derivation and the legacy-URL shim, link precedence on a card,
+timeline folding, anything that truncates or folds a value. The end-to-end suite
+below is for what is only true in a browser driving a live host: a disabled
+affordance explaining itself, a banner that must not be a toast, a redirect that
+survives a full-page navigation.
+
+The line matters because each is tempted into the other's territory. A browser
+walk *can* reach a pure helper — through six layers of render, in forty seconds,
+reporting the failure as "the board looked wrong". A unit test cannot reach a
+redirect at all. Put a helper here the moment it has a second caller or a branch
+worth naming.
+
+A test earns its place by being **seen failing** against the behaviour it
+guards. Every test in `test/unit/` was proven red by breaking its subject before
+it was trusted — a test that passes while asserting nothing is worse than no
+test, because it reports coverage.
 
 ## End-to-end suite
 
@@ -137,25 +168,40 @@ Set `PW_BASE_URL` to drive a host you brought up yourself and the config stays
 out of the way entirely: no `webServer`, and `PW_STORAGE_STATE` decides whether
 the suite signs in.
 
-**CI type-checks these specs and runs none of them** (`typecheck:e2e` is all the
-automated coverage `test/e2e/` gets). Type-checking proves a spec compiles, not
-that it holds: `workflow-edit-delete.spec.ts` spent months red against a fixture
-that was never committed, and nothing reported it. Run the suite before touching
-a view it covers.
+**CI runs this suite** in the `Console E2E` job, against a default-feature host
+built by the `Rust` job and passed across as an artifact (issue #428). It did
+not always: for a long time `typecheck:e2e` was the only automated coverage
+`test/e2e/` had, and type-checking proves a spec compiles, not that it holds.
+`workflow-edit-delete.spec.ts` spent months red against a fixture that was never
+committed; two further specs were found red against product changes that had
+been deliberate, one of which had been filed as a bug that did not exist.
+Nothing reported any of it, because nothing ran it.
+
+Run the suite before touching a view it covers — CI is a backstop, not a
+substitute for seeing your own change work.
 
 ### What a default-feature host cannot cover
 
 The host `test/e2e/host.sh` starts is the default feature set, which boots the
 offline echo brain. That is enough for the great majority of the suite, but four
 specs need an agent that actually executes — a build with the `openhuman`
-harness and a mocked inference backend — and one needs an external MCP server:
+harness and a mocked inference backend — and one needs an external MCP server.
 
-| Spec | Needs |
-|------|-------|
-| `wiring.spec.ts` | the harness + a mock LLM backend echoing `__MOCK_LLM__` |
-| `chat-to-card.spec.ts` (card chip) | an orchestrator that opens a card |
-| `workflow-run-history.spec.ts` (durable history) | a workflow run that executes |
-| `mcp.spec.ts` | `PW_MCP_SERVER` pointing at a live MCP server |
+These **skip themselves** rather than failing, through
+[`test/e2e/capabilities.ts`](test/e2e/capabilities.ts), so the CI lane is
+meaningfully green instead of permanently red. Every skip names issue #467,
+which tracks standing up the feature-gated lane that runs them for real:
+
+| Spec | Needs | Gate |
+|------|-------|------|
+| `wiring.spec.ts` | the harness + a mock LLM backend echoing `__MOCK_LLM__` | `PW_LIVE_BRAIN=1` |
+| `chat-to-card.spec.ts` (card chip) | an orchestrator that opens a card | `PW_LIVE_BRAIN=1` |
+| `workflow-run-history.spec.ts` (durable history) | a workflow run that executes | `PW_LIVE_BRAIN=1` |
+| `mcp.spec.ts` | `PW_MCP_SERVER` pointing at a live MCP server | `PW_MCP_SERVER` |
+
+A skip is a debt, not a resolution. Four of the suite's most valuable specs sit
+behind that flag, and while they do, the lane proves the console renders rather
+than that the company works.
 
 Point `PW_HOST_BINARY` at a feature-gated build, or `PW_BASE_URL` at a host you
 brought up yourself, to cover those.
