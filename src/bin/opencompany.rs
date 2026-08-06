@@ -857,6 +857,19 @@ async fn main() -> Result<()> {
                 .unwrap_or_default();
             let layout = opencompany::store::DataLayout::new(&data_root);
             layout.ensure(workspace_cfg.clear_tmp_on_startup).await?;
+            // Point the embedded OpenHuman runtime's durable agent journal at
+            // the data volume and prove it is writable before a single agent
+            // exists. Left alone the vendored runtime roots it under the user's
+            // home directory, which in a tenant container is the read-only root
+            // filesystem: every observation then fails to persist and the
+            // vendored append worker reports it per event, forever, drowning
+            // the container log (issue #446). An unwritable root aborts boot —
+            // same precedent as a selected-but-unavailable storage backend
+            // below — rather than serving an agent whose work is never
+            // recorded. `println!` for the same reason as the divergence
+            // warning above: the default `EnvFilter` would swallow an `info!`.
+            let journal = opencompany::app::journal::prepare(&data_root).await?;
+            println!("{}", journal.summary());
             // Soft disk-quota alerting. Hard enforcement is the container /
             // StorageClass layer's job (EFS access point, k8s ResourceQuota);
             // here we surface an operator-visible warning when a workspace
