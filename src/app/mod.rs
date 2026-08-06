@@ -1,5 +1,6 @@
 pub mod config;
 pub mod doctor;
+pub mod journal;
 mod types;
 
 pub use config::{BrainMode, ConfigProvenance, RuntimeConfig, resolve};
