@@ -1,0 +1,70 @@
+# Set (or unset) environment variables on a single staging tenant's StatefulSet
+# over the same SSH path the deploy uses. This is a targeted operational knob for
+# env the manager does NOT own — e.g. TINYHUMANS_API_URL, which selects the hub a
+# tenant's OAuth sign-in starts at (default is the prod hub; staging tenants must
+# be pinned to https://staging-api.tinyhumans.ai). Because the manager patches the
+# StatefulSet with server-side apply and only owns the fields it sets (image,
+# OPENCOMPANY_*, mongo/mail creds), env it does not manage survives reconciles.
+#
+# `kubectl set env` triggers a rollout, so the pod restarts and picks up the change.
+# Output is redacted for common credential shapes before it reaches the run log.
+name: Patch tenant env (staging)
+
+on:
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: Tenant namespace to patch (e.g. tenant-tinyhumans-marketing)
+        type: string
+        required: true
+      env:
+        description: >-
+          Space-separated KEY=VALUE assignments to set on the tenant container
+          (e.g. TINYHUMANS_API_URL=https://staging-api.tinyhumans.ai). Use KEY-
+          (trailing dash) to unset a key.
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add server to known hosts
+        run: ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Set env on the tenant StatefulSet (redacted)
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          NS: ${{ inputs.namespace }}
+          ENV_ASSIGNMENTS: ${{ inputs.env }}
+        run: |
+          ssh root@${SSH_HOST} "NS='${NS}' ENV_ASSIGNMENTS='${ENV_ASSIGNMENTS}' bash -s" <<'REMOTE' \
+            | sed -E 's#(mongodb(\+srv)?://[^:]+:)[^@]+@#\1***@#g; s#(Bearer )[A-Za-z0-9._-]{6,}#\1***#g; s#sntryu_[A-Za-z0-9]+#sntryu_***#g; s#((password|passwd|secret|token|apikey|api_key)[\"'"'"'=: ]+)[A-Za-z0-9._/+-]{8,}#\1***#gI'
+          set -uo pipefail
+          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+          if ! kubectl get ns "$NS" >/dev/null 2>&1; then
+            echo "namespace $NS not found"; exit 1
+          fi
+          echo "===== BEFORE: tenant container env ====="
+          kubectl -n "$NS" get sts opencompany \
+            -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' 2>&1 || true
+          echo "===== set env: ${ENV_ASSIGNMENTS} ====="
+          # shellcheck disable=SC2086
+          kubectl -n "$NS" set env statefulset/opencompany ${ENV_ASSIGNMENTS} 2>&1 || { echo "set env failed"; exit 1; }
+          echo "===== ensure a replica is running ====="
+          kubectl -n "$NS" scale sts/opencompany --replicas=1 2>&1 || true
+          echo "===== AFTER: tenant container env ====="
+          kubectl -n "$NS" get sts opencompany \
+            -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' 2>&1 || true
+          echo "===== rollout status ====="
+          kubectl -n "$NS" rollout status sts/opencompany --timeout=120s 2>&1 || true
+          echo "===== done ====="
+          REMOTE
