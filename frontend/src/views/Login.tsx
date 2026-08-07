@@ -23,6 +23,23 @@ import { cn } from "@/lib/utils";
 const TERMS_OF_USE_URL = "https://tinyhumans.gitbook.io/openhuman/legal/terms-of-use";
 const PRIVACY_POLICY_URL = "https://tinyhumans.gitbook.io/openhuman/legal/privacy-policy";
 
+/**
+ * Whether ecosystem (Google/GitHub/X) sign-in can actually complete.
+ *
+ * Kept `false` on purpose: the platform hub's redirect gate accepts loopback
+ * origins only, so on a hosted tenant a click navigates straight to a bare 400
+ * from the hub before the provider dance begins (issue #512). Until the gate
+ * learns to accept provisioned tenant origins (tinyhumansai/backend#1243), the
+ * buttons render disabled with an inline note and the email paths below carry
+ * every sign-in.
+ *
+ * This gates only the *rendering* — the `GET /auth/hub` fetch and the
+ * host-supplied `startUrl` stay wired the whole time. Once backend#1243 has
+ * shipped to every hub, flip this to `true` (or delete the flag and keep the
+ * live `<a>` branch) to light the buttons back up with no other change.
+ */
+const PROVIDER_SIGN_IN_ENABLED = false;
+
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
@@ -176,38 +193,64 @@ export function Login({ client, company, companyName, notice, onSignedIn }: Prop
         {hubProviders.length > 0 && (
           <div className="mb-6 space-y-3">
             <div className="grid gap-2">
-              {hubProviders.map((provider) => (
-                <a
-                  key={provider.id}
-                  href={provider.startUrl}
-                  className={cn(buttonVariants({ variant: "outline", size: "lg" }), "w-full")}
-                >
-                  Continue with {provider.label}
-                </a>
-              ))}
+              {hubProviders.map((provider) =>
+                PROVIDER_SIGN_IN_ENABLED ? (
+                  <a
+                    key={provider.id}
+                    href={provider.startUrl}
+                    className={cn(buttonVariants({ variant: "outline", size: "lg" }), "w-full")}
+                  >
+                    Continue with {provider.label}
+                  </a>
+                ) : (
+                  // Disabled rather than hidden: the capability exists and is
+                  // coming, so the button stays visible to say so — but a click
+                  // would hit the hub's 400 today, so it does nothing until
+                  // backend#1243 lands. Email sign-in below is fully usable.
+                  <button
+                    key={provider.id}
+                    type="button"
+                    disabled
+                    aria-disabled="true"
+                    title="Provider sign-in is coming soon — use email sign-in below"
+                    className={cn(
+                      buttonVariants({ variant: "outline", size: "lg" }),
+                      "w-full cursor-not-allowed opacity-60",
+                    )}
+                  >
+                    Continue with {provider.label}
+                  </button>
+                ),
+              )}
             </div>
 
-            <p className="text-center text-[11px] leading-5 text-muted-foreground">
-              By continuing, you agree to the{" "}
-              <a
-                href={TERMS_OF_USE_URL}
-                target="_blank"
-                rel="noreferrer"
-                className="font-medium underline underline-offset-2 hover:text-foreground"
-              >
-                Terms
-              </a>{" "}
-              and{" "}
-              <a
-                href={PRIVACY_POLICY_URL}
-                target="_blank"
-                rel="noreferrer"
-                className="font-medium underline underline-offset-2 hover:text-foreground"
-              >
-                Privacy Policy
-              </a>
-              .
-            </p>
+            {PROVIDER_SIGN_IN_ENABLED ? (
+              <p className="text-center text-[11px] leading-5 text-muted-foreground">
+                By continuing, you agree to the{" "}
+                <a
+                  href={TERMS_OF_USE_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-medium underline underline-offset-2 hover:text-foreground"
+                >
+                  Terms
+                </a>{" "}
+                and{" "}
+                <a
+                  href={PRIVACY_POLICY_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-medium underline underline-offset-2 hover:text-foreground"
+                >
+                  Privacy Policy
+                </a>
+                .
+              </p>
+            ) : (
+              <p className="text-center text-[11px] leading-5 text-muted-foreground">
+                Provider sign-in is coming soon. Use email sign-in below.
+              </p>
+            )}
 
             <div className="flex items-center gap-3">
               <div className="h-px flex-1 bg-border" />
