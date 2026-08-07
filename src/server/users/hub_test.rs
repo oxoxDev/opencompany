@@ -47,6 +47,26 @@ async fn state_with(
     home: &std::path::Path,
     exchange: Option<Arc<MockHubIdentityExchange>>,
 ) -> AppState {
+    state_with_config(
+        home,
+        exchange,
+        AppConfig {
+            bind: "127.0.0.1:8080".to_string(),
+            api_url: "https://hub.example.com".to_string(),
+            ..AppConfig::default()
+        },
+    )
+    .await
+}
+
+/// Like [`state_with`], but takes the [`AppConfig`] verbatim so a test can set a
+/// hosted `public_url` and pin exactly what the console asks the hub to return
+/// to.
+async fn state_with_config(
+    home: &std::path::Path,
+    exchange: Option<Arc<MockHubIdentityExchange>>,
+    config: AppConfig,
+) -> AppState {
     let store = crate::store::FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
     store
@@ -70,12 +90,7 @@ async fn state_with(
         .build()
         .await
         .unwrap();
-    let mut state = AppState::new(AppConfig {
-        bind: "127.0.0.1:8080".to_string(),
-        api_url: "https://hub.example.com".to_string(),
-        ..AppConfig::default()
-    })
-    .with_home(home.to_path_buf());
+    let mut state = AppState::new(config).with_home(home.to_path_buf());
     if let Some(exchange) = exchange {
         state = state.with_hub_identity(exchange);
     }
@@ -188,6 +203,43 @@ async fn the_start_url_points_at_the_hub_and_returns_to_this_console() {
 }
 
 #[tokio::test]
+async fn a_hosted_origin_returns_to_the_tenant_origin_exactly() {
+    let home = home();
+    // A hosted tenant: OPENCOMPANY_PUBLIC_URL carries the provisioned https
+    // origin. The trailing slash is deliberate — the console must not let it
+    // reach the hub as `//?company=…`; the redirect the gate matches on has to
+    // be the tenant origin exactly.
+    let config = AppConfig {
+        bind: "0.0.0.0:8080".to_string(),
+        api_url: "https://hub.example.com".to_string(),
+        public_url: Some("https://smoke1.staging.opencompany.work/".to_string()),
+        ..AppConfig::default()
+    };
+    let state = state_with_config(
+        home.path(),
+        Some(Arc::new(MockHubIdentityExchange::new())),
+        config,
+    )
+    .await;
+
+    let body = providers(&state).await;
+    let start = body["providers"][0]["startUrl"].as_str().unwrap();
+
+    // The redirect target is the tenant's provisioned origin, a single root
+    // path, and the company scope — no trailing-slash drift, no explicit port,
+    // no scheme change. backend#1243 matches the *origin* of this string exactly
+    // against the tenant registry, so this is the contract both sides agree on:
+    // `https://smoke1.staging.opencompany.work/?company=acme`, percent-encoded
+    // as one query value.
+    assert!(
+        start.ends_with(
+            "redirectUri=https%3A%2F%2Fsmoke1.staging.opencompany.work%2F%3Fcompany%3Dacme"
+        ),
+        "hosted redirect must be the tenant origin with a single root path: {start}"
+    );
+}
+
+#[tokio::test]
 async fn a_self_hosted_host_offers_no_providers_at_all() {
     let home = home();
     let state = state_with(home.path(), None).await;
@@ -227,6 +279,53 @@ async fn a_valid_token_for_an_eligible_address_mints_a_session() {
     assert_eq!(body["company"], "acme");
 
     // And the session actually works.
+    let me = router(state.clone())
+        .oneshot(get_with_cookie("/api/v1/companies/acme/auth/me", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(me.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn the_minted_session_is_a_human_session_not_the_platform_token() {
+    let home = home();
+    let exchange =
+        Arc::new(MockHubIdentityExchange::new().with_token("platform-jwt", "Ada@Example.com"));
+    let state = state_with(home.path(), Some(exchange)).await;
+
+    let response = sign_in(&state, "platform-jwt").await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The session minted on return is a fresh human session, minted the same way
+    // a magic link mints one — never the platform bearer the hub handed back.
+    // Reusing that token as the session would collapse the human/machine split
+    // tenant scoping depends on (#315), so the cookie must not carry it verbatim.
+    let cookie = session_cookie(&response);
+    let minted = cookie
+        .strip_prefix("oc_session_acme=")
+        .expect("a session cookie named for this company");
+    assert_ne!(
+        minted, "platform-jwt",
+        "the session cookie must not be the platform token itself"
+    );
+
+    // And the platform token must not be usable as a session on its own: only
+    // the freshly minted human session authenticates. Presenting the platform
+    // bearer as the session cookie is rejected.
+    let forged = router(state.clone())
+        .oneshot(get_with_cookie(
+            "/api/v1/companies/acme/auth/me",
+            "oc_session_acme=platform-jwt",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        forged.status(),
+        StatusCode::UNAUTHORIZED,
+        "the platform token must not work as a session"
+    );
+
+    // The genuine minted session, by contrast, does.
     let me = router(state.clone())
         .oneshot(get_with_cookie("/api/v1/companies/acme/auth/me", &cookie))
         .await
