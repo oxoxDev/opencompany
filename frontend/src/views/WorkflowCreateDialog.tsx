@@ -14,18 +14,21 @@
 // second one would drift the moment either side grew a field.
 
 import { useEffect, useId, useState } from "react";
-import { Plus, Trash2 } from "lucide-react";
+import { History, Plus, RotateCcw, Trash2 } from "lucide-react";
 
 import {
   CREATABLE_NODE_KINDS,
   DESTINATION_KINDS,
   createWorkflow,
+  listWorkflowRevisions,
   listWorkflows,
+  restoreWorkflowRevision,
   updateWorkflow,
   type WorkflowDestination,
   type WorkflowEdge,
   type WorkflowGraph,
   type WorkflowNode,
+  type WorkflowRevision,
   type WorkflowSummary,
 } from "@/api/workflows";
 import {
@@ -387,6 +390,17 @@ export function WorkflowCreateDialog({
    * is inline, scoped to the control that caused it, and never blocks Save on
    * its own — `validate()` remains the gate. */
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  // Issue #274: the edit history panel (edit mode only). It fetches lazily — the
+  // first time an operator expands it — so opening the dialog to make an edit
+  // costs no extra request unless they actually want to look back.
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [revisions, setRevisions] = useState<WorkflowRevision[]>([]);
+  const [revisionsLoaded, setRevisionsLoaded] = useState(false);
+  const [revisionsLoading, setRevisionsLoading] = useState(false);
+  const [revisionsError, setRevisionsError] = useState<string | null>(null);
+  /** The revision currently being restored, so its row can show a spinner and
+   * every Restore button disables while one restore is in flight. */
+  const [restoringId, setRestoringId] = useState<string | null>(null);
   const formId = useId();
 
   // Reload the roster (for the agent-node picker) and reset the draft each
@@ -410,6 +424,14 @@ export function WorkflowCreateDialog({
     setEdges(workflow ? draftEdges(workflow) : []);
     setError(null);
     setFieldErrors({});
+    // Issue #274: a fresh open (or a re-hydrate after a restore) must not carry
+    // the previous graph's history. It re-loads on the next expand, and against
+    // the freshly-restored body's version token.
+    setHistoryOpen(false);
+    setRevisions([]);
+    setRevisionsLoaded(false);
+    setRevisionsError(null);
+    setRestoringId(null);
     let live = true;
     (async () => {
       try {
@@ -607,6 +629,77 @@ export function WorkflowCreateDialog({
       if (e.from === e.to) return "An edge can't loop a node back to itself.";
     }
     return null;
+  }
+
+  // Issue #274: fetch this workflow's edit history. Called on first expand and
+  // again after a restore, so the list reflects the snapshot the restore just
+  // captured. A host predating #274 has no such route; the panel degrades to
+  // "no revisions" rather than throwing.
+  async function loadRevisions() {
+    if (!workflow) return;
+    setRevisionsLoading(true);
+    setRevisionsError(null);
+    try {
+      const rows = await listWorkflowRevisions(client, company, workflow.id);
+      setRevisions(rows);
+      setRevisionsLoaded(true);
+    } catch (e) {
+      setRevisionsError(
+        e instanceof Error ? e.message : "could not load the edit history",
+      );
+    } finally {
+      setRevisionsLoading(false);
+    }
+  }
+
+  function toggleHistory() {
+    const next = !historyOpen;
+    setHistoryOpen(next);
+    // Lazy: only fetch the first time it opens (or after a reset cleared it).
+    if (next && !revisionsLoaded && !revisionsLoading) void loadRevisions();
+  }
+
+  // Issue #274: restore one snapshot. A confirm names the undoability, because a
+  // restore overwrites the live graph — but the body it replaces is itself
+  // snapshotted, so the operator can walk it back. On success the dialog
+  // re-hydrates from the returned graph exactly as a save does (via `onSaved`),
+  // so the canvas shows the restored body and the next edit carries its fresh
+  // token; the history list is then refreshed to include the pre-restore body.
+  async function restore(rev: WorkflowRevision) {
+    if (!workflow || restoringId) return;
+    const ok = window.confirm(
+      `Restore "${rev.name}"? This replaces the current graph. The version you have now ` +
+        `is saved to history first, so you can restore back to it.`,
+    );
+    if (!ok) return;
+    setRestoringId(rev.id);
+    setRevisionsError(null);
+    try {
+      const restored = await restoreWorkflowRevision(
+        client,
+        company,
+        workflow.id,
+        rev.id,
+        // Condition on the graph the operator is looking at, so a concurrent
+        // edit is a 409 rather than a silent clobber.
+        workflow.version,
+      );
+      onSaved?.(restored);
+      // The parent updates `workflow`, which re-hydrates this dialog and resets
+      // the history state; re-fetch so the panel (if still open) reflects the
+      // snapshot the restore just captured.
+      await loadRevisions();
+    } catch (e) {
+      // 409 (moved under us) / 400 (invalid against the current graph) / 404 —
+      // surface the host's prosumer-language message in the panel. A 409 also
+      // rides out to the view's persistent reload banner, same as a save.
+      setRevisionsError(
+        e instanceof Error ? e.message : "could not restore this revision",
+      );
+      if (e instanceof ApiError && e.status === 409) onConflict?.(e.message);
+    } finally {
+      setRestoringId(null);
+    }
   }
 
   async function submit() {
@@ -838,6 +931,73 @@ export function WorkflowCreateDialog({
           <Alert variant="destructive">
             <AlertDescription>{error}</AlertDescription>
           </Alert>
+        )}
+
+        {/* Issue #274: the edit-history panel. Edit mode only — a workflow being
+            created has nothing to look back on. */}
+        {editing && (
+          <div className="rounded-lg border">
+            <button
+              type="button"
+              onClick={toggleHistory}
+              className="flex w-full items-center justify-between gap-2 px-3 py-2 text-sm font-medium"
+              aria-expanded={historyOpen}
+              data-testid="workflow-history-toggle"
+            >
+              <span className="flex items-center gap-2">
+                <History className="size-4" />
+                History
+              </span>
+              <span className="text-xs text-muted-foreground">
+                {historyOpen ? "Hide" : "Show"}
+              </span>
+            </button>
+            {historyOpen && (
+              <div className="border-t px-3 py-2">
+                {revisionsLoading && (
+                  <p className="py-2 text-center text-xs text-muted-foreground">
+                    Loading history…
+                  </p>
+                )}
+                {revisionsError && (
+                  <Alert variant="destructive" className="my-2">
+                    <AlertDescription>{revisionsError}</AlertDescription>
+                  </Alert>
+                )}
+                {!revisionsLoading && !revisionsError && revisions.length === 0 && (
+                  <p className="py-2 text-center text-xs text-muted-foreground">
+                    No earlier versions yet — every edit you save will show up here.
+                  </p>
+                )}
+                <ul className="divide-y">
+                  {revisions.map((rev) => (
+                    <li
+                      key={rev.id}
+                      className="flex items-center justify-between gap-3 py-2"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate text-sm">{rev.name}</p>
+                        <p className="text-[11px] text-muted-foreground">
+                          {relativeTime(rev.createdAtMillis)}
+                        </p>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void restore(rev)}
+                        disabled={restoringId !== null || submitting}
+                        aria-label={`Restore ${rev.name}`}
+                      >
+                        <RotateCcw className="mr-1 size-3.5" />
+                        {restoringId === rev.id ? "Restoring…" : "Restore"}
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
         )}
 
         <DialogFooter>
@@ -1155,6 +1315,23 @@ function ScheduleField({
       )}
     </div>
   );
+}
+
+/**
+ * A compact "how long ago" label for a revision row (issue #274). Coarse on
+ * purpose — the history list wants "2h ago", not a timestamp — and it falls back
+ * to a locale date past a week so an old snapshot reads as a real date.
+ */
+function relativeTime(millis: number): string {
+  const secs = Math.max(0, Math.round((Date.now() - millis) / 1000));
+  if (secs < 60) return "just now";
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(millis).toLocaleDateString();
 }
 
 function EdgeRow({

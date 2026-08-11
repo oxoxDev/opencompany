@@ -42,7 +42,8 @@ use crate::ports::types::{
 use crate::ports::{
     AgentEconomy, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore, EventLog,
     FactStore, InboxStore, LoginCodeStore, MemoryStore, RunStore, SecretStore, SessionStore,
-    SkillStateStore, TaskStore, ToolProvider, UsageMeter, UserStore, WorkspaceStore,
+    SkillStateStore, TaskStore, ToolProvider, UsageMeter, UserStore, WorkflowRevisionStore,
+    WorkspaceStore,
 };
 // Separate line (#241) so this addition is a pure append, not a reflow of the
 // grouped import that sibling store-seam branches (#274, #596) also edit.
@@ -227,6 +228,7 @@ pub struct RuntimeBuilder {
     artifacts: Option<Arc<dyn ArtifactStore>>,
     runs: Option<Arc<dyn RunStore>>,
     schedule_fires: Option<Arc<dyn ScheduleFireStore>>,
+    workflow_revisions: Option<Arc<dyn WorkflowRevisionStore>>,
     usage: Option<Arc<dyn UsageMeter>>,
     skills: Option<Arc<dyn SkillStateStore>>,
     users: Option<Arc<dyn UserStore>>,
@@ -318,6 +320,7 @@ impl RuntimeBuilder {
             artifacts: None,
             runs: None,
             schedule_fires: None,
+            workflow_revisions: None,
             usage: None,
             skills: None,
             users: None,
@@ -426,6 +429,7 @@ impl RuntimeBuilder {
         self.artifacts = Some(handles.artifacts.clone());
         self.runs = Some(handles.runs.clone());
         self.schedule_fires = Some(handles.schedule_fires.clone());
+        self.workflow_revisions = Some(handles.workflow_revisions.clone());
         self.usage = Some(handles.usage.clone());
         self.skills = Some(handles.skills.clone());
         self.users = Some(handles.users.clone());
@@ -501,6 +505,15 @@ impl RuntimeBuilder {
     /// Swaps the scheduler fire-claim store (default: fs-backed).
     pub fn with_schedule_fires(mut self, schedule_fires: Arc<dyn ScheduleFireStore>) -> Self {
         self.schedule_fires = Some(schedule_fires);
+        self
+    }
+
+    /// Swaps the workflow-revision store (default: fs-backed).
+    pub fn with_workflow_revisions(
+        mut self,
+        workflow_revisions: Arc<dyn WorkflowRevisionStore>,
+    ) -> Self {
+        self.workflow_revisions = Some(workflow_revisions);
         self
     }
 
@@ -830,6 +843,7 @@ impl RuntimeBuilder {
                 artifacts: self.artifacts.unwrap_or_else(|| fs_ops.clone()),
                 runs: self.runs.unwrap_or_else(|| fs_ops.clone()),
                 schedule_fires: self.schedule_fires.unwrap_or_else(|| fs_ops.clone()),
+                workflow_revisions: self.workflow_revisions.unwrap_or_else(|| fs_ops.clone()),
                 usage: self.usage.unwrap_or_else(|| fs_ops.clone()),
                 skills: self.skills.unwrap_or_else(|| fs_ops.clone()),
                 users: self.users.unwrap_or_else(|| fs_ops.clone()),

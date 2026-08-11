@@ -159,6 +159,16 @@ CREATE TABLE IF NOT EXISTS run_steps (
     step_json  TEXT NOT NULL,
     PRIMARY KEY (company_id, run_id, step_seq)
 );
+CREATE TABLE IF NOT EXISTS workflow_revisions (
+    company_id    TEXT NOT NULL,
+    id            TEXT NOT NULL,
+    workflow_id   TEXT NOT NULL,
+    revision_json TEXT NOT NULL,
+    created_ms    INTEGER NOT NULL,
+    PRIMARY KEY (company_id, id)
+);
+CREATE INDEX IF NOT EXISTS workflow_revisions_by_workflow
+    ON workflow_revisions (company_id, workflow_id, created_ms);
 CREATE TABLE IF NOT EXISTS usage_samples (
     company_id TEXT NOT NULL,
     seq        INTEGER NOT NULL,
@@ -1637,6 +1647,116 @@ impl crate::ports::artifacts::ArtifactStore for SqliteStore {
 }
 
 // ---------------------------------------------------------------------------
+// WorkflowRevisionStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::workflow_revisions::WorkflowRevisionStore for SqliteStore {
+    async fn push_revision(
+        &self,
+        company: &CompanyId,
+        revision: &crate::ports::workflow_revisions::WorkflowRevisionRecord,
+    ) -> Result<()> {
+        use crate::ports::workflow_revisions::MAX_WORKFLOW_REVISIONS;
+        let json = serde_json::to_string(revision)?;
+        let mut guard = self.conn();
+        // Insert + prune in ONE transaction, so a reader never observes a
+        // 21-deep ring. The prune keeps the newest `MAX` rows for THIS workflow
+        // (by `created_ms DESC, id DESC`, matching `sort_newest_first`) and
+        // deletes the rest — the same shape OpenHuman's `flow_revisions` prune
+        // uses.
+        let tx = guard.transaction().map_err(sql_err)?;
+        tx.execute(
+            "INSERT INTO workflow_revisions (company_id, id, workflow_id, revision_json, created_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                company.as_ref(),
+                revision.id,
+                revision.workflow_id,
+                json,
+                revision.created_at_millis as i64,
+            ],
+        )
+        .map_err(sql_err)?;
+        tx.execute(
+            "DELETE FROM workflow_revisions \
+             WHERE company_id = ?1 AND workflow_id = ?2 AND id NOT IN (\
+                 SELECT id FROM workflow_revisions \
+                 WHERE company_id = ?1 AND workflow_id = ?2 \
+                 ORDER BY created_ms DESC, id DESC LIMIT ?3)",
+            params![
+                company.as_ref(),
+                revision.workflow_id,
+                MAX_WORKFLOW_REVISIONS as i64,
+            ],
+        )
+        .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
+        Ok(())
+    }
+
+    async fn list_revisions(
+        &self,
+        company: &CompanyId,
+        workflow_id: &str,
+    ) -> Result<Vec<crate::ports::workflow_revisions::WorkflowRevisionRecord>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT revision_json FROM workflow_revisions \
+                 WHERE company_id = ?1 AND workflow_id = ?2 \
+                 ORDER BY created_ms DESC, id DESC",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![company.as_ref(), workflow_id], |r| {
+                r.get::<_, String>(0)
+            })
+            .map_err(sql_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(serde_json::from_str(&row.map_err(sql_err)?)?);
+        }
+        Ok(out)
+    }
+
+    async fn get_revision(
+        &self,
+        company: &CompanyId,
+        workflow_id: &str,
+        revision_id: &str,
+    ) -> Result<Option<crate::ports::workflow_revisions::WorkflowRevisionRecord>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT revision_json FROM workflow_revisions \
+                 WHERE company_id = ?1 AND workflow_id = ?2 AND id = ?3",
+            )
+            .map_err(sql_err)?;
+        let mut rows = stmt
+            .query_map(params![company.as_ref(), workflow_id, revision_id], |r| {
+                r.get::<_, String>(0)
+            })
+            .map_err(sql_err)?;
+        match rows.next() {
+            Some(row) => Ok(Some(serde_json::from_str(&row.map_err(sql_err)?)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn delete_revisions(&self, company: &CompanyId, workflow_id: &str) -> Result<u64> {
+        let conn = self.conn();
+        let n = conn
+            .execute(
+                "DELETE FROM workflow_revisions WHERE company_id = ?1 AND workflow_id = ?2",
+                params![company.as_ref(), workflow_id],
+            )
+            .map_err(sql_err)?;
+        Ok(n as u64)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RunStore
 // ---------------------------------------------------------------------------
 
@@ -2383,6 +2503,11 @@ mod test {
     async fn conformance_fact_store() {
         conformance::assert_fact_store(store()).await;
         conformance::assert_artifact_store(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workflow_revision_store() {
+        conformance::assert_workflow_revision_store(store()).await;
     }
 
     #[tokio::test]

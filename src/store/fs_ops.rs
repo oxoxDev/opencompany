@@ -36,6 +36,10 @@ use crate::ports::tasks::{TaskRecord, TaskStore};
 use crate::ports::types::CompanyId;
 use crate::ports::usage::{UsageMeter, UsageSample, retention_cutoff};
 use crate::ports::users::{InviteRecord, UserRecord, UserStore};
+use crate::ports::workflow_revisions::{
+    MAX_WORKFLOW_REVISIONS, WorkflowRevisionRecord, WorkflowRevisionStore,
+    sort_newest_first as sort_revisions_newest_first,
+};
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 use crate::store::fs::{append_line, io_err, path_lock, read_jsonl, read_optional, write_atomic};
 use crate::store::paths::Bundle;
@@ -507,6 +511,93 @@ impl ArtifactStore for FsOps {
         rewrite_jsonl(&path, &artifacts).await?;
         Ok(true)
     }
+}
+
+// ---------------------------------------------------------------------------
+// WorkflowRevisionStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl WorkflowRevisionStore for FsOps {
+    async fn push_revision(
+        &self,
+        company: &CompanyId,
+        revision: &WorkflowRevisionRecord,
+    ) -> Result<()> {
+        let bundle = self.bundle(company);
+        bundle.ensure_dirs().await?;
+        let path = bundle.workflow_revisions_jsonl();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut all = read_jsonl::<WorkflowRevisionRecord>(&path).await?;
+        all.push(revision.clone());
+        // Prune-to-cap for THIS workflow only, inside the lock so a reader never
+        // sees a 21-deep ring. Other workflows' snapshots are untouched.
+        prune_workflow_revisions(&mut all, &revision.workflow_id);
+        rewrite_jsonl(&path, &all).await
+    }
+
+    async fn list_revisions(
+        &self,
+        company: &CompanyId,
+        workflow_id: &str,
+    ) -> Result<Vec<WorkflowRevisionRecord>> {
+        let mut revs =
+            read_jsonl::<WorkflowRevisionRecord>(&self.bundle(company).workflow_revisions_jsonl())
+                .await?;
+        revs.retain(|r| r.workflow_id == workflow_id);
+        sort_revisions_newest_first(&mut revs);
+        Ok(revs)
+    }
+
+    async fn get_revision(
+        &self,
+        company: &CompanyId,
+        workflow_id: &str,
+        revision_id: &str,
+    ) -> Result<Option<WorkflowRevisionRecord>> {
+        let revs =
+            read_jsonl::<WorkflowRevisionRecord>(&self.bundle(company).workflow_revisions_jsonl())
+                .await?;
+        Ok(revs
+            .into_iter()
+            .find(|r| r.workflow_id == workflow_id && r.id == revision_id))
+    }
+
+    async fn delete_revisions(&self, company: &CompanyId, workflow_id: &str) -> Result<u64> {
+        let path = self.bundle(company).workflow_revisions_jsonl();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut revs = read_jsonl::<WorkflowRevisionRecord>(&path).await?;
+        let before = revs.len();
+        revs.retain(|r| r.workflow_id != workflow_id);
+        let removed = (before - revs.len()) as u64;
+        if removed > 0 {
+            rewrite_jsonl(&path, &revs).await?;
+        }
+        Ok(removed)
+    }
+}
+
+/// Trims `all` so the workflow named by `workflow_id` keeps at most
+/// [`MAX_WORKFLOW_REVISIONS`] of its newest snapshots, leaving every other
+/// workflow's rows in place and in their original file order.
+fn prune_workflow_revisions(all: &mut Vec<WorkflowRevisionRecord>, workflow_id: &str) {
+    let mut mine: Vec<WorkflowRevisionRecord> = all
+        .iter()
+        .filter(|r| r.workflow_id == workflow_id)
+        .cloned()
+        .collect();
+    if mine.len() <= MAX_WORKFLOW_REVISIONS {
+        return;
+    }
+    sort_revisions_newest_first(&mut mine);
+    let keep: HashSet<String> = mine
+        .into_iter()
+        .take(MAX_WORKFLOW_REVISIONS)
+        .map(|r| r.id)
+        .collect();
+    all.retain(|r| r.workflow_id != workflow_id || keep.contains(&r.id));
 }
 
 // ---------------------------------------------------------------------------
@@ -1281,6 +1372,13 @@ mod test {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();
         conformance::assert_run_store(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workflow_revision_store() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_workflow_revision_store(Arc::new(FsOps::new(&root))).await;
     }
 
     #[tokio::test]

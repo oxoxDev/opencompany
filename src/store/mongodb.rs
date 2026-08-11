@@ -146,7 +146,7 @@ impl MongoStore {
         // Not every index can be unique: a user holds many sessions, and an
         // address may have several login codes over time.
         let nonunique = |keys: Document| IndexModel::builder().keys(keys).build();
-        let plans: [(&str, IndexModel); 28] = [
+        let plans: [(&str, IndexModel); 30] = [
             ("companies", unique(doc! {"company_id": 1})),
             ("ledger", unique(doc! {"company_id": 1, "idx": 1})),
             ("events", unique(doc! {"company_id": 1, "seq": 1})),
@@ -199,6 +199,16 @@ impl MongoStore {
             (
                 "run_steps",
                 unique(doc! {"company_id": 1, "run_id": 1, "step_seq": 1}),
+            ),
+            // Issue #274: one row per snapshot; the compound index backs both the
+            // per-workflow list (newest-first) and the prune.
+            (
+                "workflow_revisions",
+                unique(doc! {"company_id": 1, "revision_id": 1}),
+            ),
+            (
+                "workflow_revisions",
+                nonunique(doc! {"company_id": 1, "workflow_id": 1, "created_ms": -1}),
             ),
         ];
         for (name, index) in plans {
@@ -1468,6 +1478,108 @@ impl crate::ports::artifacts::ArtifactStore for MongoStore {
 }
 
 // ---------------------------------------------------------------------------
+// WorkflowRevisionStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::workflow_revisions::WorkflowRevisionStore for MongoStore {
+    async fn push_revision(
+        &self,
+        company: &CompanyId,
+        revision: &crate::ports::workflow_revisions::WorkflowRevisionRecord,
+    ) -> Result<()> {
+        use crate::ports::workflow_revisions::MAX_WORKFLOW_REVISIONS;
+        let coll = self.collection("workflow_revisions");
+        coll.insert_one(doc! {
+            "company_id": company.as_ref(),
+            "revision_id": &revision.id,
+            "workflow_id": &revision.workflow_id,
+            "revision_json": serde_json::to_string(revision)?,
+            "created_ms": revision.created_at_millis as i64,
+        })
+        .await
+        .map_err(mongo_err)?;
+
+        // Prune to the cap: collect this workflow's revision ids newest-first and
+        // delete everything past `MAX`. Two statements rather than one because
+        // MongoDB has no "delete all but the newest N" operator; the compound
+        // index keeps the read cheap, and an interleaved second push only ever
+        // trims further, never resurrects a pruned row.
+        let mut cursor = coll
+            .find(doc! {"company_id": company.as_ref(), "workflow_id": &revision.workflow_id})
+            .sort(doc! {"created_ms": -1, "revision_id": -1})
+            .await
+            .map_err(mongo_err)?;
+        let mut ids: Vec<String> = Vec::new();
+        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+            ids.push(get_str(&doc, "revision_id")?);
+        }
+        if ids.len() > MAX_WORKFLOW_REVISIONS {
+            let stale: Vec<&String> = ids.iter().skip(MAX_WORKFLOW_REVISIONS).collect();
+            coll.delete_many(doc! {
+                "company_id": company.as_ref(),
+                "workflow_id": &revision.workflow_id,
+                "revision_id": {"$in": stale},
+            })
+            .await
+            .map_err(mongo_err)?;
+        }
+        Ok(())
+    }
+
+    async fn list_revisions(
+        &self,
+        company: &CompanyId,
+        workflow_id: &str,
+    ) -> Result<Vec<crate::ports::workflow_revisions::WorkflowRevisionRecord>> {
+        let mut cursor = self
+            .collection("workflow_revisions")
+            .find(doc! {"company_id": company.as_ref(), "workflow_id": workflow_id})
+            .sort(doc! {"created_ms": -1, "revision_id": -1})
+            .await
+            .map_err(mongo_err)?;
+        let mut out = Vec::new();
+        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+            out.push(serde_json::from_str(&get_str(&doc, "revision_json")?)?);
+        }
+        Ok(out)
+    }
+
+    async fn get_revision(
+        &self,
+        company: &CompanyId,
+        workflow_id: &str,
+        revision_id: &str,
+    ) -> Result<Option<crate::ports::workflow_revisions::WorkflowRevisionRecord>> {
+        let found = self
+            .collection("workflow_revisions")
+            .find_one(doc! {
+                "company_id": company.as_ref(),
+                "workflow_id": workflow_id,
+                "revision_id": revision_id,
+            })
+            .await
+            .map_err(mongo_err)?;
+        match found {
+            Some(doc) => Ok(Some(serde_json::from_str(&get_str(
+                &doc,
+                "revision_json",
+            )?)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn delete_revisions(&self, company: &CompanyId, workflow_id: &str) -> Result<u64> {
+        let res = self
+            .collection("workflow_revisions")
+            .delete_many(doc! {"company_id": company.as_ref(), "workflow_id": workflow_id})
+            .await
+            .map_err(mongo_err)?;
+        Ok(res.deleted_count)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RunStore
 // ---------------------------------------------------------------------------
 
@@ -2335,6 +2447,13 @@ mod test {
     async fn conformance_run_store() {
         let Some(s) = store().await else { return };
         conformance::assert_run_store(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workflow_revision_store() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workflow_revision_store(s.clone()).await;
         drop_db(&s).await;
     }
 

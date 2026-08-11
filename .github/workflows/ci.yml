@@ -24,12 +24,91 @@ permissions:
 # these runners have no vendored registry — they must reach crates.io to
 # download the crates the lock names. Pinning *resolution* and forbidding
 # *downloads* are separate properties; only the first is wanted here.
+
+# Issue #590. Every `uses:` in every workflow in this repo names a full commit
+# SHA with the resolved version in a trailing comment, never a tag. A tag is a
+# pointer its owner can move at any time, so a tag reference executes whatever
+# the tag names at run time rather than the code that was reviewed when the job
+# last passed — on our runners, with this workflow's token and secrets. It is
+# the property `--locked` buys the cargo steps above, applied to the actions.
+#
+# `actions/*` ARE PINNED TOO, deliberately. First-party GitHub actions carry
+# less risk than community ones, but the tag mechanics are identical: `v7` is a
+# moving pointer that GitHub itself repoints on every patch release. The
+# alternative rule — "pin community actions, trust first-party" — makes every
+# future reviewer classify an action's owner correctly, and the middle of that
+# distribution is exactly where the call is hardest: `aws-actions/*` and
+# `docker/*` in the deploy workflow are vendor orgs, neither GitHub nor a lone
+# maintainer. "Every `uses:` is a 40-hex SHA" is a rule a reader, a reviewer or
+# a grep can check without knowing who owns what, which is why it is the rule
+# here. The cost is bumps, and bumps are answered below.
+#
+# `dtolnay/rust-toolchain` call sites pass `toolchain:` EXPLICITLY. Under
+# `@stable` the REF made that choice — dtolnay keeps a branch per toolchain,
+# each with its own `action.yml` default. Pinned to a SHA the ref no longer
+# expresses the selection to a reader (verified: at the SHA used below the
+# default is still `stable`, so a bare pin behaves identically today), and a
+# future re-pin copied from the `nightly` branch would swap compilers with
+# nothing in the diff to show it. The input says out loud what the ref used to.
+# That pin is a BRANCH head rather than a release tag — upstream publishes one
+# `v1` tag, on a lineage a year behind `stable` — so it is the one pin here
+# Dependabot is unlikely to bump. Re-resolve it from the `stable` branch by
+# hand; never copy a SHA from another repo or another toolchain branch.
+#
+# Pins rot: an unbumped pin is a frozen, eventually-unpatched action, which
+# trades one supply-chain risk for another. The `github-actions` ecosystem entry
+# in `.github/dependabot.yml` is the other half of this — it turns each upstream
+# release into a reviewable PR that moves the SHA and its version comment
+# together, which is the point of pinning in the first place.
 jobs:
+  # The header above states an invariant. This job is what makes it one.
+  #
+  # A comment is a guard only for people who read it, and the evidence that
+  # this one is not enough arrived before the sweep even merged: the `Desktop`
+  # job below was written against the pre-sweep file and landed with three
+  # unpinned references while this branch was open. The next such job will be
+  # written the same way. A grep is the cheapest thing that says no.
+  #
+  # Deliberately dumb and deliberately not a third-party action — a pinning
+  # gate that itself resolves an action at run time would be circular. It reads
+  # every `uses:` line in every workflow and requires a 40-hex SHA. It cannot
+  # tell a good SHA from a bad one; the version comment beside it is for
+  # humans, and Dependabot is what keeps it honest.
+  actions-pinned:
+    name: Actions pinned
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Every `uses:` names a commit SHA
+        run: |
+          set -euo pipefail
+          # Match the `uses:` value only, ignoring prose that mentions "uses:"
+          # inside a comment. Anchored to the step form: optional list dash,
+          # the key, then the reference.
+          unpinned=$(grep -rnE '^[[:space:]]*-?[[:space:]]*uses:' .github/workflows/ \
+            | grep -vE 'uses:[[:space:]]*[^@]+@[0-9a-f]{40}([[:space:]]|$|#)' || true)
+          if [ -n "$unpinned" ]; then
+            echo "::error title=Unpinned action::A \`uses:\` reference names a tag or branch rather than a 40-hex commit SHA. A tag is a pointer its owner can move, so the job would run whatever it names at run time. Resolve it with: gh api repos/<owner>/<action>/commits/<tag> --jq .sha — then record the precise version in a trailing comment." >&2
+            echo "$unpinned" >&2
+            exit 1
+          fi
+          count=$(grep -rhcE '^[[:space:]]*-?[[:space:]]*uses:' .github/workflows/ | paste -sd+ - | bc)
+          # Zero would pass the check above while asserting nothing — the
+          # failure mode issue #555 exists to remember.
+          if [ "$count" -eq 0 ]; then
+            echo "::error title=Pin check matched nothing::The grep selected zero \`uses:\` lines, so this job is green while checking nothing. The pattern or the workflow layout changed." >&2
+            exit 1
+          fi
+          echo "$count \`uses:\` references, all pinned to a commit SHA."
+
   rust:
     name: Rust
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           submodules: true
@@ -104,8 +183,9 @@ jobs:
             echo "::warning title=Vendored openhuman drift::pin $pin is $behind commits behind openhuman main. Past ~25 the catch-up stops being a pointer move — see issue #499, where it reached 102 and the reorg in between turned the bump into a migration."
           fi
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
       # Issue #251. `--locked` on the compiling steps already fails a stale
@@ -182,7 +262,7 @@ jobs:
         run: cargo build --locked --bin opencompany
 
       - name: Upload the host binary
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: opencompany-debug-binary
           path: target/debug/opencompany
@@ -263,7 +343,7 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           submodules: true
@@ -281,29 +361,6 @@ jobs:
           git -C vendor/openhuman/vendor/tinycortex submodule update --init --depth 1 \
             vendor/tinyagents
 
-      # Pinned to commit SHAs, while the sibling jobs above use the mutable
-      # `@stable` and `@v2` tags. A tag is a pointer its owner can move, and
-      # whatever it is moved to runs here with this workflow's token — so the
-      # version this repo audited is not necessarily the version it executes.
-      #
-      # THE INCONSISTENCY IS DELIBERATE, NOT AN OVERSIGHT. This job pins because
-      # it is the one being added; `rust`, `rust-gated` and the console jobs are
-      # left alone because a CI-lane PR is the wrong vehicle for a repo-wide
-      # supply-chain change, and burying it under the MongoDB work would make
-      # both harder to review. It is tracked separately. So do NOT reconcile
-      # this by unpinning here — reconcile it by pinning the others.
-      #
-      # Pinning ONE job is a marker and a directional improvement, not security:
-      # every job in this workflow shares a runner pool and the same secrets, so
-      # an unpinned sibling is still the weakest link until they all move.
-      #
-      # `toolchain: stable` is passed EXPLICITLY. Under `@stable` the REF made
-      # that choice — dtolnay keeps a branch per toolchain, each with its own
-      # `action.yml` default (verified: at the SHA below the default is indeed
-      # `stable`, and that commit is the head of the `stable` branch). A SHA no
-      # longer expresses the selection to a reader, and a future re-pin copied
-      # from the `nightly` branch would silently swap compilers with nothing in
-      # the diff to show it. The input says out loud what the ref used to.
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: stable
@@ -375,7 +432,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           submodules: true
@@ -412,14 +469,12 @@ jobs:
 
       # clippy only: `rustfmt` is feature-independent, so formatting stays fully
       # covered by the `rust` job and re-running it here would buy nothing.
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
+          toolchain: stable
           components: clippy
 
-      # Pinned to a commit, not the `v2` tag: a tag can be repointed by whoever
-      # owns the action, and whatever it then resolves to runs inside this
-      # workflow. This is v2.9.2. Bump it deliberately.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # Steps are ordered to fail fast and cheap: a compile break (the `E0062`
       # class of bug that motivated this job) surfaces before the lint pass
@@ -615,7 +670,7 @@ jobs:
         run: cargo build --locked --features openhuman,tinycortex,mcp --bin opencompany
 
       - name: Upload the gated host binary
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: opencompany-gated-binary
           path: target/debug/opencompany
@@ -644,7 +699,7 @@ jobs:
     # in ten minutes instead of burning the runner's six-hour default.
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           # No `submodules` — unlike the Rust jobs this one resolves no vendored
@@ -654,7 +709,7 @@ jobs:
       # `FROM node:22-slim`. CI must compile on the version that produces the
       # artifact; bump both together or this job stops being evidence for the
       # thing that deploys.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -749,14 +804,14 @@ jobs:
     # than burning the runner's six-hour default.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           # No `submodules`, deliberately. The binary arrives prebuilt from the
           # `rust` job and nothing here resolves a cargo manifest, so the large
           # `vendor/openhuman` checkout would be pure cost.
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -768,7 +823,7 @@ jobs:
         working-directory: frontend
 
       - name: Download the host binary
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: opencompany-debug-binary
           path: target/debug
@@ -799,7 +854,7 @@ jobs:
       # this is what makes them reachable from the run summary.
       - name: Upload failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: playwright-failures
           path: frontend/test-results/
@@ -844,13 +899,13 @@ jobs:
     # a real agent turn rather than being answered by the offline echo brain.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           # No `submodules`, for the same reason as the lane above: the binary
           # arrives prebuilt and nothing here resolves a cargo manifest.
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -860,7 +915,7 @@ jobs:
         working-directory: frontend
 
       - name: Download the gated host binary
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: opencompany-gated-binary
           path: target/debug
@@ -887,7 +942,7 @@ jobs:
 
       - name: Upload failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: playwright-live-brain-failures
           path: frontend/test-results/
@@ -912,7 +967,7 @@ jobs:
     # dependency. The cap is a wedged-runner backstop, not a target.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           submodules: true
@@ -939,7 +994,7 @@ jobs:
             libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
             librsvg2-dev libsoup-3.0-dev
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -952,10 +1007,7 @@ jobs:
       - run: npm run build
         working-directory: frontend
 
-      # Pinned to a commit, not the `v2` tag: a tag can be repointed by whoever
-      # owns the action, and whatever it then resolves to runs inside this
-      # workflow. This is v2.9.2. Bump it deliberately.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri
 

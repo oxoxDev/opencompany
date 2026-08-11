@@ -75,13 +75,15 @@ pub use workflow_file::{
 // Crate-internal only: the workflow creator (issue #69) builds a `RawWorkflow`
 // from its request body, renders it to TOML, and re-parses it through
 // `parse_workflow` above for validation before writing to disk.
-pub(crate) use workflow_file::{RawEdge, RawNode, RawWorkflow, render_workflow};
+pub(crate) use workflow_file::{
+    RawEdge, RawNode, RawWorkflow, raw_workflow_from_toml, render_workflow,
+};
 // Crate-internal only: the shared validated-persist core (issue #112) both the
 // REST `POST …/workflows` route and the orchestrator `create_workflow` tool run.
 // Ungated: the REST route is in the default build, so gating this behind
 // `openhuman` is what let the two surfaces drift apart (issue #168).
 pub(crate) use workflow_create::{
-    create_company_workflow, delete_company_workflow, seed_file_exists,
+    create_company_workflow, delete_company_workflow, rollback_company_workflow, seed_file_exists,
     set_company_workflow_enabled, update_company_workflow, workflow_version,
 };
 pub use workspace_seed::{NodeKind, SeedNode, extract_wikilinks, walk_workspace};

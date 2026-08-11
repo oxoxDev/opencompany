@@ -570,6 +570,87 @@ export function setWorkflowEnabled(
 }
 
 /**
+ * One entry in a workflow's edit history (issue #274) — **metadata only**.
+ *
+ * The graph body is deliberately absent: the history list is a chooser, and the
+ * body arrives (and is applied to the canvas) only when
+ * {@link restoreWorkflowRevision} actually restores one. `version` is the same
+ * opaque token {@link getWorkflow} hands out, so the console can tell which
+ * snapshot matches the graph it currently holds.
+ */
+export interface WorkflowRevision {
+  /** Stable id of the snapshot, used to address it for a restore. */
+  id: string;
+  /** The workflow's display name at the moment the snapshot was captured. */
+  name: string;
+  /** The opaque version token of the snapshotted body. Never parse it. */
+  version: string;
+  /** Epoch-millis the snapshot was captured. */
+  createdAtMillis: number;
+}
+
+/** The `GET …/workflows/{wid}/revisions` response. */
+interface WorkflowRevisionsResponse {
+  revisions: WorkflowRevision[];
+}
+
+/**
+ * Lists one workflow's edit history (issue #274), **newest first**.
+ *
+ * Each `PUT` that actually changed the graph left the prior body here, bounded
+ * to the most recent 20. A workflow that was never edited — or a seed-defined
+ * one that cannot be edited from the console — resolves to an empty list rather
+ * than an error: "no history" is a normal state the History panel renders as
+ * empty, not a failure.
+ *
+ * Returns metadata only (see {@link WorkflowRevision}); the graph body is
+ * fetched by {@link restoreWorkflowRevision} when an operator picks one.
+ */
+export async function listWorkflowRevisions(
+  client: OpenCompanyClient,
+  company: string | null,
+  wid: string,
+): Promise<WorkflowRevision[]> {
+  const res = await client.get<WorkflowRevisionsResponse>(
+    `${client.scopeFor(company)}/workflows/${encodeURIComponent(wid)}/revisions`,
+  );
+  return res.revisions;
+}
+
+/**
+ * Restores a workflow to one of its captured revisions (issue #274), returning
+ * the restored graph with a **fresh** `version`.
+ *
+ * A restore is an ordinary edit whose new body is an old one, so it inherits
+ * everything {@link updateWorkflow} guarantees: the revision is re-validated
+ * against the *current* company (a snapshot naming a since-removed teammate is a
+ * `400`, not a broken restore), the body it replaces is itself snapshotted (so a
+ * restore is undoable), and a restored schedule lands **switched off** pending
+ * review (issue #276) — read `enabled` on the result to reflect that.
+ *
+ * Pass `expectedVersion` — the `version` of the graph the operator was looking
+ * at — to make the restore conditional. On a `409` the graph moved underneath
+ * them: **reload and let them re-choose, do not retry** without the token, which
+ * is the silent-overwrite the guard exists to prevent. Other rejections carry
+ * the host's prosumer-language message: `404` for an unknown workflow or
+ * revision, `409` for a source-defined / body-less workflow or a name collision.
+ */
+export function restoreWorkflowRevision(
+  client: OpenCompanyClient,
+  company: string | null,
+  wid: string,
+  revisionId: string,
+  expectedVersion?: string,
+): Promise<WorkflowGraph> {
+  return client.post<WorkflowGraph>(
+    `${client.scopeFor(company)}/workflows/${encodeURIComponent(wid)}/revisions/${encodeURIComponent(
+      revisionId,
+    )}/restore`,
+    expectedVersion ? { expectedVersion } : {},
+  );
+}
+
+/**
  * The node kinds the form creator's palette offers.
  *
  * The first six author from a bare form — `trigger` starts the graph, `agent`

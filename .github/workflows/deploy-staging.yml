@@ -16,6 +16,14 @@
 # No PAT is needed: this repo and every crate the build compiles
 # (openhuman and its nested vendor graph) are public, so the default
 # GITHUB_TOKEN clones them all.
+#
+# Issue #590. Every `uses:` below is a full commit SHA with the resolved version
+# in a trailing comment — `actions/*` included, no exemptions. The rationale is
+# at the top of `ci.yml`; it applies here with more force than there, because
+# this job assumes an AWS role that can push to ECR and loads an SSH key trusted
+# by root on the staging node. An action resolved from a moved tag would run
+# inside that step's environment. Bumps arrive as Dependabot PRs; re-resolve any
+# hand edit with `gh api repos/<owner>/<action>/commits/<tag> --jq .sha`.
 name: Deploy tenant image to staging
 
 on:
@@ -66,7 +74,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: false
 
@@ -80,21 +88,21 @@ jobs:
         run: git submodule update --init --recursive vendor/openhuman vendor/tinyagents
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
         id: ecr-login
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2.1.6
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Build and push image to ECR
         id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           build-args: |
@@ -107,7 +115,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Setup SSH
-        uses: webfactory/ssh-agent@v0.10.0
+        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 

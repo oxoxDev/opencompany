@@ -37,6 +37,7 @@ event vocabulary those traits carry moved to [`events.md`](events.md)
 | `SkillStateStore` | [ports-console.md](ports-console.md#skillstatestore) | installed-skill state overlay |
 | `InboxStore` | [ports-console.md](ports-console.md#inboxstore) | per-teammate email inboxes |
 | `RunStore` | [ports-runs.md](ports-runs.md#runstore) | one attempt at a task, and its trace |
+| `WorkflowRevisionStore` | [`src/ports/workflow_revisions.rs`](../../../src/ports/workflow_revisions.rs) | a bounded per-workflow edit-history ring for rollback (issue #274) |
 
 ## Assembly
 
@@ -74,3 +75,28 @@ the multi-tenant platform case with the same type.
 | `SecretStore` | fs (encrypted at rest) | OS keychain, operator-supplied |
 | `TaskStore`, `WorkspaceStore`, `FactStore`, `UsageMeter`, `SkillStateStore`, `InboxStore` | fs bundle | sqlite, mongodb |
 | `UserStore`, `SessionStore`, `LoginCodeStore` | fs bundle | sqlite, mongodb |
+| `ArtifactStore`, `RunStore`, `WorkflowRevisionStore` | fs bundle (JSONL) | sqlite, mongodb |
+
+### `WorkflowRevisionStore` (issue #274)
+
+A workflow's overlay body is replaced whole on every `PUT …/workflows/{wid}`.
+This port keeps the graph each edit replaced, so an edit that drops a node or
+mangles a cron is recoverable. It is its **own** store rather than a field on
+`CompanyRecord` because the record is loaded and saved whole on every write — a
+snapshot ring riding that hot path would bloat every unrelated company save.
+
+- **Capture** happens inside `update_company_workflow`, under the per-company
+  write lock, immediately before the overlay body is overwritten and **before**
+  the record save — the one race-free instant, and push-first so a failed push
+  loses nothing. A byte-identical re-save captures nothing.
+- **Bounded** to `MAX_WORKFLOW_REVISIONS` (20) per workflow; the prune rides the
+  push, atomically where the backend allows.
+- **Rollback** (`rollback_company_workflow`) restores a snapshot *through the
+  ordinary update path*, so it re-validates against the current record, is itself
+  undoable, honours the version token, and inherits the #276 disarm.
+- **Ids are minted**, not content hashes: the workflow's version token is already
+  a content hash, so an A→B→A edit would otherwise collide two distinct
+  snapshots.
+- Routes: `GET …/workflows/{wid}/revisions` (metadata only — no graph bodies),
+  `POST …/workflows/{wid}/revisions/{rev}/restore`. A workflow delete cascades
+  its revisions away.

@@ -3,6 +3,11 @@
 # statefulset status, node pressure, and (optionally) a wake that scales the
 # tenant to 1 and captures the booting pod's state + logs before it dies.
 # Output is redacted for common credential shapes before it reaches the run log.
+#
+# Issue #590. The single `uses:` below is a full commit SHA with the resolved
+# version in a trailing comment; rationale at the top of `ci.yml`. "Read-only"
+# describes what the SSH session does, not what the action could do — the step
+# is handed a key trusted by root on the staging node either way.
 name: Diagnose tenant (read-only)
 
 on:
@@ -25,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Setup SSH
-        uses: webfactory/ssh-agent@v0.10.0
+        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 

@@ -346,6 +346,22 @@ pub(crate) fn render_workflow(raw: &RawWorkflow) -> Result<String> {
     })
 }
 
+/// Parses stored workflow TOML back into an editable [`RawWorkflow`] draft — the
+/// inverse of [`render_workflow`], and the seam a rollback (issue #274) uses to
+/// re-feed a captured revision through the ordinary update path.
+///
+/// `RawWorkflow` is the same serde shape both directions (it is what
+/// [`render_workflow`] emits and what [`parse_workflow`] validates), so a body
+/// that was persisted through the create/update path round-trips here verbatim.
+/// A parse failure is an [`InvalidRequest`](OpenCompanyError::InvalidRequest)
+/// (400) rather than the 500 a malformed on-disk file gets, because the only
+/// caller feeds it straight back into the validating update path.
+pub(crate) fn raw_workflow_from_toml(toml_src: &str) -> Result<RawWorkflow> {
+    toml::from_str(toml_src).map_err(|err| {
+        OpenCompanyError::InvalidRequest(format!("workflow revision is unreadable: {err}"))
+    })
+}
+
 /// Parses one workflow graph from TOML source, validating it in full.
 ///
 /// Unknown keys are tolerated. On a validation failure every problem is

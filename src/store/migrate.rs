@@ -124,6 +124,7 @@ const BUNDLE_FILES: &[&str] = &[
     "tasks.json",
     "facts.jsonl",
     "artifacts.jsonl",
+    "workflow-revisions.jsonl",
     "users.json",
     "user-invites.json",
     "user-sessions.json",

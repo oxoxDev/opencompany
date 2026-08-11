@@ -299,6 +299,16 @@ impl Bundle {
         self.dir.join("artifacts.jsonl")
     }
 
+    /// Path to the per-workflow revision ring (`workflow-revisions.jsonl`, one
+    /// [`WorkflowRevisionRecord`] per line, append-then-prune to the cap; issue
+    /// #274). Not last-write-wins: every distinct snapshot is its own immutable
+    /// line, keyed by its minted `id`.
+    ///
+    /// [`WorkflowRevisionRecord`]: crate::ports::workflow_revisions::WorkflowRevisionRecord
+    pub fn workflow_revisions_jsonl(&self) -> PathBuf {
+        self.dir.join("workflow-revisions.jsonl")
+    }
+
     /// Path to the task-run log (`runs.jsonl`, one [`RunRecord`] per line;
     /// last-write-wins per id).
     ///

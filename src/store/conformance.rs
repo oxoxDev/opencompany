@@ -34,6 +34,9 @@ use crate::ports::types::{
 };
 use crate::ports::usage::{SampleKind, UsageMeter, UsageSample};
 use crate::ports::users::{InviteRecord, UserRecord, UserRole, UserStatus, UserStore};
+use crate::ports::workflow_revisions::{
+    MAX_WORKFLOW_REVISIONS, WorkflowRevisionRecord, WorkflowRevisionStore,
+};
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 
 /// A minimal valid manifest used to seed [`CompanyRecord`]s in the suite.
@@ -1573,6 +1576,198 @@ pub async fn assert_artifact_store(artifacts: Arc<dyn ArtifactStore>) {
     assert!(!artifacts.delete(&alpha, "a1").await.unwrap());
     assert_eq!(artifacts.list(&alpha, None).await.unwrap().len(), 3);
     assert_eq!(artifacts.list(&beta, None).await.unwrap().len(), 1);
+}
+
+/// Asserts the [`WorkflowRevisionStore`] contract (issue #274): per-company and
+/// per-workflow isolation, newest-first order, prune-to-cap inside the push, a
+/// verbatim body round-trip, and the delete cascade.
+///
+/// The prune assertion is the load-bearing one: a backend that grew the ring
+/// unbounded, or that pruned the *newest* rows instead of the oldest, would
+/// still pass a naive "push then read back" check while defeating the whole
+/// point of a bounded history.
+pub async fn assert_workflow_revision_store(revisions: Arc<dyn WorkflowRevisionStore>) {
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    // A helper that pins the capture time, so ordering is asserted against a
+    // known sequence rather than the wall clock.
+    let rev = |workflow_id: &str, name: &str, toml: &str, at: u64| {
+        let mut r = WorkflowRevisionRecord::new(workflow_id, name, toml, at);
+        // Force a distinct, ordered id so the tie-break is deterministic even
+        // when two share a millisecond.
+        r.id = format!("{workflow_id}-{at:04}");
+        r
+    };
+
+    // Two revisions of `greeter`, plus one of a sibling workflow, plus one under
+    // company beta that must never leak into alpha.
+    let first = rev(
+        "greeter",
+        "Greeter v1",
+        "id = \"greeter\"\nname = \"Greeter v1\"",
+        10,
+    );
+    let second = rev(
+        "greeter",
+        "Greeter v2",
+        "id = \"greeter\"\nname = \"Greeter v2\"",
+        20,
+    );
+    revisions.push_revision(&alpha, &first).await.unwrap();
+    revisions.push_revision(&alpha, &second).await.unwrap();
+    revisions
+        .push_revision(&alpha, &rev("digest", "Digest", "id = \"digest\"", 15))
+        .await
+        .unwrap();
+    revisions
+        .push_revision(&beta, &rev("greeter", "Other", "id = \"greeter\"", 99))
+        .await
+        .unwrap();
+
+    // Isolation by company AND by workflow.
+    let alpha_greeter = revisions.list_revisions(&alpha, "greeter").await.unwrap();
+    assert_eq!(alpha_greeter.len(), 2, "only greeter's two snapshots");
+    assert_eq!(
+        revisions
+            .list_revisions(&alpha, "digest")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        revisions
+            .list_revisions(&beta, "greeter")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Newest first, and the body round-trips verbatim.
+    assert_eq!(alpha_greeter[0].id, second.id, "newest snapshot leads");
+    assert_eq!(alpha_greeter[1].id, first.id);
+    assert_eq!(
+        alpha_greeter[0].toml, second.toml,
+        "the captured TOML must survive byte-for-byte"
+    );
+
+    // get_revision is workflow-scoped: greeter's id is invisible under digest.
+    assert!(
+        revisions
+            .get_revision(&alpha, "greeter", &first.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        revisions
+            .get_revision(&alpha, "digest", &first.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "a revision id must not resolve under the wrong workflow"
+    );
+    assert!(
+        revisions
+            .get_revision(&alpha, "greeter", "nope")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Prune-to-cap: push MAX+5 distinct snapshots of a fresh workflow and prove
+    // the ring holds exactly MAX, keeping the newest and dropping the oldest.
+    for i in 0..(MAX_WORKFLOW_REVISIONS as u64 + 5) {
+        revisions
+            .push_revision(
+                &alpha,
+                &rev(
+                    "ring",
+                    &format!("v{i}"),
+                    &format!("id = \"ring\" # {i}"),
+                    1000 + i,
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    let ring = revisions.list_revisions(&alpha, "ring").await.unwrap();
+    assert_eq!(
+        ring.len(),
+        MAX_WORKFLOW_REVISIONS,
+        "the ring must be capped at MAX_WORKFLOW_REVISIONS"
+    );
+    assert_eq!(
+        ring[0].created_at_millis,
+        1000 + MAX_WORKFLOW_REVISIONS as u64 + 4,
+        "the newest snapshot survives the prune"
+    );
+    assert_eq!(
+        ring[ring.len() - 1].created_at_millis,
+        1000 + 5,
+        "the oldest kept is exactly MAX back from the newest — older ones pruned"
+    );
+
+    // The prune must not have touched the sibling workflows or company beta.
+    assert_eq!(
+        revisions
+            .list_revisions(&alpha, "greeter")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        revisions
+            .list_revisions(&beta, "greeter")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Delete cascade: drops exactly one workflow's history, reports the count,
+    // and is a no-op the second time.
+    let removed = revisions.delete_revisions(&alpha, "greeter").await.unwrap();
+    assert_eq!(removed, 2, "both greeter snapshots removed");
+    assert!(
+        revisions
+            .list_revisions(&alpha, "greeter")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        revisions.delete_revisions(&alpha, "greeter").await.unwrap(),
+        0
+    );
+    // Siblings and beta untouched by the cascade.
+    assert_eq!(
+        revisions
+            .list_revisions(&alpha, "digest")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        revisions
+            .list_revisions(&alpha, "ring")
+            .await
+            .unwrap()
+            .len(),
+        MAX_WORKFLOW_REVISIONS
+    );
+    assert_eq!(
+        revisions
+            .list_revisions(&beta, "greeter")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 /// Asserts the [`FactStore`] contract: isolation, query/kind filtering, upsert,

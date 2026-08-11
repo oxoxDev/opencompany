@@ -4,6 +4,19 @@ updates:
     directory: /
     schedule:
       interval: weekly
+  # Issue #590. This entry predates the SHA pinning sweep, and it is now load
+  # bearing rather than routine: every `uses:` in `.github/workflows/` names a
+  # full commit SHA, and a pin nobody bumps is a frozen, eventually-unpatched
+  # action — the risk pinning was meant to remove, arriving from the other side.
+  # Dependabot understands SHA-pinned actions and moves the SHA and its trailing
+  # version comment together, which is what turns each upstream release into a
+  # reviewable PR. Do not drop this entry while the pins stand.
+  #
+  # `directory: /` is the whole repo for this ecosystem — Dependabot always scans
+  # `.github/workflows/`, so this is not a path that needs widening when a
+  # workflow is added. One pin it will NOT reach is
+  # `dtolnay/rust-toolchain`: that ref is the head of the `stable` branch, not a
+  # release tag, so it has to be re-resolved by hand. See `ci.yml`.
   - package-ecosystem: github-actions
     directory: /
     schedule:
