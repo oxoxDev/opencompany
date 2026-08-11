@@ -5,6 +5,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { listMemory, type MemoryEntry } from "@/api/memory";
 import { listTasks, type Task } from "@/api/tasks";
 import type { DeskDto } from "@/api/types";
+import { getWorkflow, listWorkflows, type WorkflowGraph } from "@/api/workflows";
 import { fromDto, starterTeam, type TeamMember } from "@/lib/team";
 import { adapt, buildMemoryGraph } from "./overview/kg/adapter";
 import { buildKnowledgeGraph } from "./overview/kg/model";
@@ -37,6 +38,8 @@ interface Sources {
   desks: DeskDto[];
   people: Person[];
   memories: MemoryEntry[];
+  /** The company's saved workflow graphs, whole — nodes and edges, not names. */
+  workflows: WorkflowGraph[];
 }
 
 const EMPTY: Sources = {
@@ -45,6 +48,7 @@ const EMPTY: Sources = {
   desks: [],
   people: [],
   memories: [],
+  workflows: [],
 };
 
 /**
@@ -55,12 +59,14 @@ const EMPTY: Sources = {
  * the jobs hang off each pillar, the teammate who does each job sits above it,
  * and their tools are the outer ring.
  *
- * The pillars are **declared**: they are the company's own desks (issue #486),
- * not the keyword-matched guess that used to stand there. So is the outer ring:
- * the tools are the grants the host resolved for each teammate (issue #601),
- * not a deal from the company's catalogue. What is still derived is the
- * workflow templates — there is no flow API. See `DERIVED_NOTICE` in
- * `kg/adapter.ts`; it is the standing caveat on what remains.
+ * Every ring is **declared** now: the pillars are the company's own desks
+ * (issue #486), the outer ring is the grants the host resolved for each
+ * teammate, and the flows are its saved workflow graphs with their own stages
+ * (issue #601). Nothing here is keyword-matched, dealt out or templated.
+ *
+ * The one thing this console decides for itself is which pillar a workflow
+ * hangs off, because the host scopes a flow to the company rather than to a
+ * desk — see `DERIVED_NOTICE` in `kg/adapter.ts`.
  */
 export function Overview({ client, company }: Props) {
   const [sources, setSources] = useState<Sources>(EMPTY);
@@ -68,7 +74,7 @@ export function Overview({ client, company }: Props) {
   useEffect(() => {
     let live = true;
     void (async () => {
-      const [tasks, roster, desks, people, memories] = await Promise.all([
+      const [tasks, roster, desks, people, memories, flowList] = await Promise.all([
         listTasks(client, company).catch(() => [] as Task[]),
         client.listTeam(company).catch(() => null),
         // Ring 1 (issue #486). Best-effort: see `Sources.desks`.
@@ -80,7 +86,32 @@ export function Overview({ client, company }: Props) {
         // surface draws no constellation rather than a seeded one — the graph
         // must never claim the company remembers something it doesn't.
         listMemory(client, company).catch(() => [] as MemoryEntry[]),
+        // Ring 2 (issue #601). Summaries only — see the graph reads below.
+        listWorkflows(client, company).catch(() => []),
       ]);
+      if (!live) return;
+
+      // `listWorkflows` answers with `{id,name,description,editable,enabled}`
+      // and no nodes or edges, so the stages ring needs one graph read per
+      // workflow. That is bounded by how many flows the company has saved — not
+      // an N+1 over the roster — and they go out together.
+      const workflows = await Promise.all(
+        flowList.map((summary) =>
+          getWorkflow(client, company, summary.id).catch(
+            // A name-only entry has no saved graph to fetch (and a read can
+            // simply fail). The company still declares the flow, so it is drawn
+            // with no stages rather than dropped: a flow missing from the wheel
+            // would be a quieter lie than one drawn empty.
+            (): WorkflowGraph => ({
+              id: summary.id,
+              name: summary.name,
+              description: summary.description,
+              nodes: [],
+              edges: [],
+            }),
+          ),
+        ),
+      );
       if (!live) return;
 
       setSources({
@@ -89,6 +120,7 @@ export function Overview({ client, company }: Props) {
         desks,
         people,
         memories,
+        workflows,
       });
     })();
     return () => {
@@ -103,6 +135,7 @@ export function Overview({ client, company }: Props) {
         desks: sources.desks,
         tasks: sources.tasks,
         people: sources.people,
+        workflows: sources.workflows,
         ownedBy,
       }),
     [sources],

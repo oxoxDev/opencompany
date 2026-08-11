@@ -1502,10 +1502,15 @@ export function KnowledgeGraph({
           graph's persistent, low-weight chrome, so it is where an operator
           reading the wheel is already looking to learn how to read it. The
           full sentence lives in the title — the strip is crowded enough
-          without seven kind-labels wrapping around a whole caveat. */}
+          without seven kind-labels wrapping around a whole caveat.
+
+          It used to read "derived data", covering three whole invented rings.
+          Since issue #601 the notice names the one thing left: where a flow
+          sits on the wheel. Departments, tools and stages are the company's own
+          answers now, so claiming otherwise here would understate them. */}
       <span className="flex items-center gap-1 border-l border-os-border pl-3 font-mono text-[9.5px] text-os-dim" title={DERIVED_NOTICE}>
         <Info className="h-3 w-3 shrink-0" strokeWidth={2} />
-        derived data
+        flow placement
       </span>
     </div>
   );

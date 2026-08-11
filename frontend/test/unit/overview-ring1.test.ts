@@ -78,6 +78,9 @@ const BASE = {
   servers: [],
   toolsByServer: {},
   people: [] as HostPerson[],
+  // The company's saved flows (issue #601). None by default: these cases are
+  // about ring 1, and a company with no flows must still draw its desks.
+  workflows: [],
   ownedBy,
 };
 
@@ -192,18 +195,39 @@ describe("nobody is given a position the company did not declare", () => {
 });
 
 describe("the workflow ring survives desks replacing the hardcoded departments", () => {
-  it("hangs one routine off every drawn desk", () => {
-    // The templates used to be pinned to `dept-product`, `dept-engineering` and
-    // friends. Those ids no longer exist, so a template keyed to them matches
-    // no desk and the whole ring vanishes without an error.
-    const { workflows, departments } = adapt({ ...BASE, members: ROSTER, desks: DESKS });
-    expect(workflows).toHaveLength(departments.length);
-    expect(workflows.map((f) => f.departmentId).sort()).toEqual(
-      departments.map((d) => d.id).sort(),
-    );
-    // Desk-scoped ids: two desks dealt the same routine still get two nodes.
-    expect(new Set(workflows.map((f) => f.id)).size).toBe(workflows.length);
-    for (const f of workflows) expect(f.agentIds.length).toBeGreaterThan(0);
+  // This case used to assert "hangs one routine off every drawn desk": one
+  // templated routine was dealt to each desk by position, so the count of flows
+  // was the count of desks and every flow carried an `agentIds` list. Issue #601
+  // deleted the templates — a workflow is one of the company's saved graphs now,
+  // so a company with no saved flows draws no flow ring, and `agentIds` is gone
+  // with the round-robin that consumed it.
+  //
+  // The concern the case was written for still holds and is what is checked
+  // here: when ring 1 changed under it, the flow ring must not silently empty.
+  it("hangs a saved flow off the desk of the teammate it runs through", () => {
+    const { workflows, departments } = adapt({
+      ...BASE,
+      members: ROSTER,
+      desks: DESKS,
+      workflows: [
+        {
+          id: "wf-nightly",
+          name: "Nightly digest",
+          // `hedy` is seated on Engineering by the desk, not by her job title.
+          nodes: [
+            { id: "t", kind: "trigger", name: "22:00 UTC" },
+            { id: "w", kind: "agent", name: "Write it", agent: "hedy" },
+          ],
+          edges: [{ from: "t", to: "w" }],
+        },
+      ],
+    });
+
+    expect(workflows).toHaveLength(1);
+    expect(workflows[0].departmentId).toBe("desk:engineering");
+    // And it landed on a desk that is actually drawn, so the flow is reachable
+    // on the wheel rather than pointing at a pillar nobody built.
+    expect(departments.map((d) => d.id)).toContain(workflows[0].departmentId);
   });
 });
 

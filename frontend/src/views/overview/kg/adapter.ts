@@ -5,14 +5,18 @@
 // ## What is real, and what is not
 //
 // The graph reads `company → department → SOP task → the worker who does it →
-// that worker's tools`. This host serves all but one of those edges:
+// that worker's tools`. Every one of those is a value the host answers for:
 //
-// | Edge                  | Source                             | Real? |
-// |-----------------------|------------------------------------|-------|
-// | task → worker         | `task.assignee` on the board       | yes   |
-// | teammate → department | `GET {scope}/desks`                | yes   |
-// | worker → tools        | its resolved grants (`GET …/team`) | yes   |
-// | department → workflow | nothing (no flow API yet)          | **derived** |
+// | Edge                  | Source                                        |
+// |-----------------------|-----------------------------------------------|
+// | task → worker         | `task.assignee` on the board                  |
+// | teammate → department | the desk that seats it (`GET {scope}/desks`)  |
+// | worker → tools        | its resolved grants (`GET …/team`)            |
+// | workflow → stages     | the saved graph's nodes (`GET …/workflows/…`) |
+// | stage → worker        | the `agent` node's own agent id               |
+//
+// The one thing left that is this console's reading rather than the company's
+// declaration is **where a workflow hangs on the wheel** — see `DERIVED_NOTICE`.
 //
 // Ring 1 used to be invented too: `assignDepartment` keyword-matched a role
 // string into one of five hardcoded buckets, falling back to Operations. It is
@@ -33,25 +37,36 @@
 // constructor the per-agent detail read uses, so the graph and the agent card
 // cannot disagree about who holds what (the rule issue #264 established).
 //
-// One derived edge is left, and it is a placeholder: there is no flow API, so
-// the routines below are templates. `DERIVED_NOTICE` is the standing caveat.
-// When it lands upstream, delete `WORKFLOW_ROUTINES` and read the real value
-// straight through.
+// Workflows were the last invention: `WORKFLOW_ROUTINES` dealt one made-up
+// routine per desk by position, and `model.ts` dealt its stages round-robin
+// across that desk's agents. Both are gone (issue #601). A workflow is one of
+// the company's saved graphs, its stages are that graph's nodes in run order,
+// and a stage hands off to the agent the flow itself names.
 
 import type { Person as HostPerson } from "@/api/auth";
 import type { Task } from "@/api/tasks";
 import type { MemoryEntry } from "@/api/memory";
 import type { DeskDto } from "@/api/types";
+import type { WorkflowGraph } from "@/api/workflows";
 import type { TeamMember } from "@/lib/team";
 import { TASK_COLUMNS } from "@/lib/tasks-sample";
 import type { BrainGraphEdge, BrainGraphNode, MemoryGraph } from "./memory-core";
 import { distillMemoryGraph } from "./memory-core";
 import { isOpen } from "../pulse";
-import type { Agent, Department, Person, SopTask, Workflow } from "./schemas";
+import type { Agent, Department, Person, SopTask, Workflow, WorkflowStage } from "./schemas";
 
-/** Shown wherever the derived structure is on screen. */
+/**
+ * The one caveat left on this surface.
+ *
+ * Everything the graph draws is something the company declared — except which
+ * pillar a workflow hangs off, because the host scopes a flow to the *company*
+ * and nothing links a flow to a desk. It is drawn on the desk of the first
+ * teammate it runs through, which is a real relationship (that teammate really
+ * does perform that stage, and really does sit on that desk) read as a
+ * placement it was never declared to be.
+ */
 export const DERIVED_NOTICE =
-  "Workflows are placeholders — this company doesn't declare them. Departments are its real desks and tools are the grants the host resolved; anyone on no desk is shown unplaced.";
+  "A workflow is drawn on the desk of the first teammate it runs through — the company scopes flows to itself, not to a desk. Everything else on this graph is declared.";
 
 /**
  * The department a worker gets when the company declares no desk for them.
@@ -121,56 +136,64 @@ export function deskOfMember(id: string, desks: DeskDto[]): string {
 }
 
 /**
- * One standing routine per desk.
+ * A saved workflow graph, written out as an ordered list of stages.
  *
- * **Derived, and now visibly so.** The console has no flow API — the Workflows
- * canvas draws a single hard-coded sample — so these are plausible routines
- * rather than anything the company declared. They exist to show the shape a
- * real flow will take on the graph: a desk runs a flow, and the flow passes
- * through several of that desk's agents in turn.
+ * The nodes are sorted into run order (Kahn's algorithm over the graph's own
+ * edges, ties broken by declared order) rather than taken as declared: the file
+ * lists nodes, the edges say what follows what, and a flow read out of order is
+ * a flow described wrongly. A cycle — or a node no edge reaches — cannot be
+ * ordered that way, so anything left over is appended in declared order rather
+ * than dropped.
  *
- * These used to be pinned to the five invented departments by id, which read as
- * if each area had been given its own considered routine. With ring 1 drawn
- * from real desks (issue #486) that pinning is gone: a routine is dealt to a
- * desk **by position**, wrapping when there are more desks than routines. The
- * arbitrariness is the honest part — the console does not know what a desk
- * called "Front of house" actually runs, and pretending otherwise was the
- * dodge. Kept only because deleting them would empty two of the five rings
- * before there is anything to put back; deleting them here is #363's job, not
- * this one's.
+ * `agentId` rides along from the graph's own `agent` nodes, so the "who performs
+ * this stage" edge is the flow's own answer rather than a deal across a desk.
  */
-const WORKFLOW_ROUTINES: { slug: string; name: string; summary: string; stages: string[] }[] = [
-  {
-    slug: "discovery",
-    name: "Discovery loop",
-    summary: "Turn a raw request into a specced, prioritised piece of work.",
-    stages: ["Intake", "Research", "Spec", "Prioritise"],
-  },
-  {
-    slug: "delivery",
-    name: "Ship it",
-    summary: "Take a spec through build, review, and release.",
-    stages: ["Plan", "Build", "Review", "Release"],
-  },
-  {
-    slug: "brand",
-    name: "Make it look right",
-    summary: "Draft, critique, and hand off the visuals for a piece of work.",
-    stages: ["Brief", "Draft", "Critique", "Hand off"],
-  },
-  {
-    slug: "campaign",
-    name: "Campaign run",
-    summary: "Angle to published post, with the numbers read back after.",
-    stages: ["Angle", "Write", "Publish", "Measure"],
-  },
-  {
-    slug: "triage",
-    name: "Inbound triage",
-    summary: "Sort what arrives, answer it, and escalate what needs a person.",
-    stages: ["Receive", "Sort", "Answer", "Escalate"],
-  },
-];
+export function orderStages(graph: Pick<WorkflowGraph, "nodes" | "edges">): WorkflowStage[] {
+  const rank = new Map(graph.nodes.map((n, i) => [n.id, i]));
+  const indegree = new Map(graph.nodes.map((n) => [n.id, 0]));
+  const next = new Map<string, string[]>();
+  // Deduplicated: two edges between the same pair would raise the in-degree
+  // twice and strand the target forever.
+  const seen = new Set<string>();
+  for (const edge of graph.edges) {
+    if (!rank.has(edge.from) || !rank.has(edge.to)) continue;
+    const key = `${edge.from}\u001f${edge.to}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    indegree.set(edge.to, (indegree.get(edge.to) ?? 0) + 1);
+    next.set(edge.from, [...(next.get(edge.from) ?? []), edge.to]);
+  }
+
+  const ready = graph.nodes.filter((n) => indegree.get(n.id) === 0).map((n) => n.id);
+  const order: string[] = [];
+  const placed = new Set<string>();
+  while (ready.length) {
+    // Lowest declared index first, so a fan-out reads in file order and the
+    // same graph always produces the same list.
+    ready.sort((a, b) => (rank.get(a) ?? 0) - (rank.get(b) ?? 0));
+    const id = ready.shift()!;
+    if (placed.has(id)) continue;
+    placed.add(id);
+    order.push(id);
+    for (const to of next.get(id) ?? []) {
+      const left = (indegree.get(to) ?? 0) - 1;
+      indegree.set(to, left);
+      if (left === 0) ready.push(to);
+    }
+  }
+  for (const node of graph.nodes) if (!placed.has(node.id)) order.push(node.id);
+
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  return order.map((id) => {
+    const node = byId.get(id)!;
+    return {
+      name: node.name,
+      // Only an `agent` node names a teammate; every other kind performs no
+      // agent's work and must not be attached to one.
+      ...(node.kind === "agent" && node.agent ? { agentId: node.agent } : {}),
+    };
+  });
+}
 
 // `assignHumanDepartment` was deleted with `assignDepartment` (issue #486),
 // and the reason is worth keeping: it did not merely stay derived, it got
@@ -197,6 +220,13 @@ export interface AdaptInput {
    */
   desks: DeskDto[];
   tasks: Task[];
+  /**
+   * The company's saved workflow graphs, whole — nodes and edges, not just
+   * names. The list read serves summaries only, so the caller fetches each
+   * graph; see `Overview.tsx` for why that is bounded and what a flow with no
+   * saved graph falls back to.
+   */
+  workflows: WorkflowGraph[];
   /** The humans who can sign in to this company. */
   people: HostPerson[];
   /** Matches a board card to a roster member; the one real assignment edge. */
@@ -295,20 +325,29 @@ export function adapt(input: AdaptInput): Adapted {
     tools: [],
   }));
 
-  // A flow only makes sense where its desk has agents to run it, and every
-  // drawn desk has some by construction. The routine is dealt by the desk's
-  // position, wrapping — see `WORKFLOW_ROUTINES` for why that arbitrariness is
-  // deliberate. The id is desk-scoped so two desks sharing a routine still get
-  // two distinct `flow:` nodes.
-  const workflows: Workflow[] = departments.map((d, i) => {
-    const routine = WORKFLOW_ROUTINES[i % WORKFLOW_ROUTINES.length];
+  // Every workflow the company has saved, written out. Placement is the one
+  // reading here (see `DERIVED_NOTICE`): a flow hangs off the desk of the first
+  // teammate it runs through.
+  //
+  // A flow that runs through nobody seated — a pure trigger/HTTP routine, or one
+  // whose agents are all on no desk — comes out `UNPLACED` and therefore is not
+  // drawn, because ring 2 hangs off ring 1 and there is no pillar there. That is
+  // a real flow missing from the wheel, and it is the same trade `#602` already
+  // made for an unplaced teammate's board card just above: the alternative is
+  // asserting a desk the company never tied the flow to. Seat one of its agents
+  // and the flow appears.
+  const deskOfAgent = new Map(agents.map((a) => [a.id, a.departmentId]));
+  const workflows: Workflow[] = input.workflows.map((graph) => {
+    const stages = orderStages(graph);
+    const firstSeated = stages
+      .map((stage) => (stage.agentId ? deskOfAgent.get(stage.agentId) : undefined))
+      .find((desk) => desk !== undefined && desk !== UNPLACED);
     return {
-      id: `${d.id}-${routine.slug}`,
-      departmentId: d.id,
-      name: routine.name,
-      summary: routine.summary,
-      stages: routine.stages,
-      agentIds: agents.filter((a) => a.departmentId === d.id).map((a) => a.id),
+      id: graph.id,
+      departmentId: firstSeated ?? UNPLACED,
+      name: graph.name,
+      summary: graph.description ?? "",
+      stages,
     };
   });
 

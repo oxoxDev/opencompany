@@ -4,8 +4,9 @@
 //
 // The graph, its layout, and its detail cards were written against a five-ring
 // org model — departments, written-out SOP tasks, the one worker who does each,
-// and that worker's tools. This console's host does not serve that model, so
-// `adapter.ts` derives it; these are the types both sides agree on.
+// and that worker's tools. `adapter.ts` maps the host's own shapes (desks,
+// resolved tool grants, saved workflow graphs, board cards) onto it; these are
+// the types both sides agree on.
 
 export type AgentStatus = "active" | "idle" | "paused";
 export type AgentTier = "lead" | "worker";
@@ -41,16 +42,26 @@ export interface Person {
   tools: string[];
 }
 
+/**
+ * One step of a workflow: a node of the company's saved graph.
+ *
+ * `agentId` is set only on the graph's `agent` nodes — the flow itself names
+ * who performs that step, so nothing here has to guess. A `trigger`, an
+ * `http_request` or an `output` node performs no agent's work and carries none.
+ */
+export interface WorkflowStage {
+  name: string;
+  agentId?: string;
+}
+
 export interface Workflow {
   id: string;
   departmentId: string;
   name: string;
   /** One line on what the flow does. */
   summary: string;
-  /** The stage names, in order — the flow written out. */
-  stages: string[];
-  /** Agent ids the flow runs through. */
-  agentIds: string[];
+  /** The stages, in run order — the flow written out. */
+  stages: WorkflowStage[];
 }
 
 export type SopAssigneeKind = "agent" | "person";
