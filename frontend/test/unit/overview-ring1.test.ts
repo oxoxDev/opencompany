@@ -30,7 +30,19 @@ import { ownedBy } from "@/views/overview/pulse";
  */
 
 function member(id: string, role: string, name = id): TeamMember {
-  return { id, name, role, description: "", tone: "a", inboxEnabled: false };
+  // `effectiveTools` and `desks` are what the roster read now carries for every
+  // teammate (issue #601). Empty here on purpose: these cases are about ring 1,
+  // and a teammate holding no grants must still be placed by their desk.
+  return {
+    id,
+    name,
+    role,
+    description: "",
+    tone: "a",
+    inboxEnabled: false,
+    effectiveTools: [],
+    desks: [],
+  };
 }
 
 /**
