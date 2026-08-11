@@ -152,14 +152,12 @@ export function orderStages(graph: Pick<WorkflowGraph, "nodes" | "edges">): Work
   const rank = new Map(graph.nodes.map((n, i) => [n.id, i]));
   const indegree = new Map(graph.nodes.map((n) => [n.id, 0]));
   const next = new Map<string, string[]>();
-  // Deduplicated: two edges between the same pair would raise the in-degree
-  // twice and strand the target forever.
-  const seen = new Set<string>();
+  // A repeated edge needs no special case: it raises the target's in-degree
+  // twice and is then followed twice, so the two cancel and the target is
+  // still released exactly once. An edge naming a node this graph does not
+  // contain is skipped, so it can never hold a real node back.
   for (const edge of graph.edges) {
     if (!rank.has(edge.from) || !rank.has(edge.to)) continue;
-    const key = `${edge.from}\u001f${edge.to}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
     indegree.set(edge.to, (indegree.get(edge.to) ?? 0) + 1);
     next.set(edge.from, [...(next.get(edge.from) ?? []), edge.to]);
   }
