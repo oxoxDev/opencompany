@@ -1,4 +1,5 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { RefreshCw } from "lucide-react";
 
 import { listPeople, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
@@ -22,7 +23,7 @@ interface Props {
   company: string | null;
 }
 
-/** Everything the graph is drawn from, fetched once per company. */
+/** Everything the graph is drawn from — a snapshot, taken on demand. */
 interface Sources {
   tasks: Task[];
   team: TeamMember[];
@@ -40,6 +41,8 @@ interface Sources {
   memories: MemoryEntry[];
   /** The company's saved workflow graphs, whole — nodes and edges, not names. */
   workflows: WorkflowGraph[];
+  /** When this snapshot was taken (epoch millis); `null` before the first read. */
+  fetchedAt: number | null;
 }
 
 const EMPTY: Sources = {
@@ -49,6 +52,7 @@ const EMPTY: Sources = {
   people: [],
   memories: [],
   workflows: [],
+  fetchedAt: null,
 };
 
 /**
@@ -67,12 +71,27 @@ const EMPTY: Sources = {
  * The one thing this console decides for itself is which pillar a workflow
  * hangs off, because the host scopes a flow to the company rather than to a
  * desk — see `DERIVED_NOTICE` in `kg/adapter.ts`.
+ *
+ * ## Why this is a snapshot with a button rather than a live view
+ *
+ * One paint of this page is five reads — the board, the roster, the desks, the
+ * people, the memory — plus the workflow list and one more read per saved
+ * workflow. On a timer that is a standing cost per open tab, for a picture that
+ * changes when an operator does something rather than on the clock. So the page
+ * fetches once and **says** it fetched once, with a control that re-reads on
+ * demand: the staleness is answered out loud instead of by omission, and an
+ * operator is never reading an old wheel with no way to notice.
  */
 export function Overview({ client, company }: Props) {
   const [sources, setSources] = useState<Sources>(EMPTY);
+  // Bumped by the refresh control; re-runs the read below and nothing else.
+  const [reload, setReload] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const refresh = useCallback(() => setReload((n) => n + 1), []);
 
   useEffect(() => {
     let live = true;
+    setLoading(true);
     void (async () => {
       const [tasks, roster, desks, people, memories, flowList] = await Promise.all([
         listTasks(client, company).catch(() => [] as Task[]),
@@ -121,12 +140,14 @@ export function Overview({ client, company }: Props) {
         people,
         memories,
         workflows,
+        fetchedAt: Date.now(),
       });
+      setLoading(false);
     })();
     return () => {
       live = false;
     };
-  }, [client, company]);
+  }, [client, company, reload]);
 
   const adapted = useMemo(
     () =>
@@ -165,6 +186,30 @@ export function Overview({ client, company }: Props) {
       // the page now, so the graph is what gets spotlighted.
       data-tour="overview-graph"
     >
+      {/* The snapshot line: what the page is, when it was taken, and the way to
+          take another. The graph is not live, and says so rather than leaving an
+          operator to assume a stale wheel is the current company. */}
+      <div className="absolute right-3 top-3 z-10 flex items-center gap-1.5 rounded-md border bg-background/90 px-2 py-1 text-[11px] text-muted-foreground shadow-sm backdrop-blur">
+        <span className="truncate">
+          {sources.fetchedAt === null
+            ? "Loading…"
+            : `Snapshot ${new Date(sources.fetchedAt).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              })}`}
+        </span>
+        <button
+          type="button"
+          onClick={refresh}
+          disabled={loading}
+          title="This page is a snapshot, not a live view. Re-read the company."
+          aria-label="Refresh the graph"
+          className="inline-flex items-center gap-1 rounded px-1 py-0.5 hover:bg-muted disabled:opacity-50"
+        >
+          <RefreshCw className={`size-3 ${loading ? "animate-spin" : ""}`} aria-hidden />
+          Refresh
+        </button>
+      </div>
       <Suspense
         fallback={
           <div className="grid h-full place-items-center text-sm text-muted-foreground">
