@@ -193,6 +193,46 @@ pub(super) fn requested_grants(record: &CompanyRecord, agent_id: &str) -> Vec<St
         .unwrap_or_default()
 }
 
+/// The **declared** cognition-tier hint for `agent_id`: the manifest
+/// `[[agent]].tier` line verbatim, or `None` when the row declares none — and
+/// for every overlay teammate, which has no manifest row to declare one.
+///
+/// Verbatim is the whole contract. This is what the company *wrote*, not a
+/// resolved answer, and `None` means **undeclared** — a reader has to render
+/// that as "cannot say" rather than substituting a default. Issue #643 is
+/// exactly that substitution: the overview graph printed a literal `worker` for
+/// every teammate, so a company declaring `tier = "orchestrator"` read back as
+/// a worker on its own graph.
+///
+/// Sibling of [`requested_grants`] in shape and in reason: one lookup, shared
+/// by the roster list and the detail read, so the two cannot answer differently
+/// for the same teammate.
+pub(super) fn declared_tier(record: &CompanyRecord, agent_id: &str) -> Option<String> {
+    record
+        .manifest
+        .agents
+        .iter()
+        .find(|agent| agent.id == agent_id)
+        .and_then(|agent| agent.tier.clone())
+}
+
+/// Whether `agent_id` is this company's orchestrator.
+///
+/// Delegates to [`crate::company::orchestrator_id`] — the roster rule the
+/// harness itself resolves the orchestrator with (the agent tagged with the
+/// orchestrator tier, else the first declared agent), never a re-read of
+/// [`declared_tier`].
+///
+/// **This is not the same question as the tier.** A company that tags nobody
+/// still has an orchestrator, so an untagged first agent answers `true` here
+/// while [`declared_tier`] answers `None`; and a *second* agent tagged with the
+/// orchestrator tier carries that tier while answering `false` here, because the
+/// rule picks one. A caller that re-derived the marker from the tier string
+/// would get both of those backwards.
+pub(super) fn is_orchestrator(record: &CompanyRecord, agent_id: &str) -> bool {
+    crate::company::orchestrator_id(&record.manifest.agents) == Some(agent_id)
+}
+
 /// One agent's grants at all three levels — the single constructor for
 /// [`AgentToolsDto`].
 ///
@@ -368,7 +408,7 @@ async fn detail(
     let manifest_agent = record.manifest.agents.iter().find(|a| a.id == agent_id);
     let overlay_agent = record.overlay_agents.iter().find(|a| a.id == agent_id);
 
-    let (source, name, role, description, tier) = match (manifest_agent, overlay_agent) {
+    let (source, name, role, description) = match (manifest_agent, overlay_agent) {
         // A manifest agent wins an id collision, exactly as `build_roster`
         // resolves one: the version-controlled roster is authoritative.
         (Some(agent), _) => (
@@ -376,18 +416,15 @@ async fn detail(
             None,
             agent.role.clone(),
             agent.description.clone(),
-            agent.tier.clone(),
         ),
+        // An overlay teammate has no manifest row, so `declared_tier` below
+        // misses — and so does `requested_grants`: it holds the company's
+        // standard grant, mirroring `harness::overlay_agent_to_manifest`.
         (None, Some(agent)) => (
             AgentSource::Overlay,
             Some(agent.name.clone()),
             agent.role.clone(),
             agent.description.clone(),
-            // An overlay teammate has no manifest row, so no tier — and, in
-            // `requested_grants` below, no per-agent tool line either: it holds
-            // the company's standard grant, mirroring
-            // `harness::overlay_agent_to_manifest`.
-            None,
         ),
         (None, None) => {
             return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
@@ -423,8 +460,8 @@ async fn detail(
             AgentSource::Overlay => OVERLAY_EDITABLE.to_vec(),
             AgentSource::Manifest => Vec::new(),
         },
-        tier,
-        is_orchestrator: crate::company::orchestrator_id(&record.manifest.agents) == Some(agent_id),
+        tier: declared_tier(record, agent_id),
+        is_orchestrator: is_orchestrator(record, agent_id),
         tools: agent_tools(
             &record.manifest.tools.allow,
             requested_grants(record, agent_id),
