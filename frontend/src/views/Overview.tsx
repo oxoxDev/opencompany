@@ -1,13 +1,11 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
-import { TriangleAlert } from "lucide-react";
 
 import { listPeople, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
-import { discoverMcpTools, listMcpServers } from "@/api/mcp";
 import { listMemory, type MemoryEntry } from "@/api/memory";
-import { listSkills, type Skill } from "@/api/skills";
 import { listTasks, type Task } from "@/api/tasks";
-import { ApiError, type McpServer, type McpToolInfo } from "@/api/types";
+import type { DeskDto } from "@/api/types";
+import { getWorkflow, listWorkflows, type WorkflowGraph } from "@/api/workflows";
 import { fromDto, starterTeam, type TeamMember } from "@/lib/team";
 import { adapt, buildMemoryGraph } from "./overview/kg/adapter";
 import { buildKnowledgeGraph } from "./overview/kg/model";
@@ -29,61 +27,37 @@ interface Sources {
   tasks: Task[];
   team: TeamMember[];
   people: Person[];
-  skills: Skill[];
   memories: MemoryEntry[];
-  servers: McpServer[];
-  /** Server **name** → the tools it advertises. `name` is this API's server key. */
-  toolsByServer: Record<string, McpToolInfo[]>;
-  /**
-   * The MCP read failed for a reason that is not "this host has no MCP".
-   *
-   * Kept apart from an empty `servers` on purpose. A company with no tool
-   * servers and a company whose tool servers we could not reach draw the same
-   * toolless graph, and only one of those is a true statement about the
-   * company — collapsing them is how an outage comes to look like an empty
-   * configuration. The notice below is the difference.
-   */
-  mcpUnreadable: boolean;
+  /** The company's desks: the graph's department pillars. */
+  desks: DeskDto[];
+  /** Its saved workflow graphs, whole — nodes and edges, not just names. */
+  workflows: WorkflowGraph[];
+  /** Whether a read has landed yet — an empty company and an unread one differ. */
+  loaded: boolean;
 }
 
 const EMPTY: Sources = {
   tasks: [],
   team: starterTeam(),
   people: [],
-  skills: [],
   memories: [],
-  servers: [],
-  toolsByServer: {},
-  mcpUnreadable: false,
+  desks: [],
+  workflows: [],
+  loaded: false,
 };
-
-/**
- * Whether a server is worth asking for its tool list.
- *
- * Tool discovery opens a live connection to the remote server, so this skips
- * the ones already known not to answer: disabled, or last probed as broken /
- * missing its credential. A server never probed is asked once — we cannot know
- * it works without trying, and refusing to ask would leave a working server's
- * tools off the graph forever.
- */
-function worthAsking(server: McpServer): boolean {
-  if (!server.enabled) return false;
-  const status = server.health?.status;
-  return status !== "error" && status !== "needs_config";
-}
 
 /**
  * The command centre: the company's knowledge graph, and nothing else.
  *
  * The page is the graph — no header, no strip, no top bar (the shell hides its
- * own for this view). The company sits at the core, its departments are the
- * pillars, the jobs hang off each pillar, the teammate who does each job sits
- * above it, and their tools are the outer ring.
+ * own for this view). The company sits at the core, its desks are the pillars,
+ * the jobs hang off each pillar, the teammate who does each job sits above it,
+ * and the tools that teammate actually holds are the outer ring.
  *
- * Two of those rings are **derived**, not declared: a company manifest carries
- * no department field and no per-agent tool list, so `kg/adapter.ts` invents a
- * plausible structure rather than leaving the graph three rings short. See
- * `DERIVED_NOTICE` there — it is the standing caveat on this whole surface.
+ * Every one of those is a value the host answers for (issue #601). The one
+ * thing this console decides for itself is which pillar a workflow hangs off,
+ * because the company scopes a flow to itself rather than to a desk — see
+ * `DERIVED_NOTICE` in `kg/adapter.ts`.
  */
 export function Overview({ client, company }: Props) {
   const [sources, setSources] = useState<Sources>(EMPTY);
@@ -91,46 +65,40 @@ export function Overview({ client, company }: Props) {
   useEffect(() => {
     let live = true;
     void (async () => {
-      const [tasks, roster, people, skills, memories, mcp] = await Promise.all([
+      const [tasks, roster, people, memories, desks, flowList] = await Promise.all([
         listTasks(client, company).catch(() => [] as Task[]),
         client.listTeam(company).catch(() => null),
         // Only an admin may list people; a member just gets no humans on the
         // graph, which is the right amount of information for them to have.
         listPeople(client, company).catch(() => [] as Person[]),
-        listSkills(client, company).catch(() => [] as Skill[]),
         // The company's real durable memory (issue #36). A host without the
         // surface draws no constellation rather than a seeded one — the graph
         // must never claim the company remembers something it doesn't.
         listMemory(client, company).catch(() => [] as MemoryEntry[]),
-        // `.../mcp/servers` answers with a bare array of servers. It used to be
-        // read through a client helper that promised a `{ servers }` wrapper no
-        // host has ever sent, so `mcp.servers` was `undefined` and filtering it
-        // threw — on every host that mounts the route, which is all of them
-        // (issue #407). The wrapper only looked survivable because the failure
-        // path handed back a hand-built `{ servers: [] }`: the tab rendered
-        // exactly when MCP was unreachable, and threw when it worked.
-        listMcpServers(client, company).then(
-          (servers) => ({ servers: servers ?? [], unreadable: false }),
-          (error: unknown) => ({
-            servers: [] as McpServer[],
-            // A host with no MCP surface answers 404. That is a company with no
-            // tool servers — a fact, not a failure, and not worth a warning.
-            // Anything else (offline, 5xx, a body we couldn't parse) means we
-            // genuinely do not know, which is what the notice says.
-            unreadable: !(error instanceof ApiError && error.status === 404),
-          }),
-        ),
+        // Desks are the pillars. A host that cannot answer draws no pillars
+        // rather than invented ones; the notice below says which it is.
+        client.listDesks(company).catch(() => [] as DeskDto[]),
+        listWorkflows(client, company).catch(() => []),
       ]);
       if (!live) return;
 
-      const toolLists = await Promise.all(
-        mcp.servers.filter(worthAsking).map((s) =>
-          discoverMcpTools(client, company, s.name)
-            .then((tools) => [s.name, tools ?? []] as const)
-            // A host built without the MCP client answers `not_wired`, and a
-            // server can simply be down. Neither is worth failing the graph
-            // over: that server contributes no tools and the rest still draw.
-            .catch(() => [s.name, [] as McpToolInfo[]] as const),
+      // The list read names the flows; only the graph read carries their nodes
+      // and edges, which is what the stages ring is drawn from.
+      const workflows = await Promise.all(
+        flowList.map((summary) =>
+          getWorkflow(client, company, summary.id).catch(
+            // A name-only entry has no saved graph to fetch (and a read can
+            // simply fail). The company still declares the flow, so it is drawn
+            // with no stages rather than dropped — a flow missing from the
+            // wheel would be a quieter lie than one drawn empty.
+            (): WorkflowGraph => ({
+              id: summary.id,
+              name: summary.name,
+              description: summary.description,
+              nodes: [],
+              edges: [],
+            }),
+          ),
         ),
       );
       if (!live) return;
@@ -139,11 +107,10 @@ export function Overview({ client, company }: Props) {
         tasks,
         team: roster?.length ? roster.map(fromDto) : starterTeam(),
         people,
-        skills,
         memories,
-        servers: mcp.servers,
-        toolsByServer: Object.fromEntries(toolLists),
-        mcpUnreadable: mcp.unreadable,
+        desks,
+        workflows,
+        loaded: true,
       });
     })();
     return () => {
@@ -157,9 +124,8 @@ export function Overview({ client, company }: Props) {
         members: sources.team,
         tasks: sources.tasks,
         people: sources.people,
-        skills: sources.skills,
-        servers: sources.servers,
-        toolsByServer: sources.toolsByServer,
+        desks: sources.desks,
+        workflows: sources.workflows,
         ownedBy,
       }),
     [sources],
@@ -179,6 +145,12 @@ export function Overview({ client, company }: Props) {
 
   const memoryGraph = useMemo(() => buildMemoryGraph(sources.memories), [sources.memories]);
 
+  // A company that has declared no desks has no pillars to draw, and everybody
+  // lands on the one "No desk" group. Saying so is the difference between an
+  // empty state and a broken-looking wheel — and it is the state to say out
+  // loud rather than fill with five invented departments (issue #601).
+  const noDesks = sources.loaded && sources.desks.length === 0;
+
   return (
     // The whole viewport: the shell hides its top bar for this view, so there
     // is nothing above to subtract.
@@ -189,19 +161,13 @@ export function Overview({ client, company }: Props) {
       // the page now, so the graph is what gets spotlighted.
       data-tour="overview-graph"
     >
-      {/* An unreadable MCP surface and a company with no tool servers draw the
-          same toolless graph. Saying which one this is turns "this company has
-          no tools" from an assertion the page cannot support into a question
-          the operator knows to go and check. */}
-      {sources.mcpUnreadable && (
+      {noDesks && (
         <p
           role="status"
           className="pointer-events-none absolute left-1/2 top-3 z-10 flex max-w-[calc(100%-1.5rem)] -translate-x-1/2 items-center gap-1.5 rounded-md border bg-background/90 px-2.5 py-1.5 text-xs text-muted-foreground shadow-sm backdrop-blur"
         >
-          <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
           <span className="min-w-0 truncate">
-            Couldn&apos;t read this company&apos;s MCP tool servers — tools may be missing from
-            the graph.
+            This company hasn&apos;t set up any desks, so everyone is drawn on one group.
           </span>
         </p>
       )}
