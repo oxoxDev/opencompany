@@ -79,6 +79,32 @@ struct TeamMemberDto {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    /// The declared cognition-tier hint (`[[agent]].tier`) **verbatim**, absent
+    /// when this teammate declares none — from the same constructor as
+    /// `GET …/team/{agent_id}` (issue #643).
+    ///
+    /// Carried on the list for the reason `tools` and `desks` are: the overview
+    /// graph is built from the roster read, so a field the list omitted was a
+    /// field the graph had to invent. It invented this one as a literal
+    /// `worker` on every node, and a company declaring `tier = "orchestrator"`
+    /// read back as a worker on its own graph.
+    ///
+    /// Absent is a real answer — "this teammate declares no tier" — and is why
+    /// the key is skipped rather than defaulted. A default here is precisely
+    /// the bug: it is indistinguishable from a declaration on the wire.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tier: Option<String>,
+    /// Whether this teammate is the company's orchestrator, resolved by the
+    /// roster rule (tagged tier first, else the first declared agent) — the
+    /// same field, from the same helper, as the detail read (issue #643).
+    ///
+    /// **Not** derivable from `tier`, which is why it is sent rather than left
+    /// to the client: a company that tags nobody still has an orchestrator (no
+    /// tier, `true` here), and a second agent tagged with the orchestrator tier
+    /// is not one (tier present, `false` here). Always sent, so a client never
+    /// has to guess — unlike `tier`, "no orchestrator" is not a state a company
+    /// with a roster can be in.
+    is_orchestrator: bool,
     /// This teammate's tool grants, in the **same shape and from the same
     /// constructor** as `GET …/team/{agent_id}` (issue #601).
     ///
@@ -293,9 +319,13 @@ fn member_row(
         name,
         role,
         description,
-        // Both through `team_agent`'s constructors, never recomputed here: the
+        // All four through `team_agent`'s helpers, never recomputed here: the
         // roster list and the detail read must not be able to disagree about
-        // the same teammate (issues #264, #601).
+        // the same teammate (issues #264, #601, #643). A second copy of the
+        // orchestrator rule in particular would be a copy of a rule that has
+        // two arms, and the arm it dropped would be invisible on screen.
+        tier: super::team_agent::declared_tier(record, agent_id),
+        is_orchestrator: super::team_agent::is_orchestrator(record, agent_id),
         tools: super::team_agent::agent_tools(
             &record.manifest.tools.allow,
             super::team_agent::requested_grants(record, agent_id),
@@ -413,10 +443,13 @@ async fn add_member(
         .save(&record)
         .await
         .map_err(|e| ApiError(e).into_response())?;
-    // A brand-new overlay teammate has no `[[agent]].tools` line, so it holds
-    // the company's standard grant, and it sits on no desk until somebody adds
-    // it to one. Resolved through the shared constructors rather than written
-    // out here, so this response cannot drift from the two reads (issue #601).
+    // A brand-new overlay teammate has no `[[agent]]` row at all, so it declares
+    // no tier, holds the company's standard grant, and sits on no desk until
+    // somebody adds it to one. Resolved through the shared helpers rather than
+    // written out here, so this response cannot drift from the two reads
+    // (issues #601, #643).
+    let tier = super::team_agent::declared_tier(&record, &agent.id);
+    let is_orchestrator = super::team_agent::is_orchestrator(&record, &agent.id);
     let tools = super::team_agent::agent_tools(
         &record.manifest.tools.allow,
         super::team_agent::requested_grants(&record, &agent.id),
@@ -427,6 +460,8 @@ async fn add_member(
         name: Some(agent.name),
         role: agent.role,
         description: agent.description,
+        tier,
+        is_orchestrator,
         tools,
         desks,
         // A brand-new teammate has no inbox until the toggle writes one.
@@ -1421,6 +1456,158 @@ mod tests {
         assert!(
             writer.get("budgetUsdDaily").is_none() && writer.get("spentTodayUsd").is_none(),
             "{writer}"
+        );
+    }
+
+    // --- Declared tier on the roster list (issue #643) -----------------------
+
+    /// A roster whose three teammates each answer the tier question
+    /// differently: `ceo` is tagged as the orchestrator, `writer` declares a
+    /// *non*-orchestrator tier, and `intern` declares nothing at all.
+    const TIERED_ROSTER: &str = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+         [[agent]]\nid = \"ceo\"\nrole = \"Chief Executive\"\ntier = \"orchestrator\"\n\
+         [[agent]]\nid = \"writer\"\nrole = \"Writer\"\ntier = \"reasoning\"\n\
+         [[agent]]\nid = \"intern\"\nrole = \"Intern\"\n";
+
+    /// One agent from `GET …/team/{id}` — the detail read, for cross-checking
+    /// that the list has not grown a second opinion.
+    async fn agent_detail_row(state: &AppState, agent: &str) -> Value {
+        let (status, body) = send(
+            state,
+            "GET",
+            &format!("/api/v1/company/team/{agent}"),
+            None,
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body
+    }
+
+    /// Issue #643 — the declared tier reaches the roster list verbatim.
+    ///
+    /// The list carried no tier at all, so the overview graph (built from this
+    /// read) stamped a literal `worker` on every node: a company declaring
+    /// `tier = "orchestrator"` read back as a worker on its own graph.
+    ///
+    /// The **undeclared** teammate is the half that keeps the fix honest. Its
+    /// row must omit the key entirely — not `"worker"`, not `null` — because
+    /// absence is the only wire shape that says "this company declares no tier
+    /// here" rather than asserting one on its behalf.
+    #[tokio::test]
+    async fn the_roster_list_carries_each_declared_tier_verbatim() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), TIERED_ROSTER).await;
+
+        let ceo = team_row(&state, "ceo").await;
+        assert_eq!(ceo["tier"], "orchestrator", "{ceo}");
+        assert_eq!(ceo["isOrchestrator"], true, "{ceo}");
+
+        // A declared tier that is not the orchestrator tier: carried verbatim,
+        // and it does not make the teammate the orchestrator.
+        let writer = team_row(&state, "writer").await;
+        assert_eq!(writer["tier"], "reasoning", "{writer}");
+        assert_eq!(
+            writer["isOrchestrator"], false,
+            "a declared tier is a hint, not the roster rule: {writer}"
+        );
+
+        // The negative control: undeclared means no key.
+        let intern = team_row(&state, "intern").await;
+        assert!(
+            intern.get("tier").is_none(),
+            "an undeclared tier omits the key — a defaulted \"worker\" here is \
+             indistinguishable from a declaration and is the whole of #643: {intern}"
+        );
+        assert_eq!(intern["isOrchestrator"], false, "{intern}");
+
+        // No row anywhere invents the literal the graph used to print.
+        let (_, all) = get_team(&state).await;
+        for row in all.as_array().unwrap() {
+            assert_ne!(row["tier"], "worker", "nobody declared \"worker\": {row}");
+        }
+
+        // And the list agrees with the detail read, which is the property the
+        // shared helpers exist to make unrepresentable rather than merely true.
+        for id in ["ceo", "writer", "intern"] {
+            let (list, detail) = (
+                team_row(&state, id).await,
+                agent_detail_row(&state, id).await,
+            );
+            assert_eq!(
+                list.get("tier"),
+                detail.get("tier"),
+                "{id}: {list} {detail}"
+            );
+            assert_eq!(
+                list["isOrchestrator"], detail["isOrchestrator"],
+                "{id}: {list} {detail}"
+            );
+        }
+    }
+
+    /// A company that tags nobody still has an orchestrator: the first declared
+    /// agent, by the same roster rule the harness resolves with.
+    ///
+    /// This is the case a console that re-derived the marker from the tier
+    /// string would get wrong — and get wrong invisibly, since an untagged CEO
+    /// draws as an ordinary worker rather than as an error.
+    #[tokio::test]
+    async fn an_untagged_roster_still_names_an_orchestrator_on_the_list() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let analyst = team_row(&state, "analyst").await;
+        assert_eq!(
+            analyst["isOrchestrator"], true,
+            "the first declared agent is the orchestrator when nobody is tagged: {analyst}"
+        );
+        assert!(
+            analyst.get("tier").is_none(),
+            "…and it says so without inventing a tier for them: {analyst}"
+        );
+
+        // The negative control: exactly one, and it is the first.
+        let writer = team_row(&state, "writer").await;
+        assert_eq!(writer["isOrchestrator"], false, "{writer}");
+    }
+
+    /// An overlay teammate has no manifest row, so it declares no tier and the
+    /// roster rule never picks it — even on a company whose manifest roster is
+    /// empty, where "the first declared agent" names nobody at all.
+    #[tokio::test]
+    async fn an_overlay_teammate_declares_no_tier_and_is_not_the_orchestrator() {
+        let home_dir = home();
+        let state = state_with_manifest(
+            home_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n",
+        )
+        .await;
+
+        let (status, created) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "Nova", "role": "Researcher"})),
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        assert!(
+            created.get("tier").is_none() && created["isOrchestrator"] == false,
+            "the create response answers both the same way the reads do: {created}"
+        );
+
+        let id = created["id"].as_str().unwrap().to_string();
+        let row = team_row(&state, &id).await;
+        assert!(
+            row.get("tier").is_none(),
+            "an overlay teammate has no `[[agent]]` row to declare a tier: {row}"
+        );
+        assert_eq!(
+            row["isOrchestrator"], false,
+            "an empty manifest roster names nobody, so it does not fall through \
+             to the overlay half: {row}"
         );
     }
 }
