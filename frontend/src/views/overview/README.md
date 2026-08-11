@@ -10,11 +10,11 @@ Five concentric rings, read outward from the centre:
 
 | Ring | What | Where it comes from |
 |---|---|---|
-| 0 | the company, drawn as its memory constellation | `lib/memory.ts` (local store) |
-| 1 | departments (pillars) | **derived** — see below |
-| 2 | the jobs on each pillar, and the workflows it runs | `…/tasks` grouped through their assignee; workflows **derived** |
-| 3 | the teammate who does each job, each workflow stage, and the humans | `…/team` matched by `task.assignee`; humans from `…/users`; stages **derived** |
-| 4 | that teammate's tools | **derived** — see below |
+| 0 | the company, drawn as its memory constellation | `…/memory` |
+| 1 | desks (pillars) | `…/desks`, plus a stated "No desk" group |
+| 2 | the jobs on each pillar, and the workflows it runs | `…/tasks` grouped through their assignee; `…/workflows` |
+| 3 | the teammate who does each job, each workflow stage, and the humans | `…/team` matched by `task.assignee`; humans from `…/users`; stages are the saved graph's nodes |
+| 4 | the tool grants that teammate holds | `…/team` → `tools.effective` |
 
 Rings 2 and 3 each carry two kinds. A workflow sits beside the SOP tasks
 because both are work a department runs; a workflow's stages sit beside the
@@ -30,30 +30,49 @@ Panning is an offset on top of whatever the camera is framing, not a separate
 mode: the shot still tracks its subject, just off-centre by the amount you
 dragged, and re-framing (selecting a node, opening the core) resets it.
 
-## The derived rings — read this before trusting the org chart
+## What is real, and the one thing that is a reading (issue #601)
 
-A company manifest has **no department field and no per-agent tool list**, and
-`[tools] allow` is company-wide. Two of the five rings above are therefore
-invented by `kg/adapter.ts`:
+Three of these rings used to be invented, and the reasons recorded here were
+stale. `assignDepartment` keyword-matched roles into five hard-coded pillars,
+`assignTools` dealt each teammate a slice of the company-wide `[tools] allow`
+list, and `WORKFLOW_TEMPLATES` made up one routine per pillar. All three are
+gone.
 
-- **Departments** come from keyword-matching each teammate's role, falling back
-  to Operations.
-- **Tool assignments** are a deterministic deal from the company-wide tool list.
-- **Workflows and their stages** are templates — one routine per department —
-  because the console has no flow API; the Workflows canvas draws a single
-  hard-coded sample. Stages are dealt round-robin across the department's
-  agents.
-- **A human's department** is derived too: signing in says who someone is, not
-  what they work on. Admins sit with Operations; everyone else is spread
-  deterministically by their address.
+The cause was a **DTO gap**, not carelessness: the graph is drawn from the
+roster *list*, and the list carried no tools and no desks — the per-agent
+*detail* read had both, one agent at a time, so drawing a whole roster meant
+N+1 fetches on page load. `GET …/team` now carries `tools` and `desks` on every
+row, from the same host-side constructor the detail read uses, so:
 
-Both are deterministic, so nothing jumps between renders — but neither is
-something the company declared. `DERIVED_NOTICE` in `kg/adapter.ts` is the
-standing caveat. When `[[agent]]` grows `department` and `tools`, delete
-`assignDepartment` and `assignTools` and read them straight through.
+- **Departments are desks.** Host order, one pillar per desk somebody sits on.
+  A teammate on several desks is drawn on its first. A company that has
+  declared **no** desks gets one honestly-labelled "No desk" group and a notice
+  saying so, not five invented departments.
+- **Tools are the grants the host resolved** — `tools.effective`, the agent's
+  own `[[agent]].tools` narrowed by `[tools] allow`, computed by
+  `agent_effective_grants`, the same function the harness builds the agent
+  with. The graph and the agent detail card therefore cannot disagree about a
+  teammate, which is the rule issue #264 established. A tool node is labelled
+  with the literal grant glob, because that is the string in `company.toml`.
+- **Workflows are the company's saved graphs.** Stages are the graph's own
+  nodes, sorted into run order by its own edges; a stage hands off to an agent
+  only where the graph's `agent` node names one. Nothing is dealt round-robin.
+- **Humans sit in the "No desk" group.** Signing in says who somebody is, not
+  what they work on, and desks hold agents.
 
-Everything else is real: a card's assignee, a skill's category, the tools a
-connected MCP server advertises, and who can sign in.
+**The one reading left** — and all `DERIVED_NOTICE` now claims — is *where a
+workflow hangs on the wheel*. A flow belongs to the company, not to a desk, so
+it is drawn on the desk of the first teammate it runs through.
+
+## The refresh question, answered
+
+The page is a **snapshot**, and says so: a "Snapshot HH:MM" chip with a Refresh
+button sits in the top-right corner. One paint is six reads plus one per saved
+workflow, and the picture changes when an operator does something rather than
+on the clock, so a timer would be a standing cost per open tab for no freshness
+anybody asked for. The alternative that was rejected is silence: fetching once
+and *not* saying so leaves an operator reading a stale wheel as the current
+company.
 
 ## Files
 
