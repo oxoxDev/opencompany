@@ -210,6 +210,16 @@ pub(crate) struct Drained {
     /// Synchronous desk answers, in the order they came back. Empty when
     /// [`HandOffs::Drop`] was asked for.
     pub(crate) desk_replies: Vec<DeskReply>,
+    /// The desks whose hand-off an operator CANCELLED mid-flight (issue #176).
+    ///
+    /// Carried as a fact rather than inferred from a missing reply, for the
+    /// same reason [`DelegationOutcome::cancelled`] is: a hand-off yields no
+    /// reply for several reasons and only one of them is a cancellation. The
+    /// nested drain reads this so a delegate's own cancelled hand-off is folded
+    /// into the reply as a cancellation note instead of vanishing — the
+    /// alternative being an answer that quietly omits a branch the model said it
+    /// had started.
+    pub(crate) cancelled_desks: Vec<String>,
     /// The **first** board card this drain opened, matching
     /// [`OperatorTurn::spawned_task`]'s first-wins rule.
     pub(crate) spawned_task: Option<String>,
@@ -666,7 +676,15 @@ impl<'a> DelegationRunner<'a> {
                 );
                 continue;
             }
+            // Captured before the delegation is consumed, so a cancellation can
+            // be reported against the desk it was aimed at (issue #176).
+            let target = desk_of(&delegation).map(str::to_string);
             let out = self.run_delegation(delegation, chat_id, ctx).await?;
+            if out.cancelled
+                && let Some(desk) = target
+            {
+                drained.cancelled_desks.push(desk);
+            }
             if let Some(id) = out.spawned_task {
                 drained.spawned_task.get_or_insert(id);
             }
@@ -1180,8 +1198,14 @@ impl<'a> DelegationRunner<'a> {
     /// `delegate_to_desk` runs a single turn on the desk's lead member and
     /// **returns its reply for the orchestrator to relay** (a [`DeskReply`]). An
     /// unknown desk (no roster-backed lead) or a cancelled run yields nothing to
-    /// relay. No sub-agent re-delegation in v1: desk members carry no delegation
-    /// tools, so their turns queue nothing.
+    /// relay.
+    ///
+    /// Since issue #176 a desk member the manifest opted in with `delegates_to`
+    /// carries the hand-off tools itself, so its turn may queue too. That queue
+    /// is drained **here**, recursively, inside this hand-off's scope — and the
+    /// deeper answers are folded into this member's reply rather than relayed
+    /// separately. Depth is bounded at the tool boundary by the scope chain, not
+    /// by this function.
     ///
     /// `ctx` carries what
     /// [`handle_operator_message`](Self::handle_operator_message) already
@@ -1292,10 +1316,31 @@ impl<'a> DelegationRunner<'a> {
                     },
                 );
                 let control = guard.control().clone();
+                // Issue #176: enter this hand-off's scope BEFORE the member's
+                // turn runs, so a `delegate_to_desk` the member itself calls is
+                // validated at the depth it is actually running at — and against
+                // a chain that already contains this desk, which is what makes
+                // A→B→A a detectable cycle. The guard pops on every exit path
+                // below, including the `?`s and the cancellation return.
+                //
+                // The RESOLVED id, not the key the model typed: the chain is
+                // compared by identity, and "Content desk" and "content" are the
+                // same desk. An unresolvable key cannot reach here — `desk_lead`
+                // above returned `Some` — so the fallback is unreachable and
+                // merely avoids a panic if that ever stops holding.
+                let scoped_desk = self
+                    .record
+                    .resolve_desk_id(&desk)
+                    .unwrap_or_else(|| desk.clone());
+                let _scope = self.queue.enter_scope(scoped_desk);
                 // Issue #465, same sampling as the direct-answer path: a desk
                 // delegation whose first call parks has produced nothing to
                 // review either.
                 let approvals_before = self.approvals_queued();
+                // Issue #176, the same before/after shape: a hand-off the
+                // MEMBER's tool refused must be attributed to the member, not
+                // swept up with whatever its delegator left unread.
+                let refusals_before = self.queue.refusals_queued();
                 let outcome = self
                     .run_turn
                     .run_steered(
@@ -1317,6 +1362,13 @@ impl<'a> DelegationRunner<'a> {
                 // has to explain the empty result can name the cause instead of
                 // guessing at it (issue #213 review).
                 if matches!(control.take(), Some(SteerAction::Cancel)) {
+                    // Anything the cancelled member queued before it was stopped
+                    // is dropped with it (issue #176). The outer drain already
+                    // moved its own items into a local vector, so the queue holds
+                    // nothing but this member's pushes; leaving them would run
+                    // them under the NEXT sibling hand-off's scope, attributing
+                    // one member's work to another.
+                    self.queue.clear();
                     // The card this hand-off opened outlives the cancellation:
                     // settling it returns it to To-do with the cancellation on
                     // its note, so an operator sees the work was asked for and
@@ -1337,15 +1389,78 @@ impl<'a> DelegationRunner<'a> {
                         ..DelegationOutcome::default()
                     });
                 }
+                // A hand-off the member's own tool REFUSED never becomes a
+                // `Delegation`, so it is read separately — and read here, before
+                // the nested drain, because that drain runs turns of its own
+                // which can push refusals a further level down.
+                let refused = self
+                    .queue
+                    .drain_refusals_after(refusals_before, self.max_delegations);
+                // Issue #176: run whatever the MEMBER queued during its own turn,
+                // one level deeper, before the card is settled.
+                //
+                // This is the half without which the whole feature is a receipt
+                // for work that never happens (#453's failure, one level down):
+                // the member's tool told it the hand-off "will be answered this
+                // turn", and if nobody drains here the delegation is destroyed by
+                // the next `clear()` with the member none the wiser.
+                //
+                // `Box::pin` is mandatory, not stylistic — this is async
+                // recursion (`run_delegation` → `drain_and_execute` →
+                // `run_delegation`) and an unboxed cycle is an
+                // infinitely-sized future the compiler rejects. It also keeps the
+                // stack flat, which this repo has been bitten by before.
+                //
+                // Bounded by construction: each level pushes onto the scope chain
+                // and `push_within_cap` refuses past `max_delegation_depth`,
+                // which validation caps at 4.
+                //
+                // `ctx` is threaded through unchanged. `carded_by_handler` and
+                // `answering` are properties of the OPERATOR's message, and they
+                // stay true at every depth — a question the operator asked is
+                // still a question three desks down, and must still mint no card.
+                let nested = Box::pin(self.drain_and_execute(chat_id, ctx, HandOffs::Run)).await?;
+                // Fold the nested answers INTO this member's reply rather than
+                // giving each level its own relay turn. The top-level CEO-relay
+                // already synthesises every desk reply into one coherent answer
+                // for the operator, so a per-level relay would only multiply
+                // turns to reach the same text. Steps ride along the same way, so
+                // the operator's timeline shows the deeper member working.
+                let mut reply = outcome.reply;
+                let mut steps = outcome.steps;
+                for deeper in nested.desk_replies {
+                    reply.push_str(&format!(
+                        "\n\n{} (delegated by {member}) replied:\n{}",
+                        deeper.member, deeper.reply
+                    ));
+                    steps.extend(deeper.steps);
+                }
+                // A cancelled nested run folds in as a cancellation, NEVER as a
+                // reply: the member said it was handing that slice on, and an
+                // answer that silently omits the branch is the confident
+                // falsehood the delegation stack exists to prevent.
+                for desk in nested.cancelled_desks {
+                    reply.push_str(&format!(
+                        "\n\n(the {desk} desk was handed a slice of this by {member}, but that run \
+                         was cancelled before it replied)"
+                    ));
+                }
+                // A hand-off the member's OWN tool refused — an unknown desk, one
+                // outside its allowlist, or one that would loop — never becomes a
+                // `Delegation`, so without this the only record is the tool
+                // result the member is free to describe however it likes. Folding
+                // it into the reply puts it on the card note and in front of the
+                // operator, the same independence #272 gave the delegator's
+                // refusals.
+                for desk in refused {
+                    reply.push_str(&format!(
+                        "\n\n({member} tried to hand a slice of this to the {desk} desk, but that \
+                         hand-off was refused and did not happen)"
+                    ));
+                }
                 if let Some(card) = card.as_mut() {
-                    self.settle_work_card(
-                        card,
-                        &member,
-                        TaskRunEnd::Completed,
-                        parked,
-                        &outcome.reply,
-                    )
-                    .await?;
+                    self.settle_work_card(card, &member, TaskRunEnd::Completed, parked, &reply)
+                        .await?;
                 }
                 // Hand the teammate's answer back to RELAY through a second
                 // orchestrator turn (the CEO-relay hand-back). Their steps ride
@@ -1354,8 +1469,8 @@ impl<'a> DelegationRunner<'a> {
                     bubble: None,
                     desk_reply: Some(DeskReply {
                         member,
-                        reply: outcome.reply,
-                        steps: outcome.steps,
+                        reply,
+                        steps,
                     }),
                     cancelled: false,
                     // Issue #442: the hand-off's own card, reported the same way
@@ -1363,7 +1478,12 @@ impl<'a> DelegationRunner<'a> {
                     // says a card was opened whichever hand-off the orchestrator
                     // chose. This is the field the console's "Card opened" chip
                     // renders from.
-                    spawned_task: card.map(|c| c.id),
+                    //
+                    // First-wins across the nested drain too (issue #176): this
+                    // hand-off's own card predates anything the member opened one
+                    // level down, so it stays the reported one; a card the member
+                    // opened is reported only when this hand-off opened none.
+                    spawned_task: card.map(|c| c.id).or(nested.spawned_task),
                 })
             }
             // ── Issue #186 part b: orchestrator lifecycle authority ─────────
@@ -1928,6 +2048,12 @@ investor update for the quarter\n]"
         /// on a question turn is REFUSED in the model's own turn, and a fixture
         /// that pushed straight onto the queue could never observe the refusal.
         tool_pushes: Vec<Delegation>,
+        /// Desks this turn named that the tool REFUSED (issue #272 for the
+        /// delegator, #176 for a member), recorded the way
+        /// `DelegateToDeskTool` records them so the drain can report the
+        /// attempt. A refusal never becomes a `Delegation`, so this is the only
+        /// way a fixture can stand in for one.
+        refuses: Vec<String>,
     }
 
     impl Turn {
@@ -1964,6 +2090,17 @@ investor update for the quarter\n]"
             }
         }
 
+        /// A turn whose `delegate_to_desk` call was REFUSED at the tool
+        /// boundary (issue #176): nothing is queued, and the desk it named is
+        /// recorded for the drain to report.
+        fn refused(reply: &str, desks: &[&str]) -> Self {
+            Self {
+                reply: reply.to_string(),
+                refuses: desks.iter().map(|d| d.to_string()).collect(),
+                ..Self::default()
+            }
+        }
+
         /// A turn whose **first** tool call parked for approval, so it produced
         /// nothing: the reply is the agent saying it is blocked, not a result.
         /// This is the shape in the issue #465 report.
@@ -1989,6 +2126,12 @@ investor update for the quarter\n]"
         /// The board as it looked at the START of each turn, so a test can prove
         /// a card existed *while* an agent worked rather than only afterwards.
         board_at_turn: Mutex<Vec<Vec<(String, String)>>>,
+        /// The delegation-chain bound the scripted tool boundary enforces
+        /// (issue #176), standing in for `[tools].max_delegation_depth`. The
+        /// production `DelegateToDeskTool` reads it off the live record; a
+        /// scripted turn has no tool, so the depth a test runs under is set
+        /// here.
+        max_depth: usize,
         /// How the delegation queue was **claimed** while each turn ran (issues
         /// #453, #267). This is what a real tool reads to decide between
         /// staging and refusing, so recording it here is how a test proves the
@@ -2015,7 +2158,16 @@ investor update for the quarter\n]"
                 staged: Mutex::new(Vec::new()),
                 tasks: fx.tasks.clone(),
                 company: fx.record.id.clone(),
+                max_depth: usize::from(crate::company::DEFAULT_MAX_DELEGATION_DEPTH),
             }
+        }
+
+        /// Runs this script under a different `[tools].max_delegation_depth`
+        /// (issue #176) — `1` reproduces the pre-#176 "desks may not
+        /// re-delegate" behaviour.
+        fn with_max_depth(mut self, max_depth: usize) -> Self {
+            self.max_depth = max_depth;
+            self
         }
 
         /// What the tool boundary answered every [`Turn::tool_pushes`] call, in
@@ -2082,10 +2234,17 @@ investor update for the quarter\n]"
             // …and the ones that go through the boundary a real tool goes
             // through, recording what it answered (issue #267).
             for delegation in turn.tool_pushes {
-                let staged = self
-                    .queue
-                    .push_within_cap(delegation, orchestrator::MAX_DELEGATIONS_PER_TURN);
+                let staged = self.queue.push_within_cap(
+                    delegation,
+                    orchestrator::MAX_DELEGATIONS_PER_TURN,
+                    self.max_depth,
+                );
                 self.staged.lock().expect("staged").push(staged);
+            }
+            // …and the ones the tool refused outright, which never become a
+            // `Delegation` at all (issues #272, #176).
+            for desk in turn.refuses {
+                self.queue.push_refusal(desk);
             }
             for tool in turn.parks {
                 self.approvals
@@ -2192,6 +2351,67 @@ members = ["engineer"]
         }
     }
 
+    /// A roster with **two** delegatable desks, where the engineering lead may
+    /// hand a slice on to research (issue #176).
+    ///
+    /// `design` is deliberately outside `engineer`'s allowlist and led by a
+    /// third teammate, so a test can prove a third lead never runs.
+    fn nested_record() -> CompanyRecord {
+        let manifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "chief"
+role = "Chief of Staff"
+tier = "orchestrator"
+
+[[agent]]
+id = "engineer"
+role = "Engineer"
+delegates_to = ["research_desk"]
+
+[[agent]]
+id = "researcher"
+role = "Researcher"
+delegates_to = ["design_desk"]
+
+[[agent]]
+id = "designer"
+role = "Designer"
+
+[[group_chat]]
+id = "eng_desk"
+name = "Engineering"
+members = ["engineer"]
+
+[[group_chat]]
+id = "research_desk"
+name = "Research"
+members = ["researcher"]
+
+[[group_chat]]
+id = "design_desk"
+name = "Design"
+members = ["designer"]
+"#,
+        )
+        .expect("valid manifest");
+        CompanyRecord {
+            manifest,
+            ..record()
+        }
+    }
+
+    /// The hand-off the engineering lead makes one level down (issue #176).
+    fn nested_handoff(instruction: &str) -> Delegation {
+        Delegation::DelegateToDesk {
+            desk: "research_desk".to_string(),
+            instruction: instruction.to_string(),
+        }
+    }
+
     /// The wired pieces one drain needs: the company record, a real task store
     /// over a temp dir, the shared queue, and the steer registry.
     struct Fixture {
@@ -2208,11 +2428,21 @@ members = ["engineer"]
 
     impl Fixture {
         fn new() -> Self {
+            Self::over(record())
+        }
+
+        /// A fixture over a three-desk roster whose leads may re-delegate
+        /// (issue #176).
+        fn nested() -> Self {
+            Self::over(nested_record())
+        }
+
+        fn over(record: CompanyRecord) -> Self {
             let dir = tempfile::tempdir().expect("tempdir");
             Self {
                 tasks: Arc::new(FsOps::new(dir.path())) as Arc<dyn TaskStore>,
                 _dir: dir,
-                record: record(),
+                record,
                 queue: DelegationQueue::default(),
                 steer: InflightRegistry::default(),
                 approvals: ApprovalRequestQueue::default(),
@@ -3261,6 +3491,350 @@ members = ["engineer"]
         assert!(
             fx.cards().await.is_empty(),
             "a dropped hand-off opens no card either"
+        );
+    }
+
+    // ── Issue #176: recursive desk-member delegation ────────────────────────
+
+    /// The whole point of the slice: a desk lead handed work by the
+    /// orchestrator hands a slice on to a second desk, that second lead's turn
+    /// really runs, and its answer arrives folded into the first lead's reply
+    /// rather than lost.
+    ///
+    /// Without the nested drain this is #453's failure one level down — the
+    /// member's tool told it the hand-off "will be answered this turn", the
+    /// delegation sat in the queue, and the next `clear()` destroyed it while
+    /// the member reported it as done.
+    ///
+    /// `Turn::tooling`, not `Turn::queueing`: the escape hatch bypasses
+    /// `push_within_cap` entirely and would assert nothing about the gate the
+    /// depth bound lives on.
+    #[tokio::test]
+    async fn a_desk_lead_can_hand_a_slice_on_and_the_answer_comes_back() {
+        let fx = Fixture::nested();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                // 0 — the orchestrator hands the work to engineering.
+                Turn::tooling("handing it to engineering", vec![handoff("ship the API")]),
+                // 1 — the engineering lead does its part and hands a slice on.
+                Turn::tooling(
+                    "I built it; asking research about the rate limits",
+                    vec![nested_handoff("what rate limits do competitors use?")],
+                ),
+                // 2 — the research lead answers.
+                Turn::reply("everyone lands around 100 rps"),
+                // 3 — the CEO relay.
+                Turn::reply("Built, and research says ~100 rps is the norm."),
+            ],
+        );
+
+        let out = fx
+            .runner(&turns)
+            .handle_operator_message("chief", "ship the API", Some("general"))
+            .await
+            .expect("operator message handled");
+
+        let calls = turns.calls();
+        assert_eq!(
+            calls.len(),
+            4,
+            "four turns: chief, engineer, researcher, relay: {calls:?}"
+        );
+        assert_eq!(calls[1].0, "engineer", "{calls:?}");
+        assert_eq!(
+            calls[2].0, "researcher",
+            "the nested hand-off must actually run the second lead's turn: {calls:?}"
+        );
+        assert_eq!(calls[3].0, "chief", "{calls:?}");
+        assert_eq!(
+            turns.staged(),
+            vec![orchestrator::Staged::Queued, orchestrator::Staged::Queued],
+            "both hand-offs passed the tool boundary"
+        );
+
+        // The nested answer reaches the relay folded into the engineer's reply,
+        // attributed to who said it and who asked them — one bubble, not two.
+        let relay_prompt = &calls[3].1;
+        assert!(
+            relay_prompt.contains("everyone lands around 100 rps"),
+            "the nested answer must reach the relay: {relay_prompt}"
+        );
+        assert!(
+            relay_prompt.contains("researcher (delegated by engineer) replied"),
+            "the fold must name both ends of the chain: {relay_prompt}"
+        );
+        assert_eq!(
+            out.reply, "Built, and research says ~100 rps is the norm.",
+            "the operator still gets ONE coherent answer from the relay"
+        );
+
+        // The card the hand-off opened is settled from the folded reply, so the
+        // board carries the nested answer too.
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(cards[0].assignee, "engineer", "{cards:?}");
+        assert!(
+            cards[0]
+                .note
+                .as_deref()
+                .unwrap_or_default()
+                .contains("everyone lands around 100 rps"),
+            "the nested answer must be on the card note: {:?}",
+            cards[0].note
+        );
+    }
+
+    /// The bound bites in the MEMBER'S OWN TURN, and the third lead never runs.
+    ///
+    /// Under `max_delegation_depth = 1` — the "recursion off" setting, and the
+    /// pre-#176 behaviour exactly — the engineering lead's hand-off is refused
+    /// at the tool boundary with the new reason, so no second desk turn happens
+    /// at all.
+    #[tokio::test]
+    async fn a_hand_off_past_the_depth_bound_is_refused_and_never_runs() {
+        let fx = Fixture::nested();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling("handing it to engineering", vec![handoff("ship the API")]),
+                Turn::tooling(
+                    "asking research",
+                    vec![nested_handoff("what rate limits do competitors use?")],
+                ),
+                Turn::reply("Done, though I could not consult research."),
+            ],
+        )
+        .with_max_depth(1);
+
+        fx.runner(&turns)
+            .handle_operator_message("chief", "ship the API", Some("general"))
+            .await
+            .expect("operator message handled");
+
+        assert_eq!(
+            turns.staged(),
+            vec![
+                orchestrator::Staged::Queued,
+                orchestrator::Staged::NoDrain(orchestrator::NoDrainReason::Depth),
+            ],
+            "the member's hand-off must be refused in its own turn, as depth-capped"
+        );
+        let calls = turns.calls();
+        assert_eq!(
+            calls.len(),
+            3,
+            "chief, engineer, relay — the researcher must never run: {calls:?}"
+        );
+        assert!(
+            calls.iter().all(|(agent, _)| agent != "researcher"),
+            "{calls:?}"
+        );
+    }
+
+    /// The per-turn fan-out cap applies at **every** level, and needs no new
+    /// code to do so: the outer drain moves its items into a local vector
+    /// before running any of them, so a member's turn starts against an empty
+    /// queue and gets the whole cap to itself — and its fourth push is refused.
+    ///
+    /// Pinned because "the cap is per turn" is an emergent property of how the
+    /// drain is written, not something stated anywhere. A refactor that drained
+    /// lazily would silently make the cap per *message* and this is what would
+    /// catch it.
+    #[tokio::test]
+    async fn the_fan_out_cap_applies_at_every_level() {
+        let fx = Fixture::nested();
+        let card = |n: u32| Delegation::SpawnTask {
+            title: format!("follow-up {n}"),
+            note: None,
+            assignee: None,
+        };
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling("handing it to engineering", vec![handoff("ship the API")]),
+                // The member gets the FULL cap of its own, and one more is
+                // refused.
+                Turn::tooling(
+                    "built it, opening follow-ups",
+                    vec![card(1), card(2), card(3), card(4)],
+                ),
+                Turn::reply("Shipped."),
+            ],
+        );
+
+        fx.runner(&turns)
+            .handle_operator_message("chief", "ship the API", Some("general"))
+            .await
+            .expect("operator message handled");
+
+        assert_eq!(
+            turns.staged(),
+            vec![
+                orchestrator::Staged::Queued,
+                orchestrator::Staged::Queued,
+                orchestrator::Staged::Queued,
+                orchestrator::Staged::Queued,
+                orchestrator::Staged::OverCap,
+            ],
+            "the member's own turn gets the full per-turn cap, and no more"
+        );
+        // Three follow-up cards from the member, plus the hand-off's own card.
+        let mut titles: Vec<String> = fx.cards().await.into_iter().map(|c| c.title).collect();
+        titles.sort();
+        assert_eq!(titles.len(), 4, "{titles:?}");
+        assert!(
+            titles.contains(&"follow-up 3".to_string())
+                && !titles.contains(&"follow-up 4".to_string()),
+            "{titles:?}"
+        );
+    }
+
+    /// A cancelled NESTED run folds in as a cancellation, never as a reply.
+    ///
+    /// The member said it was handing that slice on; an answer that silently
+    /// omits the branch is the confident falsehood the whole delegation stack
+    /// exists to prevent.
+    #[tokio::test]
+    async fn a_cancelled_nested_run_folds_in_as_a_cancellation() {
+        let fx = Fixture::nested();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling("handing it to engineering", vec![handoff("ship the API")]),
+                Turn::tooling(
+                    "asking research",
+                    vec![nested_handoff("what rate limits do competitors use?")],
+                ),
+                Turn::cancelled("(discarded)"),
+                Turn::reply("Built; the research question was stopped."),
+            ],
+        );
+
+        fx.runner(&turns)
+            .handle_operator_message("chief", "ship the API", Some("general"))
+            .await
+            .expect("operator message handled");
+
+        let calls = turns.calls();
+        assert_eq!(calls.len(), 4, "{calls:?}");
+        let relay_prompt = &calls[3].1;
+        assert!(
+            relay_prompt.contains("was cancelled before it replied"),
+            "a cancelled branch must be named, not omitted: {relay_prompt}"
+        );
+        assert!(
+            !relay_prompt.contains("(discarded)"),
+            "a cancelled run's text must NEVER be folded in as a reply: {relay_prompt}"
+        );
+    }
+
+    /// A hand-off the MEMBER's own tool refused reaches the card and the
+    /// operator, attributed to the member that attempted it.
+    ///
+    /// A refusal never becomes a `Delegation`, so the only other record is the
+    /// tool result — which the member is free to describe however it likes, and
+    /// "I consulted design" is exactly the claim that must not stand unchecked.
+    /// The delegator's own unread refusals must NOT be swept into the member's
+    /// account of its turn, which is what the before/after sampling buys.
+    #[tokio::test]
+    async fn a_refusal_inside_a_members_turn_is_recorded_against_that_member() {
+        let fx = Fixture::nested();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                // The orchestrator hands off AND has a refusal of its own,
+                // which belongs to its turn and must not be folded into the
+                // member's account of theirs.
+                Turn {
+                    reply: "handing it to engineering".to_string(),
+                    tool_pushes: vec![handoff("ship the API")],
+                    refuses: vec!["nowhere_desk".to_string()],
+                    ..Turn::default()
+                },
+                // The member reaches for a desk it may not have — refused.
+                Turn::refused("built it; design did not pick it up", &["design_desk"]),
+                Turn::reply("Shipped."),
+            ],
+        );
+
+        fx.runner(&turns)
+            .handle_operator_message("chief", "ship the API", Some("general"))
+            .await
+            .expect("operator message handled");
+
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        let note = cards[0].note.clone().unwrap_or_default();
+        assert!(
+            note.contains("design_desk") && note.contains("refused"),
+            "the member's refused hand-off must reach the card: {note}"
+        );
+        assert!(
+            !note.contains("nowhere_desk"),
+            "the delegator's own unread refusal must not be attributed to the member: {note}"
+        );
+    }
+
+    /// On the DISPATCHED-card path the card stays owned by the level-1 member
+    /// the orchestrator handed it to — nested delegation is visible in the note
+    /// and the steps, not by the card changing hands again.
+    #[tokio::test]
+    async fn a_dispatched_card_stays_with_the_level_one_member() {
+        let fx = Fixture::nested();
+        let mut card = TaskRecord {
+            id: "card-1".to_string(),
+            title: "Ship the API".to_string(),
+            note: None,
+            column: COLUMN_TODO.to_string(),
+            priority: "medium".to_string(),
+            assignee: "chief".to_string(),
+            updated_at_millis: now_millis(),
+            origin_chat_id: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+        };
+        fx.tasks.upsert(&fx.record.id, &card).await.expect("seed");
+
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                // The engineering lead's turn, run by the dispatched card.
+                Turn::tooling(
+                    "asking research",
+                    vec![nested_handoff("what rate limits do competitors use?")],
+                ),
+                Turn::reply("everyone lands around 100 rps"),
+            ],
+        );
+        // The dispatched turn's own delegations are staged by the orchestrator
+        // before this, so the queue is claimed the way `run_task` claims it.
+        let _claim = fx.queue.claim();
+        fx.queue.push(handoff("ship the API"));
+
+        let handed = fx
+            .runner(&turns)
+            .for_task("card-1")
+            .handle_task_delegations(&mut card, "chief")
+            .await
+            .expect("delegations drained")
+            .expect("a hand-off happened");
+
+        assert_eq!(
+            handed.delegate, "engineer",
+            "the card belongs to the member the ORCHESTRATOR handed it to"
+        );
+        let reply = handed.reply.expect("the level-1 member answered");
+        assert!(
+            reply.contains("researcher (delegated by engineer) replied"),
+            "the nested answer rides on the level-1 member's reply: {reply}"
+        );
+        assert_eq!(
+            card.assignee, "engineer",
+            "nested delegation must not move the card a second time"
         );
     }
 }
