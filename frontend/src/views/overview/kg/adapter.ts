@@ -37,6 +37,14 @@
 // constructor the per-agent detail read uses, so the graph and the agent card
 // cannot disagree about who holds what (the rule issue #264 established).
 //
+// An agent's **tier** was the same gap with a louder symptom (issue #643): the
+// list carried none, so every node was stamped a literal `worker` and a company
+// declaring `tier = "orchestrator"` read back as a worker on its own graph. The
+// tier and the orchestrator marker are both host-answered now, through the same
+// constructor the detail card reads — and they are two questions, not one: the
+// tier is the declaration verbatim, the marker is the host's roster rule, and
+// nothing here re-derives the second from the first.
+//
 // Workflows were the last invention: `WORKFLOW_ROUTINES` dealt one made-up
 // routine per desk by position, and `model.ts` dealt its stages round-robin
 // across that desk's agents. Both are gone (issue #601). A workflow is one of
@@ -249,8 +257,21 @@ export function adapt(input: AdaptInput): Adapted {
     name: member.name,
     role: member.role,
     status: "active",
-    tier: "worker",
+    // The company's own answer, verbatim (issue #643). This was a literal
+    // `"worker"` on every node, so a company declaring `tier = "orchestrator"`
+    // read back as a worker on its own graph. `null` means the company declared
+    // no tier, which the card draws as "not declared" rather than as a default.
+    tier: member.tier ?? null,
+    // The host's roster rule, read — never re-derived from `tier`. The two are
+    // different questions: an untagged company still has an orchestrator, and a
+    // second agent tagged with that tier is not one.
+    isOrchestrator: member.isOrchestrator ?? false,
     description: member.description,
+    // Still a placeholder, deliberately. Resolving it console-side would mean a
+    // second copy of the host's `model_for_tier` — the #264 drift hazard this
+    // file keeps closing — and resolving it host-side is not available today:
+    // `src/harness` is feature-gated out of the default build that `src/server`
+    // compiles in, so the roster read has nothing to ask.
     model: "—",
     // What the host says this teammate actually holds, straight through: its
     // own `[[agent]].tools` line narrowed by the company's `[tools] allow`,

@@ -9,7 +9,6 @@
 // the types both sides agree on.
 
 export type AgentStatus = "active" | "idle" | "paused";
-export type AgentTier = "lead" | "worker";
 
 export interface Department {
   id: string;
@@ -26,7 +25,22 @@ export interface Agent {
   name: string;
   role: string;
   status: AgentStatus;
-  tier: AgentTier;
+  /**
+   * The cognition tier this company declared for the agent, verbatim, or `null`
+   * when it declared none (issue #643).
+   *
+   * A free string rather than a closed union: the tier is the host's
+   * vocabulary, not the graph's, and the previous `"lead" | "worker"` union was
+   * a set the host never used — which is how every node came to be stamped
+   * `worker`. `null` is "not declared" and must be drawn as such.
+   */
+  tier: string | null;
+  /**
+   * Whether the host resolved this agent as the company's orchestrator — a
+   * separate question from {@link Agent.tier}, answered by the host's roster
+   * rule. Never re-derive it from the tier string.
+   */
+  isOrchestrator: boolean;
   description: string;
   model: string;
   tools: string[];

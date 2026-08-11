@@ -146,7 +146,15 @@ export function AgentHarnessCard({
   agent, task, parentName, parentAgentId, subAgents, lastRun, runLabel, tools,
   onBack, onClose, onTool, onAgent, onTask,
 }: {
-  agent: { name: string; role: string; model: string; tier: string; instance: string; description: string };
+  /**
+   * `tier` is the company's declaration verbatim, `null` when it declared none;
+   * `isOrchestrator` is the host's separate roster answer (issue #643). The
+   * card renders both as given and derives neither from the other.
+   */
+  agent: {
+    name: string; role: string; model: string; tier: string | null;
+    isOrchestrator: boolean; instance: string; description: string;
+  };
   task: SopTask | null;
   parentName: string | null;
   parentAgentId: string | null;
@@ -191,7 +199,8 @@ export function AgentHarnessCard({
         <SectionLabel icon={Server}>harness</SectionLabel>
         <div className="mb-4 flex flex-col gap-1 font-mono text-[10.5px] text-os-muted">
           <span>
-            <span className="text-os-dim">tier</span> {agent.tier} · <span className="text-os-dim">runs on</span>{' '}
+            <span className="text-os-dim">tier</span> {agent.tier ?? 'not declared'}
+            {agent.isOrchestrator ? ' · orchestrator' : ''} · <span className="text-os-dim">runs on</span>{' '}
             {agent.instance} · {agent.model}
           </span>
           {parentName && (
