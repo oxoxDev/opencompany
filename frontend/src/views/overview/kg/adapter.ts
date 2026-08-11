@@ -329,13 +329,13 @@ export function adapt(input: AdaptInput): Adapted {
   // reading here (see `DERIVED_NOTICE`): a flow hangs off the desk of the first
   // teammate it runs through.
   //
-  // A flow that runs through nobody seated — a pure trigger/HTTP routine, or one
-  // whose agents are all on no desk — comes out `UNPLACED` and therefore is not
-  // drawn, because ring 2 hangs off ring 1 and there is no pillar there. That is
-  // a real flow missing from the wheel, and it is the same trade `#602` already
-  // made for an unplaced teammate's board card just above: the alternative is
-  // asserting a desk the company never tied the flow to. Seat one of its agents
-  // and the flow appears.
+  // A flow that runs through nobody seated — a pure trigger/HTTP routine, one
+  // whose agents are all on no desk, or one the host lists with no saved graph
+  // behind it — comes out `UNPLACED`. Unlike an unplaced teammate's board card,
+  // which is dropped above, the flow is still drawn: `model.ts` hangs it off the
+  // company core, the same answer it gives an unplaced worker. The company
+  // really does declare the flow, so the choice is between drawing it somewhere
+  // honest and hiding it, not between two placements.
   const deskOfAgent = new Map(agents.map((a) => [a.id, a.departmentId]));
   const workflows: Workflow[] = input.workflows.map((graph) => {
     const stages = orderStages(graph);

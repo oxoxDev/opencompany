@@ -140,9 +140,18 @@ export function buildKnowledgeGraph(
   // it draws one `runs` edge per stage that names an agent.
   const agentIds = new Set(agents.map((a) => a.id));
   for (const f of workflows) {
-    if (!drawn.has(f.departmentId)) continue;
     nodes.push({ id: `flow:${f.id}`, kind: 'workflow', label: f.name, ring: RING.workflow });
-    edges.push({ source: `team:${f.departmentId}`, target: `flow:${f.id}`, kind: 'flow' });
+    // A flow the adapter could not place — it runs through nobody on a desk, or
+    // it is a company flow with no saved graph at all — hangs off the core
+    // instead of a pillar, exactly as an unplaced worker does just below. The
+    // company really does declare this flow, so dropping it would be the
+    // quieter lie: it draws, stageless if that is all we know, rather than
+    // going missing with no error anywhere.
+    edges.push(
+      drawn.has(f.departmentId)
+        ? { source: `team:${f.departmentId}`, target: `flow:${f.id}`, kind: 'flow' }
+        : { source: SELF_ID, target: `flow:${f.id}`, kind: 'flow' },
+    );
 
     // Each stage is its own node, chained to the next so the flow reads as a
     // sequence rather than a bag, and handed to the agent who performs it.
