@@ -1,4 +1,5 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { RefreshCw } from "lucide-react";
 
 import { listPeople, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
@@ -22,7 +23,7 @@ interface Props {
   company: string | null;
 }
 
-/** Everything the graph is drawn from, fetched once per company. */
+/** Everything the graph is drawn from — a snapshot, taken on demand. */
 interface Sources {
   tasks: Task[];
   team: TeamMember[];
@@ -32,8 +33,8 @@ interface Sources {
   desks: DeskDto[];
   /** Its saved workflow graphs, whole — nodes and edges, not just names. */
   workflows: WorkflowGraph[];
-  /** Whether a read has landed yet — an empty company and an unread one differ. */
-  loaded: boolean;
+  /** When this snapshot was taken (epoch millis); `null` before the first read. */
+  fetchedAt: number | null;
 }
 
 const EMPTY: Sources = {
@@ -43,7 +44,7 @@ const EMPTY: Sources = {
   memories: [],
   desks: [],
   workflows: [],
-  loaded: false,
+  fetchedAt: null,
 };
 
 /**
@@ -58,12 +59,27 @@ const EMPTY: Sources = {
  * thing this console decides for itself is which pillar a workflow hangs off,
  * because the company scopes a flow to itself rather than to a desk — see
  * `DERIVED_NOTICE` in `kg/adapter.ts`.
+ *
+ * ## Why this is a snapshot with a button rather than a live view
+ *
+ * One paint of this page is six reads — the board, the roster, the people, the
+ * memory, the desks, the workflow list — plus one more per saved workflow. On a
+ * timer that is a standing cost per open tab, for a picture that changes when
+ * an operator does something, not on the clock. So the page fetches once and
+ * **says** it fetched once, with a control that re-reads on demand: the
+ * question issue #601 raises is answered out loud rather than by omission, and
+ * the operator is never looking at stale data they had no way to notice.
  */
 export function Overview({ client, company }: Props) {
   const [sources, setSources] = useState<Sources>(EMPTY);
+  // Bumped by the refresh control; re-runs the read below and nothing else.
+  const [reload, setReload] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const refresh = useCallback(() => setReload((n) => n + 1), []);
 
   useEffect(() => {
     let live = true;
+    setLoading(true);
     void (async () => {
       const [tasks, roster, people, memories, desks, flowList] = await Promise.all([
         listTasks(client, company).catch(() => [] as Task[]),
@@ -110,13 +126,14 @@ export function Overview({ client, company }: Props) {
         memories,
         desks,
         workflows,
-        loaded: true,
+        fetchedAt: Date.now(),
       });
+      setLoading(false);
     })();
     return () => {
       live = false;
     };
-  }, [client, company]);
+  }, [client, company, reload]);
 
   const adapted = useMemo(
     () =>
@@ -149,7 +166,7 @@ export function Overview({ client, company }: Props) {
   // lands on the one "No desk" group. Saying so is the difference between an
   // empty state and a broken-looking wheel — and it is the state to say out
   // loud rather than fill with five invented departments (issue #601).
-  const noDesks = sources.loaded && sources.desks.length === 0;
+  const noDesks = sources.fetchedAt !== null && sources.desks.length === 0;
 
   return (
     // The whole viewport: the shell hides its top bar for this view, so there
@@ -171,6 +188,30 @@ export function Overview({ client, company }: Props) {
           </span>
         </p>
       )}
+      {/* The snapshot line: what the page is, when it was taken, and the way to
+          take another. The graph is not live and says so, rather than leaving an
+          operator to assume a stale wheel is the current company. */}
+      <div className="absolute right-3 top-3 z-10 flex items-center gap-1.5 rounded-md border bg-background/90 px-2 py-1 text-[11px] text-muted-foreground shadow-sm backdrop-blur">
+        <span className="truncate">
+          {sources.fetchedAt === null
+            ? "Loading…"
+            : `Snapshot ${new Date(sources.fetchedAt).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              })}`}
+        </span>
+        <button
+          type="button"
+          onClick={refresh}
+          disabled={loading}
+          title="This page is a snapshot, not a live view. Re-read the company."
+          aria-label="Refresh the graph"
+          className="inline-flex items-center gap-1 rounded px-1 py-0.5 hover:bg-muted disabled:opacity-50"
+        >
+          <RefreshCw className={`size-3 ${loading ? "animate-spin" : ""}`} aria-hidden />
+          Refresh
+        </button>
+      </div>
       <Suspense
         fallback={
           <div className="grid h-full place-items-center text-sm text-muted-foreground">
