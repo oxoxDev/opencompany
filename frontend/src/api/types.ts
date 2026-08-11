@@ -520,6 +520,33 @@ export interface TeamMemberDto {
   /** When that cap was set (epoch millis). Paired with `budgetSetBy`. */
   budgetSetAtMillis?: number;
   /**
+   * The declared cognition-tier hint (`[[agent]].tier`) verbatim, from the same
+   * host-side helper that answers `GET .../team/{agentId}` (issue #643).
+   *
+   * **Optional on the type, and genuinely absent on the wire** for a teammate
+   * that declares none — which is a different statement from any tier string.
+   * Do not coalesce it to a default: the overview graph stamped a literal
+   * `"worker"` on every node for exactly this reason, so a company declaring
+   * `tier = "orchestrator"` read back as a worker on its own graph. `undefined`
+   * means "cannot say", and the honest rendering of that is "not declared".
+   */
+  tier?: string;
+  /**
+   * Whether this teammate is the company's orchestrator (issue #643).
+   *
+   * **NOT the same question as `tier`** — this is the host's roster rule (the
+   * agent tagged with the orchestrator tier, else the first declared agent),
+   * and the two disagree in both directions: a company that tags nobody still
+   * has an orchestrator (no `tier`, `true` here), and a second agent tagged
+   * with that tier is not one (`tier` present, `false` here). Never re-derive
+   * this from the tier string; read it.
+   *
+   * Optional only because a host predating #643 does not send it, in which case
+   * `undefined` means "this host cannot say" — draw no marker rather than
+   * guessing one from `tier`.
+   */
+  isOrchestrator?: boolean;
+  /**
    * This teammate's tool grants (issue #601) — the **same** three lists, from
    * the same host-side constructor, that `GET .../team/{agentId}` serves.
    *

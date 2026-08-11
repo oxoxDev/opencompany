@@ -43,6 +43,21 @@ export interface TeamMember {
   /** When that cap was set (epoch millis). Paired with `budgetSetBy`. */
   budgetSetAtMillis?: number;
   /**
+   * The cognition tier this company declared for the teammate, verbatim
+   * (issue #643). Undefined means it declared none — render that as "not
+   * declared", never as a default tier.
+   */
+  tier?: string;
+  /**
+   * Whether the host resolved this teammate as the company's orchestrator.
+   *
+   * A separate question from `tier`, answered by the host's roster rule: an
+   * untagged company still has an orchestrator, and a second teammate tagged
+   * with the orchestrator tier is not one. Undefined means the host does not
+   * answer it.
+   */
+  isOrchestrator?: boolean;
+  /**
    * The tool grants this teammate **actually holds** — its own `[[agent]].tools`
    * line narrowed by the company's `[tools].allow`, resolved by the host
    * (issue #601).
@@ -101,6 +116,11 @@ export function fromDto(dto: TeamMemberDto): TeamMember {
     // which the card renders differently from "an admin set this".
     budgetSetBy: dto.budgetSetBy,
     budgetSetAtMillis: dto.budgetSetAtMillis,
+    // Same rule again (issue #643): `undefined` means the company declared no
+    // tier, or the host predates the field. Both are "cannot say" — coalescing
+    // either into a tier string is the bug this closed.
+    tier: dto.tier,
+    isOrchestrator: dto.isOrchestrator,
     // A host predating issue #601 sends neither, and an empty list is the
     // honest reading of that: it draws no tools and no desk rather than a
     // guess at either.
