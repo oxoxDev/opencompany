@@ -777,6 +777,149 @@ members = ["writer", "ceo"]
         );
     }
 
+    /// Issue #601: the roster **list** answers for tools and desks too, with
+    /// the same values as the detail read.
+    ///
+    /// The overview graph is drawn from the list, so before this it had no way
+    /// to learn either without an N+1 fetch — and invented both instead, while
+    /// the detail card beside it rendered the real thing. The equality is the
+    /// contract; anything less lets the two surfaces disagree again.
+    #[tokio::test]
+    async fn the_roster_list_carries_the_same_tools_and_desks_as_the_detail_read() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        // An overlay teammate too, so the agreement is checked on both halves
+        // of the merged roster rather than only on the manifest half.
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        let (status, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
+        assert_eq!(status, StatusCode::OK, "{roster}");
+        let rows = roster.as_array().unwrap();
+        assert_eq!(rows.len(), 4, "{roster}");
+
+        for row in rows {
+            let id = row["id"].as_str().unwrap();
+            let (_, detail) = get_agent(&state, id).await;
+            assert_eq!(
+                row["tools"], detail["tools"],
+                "the graph reads the list and the card reads the detail; they \
+                 must not disagree about {id}"
+            );
+            assert_eq!(row["desks"], detail["desks"], "desks disagree for {id}");
+        }
+
+        let row_of = |id: &str| {
+            rows.iter()
+                .find(|row| row["id"] == id)
+                .unwrap_or_else(|| panic!("{id} missing from {roster}"))
+                .clone()
+        };
+
+        // …and the shared values are the *right* ones, so a shared-but-wrong
+        // constructor cannot pass on agreement alone.
+        let ceo = row_of("ceo");
+        assert_eq!(
+            strings(&ceo["tools"]["effective"]),
+            vec!["workspace.read"],
+            "a request the company never allowed is not a grant: {ceo}"
+        );
+        let writer = row_of("writer");
+        assert!(
+            strings(&writer["tools"]["requested"]).is_empty(),
+            "{writer}"
+        );
+        assert_eq!(
+            strings(&writer["tools"]["effective"]),
+            vec!["workspace", "workspace.*", "composio"],
+            "an agent that lists no tools holds the whole allow-list: {writer}"
+        );
+        assert_eq!(
+            strings(&writer["tools"]["companyAllow"]),
+            vec!["workspace", "workspace.*", "composio"],
+            "the ceiling rides along, so a reader can tell an empty request \
+             from an empty grant: {writer}"
+        );
+
+        // Desks, which are the graph's departments now: declared membership,
+        // the lead flag off the effective order, and a stated empty list.
+        let writer_desks = writer["desks"].as_array().unwrap();
+        assert_eq!(writer_desks.len(), 1, "{writer}");
+        assert_eq!(writer_desks[0]["id"], "content", "{writer}");
+        assert_eq!(writer_desks[0]["name"], "Content desk", "{writer}");
+        assert_eq!(writer_desks[0]["lead"], true, "{writer}");
+        assert_eq!(ceo["desks"].as_array().unwrap()[0]["lead"], false, "{ceo}");
+        assert!(
+            row_of("hermit")["desks"].as_array().unwrap().is_empty(),
+            "a teammate on no desk says so with an empty list rather than by \
+             omitting the key: {roster}"
+        );
+        assert!(
+            row_of(&jamie)["desks"].as_array().unwrap().is_empty(),
+            "{roster}"
+        );
+    }
+
+    /// An operator-added desk membership reaches the list, not just the detail
+    /// read — otherwise the graph's pillars would go stale the moment somebody
+    /// moved a teammate.
+    #[tokio::test]
+    async fn a_desk_change_shows_up_on_the_roster_list() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, _) = send(
+            &state,
+            "POST",
+            "/api/v1/company/desks/content/members",
+            Some(json!({"agent_id": "hermit"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (_, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
+        let hermit = roster
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == "hermit")
+            .unwrap()
+            .clone();
+        let desks = hermit["desks"].as_array().unwrap();
+        assert_eq!(desks.len(), 1, "{hermit}");
+        assert_eq!(desks[0]["id"], "content", "{hermit}");
+    }
+
+    /// A teammate created through the console reads back with the grant it
+    /// actually holds, so the card the console renders from the POST response
+    /// says the same thing the next list read will.
+    #[tokio::test]
+    async fn a_new_overlay_teammate_is_created_with_the_standard_grant() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, created) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "Robin", "role": "Support"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        assert_eq!(
+            strings(&created["tools"]["effective"]),
+            vec!["workspace", "workspace.*", "composio"],
+            "{created}"
+        );
+        assert!(
+            created["desks"].as_array().unwrap().is_empty(),
+            "nobody has put it on a desk yet: {created}"
+        );
+
+        let (_, detail) = get_agent(&state, created["id"].as_str().unwrap()).await;
+        assert_eq!(created["tools"], detail["tools"], "{created} vs {detail}");
+        assert_eq!(created["desks"], detail["desks"], "{created} vs {detail}");
+    }
+
     // --- The edit half ------------------------------------------------------
 
     /// The issue's "write-once per member", gone: a console-defined teammate can
