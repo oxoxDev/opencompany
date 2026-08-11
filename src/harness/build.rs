@@ -43,15 +43,34 @@
 //!   only `Agents/<agent id>/`. Unlike the file tools these are scoped by the
 //!   store, not the filesystem: every call resolves through one company-scoped
 //!   `tree()` read, so no host path is ever built from agent input.
-//! * **Delegation is orchestrator-only.** `query_company` / `spawn_task` /
-//!   `delegate_to_desk` (and the other orchestrator roster/workflow tools) are
-//!   wired only when `is_orchestrator`; a **dispatched** desk/roster agent never
-//!   gets them. That is the depth cap = 1 / "no re-delegation in v1" invariant
-//!   (issue #178). The dispatched belt is thus a curated, metered derivative of
-//!   an OpenHuman agent — the exec subset above plus intrinsic memory / file /
-//!   MCP / skill tools, and nothing more. Both halves (the exact dispatched set,
-//!   and the orchestrator-vs-dispatched delegation contrast) are pinned by the
-//!   contract tests in this module's `tests` submodule.
+//! * **Delegation authority is orchestrator-only; delegation itself is
+//!   opt-in per member.** `query_company`, `run_workflow`, `create_workflow`,
+//!   `add_agent`, `assign_task` and `review_task` are wired only when
+//!   `is_orchestrator` — they are the company's *authority* (who owns a card,
+//!   what passes review, who is on the roster) and no desk agent gets them.
+//!
+//!   The two **hand-off** tools, `spawn_task` and `delegate_to_desk`, are also
+//!   wired onto a desk agent whose manifest entry names a
+//!   [`delegates_to`](crate::company::Agent::delegates_to) allowlist (issue
+//!   #176), narrowed to those desks. A member that names none — every agent of
+//!   every manifest written before this — carries no delegation tool at all,
+//!   which is #178's original depth cap = 1 invariant, now the default rather
+//!   than the only possibility.
+//!
+//!   Recursion is bounded **dynamically**, not by which tools were wired: belts
+//!   are cached per roster and rebuilt rarely, so the tool cannot be withheld
+//!   from the one turn that happens to be running too deep. `[tools]
+//!   .max_delegation_depth` is enforced at the tool boundary by
+//!   [`DelegationQueue::push_within_cap`](crate::harness::orchestrator::DelegationQueue::push_within_cap)
+//!   against the live scope chain, and a hand-off that would loop or leave the
+//!   member's allowlist is refused there too.
+//!
+//!   The dispatched belt is otherwise a curated, metered derivative of an
+//!   OpenHuman agent — the exec subset above plus intrinsic memory / file / MCP
+//!   / skill tools, and nothing more. All three halves (the exact dispatched
+//!   set with and without an allowlist, and the orchestrator-vs-member
+//!   authority contrast) are pinned by the contract tests in this module's
+//!   `tests` submodule.
 //! * **Workflows/skills** start empty. Parsing enabled `SKILL.md` bodies via
 //!   `openhuman::skills::ops_parse` depends on WS1's skill parsing; the seam is
 //!   the `.workflows(...)` setter.
@@ -660,6 +679,34 @@ pub fn build_agent(
             // the `read_run_output` companion reads back, so a clipped preview
             // is reachable within the turn. Orchestrator-only, like the tools.
             deps.run_outputs.clone(),
+        ));
+    }
+    // Recursive desk delegation (issue #176): a NON-orchestrator agent whose
+    // manifest entry names a `delegates_to` allowlist gets exactly the two
+    // hand-off tools — `spawn_task` and a `delegate_to_desk` narrowed to that
+    // allowlist — and nothing else from the orchestrator's set. It is what lets
+    // a desk lead pull in a specialist for one slice instead of handing the
+    // whole thing back to the CEO.
+    //
+    // `else if` rather than a second `if`: the orchestrator already has both
+    // tools from `orchestrator_tools` above, and wiring a second, narrowed
+    // `delegate_to_desk` beside its unrestricted one would put two tools with
+    // the same name on one belt.
+    //
+    // An empty allowlist wires nothing, which is the pre-#176 belt exactly — so
+    // this whole block is inert for every manifest that has not opted in.
+    else if !manifest_agent.delegates_to.is_empty() {
+        persona.push_str(&orchestrator::member_delegation_brief(
+            &manifest_agent.delegates_to,
+        ));
+        tools.extend(orchestrator::member_delegation_tools(
+            &deps.delegations,
+            company.clone(),
+            deps.store.clone(),
+            orchestrator::MemberScope {
+                member: manifest_agent.id.clone(),
+                delegates_to: manifest_agent.delegates_to.clone(),
+            },
         ));
     }
 
@@ -1279,6 +1326,17 @@ mod tests {
     /// Build one agent under `grants` and return its live tool names, sorted, so
     /// a snapshot compares byte-stably against a literal.
     fn built_tool_names(grants: &[&str], is_orchestrator: bool) -> Vec<String> {
+        built_tool_names_delegating(grants, is_orchestrator, &[])
+    }
+
+    /// [`built_tool_names`] with a `delegates_to` allowlist on the agent (issue
+    /// #176) — the only difference between a member that may re-delegate and one
+    /// that may not.
+    fn built_tool_names_delegating(
+        grants: &[&str],
+        is_orchestrator: bool,
+        delegates_to: &[&str],
+    ) -> Vec<String> {
         let dir = tempfile::tempdir().expect("tempdir");
         let deps = pin_deps(dir.path().to_path_buf());
         let manifest_agent = ManifestAgent {
@@ -1287,7 +1345,7 @@ mod tests {
             description: None,
             tier: None,
             tools: Vec::new(),
-            delegates_to: Vec::new(),
+            delegates_to: delegates_to.iter().map(|d| d.to_string()).collect(),
             budget_usd_daily: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
@@ -1847,10 +1905,16 @@ mod tests {
         assert_eq!(names, expected, "dispatched desk belt drifted: {names:?}");
     }
 
-    /// (b) The depth-cap = 1 invariant (issue #178): a dispatched desk agent
-    /// must NEVER receive the orchestrator's delegation tools, while the
-    /// orchestrator agent MUST. Building both from the same grant and contrasting
-    /// them is the registration check that a dispatched turn cannot re-delegate.
+    /// (b) The **default** depth cap (issues #178, #176): a dispatched desk
+    /// agent that named no `delegates_to` must NEVER receive a delegation tool,
+    /// while the orchestrator agent MUST. Building both from the same grant and
+    /// contrasting them is the registration check that an ordinary dispatched
+    /// turn cannot re-delegate.
+    ///
+    /// #176 made this the default rather than the only possibility — the
+    /// opt-in case is pinned by
+    /// [`a_member_with_delegates_to_gets_exactly_the_two_hand_off_tools`], and
+    /// the belt above is unchanged for every agent that does not opt in.
     #[test]
     fn dispatched_agent_has_no_delegation_tools_but_orchestrator_does() {
         let delegation = ["query_company", "spawn_task", "delegate_to_desk"];
@@ -1870,6 +1934,81 @@ mod tests {
                 "orchestrator agent MUST receive delegation tool `{tool}`: {orchestrator:?}"
             );
         }
+    }
+
+    /// (b2) Issue #176: a member the manifest opted in with `delegates_to` gets
+    /// **exactly two** tools more than it had — `spawn_task` and
+    /// `delegate_to_desk` — and not one tool of the orchestrator's authority.
+    ///
+    /// Expressed as a delta against the un-opted-in belt rather than as a second
+    /// flat literal, so the feature-aware snapshot above stays the single place
+    /// the dispatched belt is written down. What this pins is the thing #176
+    /// could get wrong: reaching for `orchestrator_tools` and handing a desk
+    /// lead `add_agent`, `assign_task` and `review_task` along with the hand-off
+    /// it actually needs.
+    #[test]
+    fn a_member_with_delegates_to_gets_exactly_the_two_hand_off_tools() {
+        let plain = built_tool_names(&["*"], false);
+        let delegating = built_tool_names_delegating(&["*"], false, &["research"]);
+
+        let added: Vec<&String> = delegating.iter().filter(|t| !plain.contains(t)).collect();
+        assert_eq!(
+            added,
+            vec!["delegate_to_desk", "spawn_task"],
+            "a delegating member's belt must differ from the plain one by exactly the two \
+             hand-off tools: {delegating:?}"
+        );
+        assert!(
+            plain.iter().all(|t| delegating.contains(t)),
+            "opting in must ADD tools, never remove any: {delegating:?}"
+        );
+        for authority in [
+            "query_company",
+            "assign_task",
+            "review_task",
+            "add_agent",
+            "run_workflow",
+            "create_workflow",
+            "read_run_output",
+        ] {
+            assert!(
+                !delegating.contains(&authority.to_string()),
+                "a desk member must NOT receive orchestrator authority `{authority}`: \
+                 {delegating:?}"
+            );
+        }
+    }
+
+    /// (b3) Issue #176: the wiring is inert for an agent that named no
+    /// allowlist, and the orchestrator's own belt is untouched by the feature.
+    ///
+    /// The empty-allowlist half is what makes #176 a no-op for every manifest
+    /// written before it; the orchestrator half is what proves the `else if`
+    /// really is exclusive, since a second narrowed `delegate_to_desk` beside
+    /// the orchestrator's unrestricted one would put two tools of the same name
+    /// on one belt.
+    #[test]
+    fn an_empty_allowlist_wires_nothing_and_the_orchestrator_belt_is_unchanged() {
+        assert_eq!(
+            built_tool_names_delegating(&["*"], false, &[]),
+            built_tool_names(&["*"], false),
+            "an empty `delegates_to` must produce the pre-#176 belt byte-for-byte"
+        );
+
+        let orchestrator = built_tool_names(&["*"], true);
+        assert_eq!(
+            built_tool_names_delegating(&["*"], true, &["research"]),
+            orchestrator,
+            "an orchestrator's belt must not change when it also names `delegates_to`"
+        );
+        assert_eq!(
+            orchestrator
+                .iter()
+                .filter(|t| *t == "delegate_to_desk")
+                .count(),
+            1,
+            "exactly one `delegate_to_desk` may be wired: {orchestrator:?}"
+        );
     }
 
     /// (c) No deferred family leaks into a dispatched belt: raw browser
