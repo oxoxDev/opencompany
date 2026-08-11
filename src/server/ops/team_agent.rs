@@ -147,6 +147,10 @@ pub(super) struct AgentDetailDto {
 
 /// An agent's tool grants at all three levels, so the resolution is legible
 /// rather than asserted.
+///
+/// Built **only** through [`agent_tools`], so every surface that renders an
+/// agent's tools renders the same list — see that function for why that is a
+/// rule rather than a convenience.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct AgentToolsDto {
@@ -169,6 +173,45 @@ pub(super) struct AgentDeskDto {
     /// Whether this agent is the desk's lead — the first effective member, who
     /// receives a `delegate_to_desk` hand-off.
     lead: bool,
+}
+
+/// The tool globs an agent *asks* for, resolved identically for every reader.
+///
+/// A manifest teammate's `[[agent]].tools` line; an **empty** list for an
+/// overlay teammate, which mirrors `harness::overlay_agent_to_manifest` — and
+/// which means "the company's standard grant", not "no tools".
+///
+/// Its callers have already established that `agent_id` is on the roster, so a
+/// miss here can only be the overlay half.
+pub(super) fn requested_grants(record: &CompanyRecord, agent_id: &str) -> Vec<String> {
+    record
+        .manifest
+        .agents
+        .iter()
+        .find(|agent| agent.id == agent_id)
+        .map(|agent| agent.tools.clone())
+        .unwrap_or_default()
+}
+
+/// One agent's grants at all three levels — the single constructor for
+/// [`AgentToolsDto`].
+///
+/// `effective` comes from
+/// [`agent_effective_grants`](crate::runtime::builder::agent_effective_grants),
+/// the same function the harness builds the agent with, for the reason the
+/// module docs give. This function exists so the **roster list** and the
+/// **detail read** cannot answer that question differently either (issue
+/// #601): the overview graph reads the list and used to invent a tool shelf by
+/// dealing slices of `[tools].allow`, so the graph and the detail card beside
+/// it disagreed about the same agent. Sharing the constructor makes that
+/// disagreement unrepresentable rather than merely fixed once.
+pub(super) fn agent_tools(company_allow: &[String], requested: Vec<String>) -> AgentToolsDto {
+    let effective = agent_effective_grants(company_allow, &requested);
+    AgentToolsDto {
+        requested,
+        company_allow: company_allow.to_vec(),
+        effective,
+    }
 }
 
 /// The `PATCH` body. Every field is optional, and an absent field is left
@@ -325,7 +368,7 @@ async fn detail(
     let manifest_agent = record.manifest.agents.iter().find(|a| a.id == agent_id);
     let overlay_agent = record.overlay_agents.iter().find(|a| a.id == agent_id);
 
-    let (source, name, role, description, tier, requested) = match (manifest_agent, overlay_agent) {
+    let (source, name, role, description, tier) = match (manifest_agent, overlay_agent) {
         // A manifest agent wins an id collision, exactly as `build_roster`
         // resolves one: the version-controlled roster is authoritative.
         (Some(agent), _) => (
@@ -334,18 +377,17 @@ async fn detail(
             agent.role.clone(),
             agent.description.clone(),
             agent.tier.clone(),
-            agent.tools.clone(),
         ),
         (None, Some(agent)) => (
             AgentSource::Overlay,
             Some(agent.name.clone()),
             agent.role.clone(),
             agent.description.clone(),
-            // An overlay teammate has no manifest row, so no tier and no
-            // per-agent tool line: it holds the company's standard grant. This
-            // mirrors `harness::overlay_agent_to_manifest` exactly.
+            // An overlay teammate has no manifest row, so no tier — and, in
+            // `requested_grants` below, no per-agent tool line either: it holds
+            // the company's standard grant, mirroring
+            // `harness::overlay_agent_to_manifest`.
             None,
-            Vec::new(),
         ),
         (None, None) => {
             return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
@@ -353,9 +395,6 @@ async fn detail(
             ))));
         }
     };
-
-    let company_allow = record.manifest.tools.allow.clone();
-    let effective = agent_effective_grants(&company_allow, &requested);
 
     let cap = record.effective_budget(agent_id);
     let attribution = record.budget_override(agent_id);
@@ -386,11 +425,10 @@ async fn detail(
         },
         tier,
         is_orchestrator: crate::company::orchestrator_id(&record.manifest.agents) == Some(agent_id),
-        tools: AgentToolsDto {
-            requested,
-            company_allow,
-            effective,
-        },
+        tools: agent_tools(
+            &record.manifest.tools.allow,
+            requested_grants(record, agent_id),
+        ),
         desks: desks_for(record, agent_id),
         inbox_enabled,
         budget_usd_daily: cap,
@@ -407,7 +445,11 @@ async fn detail(
 /// rather than by reading the declared member lists, so an operator-added
 /// membership and an operator-set lead order are both reflected — the same
 /// answer the Desks page and the harness `desk_lead` resolver give.
-fn desks_for(record: &CompanyRecord, agent_id: &str) -> Vec<AgentDeskDto> {
+///
+/// Shared with `GET {scope}/team` (issue #601) for the same anti-drift reason
+/// as [`agent_tools`]: desks are the overview graph's departments now, so the
+/// roster list and this read have to agree on which desks a teammate sits on.
+pub(super) fn desks_for(record: &CompanyRecord, agent_id: &str) -> Vec<AgentDeskDto> {
     let declared = record
         .manifest
         .group_chats
