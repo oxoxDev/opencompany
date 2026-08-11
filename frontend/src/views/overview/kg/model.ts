@@ -66,14 +66,6 @@ export function orderGraphDepartments<T>(items: T[], deptIdOf: (item: T) => stri
   return [...items].sort((a, b) => rank(a) - rank(b) || deptIdOf(a).localeCompare(deptIdOf(b)));
 }
 
-/** 'design-review' → 'Design Review' */
-function prettify(slug: string): string {
-  return slug
-    .split(/[-_]/)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
-}
-
 /** Graph node id for a task's worker: agents are `emp:`, humans are `person:`. */
 export function workerNodeId(kind: SopTask['assigneeKind'], assigneeId: string): string {
   return kind === 'agent' ? `emp:${assigneeId}` : `person:${assigneeId}`;
@@ -216,14 +208,20 @@ export function buildKnowledgeGraph(
 
   // Software tools (outer ring) — one node per (tool, department-that-uses-it)
   // for shared tools, a single node otherwise.
+  //
+  // Labelled with the slug verbatim: a slug here is a tool-grant glob, which is
+  // the literal string in the company's `[tools] allow` list. Title-casing it
+  // turned `mcp:*` into "Mcp " and `workspace.*` into something that appears
+  // nowhere in the company's own config, so an operator reading the wheel could
+  // not grep for what they were looking at (issue #601).
   for (const slug of [...deptsOfTool.keys()].sort()) {
     const depts = [...deptsOfTool.get(slug)!].sort();
     if (depts.length > 1) {
       for (const deptId of depts) {
-        nodes.push({ id: `tool:${slug}@${deptId}`, kind: 'tool', label: prettify(slug), ring: RING.tool });
+        nodes.push({ id: `tool:${slug}@${deptId}`, kind: 'tool', label: slug, ring: RING.tool });
       }
     } else {
-      nodes.push({ id: `tool:${slug}`, kind: 'tool', label: prettify(slug), ring: RING.tool });
+      nodes.push({ id: `tool:${slug}`, kind: 'tool', label: slug, ring: RING.tool });
     }
   }
 

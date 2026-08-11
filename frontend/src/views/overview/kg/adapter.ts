@@ -5,16 +5,14 @@
 // ## What is real, and what is not
 //
 // The graph reads `company → department → SOP task → the worker who does it →
-// that worker's tools`. This host serves only some of those edges:
+// that worker's tools`. This host serves all but one of those edges:
 //
-// | Edge                | Source                        | Real? |
-// |---------------------|-------------------------------|-------|
-// | task → worker       | `task.assignee` on the board  | yes   |
-// | category → skill    | `skill.category`              | yes   |
-// | server → tool       | what the server advertises    | yes   |
-// | teammate → department | `GET {scope}/desks`         | yes   |
-// | worker → tools      | nothing (`[tools] allow` is company-wide) | **derived** |
-// | department → workflow | nothing (no flow API yet)   | **derived** |
+// | Edge                  | Source                             | Real? |
+// |-----------------------|------------------------------------|-------|
+// | task → worker         | `task.assignee` on the board       | yes   |
+// | teammate → department | `GET {scope}/desks`                | yes   |
+// | worker → tools        | its resolved grants (`GET …/team`) | yes   |
+// | department → workflow | nothing (no flow API yet)          | **derived** |
 //
 // Ring 1 used to be invented too: `assignDepartment` keyword-matched a role
 // string into one of five hardcoded buckets, falling back to Operations. It is
@@ -27,16 +25,23 @@
 // let it dodge: **what about somebody the company declares no desk for?** They
 // are not placed — see `UNPLACED`. Nothing here invents a position for anyone.
 //
-// The two remaining derived edges are placeholders: there is no per-agent tool
-// list and no flow API. `DERIVED_NOTICE` is the standing caveat. As each lands
-// upstream, delete the matching helper (or `WORKFLOW_TEMPLATES`) and read the
-// real value straight through.
+// The per-agent tool list used to be derived too: `assignTools` dealt each
+// teammate a slice of the company-wide `[tools] allow` list, because the roster
+// **list** carried no grants and fetching every agent's detail on page load was
+// worse. That DTO gap is closed (issue #601) — a roster row now carries the
+// grants the host resolved for that teammate, from the same server-side
+// constructor the per-agent detail read uses, so the graph and the agent card
+// cannot disagree about who holds what (the rule issue #264 established).
+//
+// One derived edge is left, and it is a placeholder: there is no flow API, so
+// the routines below are templates. `DERIVED_NOTICE` is the standing caveat.
+// When it lands upstream, delete `WORKFLOW_ROUTINES` and read the real value
+// straight through.
 
 import type { Person as HostPerson } from "@/api/auth";
-import type { Skill } from "@/api/skills";
 import type { Task } from "@/api/tasks";
 import type { MemoryEntry } from "@/api/memory";
-import type { DeskDto, McpServer, McpToolInfo } from "@/api/types";
+import type { DeskDto } from "@/api/types";
 import type { TeamMember } from "@/lib/team";
 import { TASK_COLUMNS } from "@/lib/tasks-sample";
 import type { BrainGraphEdge, BrainGraphNode, MemoryGraph } from "./memory-core";
@@ -46,7 +51,7 @@ import type { Agent, Department, Person, SopTask, Workflow } from "./schemas";
 
 /** Shown wherever the derived structure is on screen. */
 export const DERIVED_NOTICE =
-  "Workflows and tool assignments are placeholders — this company doesn't declare them. Departments are its real desks; anyone on no desk is shown unplaced.";
+  "Workflows are placeholders — this company doesn't declare them. Departments are its real desks and tools are the grants the host resolved; anyone on no desk is shown unplaced.";
 
 /**
  * The department a worker gets when the company declares no desk for them.
@@ -113,22 +118,6 @@ export function deskDepartments(desks: DeskDto[]): Department[] {
 export function deskOfMember(id: string, desks: DeskDto[]): string {
   const desk = desks.find((d) => d.members.includes(id));
   return desk ? departmentIdOfDesk(desk.id) : UNPLACED;
-}
-
-/**
- * Which tools a teammate uses.
- *
- * **Derived.** The host knows the company's tools but not who reaches for
- * which, so each teammate is given the tools of their department's slice — a
- * deterministic deal from the company-wide list, not a record of anything.
- */
-// (member is not consulted: the assignment is positional, not personal)
-export function assignTools(index: number, tools: string[]): string[] {
-  if (tools.length === 0) return [];
-  const take = Math.min(3, Math.max(1, Math.ceil(tools.length / 3)));
-  return Array.from({ length: take }, (_, k) => tools[(index * 2 + k) % tools.length]).filter(
-    (tool, k, all) => all.indexOf(tool) === k,
-  );
 }
 
 /**
@@ -208,10 +197,6 @@ export interface AdaptInput {
    */
   desks: DeskDto[];
   tasks: Task[];
-  skills: Skill[];
-  servers: McpServer[];
-  /** Keyed by server **name** — the key `.../mcp/servers` identifies a server by. */
-  toolsByServer: Record<string, McpToolInfo[]>;
   /** The humans who can sign in to this company. */
   people: HostPerson[];
   /** Matches a board card to a roster member; the one real assignment edge. */
@@ -230,26 +215,7 @@ export interface Adapted {
 
 /** Shape the host's data into the graph's org model. */
 export function adapt(input: AdaptInput): Adapted {
-  const toolLabels: Record<string, string> = {};
-  const toolSlugs: string[] = [];
-
-  // Only active skills are tools an agent can actually reach for; a disabled
-  // one is installed but off, so it does not belong on anyone's tool shelf.
-  for (const skill of input.skills) {
-    if (!skill.enabled) continue;
-    const slug = `skill-${skill.id}`;
-    toolLabels[slug] = skill.name;
-    toolSlugs.push(slug);
-  }
-  for (const server of input.servers) {
-    for (const tool of input.toolsByServer[server.name] ?? []) {
-      const slug = `mcp-${server.name}-${tool.name}`;
-      toolLabels[slug] = tool.name;
-      toolSlugs.push(slug);
-    }
-  }
-
-  const agents: Agent[] = input.members.map((member, i) => ({
+  const agents: Agent[] = input.members.map((member) => ({
     id: member.id,
     departmentId: deskOfMember(member.id, input.desks),
     name: member.name,
@@ -258,10 +224,22 @@ export function adapt(input: AdaptInput): Adapted {
     tier: "worker",
     description: member.description,
     model: "—",
-    tools: assignTools(i, toolSlugs),
+    // What the host says this teammate actually holds, straight through: its
+    // own `[[agent]].tools` line narrowed by the company's `[tools] allow`,
+    // resolved server-side. The agent detail card renders the same list from
+    // the same resolution, which is the whole point of issue #601.
+    tools: member.effectiveTools,
     parentId: null,
     instance: "builtin",
   }));
+
+  // A tool slug is a grant glob now — the literal `[tools] allow` entry, like
+  // `composio`, `mcp:*` or `workspace.*` — so it is its own best label. The map
+  // is kept because the detail card takes one, and mapping each grant to itself
+  // is what stops the card title-casing `workspace.*` into something an
+  // operator cannot grep for.
+  const toolLabels: Record<string, string> = {};
+  for (const agent of agents) for (const grant of agent.tools) toolLabels[grant] = grant;
 
   // A board card becomes an SOP task owned by the teammate it is assigned to —
   // the one edge here that the host actually records. Cards nobody owns are

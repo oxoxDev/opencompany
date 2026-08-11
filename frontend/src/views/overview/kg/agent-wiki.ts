@@ -3,24 +3,37 @@
 /**
  * The detail card shown when you click a tool on the graph.
  *
- * A tool here is one of two things, and its slug says which: a skill this
- * company has defined (`skill-<id>`), or a single tool advertised by a
- * connected MCP server (`mcp-<serverId>-<toolName>`). Nothing else is invented
- * — the card states what the console actually knows, which is where the tool
- * comes from and who reaches for it.
+ * A tool on the outer ring is a **tool-grant glob**: one entry of what the host
+ * says an agent actually holds, resolved from that agent's own `[[agent]].tools`
+ * line against the company's `[tools] allow` ceiling (issue #601). `composio`,
+ * `mcp:*`, `workspace.*` and the catch-all `*` are all grants; so is anything
+ * else an operator wrote into that list.
+ *
+ * It used to be one of two records instead — a skill this company defined
+ * (`skill-<id>`) or a single tool advertised by a connected MCP server
+ * (`mcp-<serverId>-<toolName>`) — because the ring was dealt out of the
+ * company's catalogue rather than read from the agent. Those slugs no longer
+ * reach this card.
+ *
+ * The slug is therefore the truest label there is: it is the literal string in
+ * `company.toml`, which is what an operator greps for when they want to change
+ * it. Nothing here invents a friendlier name for it.
  */
 
-const SKILL_PREFIX = 'skill-';
-const MCP_PREFIX = 'mcp-';
+/** Grant spellings that name the MCP tool namespace, which the card flags. */
+const MCP_PREFIXES = ['mcp_', 'mcp:', 'mcp.', 'mcp-'];
+
+/** The grant that holds everything the company allows. */
+const CATCH_ALL = '*';
 
 export type ToolWiki = {
   slug: string;
   name: string;
-  /** True when the tool is served by an MCP server rather than defined here. */
+  /** True when the grant names the MCP tool namespace. */
   mcp: boolean;
-  /** Human-readable origin: `MCP server`, `skill`, or a plain tool. */
+  /** Human-readable origin. */
   kind: string;
-  /** Where this tool is managed in the console. */
+  /** Where this grant is managed. */
   path: string;
   summary: string;
   usedBy: string[];
@@ -34,18 +47,28 @@ export function prettifySlug(slug: string): string {
     .join(' ');
 }
 
-/** Whether a slug names a tool served by an MCP server. */
+/**
+ * Whether a grant names the MCP tool namespace.
+ *
+ * Matched on the namespace rather than one exact string, because a grant may be
+ * the bare family (`mcp`), a glob over it (`mcp:*`), or a single tool inside it
+ * (`mcp_registry_list_tools`).
+ *
+ * This is a **display** hint only — it decides whether the card shows an MCP
+ * mark. It is deliberately not a membership test: deciding which tools a grant
+ * actually covers is the host's `grant_matches`, and re-implementing that here
+ * would be the second copy issue #264 exists to prevent.
+ */
 export function isMcpSlug(slug: string): boolean {
-  return slug.startsWith(MCP_PREFIX);
+  return slug === 'mcp' || MCP_PREFIXES.some((p) => slug.startsWith(p));
 }
 
 /**
  * Build a tool's card.
  *
- * `labels` is the adapter's slug → display-name map, built from the skill and
- * MCP records themselves; without it the slug is prettified, which reads badly
- * for an MCP tool (`mcp-fs-1-read_file` → `Mcp Fs 1 Read_file`) and is only a
- * last resort.
+ * `labels` is the adapter's slug → display-name map, which for a grant maps the
+ * slug to itself so the card shows the literal `company.toml` entry. The
+ * prettified fallback is only reached for a slug no adapter described.
  */
 export function buildToolWiki(
   slug: string,
@@ -53,20 +76,20 @@ export function buildToolWiki(
   labels: Record<string, string> = {},
 ): ToolWiki {
   const mcp = isMcpSlug(slug);
-  const skill = slug.startsWith(SKILL_PREFIX);
   const name = labels[slug] ?? prettifySlug(slug);
 
   return {
     slug,
     name,
     mcp,
-    kind: mcp ? 'MCP server' : skill ? 'skill' : 'tool',
-    path: mcp ? 'Settings → MCP Servers' : skill ? 'Skills' : '—',
-    summary: mcp
-      ? `${name} — served by one of this company's connected MCP servers.`
-      : skill
-        ? `${name} — a skill defined for this company.`
-        : `${name} — available to this company.`,
+    kind: 'tool grant',
+    path: 'company.toml → [tools] allow',
+    summary:
+      slug === CATCH_ALL
+        ? 'Every tool this company allows — the catch-all grant.'
+        : mcp
+          ? `${name} — a grant over tools served by this company's MCP servers.`
+          : `${name} — a tool family this company grants.`,
     usedBy,
   };
 }
