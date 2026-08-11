@@ -25,6 +25,8 @@ function member(over: Partial<TeamMember> & Pick<TeamMember, "id" | "name">): Te
     description: "",
     tone: "sky",
     inboxEnabled: false,
+    effectiveTools: [],
+    desks: [],
     ...over,
   };
 }
