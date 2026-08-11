@@ -79,6 +79,26 @@ struct TeamMemberDto {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    /// This teammate's tool grants, in the **same shape and from the same
+    /// constructor** as `GET …/team/{agent_id}` (issue #601).
+    ///
+    /// Carried on the list because the overview knowledge graph draws one ring
+    /// per teammate's tools and had no way to learn them: the detail read
+    /// answered per agent, so drawing a whole roster meant N+1 fetches on page
+    /// load, and the graph invented a tool shelf instead — dealing each
+    /// teammate a slice of `[tools].allow` while the detail card beside it
+    /// rendered the real grant. One list read now answers for the roster.
+    ///
+    /// `companyAllow` repeats on every row, which is the payload cost of
+    /// mirroring the detail shape exactly rather than inventing a leaner
+    /// parallel one. It is worth paying: an **empty `requested` means the
+    /// company's standard grant**, not "no tools", and a row that dropped the
+    /// ceiling would leave a client no way to say which it was looking at.
+    tools: super::team_agent::AgentToolsDto,
+    /// The desks this teammate sits on, resolved through the same helper the
+    /// detail read uses (issue #601). Desks are the company's real grouping —
+    /// the overview graph draws its department pillars from these.
+    desks: Vec<super::team_agent::AgentDeskDto>,
     /// Whether this teammate has an enabled inbox, so the Team page's toggle
     /// renders the host's real state instead of a client-side guess.
     inbox_enabled: bool,
@@ -273,6 +293,14 @@ fn member_row(
         name,
         role,
         description,
+        // Both through `team_agent`'s constructors, never recomputed here: the
+        // roster list and the detail read must not be able to disagree about
+        // the same teammate (issues #264, #601).
+        tools: super::team_agent::agent_tools(
+            &record.manifest.tools.allow,
+            super::team_agent::requested_grants(record, agent_id),
+        ),
+        desks: super::team_agent::desks_for(record, agent_id),
         inbox_enabled,
         budget_usd_daily: cap,
         // Paired with the cap: no cap, no spend row.
@@ -385,11 +413,22 @@ async fn add_member(
         .save(&record)
         .await
         .map_err(|e| ApiError(e).into_response())?;
+    // A brand-new overlay teammate has no `[[agent]].tools` line, so it holds
+    // the company's standard grant, and it sits on no desk until somebody adds
+    // it to one. Resolved through the shared constructors rather than written
+    // out here, so this response cannot drift from the two reads (issue #601).
+    let tools = super::team_agent::agent_tools(
+        &record.manifest.tools.allow,
+        super::team_agent::requested_grants(&record, &agent.id),
+    );
+    let desks = super::team_agent::desks_for(&record, &agent.id);
     Ok(Json(TeamMemberDto {
         id: agent.id,
         name: Some(agent.name),
         role: agent.role,
         description: agent.description,
+        tools,
+        desks,
         // A brand-new teammate has no inbox until the toggle writes one.
         inbox_enabled: false,
         budget_usd_daily: body.budget_usd_daily,
