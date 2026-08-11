@@ -33,6 +33,7 @@ description = "Write ads, pages, and campaign copy."
 # NEW optional per-agent keys:
 tier = "reasoning"                 # cognition tier hint (see glossary)
 tools = ["docs.*", "email.send"]   # tool grant globs
+delegates_to = ["research"]        # desks this agent may hand work to ("*" = all)
 budget_usd_daily = 5.0             # per-agent daily spend cap (UTC day)
 
 # ── new tables (all optional) ──────────────────────────────────────────
@@ -68,6 +69,8 @@ provider = "openhuman"             # openhuman (default) | builtin
 allow = ["web.*", "docs.*", "search"]  # company-wide grant; agents intersect
                                    # `search` must be named — `*` never grants it
 search_daily_calls = 200           # per-company daily web_search cap (0 = paused)
+max_delegation_depth = 2           # how deep one message's hand-off chain may run
+                                   # 1 = desks may not re-delegate at all; 1..=4
 
 [policy]                           # see company-brain/approvals.md
 mode = "supervised"                # readonly | supervised | auto | full
@@ -107,6 +110,43 @@ prompt = "Weekly review and operator digest"
   use when delegating; it never selects a model (the backend maps tiers to
   SKUs). `tools` and `budget_usd_daily` intersect with the company-wide
   `[tools].allow` and `[budget]` — the most restrictive wins.
+
+  **`delegates_to`** (issue #176) is the one per-agent key that is *not* a
+  narrowing of a company-wide list: it is an **opt-in**. Empty — the default,
+  and every manifest written before it existed — means the agent carries no
+  delegation tool at all, which is how a dispatched desk agent has always
+  behaved. Naming one or more desks wires exactly two tools onto it,
+  `spawn_task` and a `delegate_to_desk` narrowed to those desks, so a desk lead
+  can pull a specialist in for one slice instead of handing the whole request
+  back to the orchestrator.
+
+  It takes **desk** ids or names (`[[group_chat]]` entries), never teammate
+  ids — desks are the address space `delegate_to_desk` already resolves
+  against — and `"*"` means every desk the company has. An entry that names no
+  declared desk fails validation, because at runtime it would fail silently:
+  the member would carry the tool and every call would be refused.
+
+  It never confers the orchestrator's *authority* — `assign_task`,
+  `review_task`, `add_agent`, `query_company`, `run_workflow`,
+  `create_workflow` stay orchestrator-only. A member gets what it needs to pass
+  a slice on and to leave the rest tracked, and nothing more.
+
+  Three runtime guards bound what it can do, all enforced at the tool boundary
+  in the member's own turn rather than by which tools were wired (belts are
+  cached per roster, so a tool cannot be withheld from one turn):
+
+  - **Depth** — `[tools].max_delegation_depth`, below.
+  - **Cycles** — a hand-off to a desk already on the current chain (A→B→A), or
+    to the desk the caller itself leads, is refused.
+  - **Allowlist** — a target outside `delegates_to` is refused, and the refusal
+    names the desks the member *can* reach so it can retry in the same turn.
+
+  Each refusal reaches both the model and the board: the run trail carries it
+  verbatim, and a refused hand-off is recorded on the dispatched card's note,
+  so the operator reads the fact rather than inferring it from an absence.
+
+  The per-turn fan-out cap (three delegations) applies **per level**, not per
+  message — each turn starts against an empty queue.
 
   **`budget_usd_daily`** (enforced since issue #304 — before that it was
   validated, stored and displayed, but nothing read it) caps one teammate's
@@ -275,6 +315,24 @@ prompt = "Weekly review and operator digest"
       does not get one.
     - **There is no `search` Cargo feature.** The tool rides the `openhuman`
       harness feature so CI's gated lane actually compiles and tests it.
+
+  **`max_delegation_depth`** (issue #176) bounds how deep one operator
+  message's hand-off chain may run, counted in hand-offs: the orchestrator
+  handing work to a desk lead is level 1, that lead handing a slice on is
+  level 2. Default `2`; valid `1..=4`, where `1` is the "recursion off" setting
+  and reproduces the pre-#176 behaviour exactly.
+
+  The depth in force is read from the **live company record** on every call, so
+  lowering it takes effect on the next turn without a rebuild. A hand-off past
+  the bound is refused in the model's own turn with the reason
+  `depth_capped` — while `spawn_task` still works at the bound, so a member that
+  has run out of chain leaves the remaining work tracked instead of doing it
+  silently.
+
+  The bound only ever matters to an agent some manifest opted in with
+  `delegates_to`; a company that names nobody is unaffected by any value here.
+  It is deliberately low: the fan-out cap applies per level, so each extra
+  level multiplies the turns one message can buy.
     The Usage view surfaces a `Web searches` KPI plus a search status row
     (active / paused at cap 0 / awaiting credential / not granted / not in this
     build).
