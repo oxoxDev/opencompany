@@ -519,6 +519,32 @@ export interface TeamMemberDto {
   budgetSetBy?: string;
   /** When that cap was set (epoch millis). Paired with `budgetSetBy`. */
   budgetSetAtMillis?: number;
+  /**
+   * This teammate's tool grants (issue #601) — the **same** three lists, from
+   * the same host-side constructor, that `GET .../team/{agentId}` serves.
+   *
+   * On the list because the overview graph draws a ring of each teammate's
+   * tools and is built from the roster read: without this it would have to
+   * fetch every agent's detail on page load, and it invented a tool shelf
+   * instead. Read `effective` and nothing else when the question is "what does
+   * this agent hold" — see {@link AgentToolsDto} for why `requested` alone
+   * inverts the answer.
+   *
+   * **Optional on the type, not on the wire.** A host predating #601 sends no
+   * such field; `undefined` means "this host cannot say", which is a different
+   * statement from an empty `effective` ("holds nothing") and must not be
+   * collapsed into it.
+   */
+  tools?: AgentToolsDto;
+  /**
+   * The desks this teammate sits on (issue #601), same shape as the detail
+   * read. Desks are the company's real grouping, so these are what the
+   * overview graph draws its department pillars from.
+   *
+   * **Optional on the type, not on the wire**, same rule as `tools`: absent
+   * means the host does not answer, empty means "on no desk".
+   */
+  desks?: AgentDeskDto[];
 }
 
 /**

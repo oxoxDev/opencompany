@@ -3,7 +3,10 @@
 // generic, company-agnostic roster the operator can edit. Either way, agents
 // are user-definable here.
 
-import type { TeamMemberDto } from "@/api/types";
+import type { AgentDeskDto, TeamMemberDto } from "@/api/types";
+
+/** A desk a teammate sits on, as the roster read reports it. */
+export type TeamMemberDesk = AgentDeskDto;
 
 export interface TeamMember {
   id: string;
@@ -39,6 +42,26 @@ export interface TeamMember {
   budgetSetBy?: string;
   /** When that cap was set (epoch millis). Paired with `budgetSetBy`. */
   budgetSetAtMillis?: number;
+  /**
+   * The tool grants this teammate **actually holds** — its own `[[agent]].tools`
+   * line narrowed by the company's `[tools].allow`, resolved by the host
+   * (issue #601).
+   *
+   * The `effective` list and only that: the agent detail view shows the same
+   * one, from the same server-side function the harness builds the agent with,
+   * so the two surfaces cannot disagree about a teammate. Empty means either
+   * "holds nothing" or "this host does not report grants" — both draw no tools,
+   * and neither is a licence to invent some.
+   */
+  effectiveTools: string[];
+  /**
+   * The desks this teammate sits on, host order (manifest desks first, then
+   * operator-created ones). Empty means it sits on none.
+   *
+   * This is the company's real grouping axis, and the overview graph's
+   * department pillars are drawn from it.
+   */
+  desks: TeamMemberDesk[];
 }
 
 const TONE_KEYS = ["sky", "violet", "amber", "emerald", "rose", "cyan", "indigo", "teal"];
@@ -78,6 +101,11 @@ export function fromDto(dto: TeamMemberDto): TeamMember {
     // which the card renders differently from "an admin set this".
     budgetSetBy: dto.budgetSetBy,
     budgetSetAtMillis: dto.budgetSetAtMillis,
+    // A host predating issue #601 sends neither, and an empty list is the
+    // honest reading of that: it draws no tools and no desk rather than a
+    // guess at either.
+    effectiveTools: dto.tools?.effective ?? [],
+    desks: dto.desks ?? [],
   };
 }
 
@@ -116,6 +144,10 @@ function member(name: string, role: string, description: string): TeamMember {
     description,
     tone: toneFor(name),
     inboxEnabled: false,
+    // A console-invented teammate exists on no host, so it holds no grant and
+    // sits on no desk. Stated, not guessed.
+    effectiveTools: [],
+    desks: [],
   };
 }
 
@@ -162,6 +194,10 @@ export function newMember(fields: { name: string; role: string; description: str
     description: fields.description.trim(),
     tone: toneFor(memberId),
     inboxEnabled: false,
+    // Same as `member` above: nothing on a host has granted this teammate
+    // anything or seated it anywhere yet.
+    effectiveTools: [],
+    desks: [],
   };
 }
 
