@@ -19,7 +19,20 @@
 //!   [`delegation`](crate::runtime::delegation) module so the hosted path can
 //!   resolve a desk's lead without the `openhuman` feature);
 //! - the argument parsers ([`SpawnTaskArgs`], [`DelegateArgs`]) the host uses
-//!   to service a `spawn_task` / `delegate_to_desk` tool-call frame.
+//!   to service a `spawn_task` / `delegate_to_desk` tool-call frame;
+//! - the hand-off **target checks** — [`reject_desk_target`] (issue #272) and,
+//!   since the recursive-delegation slice, [`reject_cycle_target`] and
+//!   [`reject_out_of_allowlist_target`] (issue #176). Each returns the refusal
+//!   as an `Option<String>` rather than rejecting in place, so the harness tool
+//!   can turn it into a `ToolResult::error` and the hosted device-side handler
+//!   into a failed tool frame, from one definition.
+//!
+//! What is *not* here is the enforcement of delegation **depth**. That lives on
+//! the harness [`DelegationQueue`](crate::harness::orchestrator::DelegationQueue),
+//! because only the harness runs a desk member's turn at all: the hosted path
+//! services delegation tools solely for the orchestrator's own cycle and writes
+//! a durable card, so its chain is always empty. The definitions above are
+//! brain-agnostic; the recursion they guard is not.
 //!
 //! Compiled in every build (no feature gate): the hosted brain is in the
 //! default build, and the harness path re-exports from here.
@@ -223,6 +236,109 @@ on is \"{desk}\". Valid desk ids: {list}."
 Valid desk ids: {list}."
         ),
     }
+}
+
+/// Why a **desk member's** `delegate_to_desk` call would close a loop rather
+/// than make progress — or `None` when the target is a step forward (issue
+/// #176).
+///
+/// Two shapes, both of which the depth cap alone would let run to its bound
+/// while producing nothing:
+///
+/// * **Back up the chain** — the target desk is already executing somewhere
+///   above this turn (`chain` is the scope chain, outermost first). A→B→A is the
+///   loop the issue names; the desk that handed this work out cannot be the desk
+///   it is handed back to.
+/// * **Back to itself** — the target desk's lead *is* the member calling. Its
+///   own turn is the one running; handing work to itself would re-enter it a
+///   level deeper to do what it is already doing.
+///
+/// Identity here is the **resolved desk id**, deliberately, on both sides. That
+/// is what `delegate_to_desk` already validates and what the chain records, and
+/// an agent-keyed visited set would false-positive on the perfectly ordinary
+/// company where one strong teammate leads two desks — refusing a real hand-off
+/// to a second, different desk. The self-lead arm is the one place an *agent*
+/// identity is compared, and only against the immediate caller.
+///
+/// The depth cap, not this, is the real runaway bound; this is what keeps a
+/// bounded chain from spending its whole budget going in a circle, and what
+/// keeps the guard honest if the cap is ever raised.
+pub fn reject_cycle_target(
+    record: &CompanyRecord,
+    chain: &[String],
+    key: &str,
+    delegator: &str,
+) -> Option<String> {
+    // An unresolvable key is `reject_desk_target`'s refusal to give, not this
+    // one's: saying "that would loop" about a desk that does not exist would
+    // send the model looking for a cycle it cannot find.
+    let desk_id = record.resolve_desk_id(key)?;
+    if chain.iter().any(|scoped| scoped == &desk_id) {
+        let trail = chain.join(" → ");
+        return Some(format!(
+            "The \"{desk_id}\" desk is already working on this — it is where the work came from \
+({trail}). Handing it back would loop. Do the part you can do yourself, or hand it to a desk \
+that is not already on that list."
+        ));
+    }
+    if desk_lead(record, &desk_id).as_deref() == Some(delegator) {
+        return Some(format!(
+            "You lead the \"{desk_id}\" desk, so handing this to it would hand it back to \
+yourself. Do it in this turn instead, or hand it to a different desk."
+        ));
+    }
+    None
+}
+
+/// Why a **desk member's** `delegate_to_desk` target is outside what its
+/// manifest entry permits — or `None` when the member may reach it (issue #176).
+///
+/// `allowed` is the member's
+/// [`delegates_to`](crate::company::Agent::delegates_to) list, whose entries are
+/// desk ids or names; [`DELEGATES_TO_WILDCARD`] admits every desk. Both sides
+/// are resolved to desk ids before comparison, so an allowlist written with
+/// display names and a call made with an id agree.
+///
+/// The refusal **names the desks the member may reach**, because the model has
+/// no other way to learn its own allowlist: the tool schema is shared with the
+/// orchestrator's unrestricted copy, and a bare "not allowed" costs a turn per
+/// guess. Retryable in the same turn, unlike the depth and no-drain refusals.
+///
+/// Never reached with an empty `allowed`: an empty allowlist means the tool was
+/// not wired at all. It still fails closed if one ever arrives — nothing
+/// resolves, so everything is refused.
+///
+/// [`DELEGATES_TO_WILDCARD`]: crate::company::DELEGATES_TO_WILDCARD
+pub fn reject_out_of_allowlist_target(
+    record: &CompanyRecord,
+    allowed: &[String],
+    key: &str,
+) -> Option<String> {
+    if allowed
+        .iter()
+        .any(|entry| entry.trim() == crate::company::DELEGATES_TO_WILDCARD)
+    {
+        return None;
+    }
+    // As above: an unresolvable key belongs to `reject_desk_target`.
+    let desk_id = record.resolve_desk_id(key)?;
+    let permitted: Vec<String> = allowed
+        .iter()
+        .filter_map(|entry| record.resolve_desk_id(entry.trim()))
+        .collect();
+    if permitted.contains(&desk_id) {
+        return None;
+    }
+    Some(match desk_list(permitted) {
+        Some(list) => format!(
+            "You may not hand work to the \"{desk_id}\" desk. The desks you can hand work to are: \
+{list}. Call `delegate_to_desk` again with one of those, or do the work yourself."
+        ),
+        None => format!(
+            "You may not hand work to the \"{desk_id}\" desk, and there is no other desk you can \
+hand work to either. Do the work yourself, or say what you cannot do."
+        ),
+    })
 }
 
 /// The first desk `member` is on, so an invented teammate-as-desk target can be
@@ -451,6 +567,99 @@ members = ["counsel"]
         let list = desk_list(ids).expect("non-empty");
         assert!(list.ends_with("(+3 more)"), "{list}");
         assert_eq!(desk_list(Vec::new()), None);
+    }
+
+    // --- Recursive-delegation target checks (issue #176) -------------------
+
+    /// The A→B→A loop the issue names: a desk already on the chain cannot be
+    /// handed the work back.
+    #[test]
+    fn a_desk_already_on_the_chain_is_refused_as_a_cycle() {
+        let record = record();
+        let chain = vec!["engineering".to_string()];
+        let message =
+            reject_cycle_target(&record, &chain, "engineering", "writer").expect("rejected");
+        assert!(message.contains("engineering"), "{message}");
+        assert!(message.contains("loop"), "{message}");
+        // A desk that is NOT on the chain is a step forward.
+        assert_eq!(reject_cycle_target(&record, &chain, "content", "ceo"), None);
+        // The id-or-name key `resolve_desk_id` accepts is checked identically —
+        // a cycle written with the display name is still a cycle.
+        assert!(reject_cycle_target(&record, &chain, "Engineering desk", "writer").is_some());
+    }
+
+    /// Handing work to the desk you lead is handing it to yourself.
+    #[test]
+    fn a_desk_the_caller_leads_is_refused_as_self_delegation() {
+        let record = record();
+        // `writer` leads `content`.
+        let message = reject_cycle_target(&record, &[], "content", "writer").expect("rejected");
+        assert!(message.contains("yourself"), "{message}");
+        // Somebody who does NOT lead it may hand work to it.
+        assert_eq!(reject_cycle_target(&record, &[], "content", "ceo"), None);
+    }
+
+    /// An unresolvable key belongs to `reject_desk_target`, not to either of
+    /// the #176 checks — otherwise an invented desk would be reported as a
+    /// cycle or an allowlist miss and the model would go looking for the wrong
+    /// mistake.
+    #[test]
+    fn an_unknown_desk_is_left_to_the_grounding_check() {
+        let record = record();
+        assert_eq!(reject_cycle_target(&record, &[], "nowhere", "ceo"), None);
+        assert_eq!(
+            reject_out_of_allowlist_target(&record, &["content".into()], "nowhere"),
+            None
+        );
+        // …and it IS refused by the check that owns it.
+        assert!(reject_desk_target(&record, "nowhere").is_some());
+    }
+
+    /// The allowlist refusal must name what the member CAN reach: the model has
+    /// no other way to learn its own `delegates_to`.
+    #[test]
+    fn an_out_of_allowlist_desk_is_refused_with_the_permitted_set() {
+        let record = record();
+        let allowed = vec!["content".to_string()];
+        let message =
+            reject_out_of_allowlist_target(&record, &allowed, "engineering").expect("rejected");
+        assert!(message.contains("engineering"), "{message}");
+        assert!(message.contains("content"), "{message}");
+        // The permitted desk itself passes, by id and by display name.
+        assert_eq!(
+            reject_out_of_allowlist_target(&record, &allowed, "content"),
+            None
+        );
+        assert_eq!(
+            reject_out_of_allowlist_target(&record, &allowed, "Content desk"),
+            None
+        );
+        // …and an allowlist written with display names admits the id.
+        let by_name = vec!["Content desk".to_string()];
+        assert_eq!(
+            reject_out_of_allowlist_target(&record, &by_name, "content"),
+            None
+        );
+    }
+
+    /// `"*"` admits every desk; an empty allowlist admits none (fail-closed —
+    /// though the tool is never wired in that state).
+    #[test]
+    fn the_wildcard_admits_every_desk_and_an_empty_allowlist_admits_none() {
+        let record = record();
+        let wildcard = vec!["*".to_string()];
+        for desk in ["engineering", "content", "legal"] {
+            assert_eq!(
+                reject_out_of_allowlist_target(&record, &wildcard, desk),
+                None,
+                "`*` must admit {desk}"
+            );
+        }
+        let message = reject_out_of_allowlist_target(&record, &[], "content").expect("rejected");
+        assert!(
+            message.contains("no other desk"),
+            "an empty allowlist must say so rather than offer an empty list: {message}"
+        );
     }
 
     #[test]
