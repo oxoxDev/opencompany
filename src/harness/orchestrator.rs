@@ -3367,6 +3367,7 @@ mod tests {
             description: None,
             tier: tier.map(str::to_string),
             tools: Vec::new(),
+            delegates_to: Vec::new(),
             budget_usd_daily: None,
         }
     }

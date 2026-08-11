@@ -2303,6 +2303,10 @@ fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
         // A non-empty list is intersected with `[tools].allow` by that same
         // function below (narrow-only, never a widen).
         tools: overlay.tools.clone(),
+        // Issue #176: an overlay teammate declares no delegation allowlist in
+        // this slice, so it carries today's behaviour — no hand-off tools wired.
+        // Opting overlays in needs a console write surface; see the follow-up.
+        delegates_to: Vec::new(),
         budget_usd_daily: None,
     }
 }
@@ -5273,6 +5277,7 @@ budget_usd_daily = 0.0
             description: None,
             tier: None,
             tools: Vec::new(),
+            delegates_to: Vec::new(),
             budget_usd_daily: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
@@ -5382,6 +5387,7 @@ budget_usd_daily = 0.0
             description: None,
             tier: None,
             tools: Vec::new(),
+            delegates_to: Vec::new(),
             budget_usd_daily: None,
         };
         let agent = build::build_agent(

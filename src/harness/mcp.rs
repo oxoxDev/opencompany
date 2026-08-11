@@ -607,6 +607,7 @@ mod tests {
             description: None,
             tier: None,
             tools: grants.iter().map(|g| g.to_string()).collect(),
+            delegates_to: vec![],
             budget_usd_daily: None,
         }
     }

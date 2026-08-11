@@ -12,8 +12,15 @@ use crate::error::{OpenCompanyError, Result};
 
 use super::types::{
     BRAIN_MODES, CONNECTION_PRIORITIES, CompanyManifest, GATEABLE_NAMESPACES, KNOWN_CHANNELS,
-    PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, TIERS, TOOL_PROVIDERS,
+    MAX_DELEGATION_DEPTH_BOUNDS, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, TIERS, TOOL_PROVIDERS,
 };
+
+/// The `delegates_to` entry that means "every desk this company has".
+///
+/// Shared with the runtime allowlist check
+/// ([`reject_out_of_allowlist_target`](crate::runtime::delegation_tools::reject_out_of_allowlist_target))
+/// so validation and enforcement cannot disagree about what `"*"` means.
+pub const DELEGATES_TO_WILDCARD: &str = "*";
 
 /// Preferred manifest filename.
 pub const MANIFEST_FILE: &str = "company.toml";
@@ -178,6 +185,44 @@ impl CompanyManifest {
             }
         }
 
+        // Delegation allowlists (issue #176): every `delegates_to` entry must
+        // name a desk this manifest actually declares.
+        //
+        // Checked here rather than in the roster loop above because it is the
+        // one agent field whose target lives in a *later* section — the desks
+        // are only fully known once `[[group_chat]]` has been walked. An entry
+        // that resolves to nothing would otherwise fail silently at runtime:
+        // the member would carry `delegate_to_desk`, every call would be
+        // refused as off-allowlist, and the manifest would look fine.
+        for agent in &self.agents {
+            let label = if agent.id.is_empty() {
+                "an agent".to_string()
+            } else {
+                format!("agent `{}`", agent.id)
+            };
+            for desk in &agent.delegates_to {
+                let key = desk.trim();
+                if key == DELEGATES_TO_WILDCARD {
+                    continue;
+                }
+                if key.is_empty() {
+                    problems.push(format!(
+                        "{label} has an empty entry in `delegates_to` — list desk ids, or `\"*\"` for every desk."
+                    ));
+                    continue;
+                }
+                let resolves = self
+                    .group_chats
+                    .iter()
+                    .any(|chat| chat.id == key || chat.name.eq_ignore_ascii_case(key));
+                if !resolves {
+                    problems.push(format!(
+                        "{label} may delegate to `{key}`, which is not a desk in this company — `delegates_to` takes `[[group_chat]]` ids (or `\"*\"` for every desk), not teammate ids."
+                    ));
+                }
+            }
+        }
+
         // Connections: a provider is required; a stated priority must be known.
         for (index, connection) in self.connections.iter().enumerate() {
             let label = if connection.provider.trim().is_empty() {
@@ -236,6 +281,21 @@ impl CompanyManifest {
                 "`[tools].provider`",
                 TOOL_PROVIDERS,
                 &self.tools.provider,
+            ));
+        }
+
+        // The delegation chain bound (issue #176). `0` would refuse the
+        // orchestrator's own hand-off — delegation off entirely, by a knob that
+        // reads like a depth — and anything past the ceiling is a runaway with
+        // a number in front of it, since the per-turn fan-out cap applies at
+        // every level.
+        if let Some(depth) = self.tools.max_delegation_depth
+            && !MAX_DELEGATION_DEPTH_BOUNDS.contains(&depth)
+        {
+            problems.push(format!(
+                "`[tools].max_delegation_depth` must be between {} and {} — you wrote `{depth}`. Use `1` to stop desks re-delegating at all.",
+                MAX_DELEGATION_DEPTH_BOUNDS.start(),
+                MAX_DELEGATION_DEPTH_BOUNDS.end(),
             ));
         }
 
@@ -585,6 +645,94 @@ mod tests {
                  validator rejects — unreachable from a company.toml: {problems:?}"
             );
         }
+    }
+
+    /// A `delegates_to` entry must name a real desk (issue #176).
+    ///
+    /// The failure this catches is silent at runtime rather than loud: a member
+    /// whose allowlist resolves to nothing still carries `delegate_to_desk`, and
+    /// every call it makes is refused as off-allowlist. The manifest is where
+    /// that is visible.
+    #[test]
+    fn rejects_a_delegates_to_entry_that_is_not_a_desk() {
+        let manifest = parse(
+            "[company]\nname = \"X\"\n\
+             [[agent]]\nid = \"lead\"\nrole = \"Lead\"\ndelegates_to = [\"writer\"]\n\
+             [[agent]]\nid = \"writer\"\nrole = \"Writer\"\n\
+             [[group_chat]]\nid = \"content\"\nname = \"Content desk\"\nmembers = [\"writer\"]\n",
+        );
+        let problems = manifest.validate();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("agent `lead`"), "{}", problems[0]);
+        assert!(problems[0].contains("`writer`"), "{}", problems[0]);
+        // The most common mistake is naming the teammate instead of the desk,
+        // so the message has to say which vocabulary the field takes.
+        assert!(problems[0].contains("teammate ids"), "{}", problems[0]);
+    }
+
+    /// Desk **ids**, desk **names**, and the `"*"` wildcard all resolve; an
+    /// empty entry is called out separately from an unknown one.
+    #[test]
+    fn accepts_desk_ids_names_and_the_wildcard_in_delegates_to() {
+        let ok = parse(
+            "[company]\nname = \"X\"\n\
+             [[agent]]\nid = \"lead\"\nrole = \"Lead\"\ndelegates_to = [\"content\", \"Legal desk\", \"*\"]\n\
+             [[group_chat]]\nid = \"content\"\nname = \"Content desk\"\n\
+             [[group_chat]]\nid = \"legal\"\nname = \"Legal desk\"\n",
+        );
+        assert!(ok.validate().is_empty(), "{:?}", ok.validate());
+
+        let blank = parse(
+            "[company]\nname = \"X\"\n\
+             [[agent]]\nid = \"lead\"\nrole = \"Lead\"\ndelegates_to = [\"  \"]\n\
+             [[group_chat]]\nid = \"content\"\nname = \"Content desk\"\n",
+        );
+        let problems = blank.validate();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("empty entry"), "{}", problems[0]);
+    }
+
+    /// The depth knob is bounded on both sides (issue #176): `0` would mean
+    /// "delegation off" wearing a depth's clothes, and past the ceiling the
+    /// per-level fan-out cap compounds into a runaway.
+    #[test]
+    fn rejects_a_delegation_depth_outside_its_bounds() {
+        for depth in ["0", "5"] {
+            let manifest = parse(&format!(
+                "[company]\nname = \"X\"\n[tools]\nmax_delegation_depth = {depth}\n"
+            ));
+            let problems = manifest.validate();
+            assert_eq!(problems.len(), 1, "depth {depth}: {problems:?}");
+            assert!(
+                problems[0].contains("`[tools].max_delegation_depth`"),
+                "{}",
+                problems[0]
+            );
+            assert!(problems[0].contains("between 1 and 4"), "{}", problems[0]);
+        }
+        for depth in ["1", "2", "3", "4"] {
+            let manifest = parse(&format!(
+                "[company]\nname = \"X\"\n[tools]\nmax_delegation_depth = {depth}\n"
+            ));
+            assert!(
+                manifest.validate().is_empty(),
+                "depth {depth} must be accepted: {:?}",
+                manifest.validate()
+            );
+        }
+        // Absent is always fine and means the default.
+        let bare = parse("[company]\nname = \"X\"\n");
+        assert_eq!(bare.tools.max_delegation_depth, None);
+        assert!(bare.validate().is_empty());
+    }
+
+    /// An existing manifest that names no `delegates_to` parses to the empty
+    /// allowlist, which is what keeps #176 a no-op for every company that did
+    /// not ask for it.
+    #[test]
+    fn delegates_to_defaults_to_empty() {
+        let manifest = parse("[company]\nname = \"X\"\n[[agent]]\nid = \"a\"\nrole = \"A\"\n");
+        assert!(manifest.agents[0].delegates_to.is_empty());
     }
 
     #[test]

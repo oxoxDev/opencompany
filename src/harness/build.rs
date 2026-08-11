@@ -1125,6 +1125,7 @@ mod tests {
             description: description.map(str::to_string),
             tier: None,
             tools: Vec::new(),
+            delegates_to: Vec::new(),
             budget_usd_daily: None,
         }
     }
@@ -1286,6 +1287,7 @@ mod tests {
             description: None,
             tier: None,
             tools: Vec::new(),
+            delegates_to: Vec::new(),
             budget_usd_daily: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
@@ -1324,6 +1326,7 @@ mod tests {
             description: None,
             tier: None,
             tools: Vec::new(),
+            delegates_to: Vec::new(),
             budget_usd_daily: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
@@ -1358,6 +1361,7 @@ mod tests {
             description: None,
             tier: None,
             tools: Vec::new(),
+            delegates_to: Vec::new(),
             budget_usd_daily: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
@@ -1390,6 +1394,7 @@ mod tests {
             description: None,
             tier: None,
             tools: Vec::new(),
+            delegates_to: Vec::new(),
             budget_usd_daily: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
