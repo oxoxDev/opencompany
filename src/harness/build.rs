@@ -1597,6 +1597,10 @@ mod tests {
             description: None,
             tier: None,
             tools: Vec::new(),
+            // Issue #176: this repo-tools fixture predates `delegates_to` and is
+            // only compiled under the gated feature combo, so neither this
+            // branch's CI nor #245's could see the other's half.
+            delegates_to: Vec::new(),
             budget_usd_daily: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
