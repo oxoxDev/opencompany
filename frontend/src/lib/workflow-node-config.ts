@@ -436,3 +436,79 @@ export function configDraftProblem(
   }
   return null;
 }
+
+/**
+ * The console mirror of the host's write-time kind↔config rules, for the copilot
+ * proposal path (issue #783). Returns the one actionable sentence the host would
+ * refuse the write with, or `null` when the node is coherent for its kind.
+ *
+ * The source of truth is two host functions applied on every console-authored
+ * graph (create AND update):
+ *
+ * - `required_config_problems` (`src/company/workflow_file.rs`): a `tool_call`
+ *   needs `config.slug`, a `condition` needs `config.field`, an `http_request`
+ *   needs `config.method` and `config.url`, a `switch` needs `config.field` OR
+ *   `config.expression`, and a `sub_workflow` needs `config.workflow_id`.
+ * - the `agent`-node arm of `validate_draft_against_record`
+ *   (`src/company/workflow_create.rs`): an `agent` node must name a teammate in
+ *   its first-class `agent` field (never in `config`).
+ *
+ * Deliberately NOT {@link configDraftProblem}: that is the *form* validator, and
+ * it is stricter than the host in ways that would refuse a proposal the host
+ * accepts — it requires a `switch` to set field XOR expression where the host
+ * takes either, and it runs JSON-shape and blur rules the write path does not.
+ * This checks exactly what the host checks, so a coherent proposal is never
+ * turned away and an incoherent one is caught before the operator sees a diff
+ * for a step Apply would bounce.
+ *
+ * Config **shape** only: whether a named tool is actually granted, or a named
+ * teammate is really on the roster, stays the host's authority (a run-time gate
+ * this console cannot see). This checks that the key is present, not that its
+ * value resolves.
+ */
+export function nodeKindConfigProblem(node: {
+  kind: string;
+  agent?: string;
+  config?: unknown;
+}): string | null {
+  const table =
+    node.config && typeof node.config === "object" && !Array.isArray(node.config)
+      ? (node.config as Record<string, unknown>)
+      : undefined;
+  const nonEmpty = (key: string): boolean => {
+    const value = table?.[key];
+    return typeof value === "string" && value.trim() !== "";
+  };
+
+  switch (node.kind) {
+    case "agent":
+      return (node.agent ?? "").trim()
+        ? null
+        : "An agent step names no teammate — set its `agent` field to a roster member (not inside `config`).";
+    case "tool_call":
+      return nonEmpty("slug")
+        ? null
+        : 'A tool_call step sets no `config.slug` — put the tool\'s slug inside `config`, e.g. `"config": { "slug": "web_search" }`.';
+    case "condition":
+      return nonEmpty("field")
+        ? null
+        : "A condition step sets no `config.field` — put the boolean expression the branch tests inside `config`.";
+    case "http_request":
+      if (!nonEmpty("method")) {
+        return 'An http_request step sets no `config.method` — name the HTTP method inside `config`, e.g. `"config": { "method": "GET" }`.';
+      }
+      return nonEmpty("url")
+        ? null
+        : "An http_request step sets no `config.url` — put the request URL inside `config`.";
+    case "switch":
+      return nonEmpty("field") || nonEmpty("expression")
+        ? null
+        : "A switch step names no discriminant — set `config.field` or `config.expression` inside `config`.";
+    case "sub_workflow":
+      return nonEmpty("workflow_id")
+        ? null
+        : "A sub_workflow step sets no `config.workflow_id` — name the workflow to run inside `config`.";
+    default:
+      return null;
+  }
+}

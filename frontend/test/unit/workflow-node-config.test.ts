@@ -8,6 +8,7 @@ import {
   configFieldSpecs,
   configFromDraft,
   hasConfigForm,
+  nodeKindConfigProblem,
 } from "@/lib/workflow-node-config";
 
 /**
@@ -429,5 +430,68 @@ describe("configDraftProblem — submit-time gate", () => {
 
   it("is a no-op for a kind without a config form", () => {
     expect(configDraftProblem("agent", "n1", {})).toBeNull();
+  });
+});
+
+/**
+ * Issue #783: the console mirror of the host's write-time kind↔config rules,
+ * used by the copilot proposal path to refuse a "wrong kind when applied" node
+ * before the operator is shown a diff for it. It must match the host
+ * (`required_config_problems` + the `agent` arm of `validate_draft_against_record`)
+ * — no stricter, or it would turn away a proposal the host accepts.
+ */
+describe("nodeKindConfigProblem", () => {
+  it("refuses a tool_call with no config.slug and accepts one with it", () => {
+    expect(nodeKindConfigProblem({ kind: "tool_call" })).toMatch(/config\.slug/);
+    expect(nodeKindConfigProblem({ kind: "tool_call", config: { slug: "web_search" } })).toBeNull();
+  });
+
+  it("refuses an agent naming no teammate, and accepts one that does", () => {
+    expect(nodeKindConfigProblem({ kind: "agent" })).toMatch(/teammate/);
+    // The teammate is the top-level `agent` field, never inside config.
+    expect(nodeKindConfigProblem({ kind: "agent", config: { agent: "analyst" } })).toMatch(
+      /teammate/,
+    );
+    expect(nodeKindConfigProblem({ kind: "agent", agent: "analyst" })).toBeNull();
+  });
+
+  it("requires both method and url on an http_request", () => {
+    expect(nodeKindConfigProblem({ kind: "http_request", config: { url: "https://x" } })).toMatch(
+      /config\.method/,
+    );
+    expect(nodeKindConfigProblem({ kind: "http_request", config: { method: "GET" } })).toMatch(
+      /config\.url/,
+    );
+    expect(
+      nodeKindConfigProblem({ kind: "http_request", config: { method: "GET", url: "https://x" } }),
+    ).toBeNull();
+  });
+
+  it("takes a switch discriminant as field OR expression, matching the host", () => {
+    expect(nodeKindConfigProblem({ kind: "switch" })).toMatch(/discriminant/);
+    expect(nodeKindConfigProblem({ kind: "switch", config: { field: "status" } })).toBeNull();
+    expect(nodeKindConfigProblem({ kind: "switch", config: { expression: "=x>0" } })).toBeNull();
+    // The host accepts both set; the stricter form validator does not, but this
+    // mirror must not — a proposal the host takes is never refused here.
+    expect(
+      nodeKindConfigProblem({ kind: "switch", config: { field: "status", expression: "=x>0" } }),
+    ).toBeNull();
+  });
+
+  it("requires a condition field and a sub_workflow workflow_id", () => {
+    expect(nodeKindConfigProblem({ kind: "condition" })).toMatch(/config\.field/);
+    expect(nodeKindConfigProblem({ kind: "condition", config: { field: "=item.ok" } })).toBeNull();
+    expect(nodeKindConfigProblem({ kind: "sub_workflow" })).toMatch(/config\.workflow_id/);
+    expect(
+      nodeKindConfigProblem({ kind: "sub_workflow", config: { workflow_id: "other" } }),
+    ).toBeNull();
+  });
+
+  it("imposes no config rule on kinds the host requires none of", () => {
+    // These are valid host kinds with no required config — a proposal must not
+    // be refused for omitting config it never needed.
+    for (const kind of ["trigger", "output", "merge", "split_out", "transform", "output_parser"]) {
+      expect(nodeKindConfigProblem({ kind })).toBeNull();
+    }
   });
 });

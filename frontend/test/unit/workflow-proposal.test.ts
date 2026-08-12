@@ -195,6 +195,87 @@ describe("validateProposal", () => {
     const out = validateProposal({ summary: "s", ops: [{ op: "replaceGraph", graph: {} }] }, g);
     expect(out).toMatchObject({ reason: expect.stringContaining("replaceGraph") });
   });
+
+  /**
+   * Issue #783. The host accepts a fixed set of node kinds
+   * (`WORKFLOW_NODE_KINDS`); a step of any other kind is rejected on write, so
+   * offering a diff for one is offering a change Apply will bounce. Refused here
+   * with the valid set named, so the operator's next ask can be a real one.
+   */
+  it("refuses a new step whose kind the host would reject", () => {
+    const out = validateProposal(
+      { summary: "s", ops: [{ op: "addNode", node: { id: "x", kind: "webhook", name: "X" } }] },
+      g,
+    );
+    expect(out).toMatchObject({ reason: expect.stringContaining("webhook") });
+  });
+
+  /**
+   * The "wrong kind when applied" failure: a `tool_call` with no `config.slug`
+   * is incoherent for its kind, and the host refuses it. The console mirror of
+   * that rule catches it before the diff, with the host's actionable sentence.
+   */
+  it("refuses a tool_call that names no tool slug", () => {
+    const out = validateProposal(
+      {
+        summary: "s",
+        ops: [{ op: "addNode", node: { id: "call", kind: "tool_call", name: "Call" } }],
+      },
+      g,
+    );
+    expect(out).toMatchObject({ reason: expect.stringContaining("config.slug") });
+  });
+
+  /** …and an `agent` step that names no teammate, the roster half of the rule. */
+  it("refuses an agent step that names no teammate", () => {
+    const out = validateProposal(
+      {
+        summary: "s",
+        ops: [{ op: "addNode", node: { id: "worker", kind: "agent", name: "Worker" } }],
+      },
+      g,
+    );
+    expect(out).toMatchObject({ reason: expect.stringContaining("agent") });
+  });
+
+  /**
+   * A well-formed `tool_call` — kind valid, `slug` nested under `config` — is
+   * accepted, so the grounding fix does not turn away the proposals it exists to
+   * make possible.
+   */
+  it("accepts a well-formed tool_call with its slug nested in config", () => {
+    const out = validateProposal(
+      {
+        summary: "Add a web search",
+        ops: [
+          {
+            op: "addNode",
+            node: {
+              id: "search",
+              kind: "tool_call",
+              name: "Search",
+              config: { slug: "web_search", args: { query: "=item.topic" } },
+            },
+          },
+        ],
+      },
+      g,
+    );
+    expect(out).not.toHaveProperty("reason");
+  });
+
+  /**
+   * Coherence is judged on the node an `updateNode` WOULD produce, not the change
+   * alone: switching an existing step to `tool_call` without giving it a slug is
+   * the same incoherent node the host rejects on write, so it is refused here.
+   */
+  it("refuses an update that switches a step to a kind whose config it lacks", () => {
+    const out = validateProposal(
+      { summary: "s", ops: [{ op: "updateNode", id: "send", set: { kind: "tool_call" } }] },
+      g,
+    );
+    expect(out).toMatchObject({ reason: expect.stringContaining("config.slug") });
+  });
 });
 
 describe("applyProposal", () => {

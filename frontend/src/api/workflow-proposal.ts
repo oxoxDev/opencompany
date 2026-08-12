@@ -36,6 +36,8 @@
 // the operator a sentence they can act on, and `expectedVersion` on the write
 // makes the host refuse a race this check cannot see.
 
+import { nodeKindConfigProblem } from "@/lib/workflow-node-config";
+import { WORKFLOW_NODE_KINDS } from "./workflows";
 import type { WorkflowEdge, WorkflowGraph, WorkflowNode } from "./workflows";
 
 /**
@@ -155,6 +157,12 @@ export function validateProposal(
   // Tracked as the ops are read, so an edge may reference a node the same
   // proposal adds, and may not reference one the same proposal removes.
   const ids = new Set(graph.nodes.map((n) => n.id));
+  // The nodes as they stand, so an `updateNode`'s kind↔config coherence can be
+  // judged on the node it WOULD produce (existing merged with `set`), not on the
+  // change in isolation — a kind-switch that leaves the node without the config
+  // its new kind needs is exactly the "wrong kind when applied" the host rejects
+  // on write, and this catches it before the operator is shown a diff for it.
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
   const edges = new Set(graph.edges.map(edgeKey));
   const ops: ProposalOp[] = [];
 
@@ -193,11 +201,23 @@ export function validateProposal(
             reason: `A proposed new step sets \`${stray}\`, which isn't a step field.`,
           };
         }
+        // A kind the host would reject on write (`WORKFLOW_NODE_KINDS` in
+        // `src/company/workflow_file.rs`) is refused here, with the same actionable
+        // shape as an unknown field: offering a diff for a step Apply cannot write
+        // is the ungrounded-proposal failure issue #783 exists to close.
+        if (!WORKFLOW_NODE_KINDS.includes(kind)) {
+          return {
+            reason: `A proposed new step \`${id}\` has an unknown kind \`${kind}\` — use one of: ${WORKFLOW_NODE_KINDS.join(", ")}.`,
+          };
+        }
+        const built: WorkflowNode = { ...(candidate as unknown as WorkflowNode), id, kind, name };
+        // The console mirror of the host's kind↔config rules: a `tool_call` with
+        // no `config.slug`, an `agent` naming no teammate, and the rest. Refused
+        // with the host's own actionable sentence rather than sent on to fail.
+        const coherence = nodeKindConfigProblem(built);
+        if (coherence) return { reason: coherence };
         ids.add(id);
-        ops.push({
-          op: "addNode",
-          node: { ...(candidate as unknown as WorkflowNode), id, kind, name },
-        });
+        ops.push({ op: "addNode", node: built });
         break;
       }
       case "updateNode": {
@@ -220,6 +240,19 @@ export function validateProposal(
         if (unknown) {
           return { reason: `The proposed change to \`${id}\` sets \`${unknown}\`, which isn't a step field.` };
         }
+        // Judge the node this update WOULD produce, the way `applyProposal` will
+        // build it — existing merged with `set`. A change that switches a node's
+        // kind, or replaces its `config`, can leave it incoherent for its kind;
+        // the host rejects that on write, so it is caught here before the diff.
+        const existing = byId.get(id) as WorkflowNode;
+        const merged = { ...existing, ...(set as Partial<WorkflowNode>) };
+        if (typeof merged.kind === "string" && !WORKFLOW_NODE_KINDS.includes(merged.kind)) {
+          return {
+            reason: `The proposed change to \`${id}\` sets an unknown kind \`${merged.kind}\` — use one of: ${WORKFLOW_NODE_KINDS.join(", ")}.`,
+          };
+        }
+        const updated = nodeKindConfigProblem(merged);
+        if (updated) return { reason: updated };
         ops.push({ op: "updateNode", id, set: set as Partial<WorkflowNode> });
         break;
       }

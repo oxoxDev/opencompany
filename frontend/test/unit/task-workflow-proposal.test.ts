@@ -88,7 +88,10 @@ describe("taskProposalDiff", () => {
     const bad = {
       ...spec(),
       nodes: [
-        { id: "gather", kind: "agent", name: "Gather" },
+        // Coherent for its kind (issue #783 now checks that in the shared
+        // `validateProposal`), so the id reuse is what this exercises — not a
+        // missing `agent` on the first node.
+        { id: "gather", kind: "agent", name: "Gather", agent: "analyst" },
         { id: "gather", kind: "output", name: "Duplicate" },
       ],
       edges: [],
