@@ -373,6 +373,31 @@ export function getWorkflow(
   );
 }
 
+/** The `GET …/workflows/tool-slugs` answer (issue #783). */
+interface WorkflowToolSlugsResponse {
+  slugs: string[];
+}
+
+/**
+ * The wired, granted `tool_call` slugs the per-workflow copilot may ground a
+ * proposal on (issue #783).
+ *
+ * Every slug here is one a proposed `tool_call` node would clear at the host's
+ * courtesy validation — the route serves the SAME set the create-time copilot
+ * grounds on (issue #753), so what the copilot is told it can call and what the
+ * host will accept cannot drift. A host predating the route 404s; the caller
+ * degrades to an empty list, exactly as it does for the roster read, rather than
+ * blocking the copilot.
+ */
+export function listWorkflowToolSlugs(
+  client: OpenCompanyClient,
+  company: string | null,
+): Promise<string[]> {
+  return client
+    .get<WorkflowToolSlugsResponse>(`${client.scopeFor(company)}/workflows/tool-slugs`)
+    .then((r) => r.slugs);
+}
+
 /**
  * Runs a workflow.
  *
@@ -832,4 +857,30 @@ export const CREATABLE_NODE_KINDS: { value: string; label: string }[] = [
   { value: "switch", label: "Switch — routes to a labeled branch" },
   { value: "output_parser", label: "Output parser — coerces to a schema" },
   { value: "sub_workflow", label: "Sub-workflow — runs another workflow" },
+];
+
+/**
+ * Every node kind the host accepts in a saved graph — the OpenCompany authoring
+ * contract, mirroring `WORKFLOW_NODE_KINDS` in `src/company/workflow_file.rs`.
+ *
+ * Broader than {@link CREATABLE_NODE_KINDS} on purpose: the palette omits
+ * `split_out` (it has no create control yet), but a graph may legitimately
+ * contain one, so a copilot proposal that adds one must not be refused. This is
+ * the set the proposal validator checks a proposed `kind` against — a kind the
+ * host would reject on write is caught here, before the operator is shown a diff
+ * for a step that cannot be applied.
+ */
+export const WORKFLOW_NODE_KINDS: readonly string[] = [
+  "trigger",
+  "agent",
+  "tool_call",
+  "http_request",
+  "condition",
+  "output",
+  "switch",
+  "merge",
+  "split_out",
+  "transform",
+  "output_parser",
+  "sub_workflow",
 ];
