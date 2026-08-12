@@ -34,11 +34,17 @@ import { Bot, Loader2, Send } from "lucide-react";
 import type { OpenCompanyClient } from "@/api/client";
 import { getInferenceStatus, type CognitionPath } from "@/api/inference";
 import { ApiError } from "@/api/types";
-import { updateWorkflow, type WorkflowGraph, type WorkflowRunOutcome } from "@/api/workflows";
+import {
+  listWorkflowToolSlugs,
+  updateWorkflow,
+  type WorkflowGraph,
+  type WorkflowRunOutcome,
+} from "@/api/workflows";
 import {
   askCopilot,
   loadCopilotHistory,
   type CopilotMessage,
+  type RosterEntry,
 } from "@/api/workflow-copilot";
 import {
   applyProposal,
@@ -136,6 +142,16 @@ export function CopilotPanel({
   // and a fast question gets exactly the parroted reply the gate exists to
   // prevent.
   const [inferenceChecked, setInferenceChecked] = useState(false);
+  // Issue #783. The company's roster and the tool slugs a workflow may call, so
+  // a proposal names a real teammate and a real tool instead of guessing —
+  // `undefined` means "not listed on this host", which the composed message
+  // reports honestly rather than as "there is nobody / nothing".
+  const [roster, setRoster] = useState<RosterEntry[] | undefined>(undefined);
+  const [toolSlugs, setToolSlugs] = useState<string[] | undefined>(undefined);
+  // Separate from `toolSlugs` for the same reason `runsKnown` is separate from
+  // `runs`: an empty list on a host that serves the route ("no tools granted")
+  // must not read the same as a host that does not serve it ("cannot say").
+  const [toolSlugsKnown, setToolSlugsKnown] = useState(false);
   // Issue #415. One entry per company message that carried a proposal block,
   // parsed EXACTLY ONCE, when the message first appears.
   //
@@ -209,6 +225,48 @@ export function CopilotPanel({
         // Settled either way: this is what re-opens the composer, so it must
         // run on the failure path too or an older host disables it forever.
         if (live) setInferenceChecked(true);
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
+
+  // Issue #783: the grounding the proposal path needs — the company roster and
+  // the tool slugs a workflow may call. Two independent degrade-on-failure
+  // reads, mirroring the create dialog's roster fetch: a host that serves
+  // neither leaves the copilot exactly as capable as before, only ungrounded,
+  // and the composed message says so rather than inventing teammates or tools.
+  useEffect(() => {
+    let live = true;
+    setRoster(undefined);
+    setToolSlugs(undefined);
+    setToolSlugsKnown(false);
+    (async () => {
+      try {
+        const team = await client.listTeam(company);
+        if (live) setRoster(team.map((m) => ({ id: m.id, role: m.role })));
+      } catch (e) {
+        // No roster surface on this host — leave it unlisted; the message tells
+        // the model not to invent teammate ids rather than claiming there are none.
+        console.debug("[CopilotPanel] roster unavailable", e);
+        if (live) setRoster(undefined);
+      }
+    })();
+    (async () => {
+      try {
+        const slugs = await listWorkflowToolSlugs(client, company);
+        if (live) {
+          setToolSlugs(slugs);
+          setToolSlugsKnown(true);
+        }
+      } catch (e) {
+        // The route is absent (older host): "cannot say", not "no tools".
+        console.debug("[CopilotPanel] tool slugs unavailable", e);
+        if (live) {
+          setToolSlugs(undefined);
+          setToolSlugsKnown(false);
+        }
       }
     })();
     return () => {
@@ -361,7 +419,7 @@ export function CopilotPanel({
         client,
         company,
         workflowId,
-        { graph, runs, runsKnown },
+        { graph, runs, runsKnown, roster, toolSlugs, toolSlugsKnown },
         question,
       );
       if (!mine()) return;
@@ -401,7 +459,21 @@ export function CopilotPanel({
       // composer for a NEWER question that is still in flight.
       if (mine()) setSending(false);
     }
-  }, [client, company, draft, echoing, graph, ready, runs, runsKnown, sending, workflowId]);
+  }, [
+    client,
+    company,
+    draft,
+    echoing,
+    graph,
+    ready,
+    roster,
+    runs,
+    runsKnown,
+    sending,
+    toolSlugs,
+    toolSlugsKnown,
+    workflowId,
+  ]);
 
   const placeholder = useMemo(
     () =>

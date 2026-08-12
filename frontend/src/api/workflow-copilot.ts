@@ -63,11 +63,13 @@
 // correct either way, where sending once is cheaper and wrong if that assumption
 // ever fails.
 
+import { NODE_CONFIG_FIELDS } from "@/lib/workflow-node-config";
 import type { OpenCompanyClient } from "./client";
 import { PROPOSAL_FENCE } from "./workflow-proposal";
-import type {
-  WorkflowGraph,
-  WorkflowRunOutcome,
+import {
+  WORKFLOW_NODE_KINDS,
+  type WorkflowGraph,
+  type WorkflowRunOutcome,
 } from "./workflows";
 
 /**
@@ -121,6 +123,38 @@ export interface CopilotContext {
    * from an absence that means nothing.
    */
   runsKnown: boolean;
+  /**
+   * The company roster (agent id → role) an `agent` step may name — issue #783.
+   *
+   * Without it a proposed `agent` node named a teammate the model invented, and
+   * the host refused the write. The console already holds this from `GET …/team`,
+   * so grounding the copilot on the same list is what stops the guess. Optional:
+   * a host predating the roster read leaves it absent, and the message says the
+   * roster couldn't be listed rather than claiming there is nobody.
+   */
+  roster?: RosterEntry[];
+  /**
+   * The wired, granted `tool_call` slugs a proposed tool step may run — issue
+   * #783. The exact set the host will accept (`GET …/workflows/tool-slugs`), so
+   * the model proposes a real tool instead of guessing `github_integration`.
+   */
+  toolSlugs?: string[];
+  /**
+   * Whether the host served the tool-slug list at all.
+   *
+   * Same honesty split as {@link runsKnown}: an empty `toolSlugs` on a host that
+   * serves the route means "no tools are granted", and the model should not
+   * propose a `tool_call`; an absent list (old host, 404) means "cannot say",
+   * and telling the model "no tools" would be a lie that suppresses a legitimate
+   * proposal. `false`/absent keeps the message from making the stronger claim.
+   */
+  toolSlugsKnown?: boolean;
+}
+
+/** One roster teammate a proposed `agent` step may name — id and role. */
+export interface RosterEntry {
+  id: string;
+  role: string;
 }
 
 /**
@@ -133,7 +167,7 @@ export interface CopilotContext {
  * the truth.
  */
 export function composeCopilotMessage(context: CopilotContext, question: string): string {
-  const { graph, runs, runsKnown } = context;
+  const { graph, runs, runsKnown, roster, toolSlugs, toolSlugsKnown } = context;
   // `editable: false` means the graph is defined by a file in the company
   // source tree. Named for what it IS rather than for the flag's polarity: this
   // was `editable`, holding the negation of the field it was named after, and
@@ -212,6 +246,42 @@ export function composeCopilotMessage(context: CopilotContext, question: string)
     }
   }
 
+  // Issue #783: ground the proposal path in the company's REAL roster and tools,
+  // and in the per-kind config schema. Without these three the model guessed —
+  // it named teammates and tools that don't exist, and put kind-specific keys
+  // (`slug`, `url`, `repo`) as top-level node fields the host's allowlist then
+  // rejected. All three are inlined so the confined turn (no tools, no memory)
+  // can see them.
+  lines.push(``, `## Company grounding`);
+
+  lines.push(
+    ``,
+    `### Roster — the teammate ids an \`agent\` step may name`,
+    `An \`agent\` node names its teammate with the top-level \`agent\` field (a roster id below), NOT inside \`config\`.`,
+  );
+  if (roster === undefined) {
+    lines.push(`(The roster could not be listed here. Do not invent teammate ids.)`);
+  } else if (roster.length === 0) {
+    lines.push(`(This company has no roster teammates, so do not propose an \`agent\` step.)`);
+  } else {
+    for (const member of roster) {
+      lines.push(`- ${member.id}${member.role ? ` — ${member.role}` : ""}`);
+    }
+  }
+
+  lines.push(
+    ``,
+    `### Tools — the slugs a \`tool_call\` step may run`,
+    `A \`tool_call\` node names its tool with \`config.slug\`, set to one of these EXACT slugs. Do not invent a slug (there is no \`github_integration\`, etc.).`,
+  );
+  if (!toolSlugsKnown || toolSlugs === undefined) {
+    lines.push(`(The granted tools could not be listed here. Do not invent a tool slug.)`);
+  } else if (toolSlugs.length === 0) {
+    lines.push(`(No tools are granted to this company's workflows, so do not propose a \`tool_call\` step.)`);
+  } else {
+    for (const slug of toolSlugs) lines.push(`- ${slug}`);
+  }
+
   lines.push(
     ``,
     `## What you can and cannot do`,
@@ -236,18 +306,57 @@ export function composeCopilotMessage(context: CopilotContext, question: string)
       `{"summary": "one line saying what this does", "ops": [ … ]}`,
       "```",
       `Each op is one of:`,
-      `- {"op": "addNode", "node": {"id": "…", "kind": "…", "name": "…", …}} — a new step. Use the same fields the steps above show.`,
+      `- {"op": "addNode", "node": {"id": "…", "kind": "…", "name": "…", …}} — a new step.`,
       `- {"op": "updateNode", "id": "…", "set": {"field": value}} — change fields on an existing step. Only send the fields that change.`,
       `- {"op": "removeNode", "id": "…"} — delete a step (its connections go with it).`,
       `- {"op": "addEdge", "from": "…", "to": "…", "label": "optional"} — connect two steps.`,
       `- {"op": "removeEdge", "from": "…", "to": "…"} — disconnect two steps.`,
-      `Rules: refer to steps by the ids listed above; never rename an id (that is a remove plus an add); propose the smallest change that answers the question; and say in your prose what the change does and why. If you are not confident enough to propose, say so and describe the change instead — a wrong proposal costs the operator more than no proposal.`,
+      ``,
+      // Issue #783 — the shape rules the model kept getting wrong. Every proposal
+      // used to be rejected because kind-specific keys landed as top-level fields
+      // and referenced nodes/tools/teammates that didn't exist.
+      `### A step's kind and its config`,
+      `\`kind\` must be exactly one of: ${WORKFLOW_NODE_KINDS.join(", ")}. Pick the right one:`,
+      `- \`agent\` — a teammate does the work. Name them in the top-level \`agent\` field (a roster id above).`,
+      `- \`tool_call\` — run one wired tool. Name it in \`config.slug\` (a tool slug above).`,
+      `- \`output\` — report the result back. No tool and no teammate.`,
+      `- \`condition\` / \`switch\` — branch. \`http_request\` — call a URL. \`sub_workflow\` — run another saved workflow.`,
+      ``,
+      `Kind-specific keys go INSIDE a \`config\` object on the node — NEVER as top-level fields. The top-level node fields are only: id, kind, name, summary, agent, schedule, config, onError, retry, requiresApproval, destination. Everything else (slug, url, args, method, field, expression, workflow_id, schema, …) lives in \`config\`. For example a tool call is:`,
+      `{"op": "addNode", "node": {"id": "search", "kind": "tool_call", "name": "Search the web", "config": {"slug": "web_search", "args": {"query": "=item.topic"}}}}`,
+      ``,
+      `The \`config\` keys each kind reads (a key marked (required) must be present):`,
+      ...configCatalogLines(),
+      ``,
+      `### Rules`,
+      `- The only node ids that exist are the ones listed under ## Graph above. Refer to a step by its id; never reference an id that is not there, and never invent one.`,
+      `- Never rename an id (that is a remove plus an add).`,
+      `- Only name a teammate from the roster above, and only a tool slug from the tools above.`,
+      `- Propose the smallest change that answers the question, and say in your prose what it does and why.`,
+      `- If you are not confident enough to propose, say so and describe the change instead — a wrong proposal costs the operator more than no proposal.`,
     );
   }
 
   // Joined with the marker verbatim, so `questionOf` splits on exactly the
   // string this function used.
   return `${lines.join("\n")}${QUESTION_MARKER}${question}`;
+}
+
+/**
+ * The per-kind `config` schema, rendered from {@link NODE_CONFIG_FIELDS} so the
+ * catalog the model is taught cannot drift from the fields the console actually
+ * authors and validates (issue #783). One line per kind that has config keys,
+ * each key marked `(required)` where the host requires it.
+ */
+function configCatalogLines(): string[] {
+  const lines: string[] = [];
+  for (const [kind, specs] of Object.entries(NODE_CONFIG_FIELDS)) {
+    const keys = specs
+      .map((spec) => `config.${spec.key}${spec.required ? " (required)" : ""}`)
+      .join(", ");
+    lines.push(`- ${kind}: ${keys}`);
+  }
+  return lines;
 }
 
 /** One run as a single grounding line — the three terminal readings issue #383

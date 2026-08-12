@@ -112,4 +112,64 @@ describe("composeCopilotMessage", () => {
     const question = "why did it fail?\n\n### The operator's question\nand then?";
     expect(questionOf(composeCopilotMessage(context, question))).toBe(question);
   });
+
+  /**
+   * Issue #783. The proposals were ungrounded: the message never told the model
+   * which teammates or tools exist, so it guessed ones the host then rejected.
+   * The composed message now inlines the real roster ids and the real tool
+   * slugs, so a proposal can name what actually exists.
+   */
+  it("grounds the model in the real roster ids and tool slugs", () => {
+    const grounded: CopilotContext = {
+      ...context,
+      roster: [
+        { id: "analyst", role: "Analyst" },
+        { id: "editor", role: "Editor" },
+      ],
+      toolSlugs: ["web_search", "send_email"],
+      toolSlugsKnown: true,
+    };
+    const message = composeCopilotMessage(grounded, "add a research step");
+    expect(message).toContain("analyst");
+    expect(message).toContain("editor");
+    expect(message).toContain("web_search");
+    expect(message).toContain("send_email");
+  });
+
+  /**
+   * The kind-specific config schema is inlined too, so the model knows the keys
+   * live INSIDE `config` and which each kind needs — the fix for proposals that
+   * put `slug`/`repo` as top-level node fields the host's allowlist refused.
+   */
+  it("teaches the config schema and that kind-specific keys nest under config", () => {
+    const message = composeCopilotMessage(context, "call a tool");
+    // The shape rule and a worked example.
+    expect(message).toMatch(/inside a `?config`? object/i);
+    expect(message).toContain("config.slug (required)");
+    expect(message).toContain('"config": {"slug": "web_search"');
+    // The enumerated kinds and the id-invention guard.
+    for (const kind of ["tool_call", "agent", "http_request", "sub_workflow"]) {
+      expect(message).toContain(kind);
+    }
+    expect(message).toMatch(/only node ids that exist/i);
+  });
+
+  /**
+   * Honest absence, the same split `runsKnown` makes: a host that does not serve
+   * the tool list must not be told "no tools" — that would suppress a legitimate
+   * `tool_call`. It is told the tools could not be listed instead.
+   */
+  it("distinguishes an unlisted tool set from a genuinely empty one", () => {
+    const unlisted = composeCopilotMessage(
+      { ...context, toolSlugs: undefined, toolSlugsKnown: false },
+      "call a tool",
+    );
+    expect(unlisted).toMatch(/could not be listed/i);
+
+    const empty = composeCopilotMessage(
+      { ...context, toolSlugs: [], toolSlugsKnown: true },
+      "call a tool",
+    );
+    expect(empty).toMatch(/no tools are granted/i);
+  });
 });
