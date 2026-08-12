@@ -124,6 +124,14 @@ pub fn router() -> Router<AppState> {
             "/workflows/draft-from-description",
             post(draft_from_description),
         ))
+        // Issue #783: the wired, granted `tool_call` slugs this company can reach
+        // from a workflow, so the per-workflow copilot can ground a proposal on
+        // real tools instead of guessing (`github_integration` and the like).
+        // Reads the SAME `workflow_callable_tool_slugs` the create-time copilot
+        // grounds on (issue #753), so the two cannot drift. A static prefix
+        // registered here with the others and BEFORE the dynamic
+        // `/workflows/{wid}` below — `tool-slugs` is a syntactically valid `wid`.
+        .merge(scoped("/workflows/tool-slugs", get(workflow_tool_slugs)))
         // Issue #383: stop a run that is still walking its graph. Registered
         // here, with the other static `/workflows/...` prefixes and BEFORE the
         // dynamic `/workflows/{wid}` below, for the reason the comment above
@@ -1649,6 +1657,55 @@ async fn draft_from_description(
     Err(super::not_wired("the workflow copilot"))
 }
 
+/// The `GET …/workflows/tool-slugs` answer (issue #783): the wired, granted
+/// `tool_call` slugs the per-workflow copilot may ground a proposal on.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowToolSlugsResponse {
+    /// The slugs a proposed `tool_call` node may name — every one of them will
+    /// clear the same grant gate `update_workflow` applies on write.
+    slugs: Vec<String>,
+}
+
+/// `GET …/workflows/tool-slugs` (both scope forms) — the per-workflow copilot's
+/// tool grounding (issue #783). Answers the exact slug set
+/// [`workflow_callable_tool_slugs`](crate::company::workflow_callable_tool_slugs)
+/// computes for the create-time copilot (issue #753), so the two grounding
+/// surfaces cannot drift and a slug shown here is one a proposed `tool_call`
+/// clears at courtesy validation.
+#[cfg(feature = "openhuman")]
+async fn workflow_tool_slugs(
+    company: ScopedCompany,
+) -> Result<Json<WorkflowToolSlugsResponse>, Response> {
+    let record = company
+        .runtime
+        .store()
+        .load(company.runtime.id())
+        .await
+        .map_err(|err| ApiError(err).into_response())?
+        .ok_or_else(|| {
+            ApiError(OpenCompanyError::CompanyNotFound(
+                company.runtime.id().to_string(),
+            ))
+            .into_response()
+        })?;
+    Ok(Json(WorkflowToolSlugsResponse {
+        slugs: crate::company::workflow_callable_tool_slugs(&record),
+    }))
+}
+
+/// `GET …/workflows/tool-slugs` on a build with no harness. The workflow tool
+/// surface lives behind the `openhuman` feature, so a default build wires no
+/// `tool_call` grants at all: the honest answer is an empty list, not a 404 —
+/// the copilot then grounds on "no tools" rather than being unable to tell.
+#[cfg(not(feature = "openhuman"))]
+async fn workflow_tool_slugs(
+    company: ScopedCompany,
+) -> Result<Json<WorkflowToolSlugsResponse>, Response> {
+    let _ = &company;
+    Ok(Json(WorkflowToolSlugsResponse { slugs: Vec::new() }))
+}
+
 // ---------------------------------------------------------------------------
 // Run history (issue #228)
 // ---------------------------------------------------------------------------
@@ -2895,6 +2952,35 @@ mod tests {
                 ),
                 "gap response carries a known code, got: {body}"
             );
+        }
+
+        /// Issue #783: the per-workflow copilot's tool-grounding read answers
+        /// `200 {"slugs":[…]}` on **both** scope forms — which also proves the
+        /// static prefix is wired ahead of the dynamic `/workflows/{wid}` (a
+        /// route-miss, or a `tool-slugs` swallowed as a `wid`, would not be this
+        /// shape). The blank tenant grants no tools, so the list is empty here;
+        /// the point pinned is the contract shape and that the route exists.
+        #[tokio::test]
+        async fn tool_slugs_answers_a_slug_array_on_both_scope_forms() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            for uri in [
+                "/api/v1/company/workflows/tool-slugs",
+                "/api/v1/companies/acme/workflows/tool-slugs",
+            ] {
+                let response = router(state.clone())
+                    .oneshot(request("GET", uri, None))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "tool-slugs on {uri}");
+                let body = json_body(response).await;
+                assert!(
+                    body["slugs"].is_array(),
+                    "tool-slugs answers a `slugs` array on {uri}, got: {body}"
+                );
+            }
         }
 
         /// A create body whose trigger carries a cron.
