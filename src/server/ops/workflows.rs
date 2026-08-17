@@ -3706,6 +3706,8 @@ mod tests {
                         cancelled: false,
                         notices: Vec::new(),
                         board: Vec::new(),
+                        blocked_nodes: Vec::new(),
+                        approvals: Vec::new(),
                     },
                 )
                 .await
