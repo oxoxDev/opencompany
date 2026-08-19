@@ -1569,7 +1569,8 @@ mod tests {
         // The dead end left nothing behind — run history is still empty.
         let (status, runs, raw) = send(&state, "GET", "/api/v1/company/workflows/runs", None).await;
         assert_eq!(status, StatusCode::OK, "{raw}");
-        assert_eq!(runs.as_array().map(Vec::len), Some(0), "{runs}");
+        // Issue #1012: the runs read is now a `{ runs, hasMore, … }` page.
+        assert_eq!(runs["runs"].as_array().map(Vec::len), Some(0), "{runs}");
     }
 
     /// Issue #514 (review): a config that cannot be *read* is not evidence to

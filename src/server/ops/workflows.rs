@@ -2343,6 +2343,35 @@ struct RunsQuery {
     /// default rather than returning an empty page, which is never what a
     /// caller means.
     limit: Option<usize>,
+    /// Page cursor (issue #1012): return only runs whose `seq` is strictly less
+    /// than this. The `seq` is the run's journal position — unique, monotonic,
+    /// and the same total order the newest-first sort keys on — so paging on it
+    /// cannot skip or double-count a run the way an `at_millis` cursor could
+    /// when two runs finish in the same millisecond. Absent = the first (newest)
+    /// page. Callers take the value from a previous page's `nextBeforeSeq`.
+    before_seq: Option<u64>,
+}
+
+/// One page of run history (issue #1012): the rows, plus whether older runs
+/// remain and the cursor to ask for them with.
+///
+/// Replaces the bare `Vec<WorkflowRunOutcome>` the route used to return so a
+/// truncated history is no longer *silent* — before this a company with more
+/// than `limit` runs simply lost the older ones off the end of the page with
+/// nothing to say they existed. `has_more` says they do, and `next_before_seq`
+/// is the `?before_seq=` to pass to walk back into them.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunsPage {
+    /// This page's runs, newest-finish first.
+    runs: Vec<WorkflowRunOutcome>,
+    /// Whether at least one older run exists past this page's tail.
+    has_more: bool,
+    /// The `?before_seq=` cursor for the next (older) page — the `seq` of this
+    /// page's last row. `None` exactly when `has_more` is false, so a caller can
+    /// stop as soon as it is absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_before_seq: Option<u64>,
 }
 
 /// One finished run as the console's history panel renders it (camelCase).
@@ -2506,7 +2535,7 @@ impl From<crate::ports::WorkflowRunNodeRow> for WorkflowRunNode {
 async fn list_runs(
     company: ScopedCompany,
     Query(query): Query<RunsQuery>,
-) -> Result<Json<Vec<WorkflowRunOutcome>>, ApiError> {
+) -> Result<Json<RunsPage>, ApiError> {
     let limit = match query.limit {
         Some(0) | None => DEFAULT_RUN_LIMIT,
         Some(n) => n.min(MAX_RUN_LIMIT),
@@ -2950,8 +2979,27 @@ async fn list_runs(
     // total and stable. The `limit` cut then keeps the most recently finished
     // runs, which is the number the caller was asking about all along.
     runs.sort_by(|a, b| b.at_millis.cmp(&a.at_millis).then(b.seq.cmp(&a.seq)));
+
+    // Cursor (issue #1012): drop everything at or newer than the caller's
+    // cursor, so `?before_seq=<last row of the previous page>` returns strictly
+    // the runs after it. Applied AFTER the sort so the cursor means "older than
+    // this in the display order", which — because `seq` is monotonic and the
+    // sort's final tiebreak — is the same as "earlier journal position".
+    if let Some(cursor) = query.before_seq {
+        runs.retain(|r| r.seq < cursor);
+    }
+
+    // One past the page tells us an older run exists without a second read. Cut
+    // to `limit` after computing it, and hand back the tail's `seq` as the next
+    // cursor — `None` when nothing remains, so the caller stops paging.
+    let has_more = runs.len() > limit;
+    let next_before_seq = has_more.then(|| runs[limit - 1].seq);
     runs.truncate(limit);
-    Ok(Json(runs))
+    Ok(Json(RunsPage {
+        runs,
+        has_more,
+        next_before_seq,
+    }))
 }
 
 /// Relabels a run's node rows for the nodes it blocked on a human (issue #881).
@@ -5158,7 +5206,7 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 2, "body: {body}");
 
             // Newest first: the history panel leads with the run that just ran.
@@ -5268,10 +5316,10 @@ mod tests {
                 .unwrap();
             let body = json_body(response).await;
             assert_eq!(
-                body[0]["error"],
+                body["runs"][0]["error"],
                 "no inference source for agent node `worker`"
             );
-            assert_eq!(body[0]["deliveries"].as_array().unwrap().len(), 0);
+            assert_eq!(body["runs"][0]["deliveries"].as_array().unwrap().len(), 0);
         }
 
         // ── Issue #371: the per-node progress fold ─────────────────────────
@@ -5419,7 +5467,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 1, "four journal rows fold to one run: {body}");
 
             assert_eq!(rows[0]["runId"], "run-1");
@@ -5475,7 +5523,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 1, "one run: {body}");
             assert_eq!(rows[0]["running"], true, "still in flight: {body}");
             assert_eq!(rows[0]["runId"], run, "{body}");
@@ -5523,7 +5571,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 1, "only the asked-for workflow: {body}");
             assert_eq!(rows[0]["runId"], "run-mine");
             let started = rows[0]["startedNodes"].as_array().expect("startedNodes");
@@ -5557,7 +5605,7 @@ mod tests {
                 .unwrap();
             let body = json_body(response).await;
             assert!(
-                body[0].get("startedNodes").is_none(),
+                body["runs"][0].get("startedNodes").is_none(),
                 "an empty trail is absent, not `[]`: {body}"
             );
         }
@@ -5597,11 +5645,13 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            assert!(body[0].get("running").is_none(), "settled: {body}");
-            let started = body[0]["startedNodes"].as_array().expect("startedNodes");
+            assert!(body["runs"][0].get("running").is_none(), "settled: {body}");
+            let started = body["runs"][0]["startedNodes"]
+                .as_array()
+                .expect("startedNodes");
             assert_eq!(started.len(), 2, "{body}");
             assert_eq!(started[1], "draft");
-            let nodes = body[0]["nodes"].as_array().expect("nodes");
+            let nodes = body["runs"][0]["nodes"].as_array().expect("nodes");
             assert_eq!(nodes.len(), 1, "`draft` never finished: {body}");
         }
 
@@ -5671,7 +5721,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 1, "{body}");
             assert!(
                 rows[0].get("error").is_none(),
@@ -5718,9 +5768,9 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            assert_eq!(body[0]["running"], true, "{body}");
-            assert_eq!(body[0]["nodes"].as_array().unwrap().len(), 1);
-            assert!(body[0].get("error").is_none(), "{body}");
+            assert_eq!(body["runs"][0]["running"], true, "{body}");
+            assert_eq!(body["runs"][0]["nodes"].as_array().unwrap().len(), 1);
+            assert!(body["runs"][0].get("error").is_none(), "{body}");
         }
 
         /// An event log that lets exactly one run settle **inside** `list_runs`'
@@ -5995,7 +6045,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0]["workflowId"], "digest");
             assert!(rows[0].get("nodes").is_none(), "{body}");
@@ -6025,7 +6075,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 2, "{body}");
             let by_id = |run: &str| {
                 rows.iter()
@@ -6064,7 +6114,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 2, "{body}");
             // Newest finish leads: `run-a` settled last. Start-order-reversed —
             // the pre-#1012 behaviour — led with `run-b`, the run that finished
@@ -6101,7 +6151,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             let ids: Vec<&str> = rows
                 .iter()
                 .map(|r| r["runId"].as_str().expect("runId"))
@@ -6140,12 +6190,86 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 2, "{body}");
             // Newest first, and each one whole.
             assert_eq!(rows[0]["runId"], "run-2");
             assert_eq!(rows[0]["nodes"].as_array().unwrap().len(), 2);
             assert_eq!(rows[1]["runId"], "run-1");
+        }
+
+        /// **Issue #1012: the `?before_seq=` cursor.** A truncated history is no
+        /// longer a silent drop — the page says more runs remain and hands back
+        /// the cursor to fetch them. Three runs finished `0,1,2`; a `limit=2`
+        /// page returns the newest two with `hasMore` and a cursor, asking again
+        /// with that cursor returns the last (oldest) run and stops, and a page
+        /// wide enough for all three reports `hasMore == false` with no cursor.
+        #[tokio::test]
+        async fn run_history_pages_older_with_before_seq() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            // Finished in order, so newest-finish is `run-2`.
+            for i in 0..3 {
+                let run = format!("run-{i}");
+                journal_start(&state, &id, "digest", &run, false).await;
+                journal_finish(&state, &id, "digest", &run, false, None).await;
+            }
+
+            let page = |uri: String| {
+                let state = state.clone();
+                async move {
+                    json_body(
+                        router(state)
+                            .oneshot(request("GET", &uri, None))
+                            .await
+                            .unwrap(),
+                    )
+                    .await
+                }
+            };
+            let ids = |body: &serde_json::Value| -> Vec<String> {
+                body["runs"]
+                    .as_array()
+                    .expect("array")
+                    .iter()
+                    .map(|r| r["runId"].as_str().expect("runId").to_string())
+                    .collect()
+            };
+
+            // First page: the newest two, with a cursor pointing past them.
+            let first = page("/api/v1/company/workflows/runs?limit=2".to_string()).await;
+            assert_eq!(ids(&first), ["run-2", "run-1"], "newest two: {first}");
+            assert_eq!(first["hasMore"], true, "a third run remains: {first}");
+            let cursor = first["nextBeforeSeq"]
+                .as_u64()
+                .expect("a cursor when hasMore");
+            // The cursor is the tail row's own seq.
+            assert_eq!(
+                cursor,
+                first["runs"][1]["seq"].as_u64().unwrap(),
+                "cursor is the last row's seq: {first}"
+            );
+
+            // Older page: strictly the runs before the cursor — here just the
+            // oldest — and the walk stops.
+            let older = page(format!(
+                "/api/v1/company/workflows/runs?limit=2&before_seq={cursor}"
+            ))
+            .await;
+            assert_eq!(ids(&older), ["run-0"], "the last, oldest run: {older}");
+            assert_eq!(older["hasMore"], false, "nothing older remains: {older}");
+            assert!(
+                older["nextBeforeSeq"].is_null(),
+                "no cursor once exhausted: {older}"
+            );
+
+            // A page wide enough for every run says `hasMore == false` up front.
+            let whole = page("/api/v1/company/workflows/runs?limit=20".to_string()).await;
+            assert_eq!(whole["runs"].as_array().unwrap().len(), 3, "{whole}");
+            assert_eq!(whole["hasMore"], false, "all three fit: {whole}");
+            assert!(whole["nextBeforeSeq"].is_null(), "{whole}");
         }
 
         /// `?workflow=` narrows to one graph, and does so BEFORE the limit cut —
@@ -6173,7 +6297,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 1, "body: {body}");
             assert_eq!(rows[0]["workflowId"], "digest");
         }
@@ -6205,14 +6329,14 @@ mod tests {
 
             // Explicit cap, taken from the newest end.
             let capped = page("/api/v1/company/workflows/runs?limit=3").await;
-            let rows = capped.as_array().expect("array");
+            let rows = capped["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 3);
             assert_eq!(rows[0]["workflowId"], "wf-24", "newest first: {capped}");
 
             // No `limit` → the default page, not the whole 25.
             let defaulted = page("/api/v1/company/workflows/runs").await;
             assert_eq!(
-                defaulted.as_array().unwrap().len(),
+                defaulted["runs"].as_array().unwrap().len(),
                 DEFAULT_RUN_LIMIT,
                 "{defaulted}"
             );
@@ -6220,11 +6344,15 @@ mod tests {
             // `limit=0` means "I didn't really mean zero" — an empty page is
             // never what a caller wants, so it falls back to the default.
             let zero = page("/api/v1/company/workflows/runs?limit=0").await;
-            assert_eq!(zero.as_array().unwrap().len(), DEFAULT_RUN_LIMIT, "{zero}");
+            assert_eq!(
+                zero["runs"].as_array().unwrap().len(),
+                DEFAULT_RUN_LIMIT,
+                "{zero}"
+            );
 
             // Above the ceiling clamps; with only 25 rows that is all of them.
             let huge = page("/api/v1/company/workflows/runs?limit=100000").await;
-            assert_eq!(huge.as_array().unwrap().len(), 25, "{huge}");
+            assert_eq!(huge["runs"].as_array().unwrap().len(), 25, "{huge}");
         }
 
         /// A company that has never run a workflow gets an empty list, not a
@@ -6240,7 +6368,10 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(json_body(response).await.as_array().unwrap().len(), 0);
+            assert_eq!(
+                json_body(response).await["runs"].as_array().unwrap().len(),
+                0
+            );
         }
 
         /// **Route-ordering pin.** `runs` is a syntactically valid `wid`, so
@@ -6264,9 +6395,14 @@ mod tests {
                 StatusCode::OK,
                 "the static /workflows/runs must win over /workflows/{{wid}}"
             );
-            // An array of outcomes, not a single graph object.
+            // A run-history page (`{ runs, hasMore, … }`), not a single graph
+            // object — its `runs` array is the tell (issue #1012 wrapped the
+            // bare array in a page, so `runs` is where the outcomes now live).
             let body = json_body(response).await;
-            assert!(body.is_array(), "graph read shadowed the history: {body}");
+            assert!(
+                body["runs"].is_array(),
+                "graph read shadowed the history: {body}"
+            );
         }
 
         // -------------------------------------------------------------------
@@ -6397,7 +6533,7 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let body = json_body(response).await;
-            assert_eq!(body[0]["workflowId"], "digest");
+            assert_eq!(body["runs"][0]["workflowId"], "digest");
         }
 
         // ── Issue #259: edit + delete at the HTTP boundary ──────────────────
@@ -6960,11 +7096,11 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK);
             let rows = json_body(response).await;
             assert_eq!(
-                rows.as_array().unwrap().len(),
+                rows["runs"].as_array().unwrap().len(),
                 1,
                 "past runs must outlive the workflow: {rows}"
             );
-            assert_eq!(rows[0]["workflowId"], "greeter");
+            assert_eq!(rows["runs"][0]["workflowId"], "greeter");
         }
 
         #[tokio::test]
@@ -7211,15 +7347,15 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            assert_eq!(body.as_array().unwrap().len(), 1);
+            assert_eq!(body["runs"].as_array().unwrap().len(), 1);
             // `running` is skip-serialized when false, so a settled row simply
             // omits it — assert it is not `true` rather than equal to `false`.
             assert_ne!(
-                body[0]["running"], true,
+                body["runs"][0]["running"], true,
                 "an absent run is settled on the read, not left spinning: {body}"
             );
             assert_eq!(
-                body[0]["error"],
+                body["runs"][0]["error"],
                 crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART
             );
 
@@ -7261,9 +7397,9 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            assert_eq!(body.as_array().unwrap().len(), 1);
+            assert_eq!(body["runs"].as_array().unwrap().len(), 1);
             assert_eq!(
-                body[0]["running"], true,
+                body["runs"][0]["running"], true,
                 "a run the process is running must not be settled from under it"
             );
 
@@ -7840,7 +7976,7 @@ label = "ok"
                 .await
                 .unwrap();
             let rows = json_body(response).await;
-            let row = &rows.as_array().expect("array")[0];
+            let row = &rows["runs"].as_array().expect("array")[0];
             assert_eq!(row["runId"], run_id.as_str(), "{rows}");
             assert_eq!(row["cancelled"], true, "{rows}");
             assert!(
