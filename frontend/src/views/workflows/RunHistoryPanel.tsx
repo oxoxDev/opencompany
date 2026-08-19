@@ -164,6 +164,9 @@ export function RunHistoryPanel({
   onFixWithCopilot,
   fixingRunSeq,
   fixReason,
+  hasMore,
+  onLoadOlder,
+  loadingOlder,
 }: {
   runs: WorkflowRunOutcome[];
   /**
@@ -188,6 +191,18 @@ export function RunHistoryPanel({
   fixingRunSeq?: number | null;
   /** A run the copilot judged un-fixable, shown inline under that run's row. */
   fixReason?: { seq: number; reason: string } | null;
+  /**
+   * Whether older runs remain past the loaded page (issue #1012). When true the
+   * panel shows a "Load older" affordance and badges the count `N+`, so a
+   * truncated history reads as deliberately partial rather than complete. Absent
+   * (a host predating pagination, or a page that already holds everything) reads
+   * as false — the panel behaves exactly as before.
+   */
+  hasMore?: boolean;
+  /** Fetch and append the next older page (issue #1012). Absent = no button. */
+  onLoadOlder?: () => void;
+  /** The older-page fetch is in flight, so the button shows a loading label. */
+  loadingOlder?: boolean;
 }) {
   // Only one fix may be in flight at a time: `handleFixWithCopilot` sets a
   // single `prefilledDraft`/`editOpen` slot, so a second Fix started on a
@@ -211,7 +226,13 @@ export function RunHistoryPanel({
               {workflowName}
             </span>
           )}
-          <Badge variant="secondary">{runs.length}</Badge>
+          {/* Issue #1012: `N+` when older runs remain past this page, so the
+              count is honestly "at least this many" rather than a total that
+              silently dropped the rest. */}
+          <Badge variant="secondary" data-testid="workflow-run-count">
+            {runs.length}
+            {hasMore ? "+" : ""}
+          </Badge>
         </div>
         <Button variant="ghost" size="sm" onClick={onClose}>
           Dismiss
@@ -239,6 +260,22 @@ export function RunHistoryPanel({
                 fixReason={fixReason?.seq === run.seq ? fixReason.reason : null}
               />
             ))}
+            {/* Issue #1012: walk back into the older runs this page truncated.
+                Shown only when the host said more remain AND the parent wired a
+                loader — a host predating pagination sends no `hasMore`, so the
+                panel stays exactly as it was. */}
+            {hasMore && onLoadOlder && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full"
+                onClick={onLoadOlder}
+                disabled={loadingOlder}
+                data-testid="workflow-run-load-older"
+              >
+                {loadingOlder ? "Loading…" : "Load older runs"}
+              </Button>
+            )}
           </div>
         )}
       </div>
