@@ -163,6 +163,14 @@ function readWorkflowHash(): {
 }
 
 /**
+ * How many runs the history drawer fetches per page (issue #1012). The scoped
+ * read and every "Load older" step use the same size, so a full page is the
+ * signal that older runs may remain — and the "Load older" button appends
+ * exactly this many more.
+ */
+const HISTORY_PAGE_SIZE = 50;
+
+/**
  * The live Workflows canvas. Reads the company's saved graphs from the host's
  * `…/workflows` routes, lets the operator pick one, renders its real nodes and
  * edges (auto-laid-out left→right by longest-path depth, since saved graphs
@@ -340,6 +348,20 @@ export function WorkflowsView({
   // to be able to tell that the pair does not agree yet, and a bare "is it
   // loading" flag cannot: the mismatch outlives the load when a fetch fails.
   const [runsFor, setRunsFor] = useState<string | null>(null);
+  // `runsFor` as a ref, so an in-flight "Load older" fetch can tell whether the
+  // scope moved under it before appending (issue #1012) — the same pattern
+  // `selectedIdRef` uses for the copilot-fix race.
+  const runsForRef = useRef<string | null>(null);
+  runsForRef.current = runsFor;
+  // Issue #1012: run history is paginated. `historyHasMore` says older runs
+  // remain past the loaded page, `historyCursor` is the `beforeSeq` to fetch
+  // them with, and `loadingOlder` guards the "Load older" fetch. All three are
+  // scoped to `runsFor` and reset to the first page whenever the scoped read
+  // re-runs (a selection change, or a run finishing), so an appended older page
+  // never lingers across a refresh.
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [historyCursor, setHistoryCursor] = useState<number | null>(null);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   // A host predating the runs route answers 404. That is not an error worth
   // showing — the rest of the view works — so it just means "no history here".
@@ -810,25 +832,34 @@ export function WorkflowsView({
     if (!selectedId) {
       setRuns([]);
       setRunsFor(null);
+      // Issue #1012: no selection means no page — clear the cursor too, so a
+      // later "Load older" cannot fire against a stale one.
+      setHistoryHasMore(false);
+      setHistoryCursor(null);
       return;
     }
     let live = true;
     (async () => {
       try {
-        const rows = await listWorkflowRuns(client, company, {
+        const page = await listWorkflowRuns(client, company, {
           workflow: selectedId,
-          limit: 50,
+          limit: HISTORY_PAGE_SIZE,
         });
         if (!live) return;
-        setRuns(rows);
+        setRuns(page.runs);
         setRunsFor(selectedId);
         setHistorySupported(true);
+        // Issue #1012: this scoped read IS page one, so it resets pagination.
+        // Any older page a previous "Load older" appended is dropped here — the
+        // fresh first page is newest-first and authoritative.
+        setHistoryHasMore(page.hasMore);
+        setHistoryCursor(page.nextBeforeSeq ?? null);
         // Issue #371, the no-live-stream fallback. If the run we just POSTed is
         // in this page and nothing was ever *reported* live (only the frontier
         // we derived ourselves), overlay the journaled row so the operator
         // still gets the per-node answer.
         if (awaitingRunId) {
-          const mine = rows.find((r) => r.runId === awaitingRunId);
+          const mine = page.runs.find((r) => r.runId === awaitingRunId);
           if (mine) {
             setAwaitingRunId(null);
             // Only when the live fold never adopted this run — i.e. no frame
@@ -843,6 +874,9 @@ export function WorkflowsView({
         // Degrade quietly: an older host simply has no history to show.
         console.debug("[WorkflowsView] run history unavailable", e);
         setRuns([]);
+        // Issue #1012: no page, no cursor.
+        setHistoryHasMore(false);
+        setHistoryCursor(null);
         // Still THIS workflow's answer — "the host has no history for it" — so
         // the pair agrees and the copilot may proceed, told via `runsKnown`
         // that nothing is known about runs rather than that there were none.
@@ -877,9 +911,11 @@ export function WorkflowsView({
     let live = true;
     (async () => {
       try {
-        const rows = await listWorkflowRuns(client, company, { limit: 200 });
+        // Issue #1012: the index reads the newest page for its health cards and
+        // does not paginate — `hasMore`/`nextBeforeSeq` are ignored here.
+        const page = await listWorkflowRuns(client, company, { limit: 200 });
         if (!live) return;
-        setIndexRuns(rows);
+        setIndexRuns(page.runs);
         setIndexRunsLoaded(true);
       } catch (e) {
         if (!live) return;
@@ -917,6 +953,39 @@ export function WorkflowsView({
     }
     return byId;
   }, [indexRuns]);
+
+  // Issue #1012: fetch the next older page and APPEND it to `runs`. The older
+  // page is `?before_seq=<current cursor>`, which the host returns strictly
+  // older than this page's tail — so appending cannot duplicate a loaded run.
+  const loadOlder = useCallback(async () => {
+    // Guard: only when a cursor is loaded, nothing else is paging, and we know
+    // which workflow the loaded page belongs to.
+    const workflow = runsForRef.current;
+    if (historyCursor == null || loadingOlder || !workflow) return;
+    setLoadingOlder(true);
+    try {
+      const page = await listWorkflowRuns(client, company, {
+        workflow,
+        limit: HISTORY_PAGE_SIZE,
+        beforeSeq: historyCursor,
+      });
+      // A selection or company switch (or a scoped refresh) may have moved
+      // `runs` onto a different workflow while this was in flight — appending
+      // the previous workflow's older runs onto the new one would corrupt the
+      // list. Drop the result unless the scope still matches.
+      if (runsForRef.current !== workflow) return;
+      setRuns((prev) => [...prev, ...page.runs]);
+      setHistoryHasMore(page.hasMore);
+      setHistoryCursor(page.nextBeforeSeq ?? null);
+    } catch (e) {
+      // Degrade quietly — the loaded page still stands, the button just did
+      // nothing. A host that served page one but 404s a cursor is the only way
+      // here, and it is not worth a banner.
+      console.debug("[WorkflowsView] older run page unavailable", e);
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [client, company, historyCursor, loadingOlder]);
 
   const run = useCallback(async (dryRun = false) => {
     if (!selectedId) return;
@@ -2277,6 +2346,9 @@ export function WorkflowsView({
           onFixWithCopilot={handleFixWithCopilot}
           fixingRunSeq={fixingRunSeq}
           fixReason={fixReason}
+          hasMore={historyHasMore}
+          onLoadOlder={loadOlder}
+          loadingOlder={loadingOlder}
         />
       )}
 

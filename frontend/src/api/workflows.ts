@@ -664,23 +664,55 @@ export function cancelWorkflowRun(
 }
 
 /**
- * The company's finished workflow runs, **newest first** (issue #228).
+ * One page of run history (issue #1012): the rows plus whether older runs remain
+ * and the cursor to fetch them with.
+ *
+ * Replaces the bare `WorkflowRunOutcome[]` {@link listWorkflowRuns} used to
+ * resolve to. Before this a company with more runs than the page `limit` simply
+ * lost the older ones off the end with nothing to say they existed — the history
+ * panel claimed the whole story was `limit` runs long. `hasMore` says it is not,
+ * and `nextBeforeSeq` is the {@link listWorkflowRuns} `beforeSeq` to walk back
+ * into the older runs.
+ */
+export interface RunsPage {
+  /** This page's runs, newest-finish first. */
+  runs: WorkflowRunOutcome[];
+  /** Whether at least one older run exists past this page's tail. */
+  hasMore: boolean;
+  /**
+   * The `beforeSeq` cursor for the next (older) page — the `seq` of this page's
+   * last row. Absent exactly when {@link hasMore} is false, so a caller stops
+   * paging as soon as it is missing.
+   */
+  nextBeforeSeq?: number;
+}
+
+/**
+ * The company's finished workflow runs as one page, **newest first** (issue
+ * #228; paginated in #1012).
  *
  * `workflow` narrows to one graph's runs; `limit` caps the page (the host
- * defaults to a short recent list and clamps a large ask). A host predating this
- * route answers 404 — callers should treat that as "no history yet" rather than
- * an error, since the console still works without it.
+ * defaults to a short recent list and clamps a large ask); `beforeSeq` asks for
+ * the runs strictly older than a previous page's {@link RunsPage.nextBeforeSeq},
+ * which is how "Load older" walks back through a long history. A host predating
+ * this route answers 404 — callers should treat that as "no history yet" rather
+ * than an error, since the console still works without it.
  */
 export function listWorkflowRuns(
   client: OpenCompanyClient,
   company: string | null,
-  options?: { workflow?: string; limit?: number },
-): Promise<WorkflowRunOutcome[]> {
+  options?: { workflow?: string; limit?: number; beforeSeq?: number },
+): Promise<RunsPage> {
   const params = new URLSearchParams();
   if (options?.workflow) params.set("workflow", options.workflow);
   if (options?.limit) params.set("limit", String(options.limit));
+  // The cursor is always a real row's `seq` (≥ 1), so `!= null` rather than a
+  // truthiness check is only belt-and-braces — but it keeps a `beforeSeq` of 0
+  // from being silently dropped if the host's seq numbering ever starts there.
+  if (options?.beforeSeq != null)
+    params.set("before_seq", String(options.beforeSeq));
   const query = params.toString();
-  return client.get<WorkflowRunOutcome[]>(
+  return client.get<RunsPage>(
     `${client.scopeFor(company)}/workflows/runs${query ? `?${query}` : ""}`,
   );
 }

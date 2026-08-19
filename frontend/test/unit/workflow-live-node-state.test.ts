@@ -200,7 +200,8 @@ function fakeClient(): OpenCompanyClient {
     scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
     get: async (path: string) => {
       if (path.endsWith("/workflows")) return [{ id: GRAPH.id, name: GRAPH.name }];
-      if (path.includes("/workflows/runs")) return [RUNNING_ROW];
+      // Issue #1012: the runs read is a `{ runs, hasMore, … }` page.
+      if (path.includes("/workflows/runs")) return { runs: [RUNNING_ROW], hasMore: false };
       return GRAPH;
     },
     post: async () => ({}),

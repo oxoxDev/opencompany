@@ -108,7 +108,8 @@ async function mockCompanySwitchApi(page: Page) {
     if (path === `/api/v1/companies/${company}/workflows`) return json(workflows[company]);
     if (path.endsWith("/workflows/tool-slugs")) return json({ slugs: [] });
     if (path.endsWith("/workflows/wired-channels")) return json({ channels: [] });
-    if (path.endsWith("/workflows/runs")) return json([]);
+    // Issue #1012: the runs read is a `{ runs, hasMore, … }` page.
+    if (path.endsWith("/workflows/runs")) return json({ runs: [], hasMore: false });
 
     const workflowId = path.match(/\/workflows\/([^/]+)$/)?.[1];
     if (workflowId) {
