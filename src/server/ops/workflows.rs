@@ -2939,10 +2939,17 @@ async fn list_runs(
         }
     }
 
-    // Newest first: a history panel leads with the run that just happened. The
-    // `limit` now cuts *runs* rather than journal rows, which is the number the
-    // caller was asking about all along.
-    runs.reverse();
+    // Newest first: a history panel leads with the run that just happened —
+    // ordered by when each run *finished* (issue #1012), which for a settled run
+    // is the `at_millis`/`seq` the finish bracket wrote over the start's. The
+    // journal is append-only, so a plain `runs.reverse()` ordered by *start*
+    // instead: two runs that started `a`-then-`b` but finished `b`-then-`a` came
+    // back with `a` leading, and `runs[0]` — the "last run" every reader keys on
+    // — was the run that finished FIRST. `seq` breaks ties (two finishes can
+    // share a millisecond) and is itself unique and monotonic, so the order is
+    // total and stable. The `limit` cut then keeps the most recently finished
+    // runs, which is the number the caller was asking about all along.
+    runs.sort_by(|a, b| b.at_millis.cmp(&a.at_millis).then(b.seq.cmp(&a.seq)));
     runs.truncate(limit);
     Ok(Json(runs))
 }
@@ -6030,6 +6037,81 @@ mod tests {
             assert_eq!(by_id("run-a")["nodes"].as_array().unwrap().len(), 1);
             assert_eq!(by_id("run-b")["nodes"][0]["nodeId"], "b1");
             assert_eq!(by_id("run-b")["nodes"].as_array().unwrap().len(), 1);
+        }
+
+        /// **Issue #1012.** Run history is ordered by when each run *finished*,
+        /// not when it started. Two runs that start `a`-then-`b` but finish
+        /// `b`-then-`a` must come back newest-finish first — `run-a` leading —
+        /// because that is the order the run whose outcome an operator most
+        /// recently learned belongs in. Before the fix the fold returned start
+        /// order reversed (`runs.reverse()`), so the run that finished FIRST led
+        /// the list and `runs[0]` was the wrong "last run".
+        #[tokio::test]
+        async fn run_history_orders_by_finish_not_start() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            // Start a, start b, finish b, finish a: `run-a` is the most recently
+            // FINISHED, though it started first.
+            journal_start(&state, &id, "digest", "run-a", false).await;
+            journal_start(&state, &id, "digest", "run-b", false).await;
+            journal_finish(&state, &id, "digest", "run-b", false, None).await;
+            journal_finish(&state, &id, "digest", "run-a", false, None).await;
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            let rows = body.as_array().expect("array");
+            assert_eq!(rows.len(), 2, "{body}");
+            // Newest finish leads: `run-a` settled last. Start-order-reversed —
+            // the pre-#1012 behaviour — led with `run-b`, the run that finished
+            // first, which is the bug.
+            assert_eq!(rows[0]["runId"], "run-a", "newest finish leads: {body}");
+            assert_eq!(rows[1]["runId"], "run-b", "{body}");
+        }
+
+        /// **Issue #1012.** The `limit` cut keeps the most recently *finished*
+        /// runs, not the most recently started. Three runs start `a,b,c` and
+        /// finish `c,b,a`; a `limit=2` page must keep `run-a` (finished last)
+        /// and drop `run-c` (finished first). Before the fix the reversed start
+        /// order kept `[c, b]` and silently dropped the newest-finished run —
+        /// the truncation half of the same ordering bug.
+        #[tokio::test]
+        async fn run_history_truncate_keeps_the_most_recently_finished() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_start(&state, &id, "digest", "run-a", false).await;
+            journal_start(&state, &id, "digest", "run-b", false).await;
+            journal_start(&state, &id, "digest", "run-c", false).await;
+            journal_finish(&state, &id, "digest", "run-c", false, None).await;
+            journal_finish(&state, &id, "digest", "run-b", false, None).await;
+            journal_finish(&state, &id, "digest", "run-a", false, None).await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/runs?limit=2",
+                    None,
+                ))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            let rows = body.as_array().expect("array");
+            let ids: Vec<&str> = rows
+                .iter()
+                .map(|r| r["runId"].as_str().expect("runId"))
+                .collect();
+            assert_eq!(rows.len(), 2, "{body}");
+            assert!(
+                ids.contains(&"run-a"),
+                "the newest-finished run must survive the cut: {body}"
+            );
+            assert_eq!(ids, ["run-a", "run-b"], "newest two by finish time: {body}");
         }
 
         /// `?limit=` now cuts **runs**, not journal rows — the number the caller
