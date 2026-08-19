@@ -5954,7 +5954,7 @@ mod tests {
             // still the snapshot's, `running: true`. That is honest: the run WAS
             // in flight when the journal was sampled. What matters is that it is
             // not stamped dead.
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 1, "{body}");
             assert!(
                 rows[0].get("error").is_none(),
@@ -5971,9 +5971,12 @@ mod tests {
                     .unwrap(),
             )
             .await;
-            assert!(next[0].get("running").is_none(), "settled: {next}");
-            assert!(next[0].get("error").is_none(), "a successful run: {next}");
-            assert_eq!(next[0]["deliveries"][0]["status"], "sent", "{next}");
+            assert!(next["runs"][0].get("running").is_none(), "settled: {next}");
+            assert!(
+                next["runs"][0].get("error").is_none(),
+                "a successful run: {next}"
+            );
+            assert_eq!(next["runs"][0]["deliveries"][0]["status"], "sent", "{next}");
         }
 
         /// **A settled row keeps one identity across reads.** The response that
@@ -6010,21 +6013,24 @@ mod tests {
             )
             .await;
 
-            assert!(first[0].get("running").is_none(), "settled: {first}");
+            assert!(
+                first["runs"][0].get("running").is_none(),
+                "settled: {first}"
+            );
             assert_eq!(
-                first[0]["seq"], second[0]["seq"],
+                first["runs"][0]["seq"], second["runs"][0]["seq"],
                 "the settling read and the one after it must agree on the row's \
                  identity: {first} then {second}"
             );
             assert_eq!(
-                first[0]["atMillis"], second[0]["atMillis"],
+                first["runs"][0]["atMillis"], second["runs"][0]["atMillis"],
                 "…and on when it settled: {first} then {second}"
             );
             // Specifically the FINISH's row, which is what the next fold uses —
             // not the start's, which is the only other candidate.
             assert!(
-                first[0]["atMillis"].as_u64().unwrap()
-                    >= first[0]["startedAtMillis"].as_u64().unwrap(),
+                first["runs"][0]["atMillis"].as_u64().unwrap()
+                    >= first["runs"][0]["startedAtMillis"].as_u64().unwrap(),
                 "the settle cannot predate the start: {first}"
             );
         }
