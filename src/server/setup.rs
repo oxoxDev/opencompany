@@ -72,7 +72,7 @@
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
@@ -87,7 +87,10 @@ use crate::server::users::admin::require_admin;
 
 /// Builds the setup route fragment.
 pub fn router() -> Router<AppState> {
-    Router::new().route("/api/v1/setup", get(read).post(apply))
+    Router::new()
+        .route("/api/v1/setup", get(read).post(apply))
+        .route("/api/v1/setup/roster", post(propose_roster))
+        .route("/api/v1/setup/inference/test", post(test_inference))
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +178,54 @@ pub struct SetupDto {
     /// Company ids already registered on this host. A non-empty list means the
     /// seed step should be skipped — the instance already has a company.
     pub companies: Vec<String>,
+    /// What this host can already reach without the operator supplying anything.
+    pub inference: InferenceReadyDto,
+}
+
+/// The credential this host already holds, for the wizard's first step.
+///
+/// A hosted tenant has one injected by the control plane, and its operator has
+/// no key of their own and no way to get one. Reporting this is what lets the
+/// step arrive already answered — pre-filled and testable — instead of demanding
+/// something unobtainable.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct InferenceReadyDto {
+    /// Whether a credential is already resolvable, so the design pass would run
+    /// with the operator typing nothing.
+    ///
+    /// Answered by constructing the pass itself rather than by re-reading the
+    /// environment — see [`house_credential`]. A console that decided this
+    /// differently would pre-fill a step on a host that then silently shipped a
+    /// keyword-matched template.
+    pub ready: bool,
+    /// The provider slug behind it, for the picker's initial value. Always
+    /// `managed` today: the injected path is the platform's own endpoint.
+    pub provider: Option<&'static str>,
+    /// The endpoint it resolves to. Shown, not secret — it is a URL, and seeing
+    /// which one a test is about to hit is the difference between a green tick
+    /// and a green tick you can trust.
+    pub base_url: Option<String>,
+}
+
+/// Whether the host already holds a usable credential, and where it points.
+///
+/// Deliberately implemented by asking the harness for the very config the design
+/// pass would run on, not by re-reading `OPENCOMPANY_INFERENCE_KEY` and friends.
+/// That resolution is already subtle — a projected token file ahead of a static
+/// key, an explicit URL ahead of the default — and a second copy of it in the
+/// console layer would eventually disagree with the one that matters.
+///
+/// The credential itself never leaves this function.
+#[cfg(feature = "openhuman")]
+fn house_credential(env: &dyn EnvSource) -> Option<String> {
+    crate::harness::provider::harness_inference_from_env(env).map(|(config, _)| config.base_url)
+}
+
+/// Without the harness there is no inference path at all, so the host holds
+/// nothing and the step asks for everything.
+#[cfg(not(feature = "openhuman"))]
+fn house_credential(_env: &dyn EnvSource) -> Option<String> {
+    None
 }
 
 /// What `POST /api/v1/setup` accepts.
@@ -188,6 +239,49 @@ pub struct SetupRequest {
     /// already has a company — setup must never hand an operator a second
     /// starter company on a re-run.
     pub template: Option<String>,
+    /// A company the wizard **designed**, from the operator's answers and the
+    /// roster they reviewed.
+    ///
+    /// Takes precedence over [`Self::template`] when both are present: an
+    /// operator who answered three questions and edited a roster has expressed
+    /// a preference that a template slug cannot override. The template path
+    /// stays for `desktop::bootstrap_companies` and for any caller that still
+    /// wants a preset.
+    pub company: Option<SetupCompany>,
+}
+
+/// The company the wizard designed, as it arrives from the review step.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SetupCompany {
+    industry: String,
+    team_hint: String,
+    automate: String,
+    /// The roster **as reviewed** — renamed, trimmed and reordered by the
+    /// operator. Sent back rather than regenerated, so what they approved is
+    /// exactly what gets built; a second pass could return something else.
+    agents: Vec<SetupCompanyAgent>,
+    /// The address that will be able to sign in. Written into `[users].admins`,
+    /// which is the only reason a laptop operator who chose email sign-in is
+    /// not locked out of the company they just made.
+    admin_email: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SetupCompanyAgent {
+    name: String,
+    role: String,
+    description: String,
+    /// The job shape the design pass assigned, round-tripped through the review
+    /// screen untouched — it is what decides this teammate's tool belt
+    /// (`crate::company::setup::AgentFocus`).
+    ///
+    /// A `String` here rather than the enum, resolved through `from_wire`: this
+    /// is the one field the console never shows and never edits, so an older or
+    /// unknown spelling should cost that teammate its narrowing rather than
+    /// reject the whole apply an operator has just confirmed.
+    focus: Option<String>,
 }
 
 /// What the apply returns.
@@ -462,6 +556,14 @@ fn snapshot(state: &AppState, env: &dyn EnvSource) -> Result<SetupDto, OpenCompa
             .into_iter()
             .map(|id| id.as_ref().to_string())
             .collect(),
+        inference: {
+            let base_url = house_credential(env);
+            InferenceReadyDto {
+                ready: base_url.is_some(),
+                provider: base_url.is_some().then_some("managed"),
+                base_url,
+            }
+        },
     })
 }
 
@@ -668,8 +770,42 @@ async fn apply_inner(
     // Seed the template only when the host has no company. A re-run must never
     // hand the operator a second starter company, which is the same reason
     // `desktop::bootstrap_companies` seeds only as a fallback.
-    let seeded = match (&req.template, state.registry().is_empty()) {
-        (Some(template), true) => {
+    let seeded = match (&req.company, &req.template, state.registry().is_empty()) {
+        // A designed company wins over a template slug: the operator answered
+        // three questions and edited the roster, which a preset cannot override.
+        (Some(designed), _, true) => {
+            let answers = crate::company::setup::SetupAnswers {
+                industry: designed.industry.clone(),
+                team_hint: designed.team_hint.clone(),
+                automate: designed.automate.clone(),
+            };
+            let agents: Vec<crate::company::setup::ProposedAgent> = designed
+                .agents
+                .iter()
+                .map(|a| crate::company::setup::ProposedAgent {
+                    name: a.name.clone(),
+                    role: a.role.clone(),
+                    description: a.description.clone(),
+                    focus: a
+                        .focus
+                        .as_deref()
+                        .and_then(crate::company::setup::AgentFocus::from_wire),
+                })
+                .collect();
+            // Validated again on the way in, for the same reason the roster pass
+            // validates the model's answer: this arrived over the wire and the
+            // operator edited it, so neither the bounds nor the de-duplication
+            // can be assumed to have survived.
+            let agents = crate::company::setup::validate_roster(agents);
+            let manifest = crate::company::setup::manifest_from_setup(
+                &answers,
+                &agents,
+                designed.admin_email.as_deref(),
+            );
+            let id = crate::desktop::seed_generated_company(state, manifest, Some(answers)).await?;
+            Some(id.as_ref().to_string())
+        }
+        (None, Some(template), true) => {
             let id = crate::desktop::seed_company(state, template).await?;
             Some(id.as_ref().to_string())
         }
@@ -768,3 +904,311 @@ fn parse_value(spec: &FieldSpec, raw: Option<&str>) -> Result<ConfigValue, OpenC
 
 #[cfg(test)]
 mod test;
+
+// ---------------------------------------------------------------------------
+// The roster proposal, before any company exists
+// ---------------------------------------------------------------------------
+
+/// What `POST /api/v1/setup/roster` accepts.
+///
+/// The same three answers the company-scoped route takes, plus the credential
+/// the operator is typing into this very wizard. The credential is **used and
+/// discarded**: it is not written anywhere by this route, so the apply that
+/// writes `config.toml` stays one atomic step rather than a write-then-generate
+/// sequence that can half-land.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SetupRosterRequest {
+    industry: String,
+    team_hint: String,
+    automate: String,
+    /// The inference credential from the wizard's own field, when the operator
+    /// has just supplied one. Absent falls back to whatever the host already
+    /// has; neither yielding one ships the curated team.
+    inference_key: Option<String>,
+}
+
+/// One proposed teammate, shaped for the wizard's review step.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupAgentDto {
+    name: String,
+    role: String,
+    description: String,
+    /// The job shape that decides this teammate's tool belt. Sent so the review
+    /// step can hand it straight back on apply — the console never shows or
+    /// edits it, it only carries it.
+    focus: Option<String>,
+}
+
+/// The proposal.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupRosterDto {
+    agents: Vec<SetupAgentDto>,
+    /// Which curated roster framed the proposal, e.g. `ecommerce`.
+    template: String,
+    /// `model` or `fallback` — the review step says which, in a sentence.
+    source: String,
+    /// The jobs the operator named, as the host split them. Echoed back so the
+    /// list the roster was judged against is the list they can see — a bad split
+    /// is then visible to the person who typed it.
+    jobs: Vec<String>,
+    /// The jobs no teammate owns. Non-empty only on the `model` path; a curated
+    /// team makes no coverage claim about a list it never read.
+    uncovered: Vec<String>,
+    /// Why this is the curated team: `no_model` or `not_designable`. Absent on
+    /// the `model` path. The review screen needs it because the operator's next
+    /// move differs — "add a key" versus "tell us more".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+}
+
+/// What `POST /api/v1/setup/inference/test` accepts.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct InferenceTestRequest {
+    /// One of `crate::company::INFERENCE_PROVIDERS`.
+    provider: String,
+    /// The key the operator just typed. Blank means "use whatever this host
+    /// already has", which is the hosted case and the keyless-Ollama case.
+    ///
+    /// Used and discarded. Nothing here is written: testing a credential and
+    /// committing to it are separate acts, and an operator must be able to find
+    /// out a key is wrong without having already stored it.
+    key: Option<String>,
+    /// Endpoint override. Required for `openai_compatible`, defaulted otherwise.
+    base_url: Option<String>,
+}
+
+/// What the test answers. Never carries the credential, and never the raw
+/// provider error — see [`test_inference`].
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InferenceTestDto {
+    ok: bool,
+    /// The endpoint that was actually reached, so a green tick is checkable.
+    /// An operator who mistypes a base URL and gets a tick from the *default*
+    /// endpoint has been told the wrong thing.
+    base_url: String,
+    /// Present only on failure, in the operator's language.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// `POST /api/v1/setup/inference/test` — a live one-turn probe of a credential
+/// the operator has just typed, before anything is written.
+///
+/// The company-scoped `POST {scope}/inference/test` cannot serve the wizard for
+/// the same reason the roster route could not: it resolves a `CompanyRuntime`
+/// and reads that company's secret store, and during first-run setup there is
+/// no company and no store. Same [`probe`](crate::harness::provider::probe)
+/// underneath.
+///
+/// ## Why this exists as its own step
+///
+/// The design pass is silent about credentials by design: it falls back to a
+/// curated team on any failure, so a wrong key produces a *plausible* company
+/// rather than an error. That is right for the pass and wrong for setup — an
+/// operator who mistypes a key would be shown a keyword-matched roster and told
+/// only that a model could not be reached, several screens after the mistake.
+/// One explicit test, before the questions, is where a bad credential is cheap
+/// to discover.
+///
+/// ## The error is summarised, not forwarded
+///
+/// A provider's failure body can echo request material back. The probe already
+/// scrubs the credential, and this narrows further to the shape of the failure —
+/// enough to act on, without a wire from an upstream error message into a
+/// browser on an unauthenticated first-run host.
+async fn test_inference(
+    State(state): State<AppState>,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+    headers: HeaderMap,
+    Json(req): Json<InferenceTestRequest>,
+) -> Result<Json<InferenceTestDto>, Response> {
+    authorize(&state, &headers, peer).await?;
+    Ok(Json(probe_inference(&req, &ProcessEnv).await))
+}
+
+/// Runs the probe against the resolved config.
+#[cfg(feature = "openhuman")]
+async fn probe_inference<E: EnvSource + Sync>(
+    req: &InferenceTestRequest,
+    env: &E,
+) -> InferenceTestDto {
+    let env_default =
+        crate::harness::provider::harness_inference_from_env(env).map(|(config, _)| {
+            crate::company::inference::EnvDefault {
+                base_url: config.base_url,
+                credential: config.credential,
+            }
+        });
+    let decl = crate::company::inference::decl_for_probe(
+        &req.provider,
+        req.base_url.as_deref(),
+        req.key.as_deref(),
+        env_default.as_ref(),
+    );
+    let base_url = decl.base_url.clone();
+
+    // `openai_compatible` has no default endpoint, so a blank URL resolves to
+    // an empty string. Reported here rather than left to produce a confusing
+    // transport error from a request to nowhere.
+    if base_url.trim().is_empty() {
+        return InferenceTestDto {
+            ok: false,
+            base_url,
+            error: Some("This provider needs an endpoint URL.".to_string()),
+        };
+    }
+
+    match crate::harness::provider::probe(&decl).await {
+        Ok(()) => InferenceTestDto {
+            ok: true,
+            base_url,
+            error: None,
+        },
+        Err(err) => {
+            // Logged in full for whoever runs the host; summarised for the page.
+            tracing::info!(
+                provider = %req.provider,
+                base_url = %base_url,
+                error = %err,
+                "[setup] the inference test could not reach the provider"
+            );
+            InferenceTestDto {
+                ok: false,
+                base_url,
+                error: Some(summarise_probe_failure(&err.to_string())),
+            }
+        }
+    }
+}
+
+/// Without the harness there is nothing to probe with.
+#[cfg(not(feature = "openhuman"))]
+async fn probe_inference<E: EnvSource + Sync>(
+    req: &InferenceTestRequest,
+    _env: &E,
+) -> InferenceTestDto {
+    InferenceTestDto {
+        ok: false,
+        base_url: crate::company::inference::effective_base_url(
+            &req.provider,
+            req.base_url.as_deref(),
+        ),
+        error: Some(
+            "This build cannot reach a model — the agent harness is not compiled in.".to_string(),
+        ),
+    }
+}
+
+/// Turns a provider failure into one line an operator can act on.
+///
+/// Three outcomes are worth telling apart because each has a different fix: the
+/// key is wrong, the endpoint is wrong, or the provider said no for its own
+/// reasons. Everything else is reported as unreachable rather than guessed at.
+#[cfg(feature = "openhuman")]
+fn summarise_probe_failure(raw: &str) -> String {
+    let lower = raw.to_lowercase();
+    if lower.contains("401") || lower.contains("unauthorized") || lower.contains("invalid api key")
+    {
+        "That key was rejected by the provider.".to_string()
+    } else if lower.contains("403") || lower.contains("forbidden") {
+        "That key was accepted but is not allowed to use this model.".to_string()
+    } else if lower.contains("404") {
+        "Reached the host, but there is no chat endpoint at that URL.".to_string()
+    } else if lower.contains("429") || lower.contains("rate limit") {
+        "The provider is rate-limiting this key right now.".to_string()
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        "The provider did not answer in time.".to_string()
+    } else if lower.contains("dns") || lower.contains("connect") || lower.contains("resolve") {
+        "Could not reach that address.".to_string()
+    } else {
+        "Could not get a reply from the provider.".to_string()
+    }
+}
+
+/// `POST /api/v1/setup/roster` — propose a starting team for a company that
+/// does not exist yet.
+///
+/// The company-scoped `POST {scope}/setup/roster` cannot serve the wizard: it
+/// resolves a `CompanyRuntime`, and during first-run setup there is none. Same
+/// pass underneath, same validation, same fallback — only the scope differs.
+///
+/// Authorized by the same [`authorize`] the rest of this flow uses, so an
+/// unconfigured loopback host can reach it before anyone can sign in, and a
+/// configured one demands an admin.
+async fn propose_roster(
+    State(state): State<AppState>,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+    headers: HeaderMap,
+    Json(req): Json<SetupRosterRequest>,
+) -> Result<Json<SetupRosterDto>, Response> {
+    authorize(&state, &headers, peer).await?;
+
+    let answers = crate::company::setup::SetupAnswers {
+        industry: req.industry,
+        team_hint: req.team_hint,
+        automate: req.automate,
+    };
+    let proposal = propose_for_setup(&answers, req.inference_key.as_deref()).await;
+
+    tracing::info!(
+        template = proposal.template_key,
+        source = proposal.source.as_str(),
+        agents = proposal.agents.len(),
+        "[setup] proposed a starting roster for a company that does not exist yet"
+    );
+
+    Ok(Json(SetupRosterDto {
+        agents: proposal
+            .agents
+            .into_iter()
+            .map(|a| SetupAgentDto {
+                name: a.name,
+                role: a.role,
+                description: a.description,
+                focus: a.focus.map(|f| f.as_str().to_string()),
+            })
+            .collect(),
+        template: proposal.template_key.to_string(),
+        source: proposal.source.as_str().to_string(),
+        jobs: proposal.jobs,
+        uncovered: proposal.uncovered,
+        reason: proposal.reason.map(|r| r.as_str()),
+    }))
+}
+
+/// Designs the roster when a model is reachable, and hands back the curated
+/// team when one is not.
+#[cfg(feature = "openhuman")]
+async fn propose_for_setup(
+    answers: &crate::company::setup::SetupAnswers,
+    credential: Option<&str>,
+) -> crate::company::setup::RosterProposal {
+    match crate::harness::roster_build::RosterBuilder::for_setup(&ProcessEnv, credential) {
+        // Unmetered on purpose — there is no company to charge yet. See
+        // `RosterBuilder::for_setup`.
+        Some(builder) => builder.propose(answers).await.0,
+        // No builder means no credential was reachable at all.
+        None => crate::company::setup::template_proposal(
+            answers,
+            crate::company::setup::FallbackReason::NoModel,
+        ),
+    }
+}
+
+/// The default build links no harness, so the curated team is the whole answer —
+/// and it is a real one.
+#[cfg(not(feature = "openhuman"))]
+async fn propose_for_setup(
+    answers: &crate::company::setup::SetupAnswers,
+    _credential: Option<&str>,
+) -> crate::company::setup::RosterProposal {
+    crate::company::setup::template_proposal(
+        answers,
+        crate::company::setup::FallbackReason::NoModel,
+    )
+}

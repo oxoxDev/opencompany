@@ -8,7 +8,7 @@
 // Desks page, which #302 unmounted; between then and now nothing rendered this
 // dialog at all, so creating a desk was impossible outside the manifest.
 
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Crown } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
@@ -47,8 +47,16 @@ export function DeskCreateDialog({
   const [members, setMembers] = useState<string[]>([]);
   const [roster, setRoster] = useState<TeamMemberDto[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  // Two kinds of message, deliberately kept apart (issue #1100). `nameError` is
+  // about one field and renders at that field; `error` is the host's refusal of
+  // the whole form and keeps the banner above the footer. Sharing one slot put
+  // "Give the desk a name." underneath the entire roster picker — below the
+  // fold on a real company, with nothing moving the operator to it.
+  const [nameError, setNameError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const nameRef = useRef<HTMLInputElement>(null);
   const formId = useId();
+  const nameErrorId = `${formId}-name-error`;
 
   // Reload the roster (the member picker) and reset the draft each time the
   // dialog opens, so a prior attempt never leaks into the next one.
@@ -57,6 +65,7 @@ export function DeskCreateDialog({
     setName("");
     setDescription("");
     setMembers([]);
+    setNameError(null);
     setError(null);
     let live = true;
     (async () => {
@@ -87,9 +96,19 @@ export function DeskCreateDialog({
 
   async function submit() {
     if (!name.trim()) {
-      setError("Give the desk a name.");
+      setNameError("Give the desk a name.");
+      setError(null);
+      // The frame AFTER the state change: the message does not exist in the DOM
+      // until this render commits, and the input can be scrolled far above the
+      // Create button the operator just pressed. `preventScroll` so the focus
+      // move does not jump the container out from under the smooth scroll.
+      requestAnimationFrame(() => {
+        nameRef.current?.focus({ preventScroll: true });
+        nameRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+      });
       return;
     }
+    setNameError(null);
     setSubmitting(true);
     setError(null);
     try {
@@ -125,10 +144,31 @@ export function DeskCreateDialog({
           <Label htmlFor={`${formId}-name`}>Name</Label>
           <Input
             id={`${formId}-name`}
+            ref={nameRef}
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => {
+              setName(e.target.value);
+              // The complaint was about the field being empty, so the first
+              // keystroke answers it; leaving it up would outlive its subject.
+              setNameError(null);
+            }}
+            aria-invalid={Boolean(nameError)}
+            aria-describedby={nameError ? nameErrorId : undefined}
             placeholder="e.g. Engineering"
           />
+          {nameError && (
+            // Announced as well as rendered: the focus move above is what a
+            // sighted operator notices, `role="alert"` is what a screen reader
+            // gets, and `aria-describedby` ties it to the field it is about.
+            <p
+              id={nameErrorId}
+              role="alert"
+              data-testid="desk-name-error"
+              className="text-xs text-destructive"
+            >
+              {nameError}
+            </p>
+          )}
         </div>
         <div className="grid gap-2">
           <Label htmlFor={`${formId}-desc`}>Description</Label>
@@ -142,7 +182,7 @@ export function DeskCreateDialog({
         </div>
 
         <div className="grid gap-2">
-          <Label>Members</Label>
+          <Label>Teammates</Label>
           {roster.length === 0 ? (
             <p className="rounded-lg border border-dashed p-3 text-center text-xs text-muted-foreground">
               No roster teammates to add — you can add them after the desk exists.
@@ -188,8 +228,11 @@ export function DeskCreateDialog({
           )}
         </div>
 
+        {/* Whole-form failures only — what the host said when it refused the
+            create. Field-level complaints render at their field, above.
+            `Alert` carries `role="alert"` itself. */}
         {error && (
-          <Alert variant="destructive">
+          <Alert variant="destructive" data-testid="desk-create-error">
             <AlertDescription>{error}</AlertDescription>
           </Alert>
         )}

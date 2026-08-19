@@ -67,13 +67,6 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { WorkflowNode } from "@/components/workflow-node";
 import { WorkflowCreateDialog } from "@/views/WorkflowCreateDialog";
@@ -103,6 +96,7 @@ import { classifyRunError } from "@/views/workflows/run-error";
 import { runFailureFrom, type RunFailure } from "@/views/workflows/run-failure";
 import { RunFailurePanel } from "@/views/workflows/RunFailurePanel";
 import { RunResultPanel } from "@/views/workflows/RunResultPanel";
+import { CanvasShell } from "@/views/workflows/CanvasShell";
 import { approvalsForRun } from "@/views/workflows/run-approvals";
 import { NodeDetailPanel } from "@/views/workflows/NodeDetailPanel";
 import { type NodeOutputView, nodeOutputFor } from "@/views/workflows/run-output";
@@ -189,6 +183,20 @@ function clearWorkflowFromHash(): void {
   const { onWorkflows, workflowId } = readWorkflowHash();
   if (!onWorkflows || workflowId === null) return;
   window.history.replaceState(null, "", "#/workflows");
+}
+
+/**
+ * A hairline between two groups of toolbar controls (issue #1135).
+ *
+ * The row it sits in holds three groups — run intent, the secondary actions,
+ * and the two that change the workflow itself — and a uniform `gap-2` between
+ * nine buttons says nothing about which of them belong together. The rule is
+ * decoration only in the sense that it draws nothing new: it makes a grouping
+ * that is already true in the markup visible, which is what stopped `Run`
+ * reading as one pill among six and `Delete` as the neighbour of `Edit`.
+ */
+function ToolbarDivider() {
+  return <span aria-hidden className="mx-1 h-5 w-px shrink-0 bg-border" />;
 }
 
 /**
@@ -1212,7 +1220,7 @@ export function WorkflowsView({
           // sent — which is the opposite of what the operator intended.
           toast.error("This host ran the workflow for real — it doesn't support test runs.", {
             description:
-              "Your test run executed real effects (agent turns, tools, and any report delivery). Update the host to get true no-effect test runs.",
+              "Your test run executed real effects (teammate turns, tools, and any report delivery). Update the host to get true no-effect test runs.",
           });
         } else {
           toast.success(dryRun ? "Test run complete — nothing was sent." : "Workflow ran.");
@@ -1818,15 +1826,6 @@ export function WorkflowsView({
 
   const selected = workflows.find((w) => w.id === selectedId) ?? null;
 
-  // id → display name, for the toolbar picker's closed state. A workflow's id
-  // is not its name, and the trigger renders the raw value unless it is handed
-  // this mapping — issue #270, where the closed picker read
-  // `e2e_conflict_1785687393855` while the open popup read "Conflict probe".
-  const workflowLabels = useMemo(
-    () => Object.fromEntries(workflows.map((w) => [w.id, w.name])),
-    [workflows],
-  );
-
   // The full node model (kind/name/summary/agent/config) for the clicked node,
   // looked up from the loaded graph so the inspector shows fields the laid-out
   // canvas node data doesn't carry (agent, config, …).
@@ -1969,374 +1968,391 @@ export function WorkflowsView({
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-3">
-        {/* Issue #1110: the heading says where you are. On the index that is
-            the tab — "Workflows", and how many there are. In a workflow it is
-            that workflow's name, behind the control that goes back to the list,
-            which is the ordinary shape of a list → detail pair and is what
-            makes the two states tell themselves apart at a glance. */}
-        <div className="flex min-w-0 items-center gap-2">
-          {detailOpen ? (
-            <>
-              {/* Issue #1110: what "Browse" became. It used to toggle a panel
-                  over the canvas; the panel is the tab's front door now, so the
-                  button that pointed at it is the way back out. Named for the
-                  destination rather than the gesture — "Back" alone would be
-                  ambiguous next to the browser's own Back, which lands in the
-                  same place from here on purpose. */}
-              <Button
-                size="sm"
-                variant="ghost"
-                className="-ml-2 h-8 shrink-0 px-2 text-muted-foreground hover:text-foreground"
-                onClick={backToIndex}
-                data-testid="workflow-back-to-index"
-                title="Back to every workflow in this company."
-              >
-                <ArrowLeft className="mr-1.5 size-4" />
-                All workflows
-              </Button>
-              <h2 className="min-w-0 truncate text-sm font-semibold" data-testid="workflow-detail-name">
-                {selected?.name ?? graph?.name ?? selectedId}
-              </h2>
-              {/* Issue #228: the last run's outcome at a glance — including for
-                  a scheduled run nobody watched, which is the case the issue is
-                  about. Absent until this workflow has run at least once. */}
-              {lastRun && <LastRunChip run={lastRun} />}
-              {/* Issue #276: state an operator must not have to hover to learn.
-                  A paused workflow looks exactly like a live one otherwise, and
-                  the case that matters most — a schedule the disarm rule
-                  switched off on create — has never run, so there is no
-                  LastRunChip to hint at it. */}
-              {paused && (
-                <Badge variant="outline" data-testid="workflow-paused-badge">
-                  Schedule paused
-                </Badge>
-              )}
+      {/* Issue #1135: the tab's toolbar, in two shapes.
+
+          On the INDEX it is one row: where you are, and the two controls that
+          act on the list — how it is drawn, and `New workflow`, which is this
+          screen's primary action because making one is what an operator comes
+          to a list of workflows to do.
+
+          Inside a WORKFLOW it is two rows, because the controls answer two
+          different questions and one undifferentiated strip of nine made
+          neither of them readable. Row 1 is identity and state — where am I,
+          and how is it doing. Row 2 is action — what do I want to do to it.
+          `Run` is the only filled button on the detail screen: two primaries on
+          one screen means neither reads as the main action, which is why `New
+          workflow` moved to the index rather than being demoted here. */}
+      <div className="border-b px-4 py-3">
+        {detailOpen ? (
+          <div className="flex flex-col gap-3" data-testid="workflow-detail-toolbar">
+            {/* ── row 1 · identity and state ─────────────────────────────
+                Issue #1110: the heading says where you are — this workflow's
+                name, behind the control that goes back to the list, which is
+                the ordinary shape of a list → detail pair and is what makes
+                the two states tell themselves apart at a glance.
+
+                Issue #1135 dropped the workflow picker that used to sit below
+                it. You are already inside this workflow; its name is right
+                here and "All workflows" goes back. Switching between them is
+                what the index is for now. */}
+            <div
+              className="flex min-w-0 flex-col gap-1"
+              data-testid="workflow-detail-identity"
+            >
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                {/* Issue #1110: what "Browse" became. It used to toggle a panel
+                    over the canvas; the panel is the tab's front door now, so
+                    the button that pointed at it is the way back out. Named for
+                    the destination rather than the gesture — "Back" alone would
+                    be ambiguous next to the browser's own Back, which lands in
+                    the same place from here on purpose. */}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="-ml-2 h-8 shrink-0 px-2 text-muted-foreground hover:text-foreground"
+                  onClick={backToIndex}
+                  data-testid="workflow-back-to-index"
+                  title="Back to every workflow in this company."
+                >
+                  <ArrowLeft className="mr-1.5 size-4" />
+                  All workflows
+                </Button>
+                {/* Navigation is not identity. The hairline says so, so the
+                    name reads as a heading rather than as the next link. */}
+                <span aria-hidden className="h-4 w-px shrink-0 bg-border" />
+                <h2 className="min-w-0 truncate text-sm font-semibold" data-testid="workflow-detail-name">
+                  {selected?.name ?? graph?.name ?? selectedId}
+                </h2>
+                {/* Issue #228: the last run's outcome at a glance — including for
+                    a scheduled run nobody watched, which is the case the issue is
+                    about. Absent until this workflow has run at least once. */}
+                {lastRun && <LastRunChip run={lastRun} />}
+                {/* Issue #276: state an operator must not have to hover to learn.
+                    A paused workflow looks exactly like a live one otherwise, and
+                    the case that matters most — a schedule the disarm rule
+                    switched off on create — has never run, so there is no
+                    LastRunChip to hint at it. */}
+                {paused && (
+                  <Badge variant="outline" data-testid="workflow-paused-badge">
+                    Schedule paused
+                  </Badge>
+                )}
+              </div>
+              {/* Issue #1135: its own line. Beside the chips it was the flexible
+                  child of a row whose every other item is `shrink-0`, so it
+                  truncated first and hardest — often to a few words — while
+                  competing with them for the same reading. A line to itself both
+                  gives it the width to be read and leaves the chips alone. */}
               {selected?.description && (
-                <p className="hidden truncate text-xs text-muted-foreground sm:block">
+                <p
+                  className="truncate text-xs text-muted-foreground"
+                  data-testid="workflow-detail-description"
+                >
                   {selected.description}
                 </p>
               )}
-            </>
-          ) : (
-            <>
-              <h2 className="text-sm font-semibold">Workflows</h2>
-              <Badge variant="secondary">{workflows.length}</Badge>
-            </>
-          )}
-        </div>
-        {/* Issue #824. `flex-wrap` on the ACTION ROW, not just on the header
-            above it. The header already wraps, but that wrap only breaks
-            between its two children — and this row is one child whose buttons
-            are `shrink-0`, so on its own line it stayed 1386px wide inside a
-            1289px container and overflowed into an `overflow-hidden` ancestor.
-            Nothing in that chain scrolls, so `New workflow` was not merely
-            off-screen, it could not be clicked.
+            </div>
 
-            The row grows every time a control is added — `Pause` (#814) took
-            the overhang from 22px to 113px, which is what finally made it
-            visible — so it needs a break point of its own rather than a wider
-            budget. `justify-end` keeps the wrapped line aligned to the right
-            edge it belongs to instead of drifting left under the title. */}
-        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
-          {/* Issue #1110: every control from here to `New workflow` acts on ONE
-              workflow, so none of them is on screen until one is open. That is
-              the issue in a line: an index with a Run button has no subject to
-              run, and a toolbar that keeps its subject by picking one for you is
-              how the tab came to open inside a workflow nobody chose.
-
-              `New workflow` stays outside this branch and is rendered in both
-              states, exactly as issue #341 requires of the control that answers
-              to that name. */}
-          {detailOpen && (
-            <>
-          <Select
-            // Issue #406, half one. NOT `selectedId ?? undefined`: Base UI
-            // decides controlled-vs-uncontrolled ONCE, on the first render,
-            // from `value !== undefined` — and on that render the list has not
-            // arrived, so `selectedId` is still null. Handing it `undefined`
-            // there locked the picker uncontrolled for its whole life, and
-            // every selection this view makes for itself — the auto-select
-            // when the list lands, a card in Browse, the re-select after a
-            // delete — then moved `selectedId` without ever reaching the
-            // picker, which went on rendering its own untouched initial value.
-            // Clicking an option worked, which is why only the operator saw
-            // this. `null` is Base UI's own "nothing is selected", so passing
-            // it keeps the picker controlled from the first render on.
-            value={selectedId}
-            onValueChange={(v) => setSelectedId(v)}
-            disabled={loadingList || workflows.length === 0}
-            // Issue #406, half two. This map is what makes the trigger show a
-            // name instead of an id (#270). It replaces a `SelectValue`
-            // function child that did the same lookup by hand — because a
-            // function child ALSO overrides `placeholder`, which is how an
-            // empty selection came to render nothing at all rather than "Pick
-            // a workflow". Formatting through `items` leaves the placeholder
-            // reachable.
-            items={workflowLabels}
-          >
-            <SelectTrigger className="h-8 w-56">
-              <SelectValue placeholder={loadingList ? "Loading…" : "Pick a workflow"} />
-            </SelectTrigger>
-            <SelectContent>
-              {workflows.map((w) => (
-                <SelectItem key={w.id} value={w.id}>
-                  {w.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Input
-            value={request}
-            onChange={(e) => setRequest(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && selectedId && !running && !loadingGraph) {
-                void run();
-              }
-            }}
-            disabled={!selectedId || running}
-            placeholder="What should this run work on?"
-            aria-label="Request for this run"
-            className="h-8 w-64"
-          />
-          <Button size="sm" onClick={() => void run()} disabled={!selectedId || running || loadingGraph}>
-            {running ? (
-              <Loader2 className="mr-1.5 size-4 animate-spin" />
-            ) : (
-              <Play className="mr-1.5 size-4" />
-            )}
-            Run
-          </Button>
-          {/* Issue #542: a dry run — the real graph over stubbed effects, so
-              nothing is sent and no tokens are spent. Shares the exact `run()`
-              dispatch (and its #528 error triage) as the Run button, passing the
-              dry flag; the result panel says what it was. */}
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => void run(true)}
-            disabled={!selectedId || running || loadingGraph}
-            data-testid="workflow-test-run"
-            title="Test run: walk the real workflow over stubbed effects to prove its routing and output shape. Nothing is sent, and no tokens are spent."
-          >
-            <FlaskConical className="mr-1.5 size-4" />
-            Test run
-          </Button>
-          {/* Issue #383. Present only while a run this view started is actually
-              in flight — which is knowable at all because the host now hands
-              back the run id before the run ends. Hidden once the host has told
-              us it cannot stop runs, rather than left there to fail every time. */}
-          {activeRunId && cancelUnsupportedFor !== activeRunId && (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => void cancel()}
-              disabled={cancelling}
-              data-testid="workflow-cancel-run"
-              title="Stop this run. Steps that already finished stay in the run history; a step still executing is stopped where it is, not finished."
+            {/* ── row 2 · action ─────────────────────────────────────────
+                Three groups, hairline-separated, in the order an operator
+                reaches for them: what to run, then the things that inspect a
+                run, then the two that change or remove the workflow itself. */}
+            <div
+              className="flex flex-wrap items-center gap-2"
+              data-testid="workflow-detail-actions"
             >
-              {cancelling ? (
-                <Loader2 className="mr-1.5 size-4 animate-spin" />
-              ) : (
-                <Square className="mr-1.5 size-4" />
-              )}
-              Stop
-            </Button>
-          )}
-          {/* Issue #1110: the Browse toggle that used to sit here is gone. It
-              opened the index over the canvas, and the index is what the tab
-              opens on now — a button that toggles the surface you arrived
-              through is one control for two states with one name. Its job as a
-              way back is done by "All workflows" at the head of this bar, where
-              a back affordance belongs. */}
-          {/* Issue #303. Needs a loaded graph, not just a selection: the
-              copilot's whole grounding IS the graph, and opening it against a
-              workflow that failed to load would give it nothing to answer
-              from. */}
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => {
-              setCopilotOpen((open) => !open);
-              // The inspector occupies the same corner. Two stacked panels on
-              // top of each other is worse than either alone.
-              setSelectedNodeId(null);
-            }}
-            disabled={!graph}
-            aria-pressed={copilotOpen}
-            data-testid="workflow-copilot-toggle"
-            title="Ask about this workflow — what it does, or why a run failed."
-          >
-            <Bot className="mr-1.5 size-4" />
-            Copilot
-          </Button>
-          {historySupported && (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setHistoryOpen((open) => !open)}
-              aria-pressed={historyOpen}
-              data-testid="workflow-history-toggle"
-            >
-              <History className="mr-1.5 size-4" />
-              History
-              {historyRows.length > 0 && (
-                <Badge variant="secondary" className="ml-1.5 h-4 px-1.5 text-3xs font-normal">
-                  {historyRows.length}
-                </Badge>
-              )}
-            </Button>
-          )}
-          {/* Issue #276. Pause stops the SCHEDULE, not the workflow — the title
-              says so, because "pause" on its own reads like "I can't run this",
-              and an operator debugging a workflow needs the opposite. Shown only
-              for a scheduled workflow: see `isScheduled`. */}
-          {isScheduled && (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => void toggleEnabled()}
-              disabled={!canToggle}
-              aria-pressed={paused}
-              aria-label={paused ? "Resume schedule" : "Pause schedule"}
-              data-testid="workflow-toggle-enabled"
-              title={
-                paused
-                  ? "Start running this on its schedule again. It keeps its graph either way."
-                  : "Stop this running on its schedule. It keeps its graph and you can still run it by hand."
-              }
-            >
-              {toggling ? (
-                <Loader2 className="mr-1.5 size-4 animate-spin" />
-              ) : paused ? (
-                <Power className="mr-1.5 size-4" />
-              ) : (
-                <Pause className="mr-1.5 size-4" />
-              )}
-              {paused ? "Resume" : "Pause"}
-            </Button>
-          )}
-          {/* Issue #259. The wrapping span carries the explanation: a disabled
-              button swallows pointer events in most browsers, so a `title` on
-              the button itself would never show. */}
-          <span title={notEditable ? notEditableReason : undefined}>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setEditOpen(true)}
-              disabled={!canEdit}
-              aria-label="Edit workflow"
-              data-testid="workflow-edit"
-            >
-              <Pencil className="mr-1.5 size-4" />
-              Edit
-            </Button>
-          </span>
-          <span title={notEditable ? notEditableReason : undefined}>
-            <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-              <AlertDialogTrigger
-                render={
+              {/* run intent — the point of the screen, and the only filled
+                  button on it. */}
+              <div className="flex min-w-0 items-center gap-2">
+                <Input
+                  value={request}
+                  onChange={(e) => setRequest(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && selectedId && !running && !loadingGraph) {
+                      void run();
+                    }
+                  }}
+                  disabled={!selectedId || running}
+                  placeholder="What should this run work on?"
+                  aria-label="Request for this run"
+                  className="h-8 w-64 max-w-full"
+                />
+                <Button
+                  size="sm"
+                  onClick={() => void run()}
+                  disabled={!selectedId || running || loadingGraph}
+                  data-testid="workflow-run"
+                >
+                  {running ? (
+                    <Loader2 className="mr-1.5 size-4 animate-spin" />
+                  ) : (
+                    <Play className="mr-1.5 size-4" />
+                  )}
+                  Run
+                </Button>
+                {/* Issue #383. Present only while a run this view started is actually
+                    in flight — which is knowable at all because the host now hands
+                    back the run id before the run ends. Hidden once the host has told
+                    us it cannot stop runs, rather than left there to fail every time.
+                    It belongs to the run group: it is the same run, undone. */}
+                {activeRunId && cancelUnsupportedFor !== activeRunId && (
                   <Button
                     size="sm"
                     variant="outline"
-                    disabled={!canDelete}
-                    aria-label="Delete workflow"
-                    data-testid="workflow-delete"
+                    onClick={() => void cancel()}
+                    disabled={cancelling}
+                    data-testid="workflow-cancel-run"
+                    title="Stop this run. Steps that already finished stay in the run history; a step still executing is stopped where it is, not finished."
                   >
-                    {deleting ? (
+                    {cancelling ? (
                       <Loader2 className="mr-1.5 size-4 animate-spin" />
                     ) : (
-                      <Trash2 className="mr-1.5 size-4" />
+                      <Square className="mr-1.5 size-4" />
                     )}
-                    Delete
+                    Stop
                   </Button>
-                }
-              />
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>Delete “{graph?.name ?? selectedId}”?</AlertDialogTitle>
-                  {/* Say exactly what goes and what stays. "Stops its schedule"
-                      is the consequence an operator most needs spelled out, and
-                      "past runs stay" stops them hesitating over losing history. */}
-                  <AlertDialogDescription>
-                    This removes the workflow and stops it running on its schedule. Past runs stay
-                    in the run history. This can&apos;t be undone.
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>Keep it</AlertDialogCancel>
-                  <AlertDialogAction
-                    onClick={() => {
-                      // Close FIRST: `remove()` clears the selection, so a
-                      // dialog left mounted would re-render its title as
-                      // `Delete “”?` over a backdrop nothing can click past.
-                      setConfirmOpen(false);
-                      void remove();
-                    }}
-                    className="bg-destructive text-white hover:bg-destructive/90"
-                    data-testid="workflow-delete-confirm"
-                  >
-                    Delete workflow
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
-          </span>
-            </>
-          )}
-          {/* Issue #1110: the index's Cards/List toggle, in the tab's one
-              toolbar. It used to sit in a header the index drew for itself,
-              which was fine while the index was a panel over the canvas and
-              wrong the moment it became the page — "Workflows 7" and "All
-              workflows 7" one above the other, with the toggle stranded under
-              the duplicate.
+                )}
+              </div>
 
-              Segmented rather than two loose buttons, because the pair is one
-              question with two answers and reads as a switch. Shown only on the
-              index: it decides how the list is drawn, and there is no list to
-              draw inside a workflow. */}
-          {!detailOpen && workflows.length > 0 && (
-            <div className="flex items-center gap-1 rounded-lg border p-0.5">
-              {(
-                [
-                  { value: "cards", label: "Cards", Icon: LayoutGrid },
-                  { value: "list", label: "List", Icon: ListIcon },
-                ] as const
-              ).map(({ value, label, Icon }) => (
+              {/* secondary — prove it, ask about it, read what it did, put its
+                  schedule back. None of these is the main action, and they all
+                  look alike so that Run does not.
+
+                  The rule is INSIDE the group it introduces, not between the
+                  two: at narrow widths the row wraps, and a divider that is a
+                  sibling of both groups gets left dangling at the end of the
+                  line the group it belonged to just left. */}
+              <div className="flex flex-wrap items-center gap-2">
+                <ToolbarDivider />
+                {/* Issue #542: a dry run — the real graph over stubbed effects, so
+                    nothing is sent and no tokens are spent. Shares the exact `run()`
+                    dispatch (and its #528 error triage) as the Run button, passing the
+                    dry flag; the result panel says what it was. */}
                 <Button
-                  key={value}
                   size="sm"
-                  variant={indexMode === value ? "secondary" : "ghost"}
-                  className="h-7 px-2"
-                  onClick={() => {
-                    setIndexMode(value);
-                    writeIndexMode(value);
-                  }}
-                  aria-pressed={indexMode === value}
-                  data-testid={`workflow-index-${value}`}
+                  variant="outline"
+                  onClick={() => void run(true)}
+                  disabled={!selectedId || running || loadingGraph}
+                  data-testid="workflow-test-run"
+                  title="Test run: walk the real workflow over stubbed effects to prove its routing and output shape. Nothing is sent, and no tokens are spent."
                 >
-                  <Icon className="mr-1.5 size-3.5" />
-                  {label}
+                  <FlaskConical className="mr-1.5 size-4" />
+                  Test run
                 </Button>
-              ))}
+                {/* Issue #1110: the Browse toggle that used to sit here is gone. It
+                    opened the index over the canvas, and the index is what the tab
+                    opens on now — a button that toggles the surface you arrived
+                    through is one control for two states with one name. Its job as a
+                    way back is done by "All workflows" at the head of row 1, where
+                    a back affordance belongs. */}
+                {/* Issue #303. Needs a loaded graph, not just a selection: the
+                    copilot's whole grounding IS the graph, and opening it against a
+                    workflow that failed to load would give it nothing to answer
+                    from. */}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setCopilotOpen((open) => !open);
+                    // The inspector occupies the same corner. Two stacked panels on
+                    // top of each other is worse than either alone.
+                    setSelectedNodeId(null);
+                  }}
+                  disabled={!graph}
+                  aria-pressed={copilotOpen}
+                  data-testid="workflow-copilot-toggle"
+                  title="Ask about this workflow — what it does, or why a run failed."
+                >
+                  <Bot className="mr-1.5 size-4" />
+                  Copilot
+                </Button>
+                {historySupported && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setHistoryOpen((open) => !open)}
+                    aria-pressed={historyOpen}
+                    data-testid="workflow-history-toggle"
+                  >
+                    <History className="mr-1.5 size-4" />
+                    History
+                    {historyRows.length > 0 && (
+                      <Badge variant="secondary" className="ml-1.5 h-4 px-1.5 text-3xs font-normal">
+                        {historyRows.length}
+                      </Badge>
+                    )}
+                  </Button>
+                )}
+                {/* Issue #276. Pause stops the SCHEDULE, not the workflow — the title
+                    says so, because "pause" on its own reads like "I can't run this",
+                    and an operator debugging a workflow needs the opposite. Shown only
+                    for a scheduled workflow: see `isScheduled`. */}
+                {isScheduled && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void toggleEnabled()}
+                    disabled={!canToggle}
+                    aria-pressed={paused}
+                    aria-label={paused ? "Resume schedule" : "Pause schedule"}
+                    data-testid="workflow-toggle-enabled"
+                    title={
+                      paused
+                        ? "Start running this on its schedule again. It keeps its graph either way."
+                        : "Stop this running on its schedule. It keeps its graph and you can still run it by hand."
+                    }
+                  >
+                    {toggling ? (
+                      <Loader2 className="mr-1.5 size-4 animate-spin" />
+                    ) : paused ? (
+                      <Power className="mr-1.5 size-4" />
+                    ) : (
+                      <Pause className="mr-1.5 size-4" />
+                    )}
+                    {paused ? "Resume" : "Pause"}
+                  </Button>
+                )}
+              </div>
+
+              {/* utility · destructive — the two that change the workflow
+                  rather than run it, Delete last and in the destructive tone.
+                  Issue #1135's fourth complaint was that it sat flush against
+                  Edit with nothing separating it: an outline button one gap
+                  away from another outline button is a misclick away from a
+                  deletion. */}
+              <div className="flex items-center gap-2">
+                <ToolbarDivider />
+                {/* Issue #259. The wrapping span carries the explanation: a disabled
+                    button swallows pointer events in most browsers, so a `title` on
+                    the button itself would never show. */}
+                <span title={notEditable ? notEditableReason : undefined}>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setEditOpen(true)}
+                    disabled={!canEdit}
+                    aria-label="Edit workflow"
+                    data-testid="workflow-edit"
+                  >
+                    <Pencil className="mr-1.5 size-4" />
+                    Edit
+                  </Button>
+                </span>
+                <span title={notEditable ? notEditableReason : undefined}>
+                  <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+                    <AlertDialogTrigger
+                      render={
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          disabled={!canDelete}
+                          aria-label="Delete workflow"
+                          data-testid="workflow-delete"
+                        >
+                          {deleting ? (
+                            <Loader2 className="mr-1.5 size-4 animate-spin" />
+                          ) : (
+                            <Trash2 className="mr-1.5 size-4" />
+                          )}
+                          Delete
+                        </Button>
+                      }
+                    />
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>Delete “{graph?.name ?? selectedId}”?</AlertDialogTitle>
+                        {/* Say exactly what goes and what stays. "Stops its schedule"
+                            is the consequence an operator most needs spelled out, and
+                            "past runs stay" stops them hesitating over losing history. */}
+                        <AlertDialogDescription>
+                          This removes the workflow and stops it running on its schedule. Past runs
+                          stay in the run history. This can&apos;t be undone.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>Keep it</AlertDialogCancel>
+                        <AlertDialogAction
+                          onClick={() => {
+                            // Close FIRST: `remove()` clears the selection, so a
+                            // dialog left mounted would re-render its title as
+                            // `Delete “”?` over a backdrop nothing can click past.
+                            setConfirmOpen(false);
+                            void remove();
+                          }}
+                          className="bg-destructive text-white hover:bg-destructive/90"
+                          data-testid="workflow-delete-confirm"
+                        >
+                          Delete workflow
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                </span>
+              </div>
             </div>
-          )}
-          {/* Issue #341: THE control named "New workflow". It is in the
-              toolbar in every state, so it is the one an operator — or a
-              screen reader, or a spec — should find under that name. The
-              empty-state call to action below is named differently on
-              purpose; two buttons answering to one name is an ambiguity
-              nothing can resolve. */}
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setCreateOpen(true)}
-            data-testid="workflow-create"
-          >
-            <Plus className="mr-1.5 size-4" />
-            New workflow
-          </Button>
-        </div>
+          </div>
+        ) : (
+          /* The index's one row: the tab's own heading, and the controls that
+             act on the list rather than on any workflow in it. */
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <h2 className="text-sm font-semibold">Workflows</h2>
+              <Badge variant="secondary">{workflows.length}</Badge>
+            </div>
+            <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+              {/* Issue #1110: the index's Cards/List toggle, in the tab's one
+                  toolbar. It used to sit in a header the index drew for itself,
+                  which was fine while the index was a panel over the canvas and
+                  wrong the moment it became the page — "Workflows 7" and "All
+                  workflows 7" one above the other, with the toggle stranded under
+                  the duplicate.
+
+                  Segmented rather than two loose buttons, because the pair is one
+                  question with two answers and reads as a switch. */}
+              {workflows.length > 0 && (
+                <div className="flex items-center gap-1 rounded-lg border p-0.5">
+                  {(
+                    [
+                      { value: "cards", label: "Cards", Icon: LayoutGrid },
+                      { value: "list", label: "List", Icon: ListIcon },
+                    ] as const
+                  ).map(({ value, label, Icon }) => (
+                    <Button
+                      key={value}
+                      size="sm"
+                      variant={indexMode === value ? "secondary" : "ghost"}
+                      className="h-7 px-2"
+                      onClick={() => {
+                        setIndexMode(value);
+                        writeIndexMode(value);
+                      }}
+                      aria-pressed={indexMode === value}
+                      data-testid={`workflow-index-${value}`}
+                    >
+                      <Icon className="mr-1.5 size-3.5" />
+                      {label}
+                    </Button>
+                  ))}
+                </div>
+              )}
+              {/* Issue #341: THE control named "New workflow" — the one an
+                  operator, a screen reader or a spec should find under that
+                  name. The empty-state call to action below is named
+                  differently on purpose; two buttons answering to one name is
+                  an ambiguity nothing can resolve.
+
+                  Issue #1135 put it here and only here. It is an index-level
+                  action, and it used to render in both states — stranded on a
+                  third toolbar row inside a workflow, where "new" is the one
+                  thing the screen is not about. Filled, because on the index it
+                  is the primary action; the detail screen's primary is Run. */}
+              <Button size="sm" onClick={() => setCreateOpen(true)} data-testid="workflow-create">
+                <Plus className="mr-1.5 size-4" />
+                New workflow
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Issue #259: a write refused because the graph moved under us. Distinct
@@ -2452,17 +2468,26 @@ export function WorkflowsView({
         </div>
       )}
 
-      <div className="relative flex-1">
-        {/* Issue #1110: ONE branch, on the one piece of state that says where
-            the operator is. No workflow open ⇒ the index fills the body; a
-            workflow open ⇒ its canvas does.
+      {/* Issue #1110: ONE branch, on the one piece of state that says where
+          the operator is. No workflow open ⇒ the index fills the body; a
+          workflow open ⇒ its canvas does.
 
-            The index REPLACES the canvas rather than squeezing in above it
-            (issue #303's reasoning, unchanged): a card grid needs the width,
-            and a canvas is meaningless while the operator is still deciding
-            which workflow they want. */}
-        {!detailOpen ? (
-          !loadingList && workflows.length === 0 ? (
+          The index REPLACES the canvas rather than squeezing in above it
+          (issue #303's reasoning, unchanged): a card grid needs the width,
+          and a canvas is meaningless while the operator is still deciding
+          which workflow they want.
+
+          Issue #1107: the same branch also chooses the LAYOUT. The index is
+          one full-width column and stays that way; the detail view is a
+          `CanvasShell`, which is what adds the left rail slot. Run history is
+          per-workflow chrome, so it can only exist on the side of this branch
+          that has a workflow — a list of workflows has no single run to show
+          history for (#1110). Gating the rail here rather than gating the
+          panel makes that structural: the index cannot grow run chrome by
+          accident, because the slot it would mount in does not exist there. */}
+      {!detailOpen ? (
+        <div className="relative flex-1">
+          {!loadingList && workflows.length === 0 ? (
             // Issue #813's on-ramp, which used to live behind the canvas's
             // empty selection. An empty company now lands here instead, so this
             // is where it has to be — and it is shown INSTEAD of the index
@@ -2479,7 +2504,7 @@ export function WorkflowsView({
                 <p>
                   A workflow runs a sequence of steps on a schedule or on demand: a{" "}
                   <span className="font-medium text-foreground">trigger</span> starts it,{" "}
-                  <span className="font-medium text-foreground">agents</span> and{" "}
+                  <span className="font-medium text-foreground">teammates</span> and{" "}
                   <span className="font-medium text-foreground">tools</span> do the work,
                   and an <span className="font-medium text-foreground">output</span> step
                   reports the result somewhere.
@@ -2517,75 +2542,108 @@ export function WorkflowsView({
               loading={loadingList}
               runsLoaded={indexRunsLoaded}
             />
-          )
-        ) : loadingList || loadingGraph ? (
-          <div className="absolute inset-0 p-4">
-            <Skeleton className="h-full w-full rounded-xl" />
-          </div>
-        ) : (
-          <>
-            <ReactFlow
-              nodes={nodes}
-              edges={edges}
-              nodeTypes={NODE_TYPES}
-              colorMode={resolvedTheme === "dark" ? "dark" : "light"}
-              fitView
-              fitViewOptions={{ padding: 0.2 }}
-              nodesDraggable={false}
-              nodesConnectable={false}
-              elementsSelectable
-              onNodeClick={onNodeClick}
-              onPaneClick={() => setSelectedNodeId(null)}
-              proOptions={{ hideAttribution: true }}
-            >
-              <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
-              <Controls showInteractive={false} />
-              <MiniMap pannable zoomable className="!hidden sm:!block" />
-            </ReactFlow>
-            {/* Issue #303: the copilot and the node inspector share the canvas's
-                right edge, and the copilot wins while it is open — it was
-                opened deliberately, whereas a node click is incidental and is
-                already cleared when the copilot opens. */}
-            {copilotOpen && graph ? (
-              <CopilotPanel
-                // Remount per workflow. The panel replays that workflow's own
-                // transcript on mount, and keying it means a workflow switch
-                // can never leave the previous conversation on screen — the
-                // "no cross-workflow leakage" criterion, on the client side.
-                key={graph.id}
-                client={client}
-                company={company}
+          )}
+        </div>
+      ) : (
+        /* Issue #1107: canvas and left rail side by side. `CanvasShell` owns
+           the detail view's column layout and documents which slot a new panel
+           belongs in — left rail, right overlay, or bottom strip. */
+        <CanvasShell
+          rail={
+            historyOpen && historySupported ? (
+              <RunHistoryPanel
+                runs={historyRows}
                 graph={graph}
-                runs={runs}
-                runsKnown={historySupported}
-                // The graph on screen and the history in `runs` must be the
-                // same workflow's before anything is grounded on the pair.
-                runsReady={runsFor === graph.id}
-                // Issue #415: an applied proposal lands through the SAME
-                // handler the edit dialog's save does. One place decides what
-                // "the graph is now this" means, so a copilot edit and a canvas
-                // edit cannot leave the view in two different states.
-                onApplied={handleSaved}
-                onConflict={setConflict}
-                onClose={() => setCopilotOpen(false)}
+                workflowName={selected?.name ?? selectedId ?? ""}
+                onClose={() => setHistoryOpen(false)}
+                selectedRunSeq={overlayRun?.seq ?? null}
+                onSelectRun={(picked) =>
+                  // Clicking the row already shown clears it, so the control is
+                  // a toggle rather than a one-way trip into overlay mode.
+                  setOverlayRun((prev) => (prev?.seq === picked.seq ? null : picked))
+                }
+                onFixWithCopilot={handleFixWithCopilot}
+                fixingRunSeq={fixingRunSeq}
+                fixReason={fixReason}
+                hasMore={historyHasMore}
+                onLoadOlder={loadOlder}
+                loadingOlder={loadingOlder}
               />
-            ) : (
-              selectedNode && (
-                <NodeDetailPanel
-                  node={selectedNode}
-                  output={selectedNodeOutput}
-                  onClose={() => setSelectedNodeId(null)}
+            ) : null
+          }
+        >
+          {loadingList || loadingGraph ? (
+            <div className="absolute inset-0 p-4">
+              <Skeleton className="h-full w-full rounded-xl" />
+            </div>
+          ) : (
+            <>
+              <ReactFlow
+                nodes={nodes}
+                edges={edges}
+                nodeTypes={NODE_TYPES}
+                colorMode={resolvedTheme === "dark" ? "dark" : "light"}
+                fitView
+                fitViewOptions={{ padding: 0.2 }}
+                nodesDraggable={false}
+                nodesConnectable={false}
+                elementsSelectable
+                onNodeClick={onNodeClick}
+                onPaneClick={() => setSelectedNodeId(null)}
+                proOptions={{ hideAttribution: true }}
+              >
+                <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
+                <Controls showInteractive={false} />
+                <MiniMap pannable zoomable className="!hidden sm:!block" />
+              </ReactFlow>
+              {/* Issue #303: the copilot and the node inspector share the canvas's
+                  right edge, and the copilot wins while it is open — it was
+                  opened deliberately, whereas a node click is incidental and is
+                  already cleared when the copilot opens. */}
+              {copilotOpen && graph ? (
+                <CopilotPanel
+                  // Remount per workflow. The panel replays that workflow's own
+                  // transcript on mount, and keying it means a workflow switch
+                  // can never leave the previous conversation on screen — the
+                  // "no cross-workflow leakage" criterion, on the client side.
+                  key={graph.id}
+                  client={client}
+                  company={company}
+                  graph={graph}
+                  runs={runs}
+                  runsKnown={historySupported}
+                  // The graph on screen and the history in `runs` must be the
+                  // same workflow's before anything is grounded on the pair.
+                  runsReady={runsFor === graph.id}
+                  // Issue #415: an applied proposal lands through the SAME
+                  // handler the edit dialog's save does. One place decides what
+                  // "the graph is now this" means, so a copilot edit and a canvas
+                  // edit cannot leave the view in two different states.
+                  onApplied={handleSaved}
+                  onConflict={setConflict}
+                  onClose={() => setCopilotOpen(false)}
                 />
-              )
-            )}
-          </>
-        )}
-      </div>
+              ) : (
+                selectedNode && (
+                  <NodeDetailPanel
+                    node={selectedNode}
+                    output={selectedNodeOutput}
+                    onClose={() => setSelectedNodeId(null)}
+                  />
+                )
+              )}
+            </>
+          )}
+        </CanvasShell>
+      )}
 
-      {/* Issue #1110: the three drawers below belong to ONE workflow, so
-          none of them may outlive leaving it. Their state is cleared on every
-          selection change, but a drawer is the wrong thing to be wrong about —
-          `detailOpen` makes it structural rather than a promise about ordering. */}
+      {/* Issue #1110: the two strips below belong to ONE workflow, so neither
+          may outlive leaving it. Their state is cleared on every selection
+          change, but a drawer is the wrong thing to be wrong about —
+          `detailOpen` makes it structural rather than a promise about ordering.
+          The third drawer this used to cover, run history, is now the detail
+          view's left rail (#1107) and is gated by the same branch structurally:
+          it renders inside `CanvasShell`, which only the detail side has. */}
       {detailOpen && result && (
         <RunResultPanel
           result={result}
@@ -2613,27 +2671,6 @@ export function WorkflowsView({
         <RunFailurePanel
           failure={runFailure}
           onClose={() => setRunFailure(null)}
-        />
-      )}
-
-      {detailOpen && historyOpen && historySupported && (
-        <RunHistoryPanel
-          runs={historyRows}
-          graph={graph}
-          workflowName={selected?.name ?? selectedId ?? ""}
-          onClose={() => setHistoryOpen(false)}
-          selectedRunSeq={overlayRun?.seq ?? null}
-          onSelectRun={(picked) =>
-            // Clicking the row already shown clears it, so the control is a
-            // toggle rather than a one-way trip into overlay mode.
-            setOverlayRun((prev) => (prev?.seq === picked.seq ? null : picked))
-          }
-          onFixWithCopilot={handleFixWithCopilot}
-          fixingRunSeq={fixingRunSeq}
-          fixReason={fixReason}
-          hasMore={historyHasMore}
-          onLoadOlder={loadOlder}
-          loadingOlder={loadingOlder}
         />
       )}
 

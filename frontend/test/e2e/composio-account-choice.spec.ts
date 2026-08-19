@@ -172,14 +172,14 @@ test("an operator names the account, and the page says so", async ({ page }) => 
   // The claim is the host's, re-read: the mark is drawn from `GET
   // …/composio/connections`, so a passing assertion here means the choice was
   // stored and reported, not merely painted locally.
-  await expect(gmail.getByTestId("account-ca_billing")).toContainText("agents act as this");
+  await expect(gmail.getByTestId("account-ca_billing")).toContainText("teammates act as this");
   await expect(gmail).not.toContainText("Composio picks");
 
   await page.reload();
   await openConnections(page);
   await expect(
     page.getByTestId("accounts-gmail").getByTestId("account-ca_billing"),
-  ).toContainText("agents act as this", { timeout: 30_000 });
+  ).toContainText("teammates act as this", { timeout: 30_000 });
 
   // Choosing for Gmail says nothing about any other provider.
   const rows = await page.request.get("/api/v1/company/composio/connections");
@@ -317,7 +317,7 @@ test.describe("the agent acts as the chosen account", () => {
       .click();
     await expect(
       page.getByTestId("accounts-gmail").getByTestId("account-ca_billing"),
-    ).toContainText("agents act as this");
+    ).toContainText("teammates act as this");
 
     // …and the next turn acts as it. This is the whole issue in one assertion:
     // the choice made on the page reaches the request the harness sends, which

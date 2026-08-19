@@ -126,7 +126,7 @@ Everything is decoupled so you can embed parts elsewhere:
 - [`src/api/types.ts`](src/api/types.ts) — the API payload types, mirrored from
   the Rust server.
 - [`src/views/`](src/views/) and [`src/components/`](src/components/) —
-  prop-driven views and pieces (`ChatView`, `TasksView`, `WorkflowsView`,
+  prop-driven views and pieces (`ChatView`, `LedgersView`, `WorkflowsView`,
   `FeedbackForm`, …).
 
 ## Build

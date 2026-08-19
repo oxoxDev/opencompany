@@ -111,6 +111,7 @@ async fn state_with(
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();
@@ -3195,6 +3196,7 @@ async fn state_with_manifest_and_defaults(
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();
@@ -3237,6 +3239,7 @@ async fn state_with_manifest_and_overlays(
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();
@@ -3735,6 +3738,7 @@ async fn state_with_source_dir(
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();
@@ -4130,6 +4134,7 @@ async fn state_with_telegram_at(
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();
@@ -8554,6 +8559,152 @@ async fn a_malformed_multipart_body_is_still_a_400() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// First-run company setup (docs/spec/runtime/company-setup.md)
+// ---------------------------------------------------------------------------
+
+/// The e-commerce worked example, end to end over the router.
+///
+/// The default test build has no harness, so this is the unpolished path — and
+/// that is exactly the contract worth pinning: a company with no inference
+/// credential still gets a real industry roster rather than an empty page or an
+/// error. Decision D3's floor, asserted at the surface an operator meets.
+#[tokio::test]
+async fn setup_proposes_a_real_roster_with_no_model_wired() {
+    let home = home();
+    let state = state_with_company(home.path()).await;
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/setup/roster",
+        Some(json!({
+            "industry": "E-commerce — I sell homeware online",
+            "teamHint": "",
+            "automate": "Social media posts, Meta ads, generating my reports, order dispatch",
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["template"], "ecommerce", "{body}");
+    assert_eq!(
+        body["source"], "fallback",
+        "no harness is wired, so the curated team ships: {body}"
+    );
+    let agents = body["agents"].as_array().expect("agents array");
+    assert!(
+        (4..=6).contains(&agents.len()),
+        "a proposal must be a workable team, got {}: {body}",
+        agents.len()
+    );
+    let roles: Vec<&str> = agents
+        .iter()
+        .map(|a| a["role"].as_str().unwrap_or_default())
+        .collect();
+    assert!(roles.contains(&"Logistics Coordinator"), "{roles:?}");
+    // Every row must be directly usable as a `POST …/team` body — the console
+    // passes them straight through, so a missing field would surface as a
+    // half-created teammate rather than as a validation error here.
+    for agent in agents {
+        for field in ["name", "role", "description"] {
+            assert!(
+                agent[field].as_str().is_some_and(|v| !v.trim().is_empty()),
+                "agent is missing `{field}`: {agent}"
+            );
+        }
+    }
+}
+
+/// Setup proposes; it does not create. The roster must be untouched afterwards,
+/// because the console is what creates each teammate — and because the empty
+/// roster is also the "has setup run?" signal (decision D4), a route that
+/// created them itself would answer that question before the operator had seen
+/// a single name.
+#[tokio::test]
+async fn setup_creates_no_teammates_of_its_own() {
+    let home = home();
+    let state = state_with_company(home.path()).await;
+
+    let (before_status, before) = send(&state, "GET", "/api/v1/company/team", None).await;
+    assert_eq!(before_status, StatusCode::OK);
+    let before_len = before.as_array().expect("roster").len();
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/setup/roster",
+        Some(json!({ "industry": "content creator", "automate": "daily posts" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, after) = send(&state, "GET", "/api/v1/company/team", None).await;
+    assert_eq!(
+        after.as_array().expect("roster").len(),
+        before_len,
+        "setup created teammates itself: {after}"
+    );
+}
+
+/// The answers are persisted, because Phase 2 builds this company's workflows
+/// from them and must not have to ask a second time.
+#[tokio::test]
+async fn setup_remembers_the_answers() {
+    let home = home();
+    let state = state_with_company(home.path()).await;
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/setup/roster",
+        Some(json!({
+            "industry": "E-commerce",
+            "teamHint": "plus customer support",
+            "automate": "Meta ads, order dispatch",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    use crate::ports::CompanyStore;
+    let store = FsCompanyStore::new(home.path().to_path_buf());
+    let record = store
+        .load(&CompanyId::new("acme"))
+        .await
+        .expect("load")
+        .expect("record");
+    let answers = record.setup.expect("the answers were stored");
+    assert_eq!(answers.industry, "E-commerce");
+    assert_eq!(answers.team_hint, "plus customer support");
+    assert_eq!(answers.automate, "Meta ads, order dispatch");
+}
+
+/// An operator who types nothing still gets a team. The three questions are
+/// free text and the last two are skippable, so an empty body is a real request
+/// rather than a client bug — and stranding someone on the setup screen is the
+/// one outcome worse than a generic roster.
+#[tokio::test]
+async fn setup_answers_an_empty_body_with_the_generic_team() {
+    let home = home();
+    let state = state_with_company(home.path()).await;
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/setup/roster",
+        Some(json!({})),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["template"], "generic", "{body}");
+    assert!(
+        body["agents"].as_array().expect("agents").len() >= 4,
+        "{body}"
+    );
+}
+
 /// `[workspace] max_blob_mb` above the default is a real knob again.
 ///
 /// It never was one: the route stopped reading at 64 MiB whatever a company had
@@ -8979,4 +9130,22 @@ async fn a_card_opened_by_a_run_projects_its_provenance() {
         "a card no run opened must carry neither key, so the board's existing wire shape is \
          unchanged: {by_hand}"
     );
+}
+
+/// Both addressing forms reach it, like every other write-plane route — the
+/// platform `…/companies/{id}/…` spelling and the single-company alias.
+#[tokio::test]
+async fn setup_is_reachable_under_both_scope_forms() {
+    let home = home();
+    let state = state_with_company(home.path()).await;
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/companies/acme/setup/roster",
+        Some(json!({ "industry": "software" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["template"], "software", "{body}");
 }

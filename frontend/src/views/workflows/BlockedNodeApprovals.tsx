@@ -67,26 +67,49 @@ export function BlockedNodeApprovals({
     >
       {shown.map((b) => {
         const approvalIds = b.approvalIds ?? [];
+        const stranded = b.stranded ?? 0;
         return (
           <li key={b.nodeId}>
             <span className="font-medium">“{b.nodeId}”</span>
             {b.tools.length > 0 && <> gated {b.tools.join(", ")}</>}
-            {approvalIds.length > 0 && (
-              <>
-                {" — decide in Approvals: "}
-                {approvalIds.map((id, i) => (
-                  <span key={id}>
-                    {i > 0 && ", "}
-                    <a
-                      href={APPROVALS_ROUTE}
-                      className="underline underline-offset-2 hover:text-foreground"
-                      data-testid="workflow-blocked-approval-link"
-                    >
-                      {toolFor.get(id) ?? "this call"}
-                    </a>
-                  </span>
-                ))}
-              </>
+            {approvalIds.length > 0 && stranded >= approvalIds.length ? (
+              // Every card this node opened is gone from the queue (#1143), so
+              // there is nothing to link to. Sending the operator to an empty
+              // Approvals page and calling it an action is the defect itself —
+              // the honest line says the run cannot be continued and why.
+              <span data-testid="workflow-blocked-approval-stranded">
+                {" — "}
+                {approvalIds.length === 1
+                  ? "its approval is no longer in the queue"
+                  : "none of its approvals are in the queue any more"}
+                , so this run cannot be continued. Re-run the workflow.
+              </span>
+            ) : (
+              approvalIds.length > 0 && (
+                <>
+                  {" — decide in Approvals: "}
+                  {approvalIds.map((id, i) => (
+                    <span key={id}>
+                      {i > 0 && ", "}
+                      <a
+                        href={APPROVALS_ROUTE}
+                        className="underline underline-offset-2 hover:text-foreground"
+                        data-testid="workflow-blocked-approval-link"
+                      >
+                        {toolFor.get(id) ?? "this call"}
+                      </a>
+                    </span>
+                  ))}
+                  {stranded > 0 && (
+                    // Partly stranded: the surviving cards are still worth
+                    // linking, but the count would otherwise overstate what the
+                    // operator can actually act on.
+                    <span data-testid="workflow-blocked-approval-partly-stranded">
+                      {` (${stranded} more no longer in the queue)`}
+                    </span>
+                  )}
+                </>
+              )
             )}
           </li>
         );

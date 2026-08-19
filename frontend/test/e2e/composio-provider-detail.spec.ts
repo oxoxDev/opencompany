@@ -211,8 +211,8 @@ test("the panel names every account the company holds, and marks none of them", 
   await expect(panel, "no account may be marked as the one agents use").not.toContainText(
     "Default",
   );
-  await expect(panel).not.toContainText("agents act as this");
-  await expect(panel).toContainText("Which account agents act as");
+  await expect(panel).not.toContainText("teammates act as this");
+  await expect(panel).toContainText("Which account teammates act as");
   await expect(panel).toContainText("Composio resolves it for the company");
 
   // And specifically NOT the claim it replaced. #819 wrote "`composio_execute`

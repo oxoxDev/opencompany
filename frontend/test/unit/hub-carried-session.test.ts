@@ -18,7 +18,7 @@ import {
 } from "@/connections/registry";
 import { readProfiles } from "@/connections/profileStore";
 import { connectionConfig } from "@/connections/types";
-import { connectionRailVisible } from "@/components/connection-rail";
+import { hostSwitcherInteractive } from "@/components/host-switcher";
 
 /**
  * A **hub** console: one deployment of this app operating hosts that live on
@@ -212,17 +212,19 @@ async function probeRefuses(id: string): Promise<void> {
   expect(connection?.error).toMatch(/not encrypted/);
 }
 
-describe("the connection rail in a hub", () => {
-  it("is drawn at any count, including none", () => {
+describe("the host switcher in a hub", () => {
+  it("opens a menu at any count, including none", () => {
     // A hub has no bootstrap connection, so it can genuinely hold zero hosts —
-    // and the "+" in this rail is the only way to add the first one. Hiding the
-    // rail there is a dead end with no way out of it.
-    expect(connectionRailVisible(0, true)).toBe(true);
-    expect(connectionRailVisible(1, true)).toBe(true);
+    // and "Add a host" in this menu is the only way to add the first one. An
+    // inert nameplate there is a dead end with no way out of it.
+    expect(hostSwitcherInteractive(0, true)).toBe(true);
+    expect(hostSwitcherInteractive(1, true)).toBe(true);
   });
 
   it("still stays out of the way of an ordinary single-host console", () => {
-    expect(connectionRailVisible(1, false)).toBe(false);
-    expect(connectionRailVisible(2, false)).toBe(true);
+    // One host in a browser is a nameplate, not a control: no chevron, and
+    // nothing to open. Same rule the rail used for whether to draw at all.
+    expect(hostSwitcherInteractive(1, false)).toBe(false);
+    expect(hostSwitcherInteractive(2, false)).toBe(true);
   });
 });

@@ -222,6 +222,7 @@ impl Fixture {
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         };
         Self {
             company,
@@ -1090,6 +1091,7 @@ async fn a_disabled_global_stays_hidden_even_if_a_second_read_would_fail() {
         overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
+        setup: None,
     };
     let store: Arc<dyn CompanyStore> = Arc::new(FailsAfterFirstLoadStore::seeded(record));
     let admin = WorkflowAdmin::new(company, None, store, None, None);

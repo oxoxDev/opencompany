@@ -218,6 +218,27 @@ pub struct WorkflowBlockedNode {
     /// zero, which is the ordinary case.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub unparkable: usize,
+    /// How many of this node's [`approval_ids`](Self::approval_ids) the journal
+    /// no longer holds (issue #1143).
+    ///
+    /// **Computed on the read, never journaled.** Every writer leaves this zero
+    /// and it is skipped when zero, so a run's durable row is byte-for-byte what
+    /// it was; `list_runs` fills it in by asking the journal which of the ids
+    /// this node parked are still parked. It has to be derived rather than
+    /// stored for the same reason the sibling `WorkflowRun::approvals` receipt
+    /// is named for what was parked rather than what is outstanding: a stored
+    /// count of "still waiting" is a fresh lie the moment the queue moves.
+    ///
+    /// Semantically this is [`unparkable`](Self::unparkable) arrived at late.
+    /// Both mean the operator will never be asked and re-running is the only way
+    /// forward — the difference is only *when* that became true. A park is
+    /// unparkable at run time because the gate refused it; it is stranded
+    /// afterwards because the question did not survive (the park record is
+    /// `Durability::Process`, and the "the agent re-parks on its next attempt"
+    /// tolerance that justifies it does not hold for a run that already halted —
+    /// see #1145).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub stranded: usize,
 }
 
 /// `skip_serializing_if` predicate for a count that is almost always zero.

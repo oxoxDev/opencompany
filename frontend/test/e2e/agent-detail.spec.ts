@@ -141,12 +141,12 @@ test("an agent defined in the console can be read back and edited", async ({ pag
   // and leaves a second card for `card(page, role)` to match.
   try {
     // Define one through the dialog the issue calls create-only.
-    await page.getByRole("button", { name: "Add member" }).first().click();
+    await page.getByRole("button", { name: "Add teammate" }).first().click();
     const dialog = page.getByRole("dialog");
     await dialog.getByTestId("agent-field-name").fill("Detail Spec");
     await dialog.getByTestId("agent-field-role").fill(role);
     await dialog.getByTestId("agent-field-description").fill("Original instructions.");
-    await dialog.getByRole("button", { name: "Add member" }).click();
+    await dialog.getByRole("button", { name: "Add teammate" }).click();
     await expect(card(page, role)).toBeVisible({ timeout: 30_000 });
 
     // Open it. This is the half that was impossible: the roster was write-once
@@ -198,7 +198,7 @@ test("an agent defined in the console can be read back and edited", async ({ pag
     await goToTeam(page);
     const leftover = page.getByTestId("team-card").filter({ hasText: "Detail Spec" }).first();
     if (await leftover.count()) {
-      await leftover.getByLabel("Member actions").click();
+      await leftover.getByLabel("Teammate actions").click();
       await page.getByRole("menuitem", { name: "Remove" }).click();
       await expect(leftover).toHaveCount(0, { timeout: 30_000 });
     }

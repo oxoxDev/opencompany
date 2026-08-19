@@ -24,13 +24,27 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 
 import { failedNodeOf } from "./graph";
-import { pendingCount, relativeTime, runTone, undeliveredCount } from "./run-health";
+import {
+  pendingCount,
+  relativeTime,
+  runSummaryLine,
+  runTone,
+  undeliveredCount,
+} from "./run-health";
 
 /** Which rendering the index is showing. Persisted by the caller. */
 export type IndexMode = "cards" | "list";
 
 /** How many recent runs the health strip shows per workflow. */
 const STRIP_RUNS = 5;
+
+/** The two "no run to report" readings, named once because a card and a list
+ * row both say them (issue #1136) and two copies of a sentence this careful
+ * drift apart. What each one means is argued in {@link HealthLine}. */
+const NO_RUNS_LABEL = "No recent runs";
+const NO_RUNS_TITLE =
+  "No runs in the recent company-wide page. Open the workflow to read its own run history.";
+const LOADING_RUNS_LABEL = "Loading runs…";
 
 export function WorkflowIndex({
   workflows,
@@ -94,7 +108,11 @@ export function WorkflowIndex({
           ))}
         </div>
       ) : (
-        <div className="divide-y rounded-xl border">
+        // `@container`: the row's breakpoint is the LIST's width, not the
+        // window's — the tab sits beside a sidebar, so a viewport breakpoint
+        // would drop the description while there was still room for it, and
+        // keep it past the point where there wasn't (issue #1136).
+        <div className="@container divide-y rounded-xl border">
           {workflows.map((w) => (
             <WorkflowRow
               key={w.id}
@@ -161,7 +179,27 @@ function WorkflowCard({
 }
 
 /** One workflow as a list row — the same facts, laid out for scanning down a
- * column rather than across a grid. */
+ * column rather than across a grid.
+ *
+ * WHY EVERY COLUMN BUT ONE IS A FIXED LENGTH (issue #1136). A row is its own
+ * element, so a grid drawn here is a grid of ONE row: `auto` and `fr` tracks are
+ * measured against that row's own content and nothing else. Sized that way the
+ * columns land wherever each row's own text happens to end, which is exactly the
+ * ragged edge the flex version had — the description's left edge zigzagging by a
+ * couple of hundred pixels and the status dots never forming a line. Fixed
+ * lengths are what a shared vertical edge is made of; the single `1fr` is the
+ * description, and it is the same width on every row because everything around
+ * it is.
+ *
+ * NARROW VIEWPORTS: the description is the column that yields. Below `@3xl`
+ * (48rem of *list* width — a container query, because the sidebar means the
+ * viewport is not the width this list gets) the three fixed tracks plus a
+ * readable description no longer fit, and the description would be truncated to
+ * a word or two. It is dropped entirely there and the name takes the space: a
+ * name identifies the row, a five-character description fragment identifies
+ * nothing. `hidden` rather than a conditional render on purpose — a
+ * `display: none` cell is not a grid item, so the remaining three cells fall
+ * into the three-track template with no second code path. */
 function WorkflowRow({
   workflow,
   runs,
@@ -178,25 +216,78 @@ function WorkflowRow({
       type="button"
       onClick={onSelect}
       data-testid="workflow-list-row"
-      className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-left transition hover:bg-accent/40"
+      className="grid w-full grid-cols-[minmax(0,1fr)_13rem_4.5rem] items-center gap-x-3 px-3 py-2 text-left transition hover:bg-accent/40 @3xl:grid-cols-[17.5rem_minmax(0,1fr)_13rem_4.5rem]"
     >
-      <span className="min-w-0 flex-1 truncate text-sm font-medium">{workflow.name}</span>
-      {workflow.editable === false && (
-        <Badge
-          variant="outline"
-          className="h-4 shrink-0 px-1.5 text-3xs font-normal"
-          title="Defined by a file in the company source tree, so it can't be changed or removed from the console."
-        >
-          in source
-        </Badge>
-      )}
-      <span className="hidden min-w-0 flex-1 truncate text-xs text-muted-foreground sm:block">
+      <span className="flex min-w-0 items-center gap-2">
+        {/* `title` because the column is fixed: a truncated name is unreadable
+            without one, and this is the only place the row says which workflow
+            it is. */}
+        <span className="truncate text-sm font-medium" title={workflow.name}>
+          {workflow.name}
+        </span>
+        {/* Issue #1136: inside the name cell, not floating between columns —
+            the badge qualifies the name, so it travels with it. */}
+        {workflow.editable === false && (
+          <Badge
+            variant="outline"
+            className="h-4 shrink-0 px-1.5 text-3xs font-normal"
+            title="Defined by a file in the company source tree, so it can't be changed or removed from the console."
+          >
+            in source
+          </Badge>
+        )}
+      </span>
+      <span
+        className="hidden min-w-0 truncate text-xs text-muted-foreground @3xl:block"
+        title={workflow.description ?? undefined}
+      >
         {workflow.description ?? ""}
       </span>
-      <span className="shrink-0">
-        <HealthLine runs={runs} runsLoaded={runsLoaded} />
-      </span>
+      <RowHealth runs={runs} runsLoaded={runsLoaded} />
     </button>
+  );
+}
+
+/** The last two cells of a list row: how the most recent run went, and when.
+ *
+ * The same reading {@link HealthLine} gives a card, split across two grid cells
+ * (issue #1136) — a fragment, so the row's grid places each one itself. The
+ * status text starts at the left edge of its own fixed column, which is what
+ * puts the dots in a vertical line; the time sits right-aligned in a column
+ * narrow enough that "21h ago" and "7d ago" end on the same pixel.
+ *
+ * Both are single-line and truncate: a row that wraps is a row that is taller
+ * than its neighbours, and the alignment this is all for is the first thing an
+ * uneven row height destroys. */
+function RowHealth({ runs, runsLoaded }: { runs: WorkflowRunOutcome[]; runsLoaded: boolean }) {
+  const last = runs[0];
+
+  // Nothing to show, and the two reasons for that are NOT the same thing — see
+  // {@link HealthLine}, which owns the wording both surfaces use. The time cell
+  // is simply absent; it is the last column, so nothing follows it to shift.
+  if (!last) {
+    return runsLoaded ? (
+      <span className="truncate text-2xs text-muted-foreground" title={NO_RUNS_TITLE}>
+        {NO_RUNS_LABEL}
+      </span>
+    ) : (
+      <span className="truncate text-2xs text-muted-foreground/60">{LOADING_RUNS_LABEL}</span>
+    );
+  }
+
+  const tone = runTone(last);
+  const label = runSummaryLine(last, tone.label, last.error ? failedNodeOf(last) : null);
+
+  return (
+    <>
+      <span className="flex min-w-0 items-center gap-1.5 text-2xs" title={label}>
+        <span className={`size-1.5 shrink-0 rounded-full ${tone.dot}`} />
+        <span className="truncate text-muted-foreground">{label}</span>
+      </span>
+      <span className="truncate text-right text-2xs text-muted-foreground/70">
+        {relativeTime(last.atMillis)}
+      </span>
+    </>
   );
 }
 
@@ -211,7 +302,7 @@ function HealthLine({ runs, runsLoaded }: { runs: WorkflowRunOutcome[]; runsLoad
   if (!last) {
     // Nothing yet, and the two reasons for that are NOT the same thing.
     if (!runsLoaded) {
-      return <span className="text-2xs text-muted-foreground/60">Loading runs…</span>;
+      return <span className="text-2xs text-muted-foreground/60">{LOADING_RUNS_LABEL}</span>;
     }
     // "No recent runs", never "never run". The company-wide run page is cut by
     // a limit, so a workflow whose last run has scrolled off it is
@@ -220,11 +311,8 @@ function HealthLine({ runs, runsLoaded }: { runs: WorkflowRunOutcome[]; runsLoad
     // Selecting the workflow re-reads its history scoped server-side, which
     // does answer the stronger question.
     return (
-      <span
-        className="text-2xs text-muted-foreground"
-        title="No runs in the recent company-wide page. Open the workflow to read its own run history."
-      >
-        No recent runs
+      <span className="text-2xs text-muted-foreground" title={NO_RUNS_TITLE}>
+        {NO_RUNS_LABEL}
       </span>
     );
   }

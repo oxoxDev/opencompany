@@ -119,7 +119,7 @@ export function ApprovalMeta({
   approval: ApprovalSummary;
   now: number;
   askerNames: Map<string, string>;
-  /** Trailing status text ("Waiting for the agent…", "Approved"), if any. */
+  /** Trailing status text ("Waiting for the teammate…", "Approved"), if any. */
   status?: React.ReactNode;
 }) {
   const taskId = a.task?.link === "task" ? a.task.id : null;

@@ -35,7 +35,7 @@
 //
 // A healthy company's board reads as dead. To-do, Planning and In progress are
 // the three columns that fit an ordinary window, and they are exactly the three
-// that empty out first — so an operator opens Tasks, gets three confident
+// that empty out first — so an operator opens the board, gets three confident
 // zeros, and never learns that the 101 cards they came for are two columns off
 // the right edge. The board that has moved the most work is the board that
 // looks the most finished.

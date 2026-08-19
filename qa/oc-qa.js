@@ -155,14 +155,22 @@
    * ------------------------------------------------------------------ */
 
   /**
-   * A run's verdict, in the console's own precedence order.
+   * A run's verdict — **the host's when it sends one** (issue #981).
    *
-   * **This is a transcription of `frontend/src/views/workflows/run-health.ts`,
-   * and it must stay one.** Two independent definitions of "did this run
-   * succeed" is precisely the defect issue #981 filed, and the harness owned
-   * the second copy. `frontend/test/unit/qa-harness.test.ts` pins the two
-   * together so a change to the console's reading breaks this file loudly
-   * rather than silently re-greening a bad run.
+   * `run.verdict` is now derived server-side and serialized on both run DTOs,
+   * so the first line below is the whole of this function against any current
+   * host. Everything after it is the fallback for a host predating #981, and
+   * that fallback is a transcription of
+   * `frontend/src/views/workflows/run-health.ts` **which must stay one**: two
+   * independent definitions of "did this run succeed" is precisely the defect
+   * issue #981 filed, and the harness owned the second copy — it scored a
+   * delivery-failure run as PASS. `frontend/test/unit/qa-harness.test.ts` pins
+   * the two together so a change to the console's reading breaks this file
+   * loudly rather than silently re-greening a bad run.
+   *
+   * The fallback cannot simply be deleted now the host answers: this script is
+   * pasted into a browser against whatever host is in front of the operator,
+   * including one rolled back or older than this file.
    *
    * The order IS the check, and every arm below exists because the state it
    * names had been scoring green:
@@ -182,11 +190,13 @@
    *   reached an `output` node, so its `deliveries` are empty and a
    *   delivery-only read scored the gated case — the common one — as clean.
    *
-   * These are exactly the seven words issue #981 proposes for a server-side
-   * `WorkflowRunVerdict`. When that lands, delete this and read the host's.
+   * These are exactly the seven words the host's `WorkflowRunVerdict` uses, in
+   * the same order — which is what makes the fallback and the answer
+   * interchangeable rather than merely similar.
    */
   function runVerdict(run) {
     if (!run) return "unknown";
+    if (run.verdict) return run.verdict;
     if (run.running === true) return "running";
     if (run.error) return "failed";
     if (run.cancelled) return "stopped";

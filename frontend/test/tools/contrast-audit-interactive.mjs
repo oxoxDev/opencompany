@@ -132,7 +132,7 @@ const SCENARIOS = [
       if (await t.count()) { await t.first().hover(); return true; } return false; } },
   { name: 'overview: keyboard focus ring', view: 'overview', act: async (p) => {
       await p.keyboard.press('Tab'); await p.keyboard.press('Tab'); return true; } },
-  { name: 'tasks: board', view: 'tasks', act: async () => true },
+  { name: 'ledgers: board', view: 'ledgers/tasks', act: async () => true },
   { name: 'chat: composer focus', view: 'chat', act: async (p) => {
       const t = p.locator('textarea, input[type=text]').first();
       if (await t.count()) { await t.focus(); return true; } return false; } },

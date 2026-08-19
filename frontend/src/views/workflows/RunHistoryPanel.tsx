@@ -218,15 +218,25 @@ export function RunHistoryPanel({
   // click did something, and it is only true if it moves.
   const now = useRunningClock(runs.some(isRunning));
   return (
-    <div className="border-t bg-card/60" data-testid="workflow-run-history">
-      <div className="flex items-center justify-between px-4 py-2">
-        <div className="flex items-center gap-2">
+    // Issue #1107: a left rail at `xl`, the bottom strip it has always been
+    // below that. `CanvasShell` owns the placement and the width; this owns
+    // the chrome, and the two readings differ only in which edge carries the
+    // border and whether the list is capped or grows.
+    //
+    // `aside` + `aria-label`: at `xl` the rail is painted left of a canvas it
+    // follows in the DOM, so it is reachable as a named complementary landmark
+    // rather than only by tabbing past the graph.
+    <aside
+      aria-label="Run history"
+      className="flex h-full flex-col border-t bg-card/60 xl:border-t-0 xl:border-r"
+      data-testid="workflow-run-history"
+    >
+      {/* `flex-wrap` rather than a breakpoint: at 320px the workflow name drops
+          to its own line on its own, and at full width it stays inline where
+          there is room for it. */}
+      <div className="flex items-start justify-between gap-2 border-b px-4 py-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
           <span className="text-sm font-medium">Run history</span>
-          {workflowName && (
-            <span className="truncate text-xs text-muted-foreground">
-              {workflowName}
-            </span>
-          )}
           {/* Issue #1012: `N+` when older runs remain past this page, so the
               count is honestly "at least this many" rather than a total that
               silently dropped the rest. */}
@@ -234,12 +244,25 @@ export function RunHistoryPanel({
             {runs.length}
             {hasMore ? "+" : ""}
           </Badge>
+          {workflowName && (
+            <span className="max-w-full truncate text-xs text-muted-foreground">
+              {workflowName}
+            </span>
+          )}
         </div>
-        <Button variant="ghost" size="sm" onClick={onClose}>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="-mr-2 shrink-0"
+          onClick={onClose}
+        >
           Dismiss
         </Button>
       </div>
-      <div className="max-h-72 overflow-auto px-4 pb-3">
+      {/* Capped as a strip, growing as a rail. `min-h-0` is what actually lets
+          it scroll inside the column — without it the flex item floors at its
+          content height and the rail overflows the view instead. */}
+      <div className="max-h-72 overflow-auto px-4 py-3 xl:min-h-0 xl:max-h-none xl:flex-1">
         {runs.length === 0 ? (
           <p className="text-xs text-muted-foreground">
             This workflow hasn't finished a run yet. Runs appear here once they
@@ -280,7 +303,7 @@ export function RunHistoryPanel({
           </div>
         )}
       </div>
-    </div>
+    </aside>
   );
 }
 
@@ -665,9 +688,9 @@ function RunNodeChip({ node }: { node: WorkflowRunNode }) {
  * A once-a-second clock, live only while something on screen is counting
  * against it (issue #1007).
  *
- * Gated rather than always-on: the history drawer sits under the canvas for as
- * long as the operator leaves it open, and a settled row's duration is a fixed
- * number that re-rendering every second cannot change.
+ * Gated rather than always-on: the history rail stays up for as long as the
+ * operator leaves it open, and a settled row's duration is a fixed number that
+ * re-rendering every second cannot change.
  */
 function useRunningClock(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());

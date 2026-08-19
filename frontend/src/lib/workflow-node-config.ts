@@ -510,7 +510,7 @@ export function nodeKindConfigProblem(node: {
       // take the whole validation down instead of refusing the one node).
       return typeof node.agent === "string" && node.agent.trim()
         ? null
-        : "An agent step names no teammate — set its `agent` field to a roster member (not inside `config`).";
+        : "An agent step names no teammate — set its `agent` field to a roster teammate (not inside `config`).";
     case "tool_call":
       return nonEmpty("slug")
         ? null

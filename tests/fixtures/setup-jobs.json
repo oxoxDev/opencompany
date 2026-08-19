@@ -1,0 +1,41 @@
+{
+  "_comment": "The one definition of how the 'what do you want automated?' answer splits into a checklist. Read by BOTH src/company/setup.rs (job_items) and frontend/src/lib/company-setup.ts (jobItems). Two implementations of one rule is how the first version of this feature drifted; this file is the reason they cannot. Add a case here before changing either implementation.",
+  "maxJobs": 12,
+  "cases": [
+    {
+      "why": "the ordinary case: a comma list, in the order they wrote it",
+      "input": "class schedule reminders, restocking mats, chasing unpaid invoices",
+      "items": ["class schedule reminders", "restocking mats", "chasing unpaid invoices"]
+    },
+    {
+      "why": "semicolons and newlines are list separators too",
+      "input": "Meta ads;\norder dispatch\nmonthly reports",
+      "items": ["Meta ads", "order dispatch", "monthly reports"]
+    },
+    {
+      "why": "prose with no separator is ONE item, and coverage is then trivially satisfied — the honest answer, not a failure",
+      "input": "I want the whole back office to just run itself really",
+      "items": ["I want the whole back office to just run itself really"]
+    },
+    {
+      "why": "trailing full stops and stray whitespace are noise, not content",
+      "input": "  Meta ads .,  order dispatch.  ,,, ",
+      "items": ["Meta ads", "order dispatch"]
+    },
+    {
+      "why": "a repeated job must not make the list impossible to cover",
+      "input": "invoices, Invoices, INVOICES, dispatch",
+      "items": ["invoices", "dispatch"]
+    },
+    {
+      "why": "nothing typed is an empty checklist, never a checklist of one empty string",
+      "input": "   ",
+      "items": []
+    },
+    {
+      "why": "past MAX_JOBS a checklist is a backlog; the tail is dropped rather than shipped to a prompt",
+      "input": "a, b, c, d, e, f, g, h, i, j, k, l, m, n, o",
+      "items": ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"]
+    }
+  ]
+}

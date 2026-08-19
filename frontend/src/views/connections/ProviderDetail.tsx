@@ -314,8 +314,8 @@ function ComposioBody({
                   provider that has never been connected is a third. The empty
                   case says which of them this is rather than "not connected",
                   which would cover all three. */}
-              No Composio account is connected for {provider.label}, so its agents have none of its
-              tools.
+              No Composio account is connected for {provider.label}, so its teammates have none of
+              its tools.
             </p>
           )}
         </section>
@@ -329,9 +329,9 @@ function ComposioBody({
           <p className="flex items-start gap-2 rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
             <AlertTriangle className="mt-px size-3 shrink-0" />
             <span>
-              Holding several accounts is fine — they are the company&apos;s, and every member works
-              through them. Which one an agent acts as is set under{" "}
-              <span className="font-medium">Which account agents act as</span> on the Connections
+              Holding several accounts is fine — they are the company&apos;s, and every teammate
+              works through them. Which one a teammate acts as is set under{" "}
+              <span className="font-medium">Which account teammates act as</span> on the Connections
               page; until one is chosen, Composio resolves it for the company as it always has.
             </span>
           </p>
@@ -341,9 +341,9 @@ function ComposioBody({
           <p className="flex items-start gap-2 rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
             <AlertTriangle className="mt-px size-3 shrink-0" />
             <span>
-              This company also stores a self-hosted OAuth credential for {provider.label}. No agent
-              reads it (issue #396), it is not what the accounts above are, and disconnecting here
-              does not touch it.
+              This company also stores a self-hosted OAuth credential for {provider.label}. No
+              teammate reads it (issue #396), it is not what the accounts above are, and
+              disconnecting here does not touch it.
             </span>
           </p>
         )}
@@ -386,7 +386,7 @@ function ComposioBody({
               )}
               {accounts.length > 0 && (
                 <p className="text-xs text-muted-foreground">
-                  Disconnecting removes the connection at Composio, so agents lose these tools on
+                  Disconnecting removes the connection at Composio, so teammates lose these tools on
                   their next turn. It does not sign the company out of {provider.label}, and it does
                   not delete anything there.
                 </p>
@@ -502,7 +502,7 @@ function McpBody({
               <>
                 <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
                 <span>
-                  No agent can reach this server — no teammate&apos;s tool grants cover{" "}
+                  No teammate can reach this server — no tool grant covers{" "}
                   <code className="font-mono">mcp:{server.name}</code>. Whatever usage says below
                   happened before that was true.
                 </span>
@@ -523,7 +523,7 @@ function McpBody({
 
         <UsageSection
           usage={usage}
-          perConnection={`Successful tool calls your agents made through ${server.name}, counted under mcp:${server.name.trim().toLowerCase()} so a Composio provider of the same name cannot be read as this one.`}
+          perConnection={`Successful tool calls your teammates made through ${server.name}, counted under mcp:${server.name.trim().toLowerCase()} so a Composio provider of the same name cannot be read as this one.`}
         />
 
         <Separator />
@@ -534,8 +534,8 @@ function McpBody({
           </h4>
           <p className="text-xs text-muted-foreground" data-testid="mcp-detail-disconnect-scope">
             {server.source === "manifest"
-              ? "This server is declared in company.toml, so it cannot be removed from the console — turning it off drops it from every agent's tool belt on the next turn, and it returns on the next boot unless the manifest changes."
-              : "Removing it drops it from every agent's tool belt on the next turn and deletes the credential stored here for it."}{" "}
+              ? "This server is declared in company.toml, so it cannot be removed from the console — turning it off drops it from every teammate's tool belt on the next turn, and it returns on the next boot unless the manifest changes."
+              : "Removing it drops it from every teammate's tool belt on the next turn and deletes the credential stored here for it."}{" "}
             Nothing is revoked at the server&apos;s own end: no token it issued is invalidated and no
             session there is closed. Revoke those where they were issued.
           </p>

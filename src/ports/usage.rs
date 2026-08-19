@@ -84,6 +84,25 @@ pub enum SampleKind {
     /// company-driven model spend, and excluding it would let chat keep paying
     /// for classification after the tier budget was exhausted.
     TriageCall,
+    /// One completed first-run setup pass — the single tool-less model call
+    /// that turns three answers into a starting roster
+    /// (`docs/spec/runtime/company-setup.md`).
+    ///
+    /// A sibling of [`Self::PlanningCall`] and not of [`Self::Inference`], for
+    /// the same reason: this call belongs to no teammate. It runs *before the
+    /// roster exists*, so there is not yet an agent it could be attributed to,
+    /// and it mints no attempt row — [`UNATTRIBUTED_AGENT`](crate::metering::UNATTRIBUTED_AGENT)
+    /// with no `run_id` is the truth rather than a gap.
+    ///
+    /// Its own kind rather than a reused `PlanningCall` because the two are
+    /// asked about separately: setup runs once per company and is a
+    /// first-impression cost we are actively measuring, while planning recurs
+    /// for the life of the company. Folding them together would make "what does
+    /// onboarding a company cost?" unanswerable.
+    ///
+    /// Counted toward the capability-tier token budget exactly like planning —
+    /// see [`tokens_in`](crate::metering::tokens_in).
+    SetupCall,
 }
 
 /// One metered usage event.

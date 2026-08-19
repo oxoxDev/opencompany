@@ -88,7 +88,7 @@ export function NodeDetailPanel({
         )}
 
         {node.agent && (
-          <DetailField label="Assigned agent">
+          <DetailField label="Assigned teammate">
             <p className="font-mono text-xs">{node.agent}</p>
           </DetailField>
         )}

@@ -391,8 +391,8 @@ export function TaskDetailView({
   // attempt moved, rather than up to `POLL_MS` later — and at all, which the
   // poll above deliberately does not do while the tab is hidden.
   //
-  // Its own effect rather than a dependency of the one above, for the reason
-  // `TasksView` gives for the same split (issue #464): folding the tick in there
+  // Its own effect rather than a dependency of the one above, for the reason the
+  // board screen gave for the same split (issue #464): folding the tick in there
   // would tear down and restart the fallback timer on every frame, so a busy
   // company would keep resetting the interval and the fallback would effectively
   // stop existing on exactly the companies that need it most.
@@ -622,7 +622,28 @@ export function TaskDetailView({
 
               {detail.task.plan && (
                 <TabsContent value="plan" className="mt-4">
-                  <TaskPlanBrief plan={detail.task.plan} />
+                  <TaskPlanBrief
+                    plan={detail.task.plan}
+                    // Issue #1106: answering the brief's ownership question is
+                    // the same write the reassign row makes, through the same
+                    // route — so the host validates the pick against the roster
+                    // once, for both, and a candidate the planner named cannot
+                    // reach the card by a path that skips that check.
+                    onPick={async (id) => {
+                      try {
+                        const saved = await patchTask(client, company, detail.task.id, {
+                          assignee: id,
+                        });
+                        onSaved(saved);
+                        await load();
+                        toast.success(`Assigned to ${id}.`);
+                      } catch (e) {
+                        toast.error(
+                          e instanceof Error ? e.message : "could not assign the task",
+                        );
+                      }
+                    }}
+                  />
                 </TabsContent>
               )}
 
@@ -1046,12 +1067,14 @@ function ControlBar({
 
       {reassigning && (
         <div className="mt-2 flex items-center gap-2">
-          {/* Issue #263: the same roster picker the edit dialog uses. Since
-              #301 this is the *only* place a card gets an assignee — the create
-              box asks for a prompt and nothing else, so the host's default
-              (unassigned → orchestrator) stands until somebody picks here.
-              Unassigned is a row here rather than an empty field, so handing the
-              card back to the orchestrator is something you can see and choose. */}
+          {/* Issue #263: the same roster picker the edit dialog uses, and since
+              #1106 the same one the create dialog offers up front. This is the
+              row that can reach the *whole* roster after the fact — the create
+              dialog pre-empts, and the plan brief's candidate list narrows to
+              what the planner named, so a card that needs anyone else is
+              reassigned here. Unassigned is a row rather than an empty field, so
+              handing the card back to the orchestrator is something you can see
+              and choose. */}
           <AssigneeSelect
             client={client}
             company={company}

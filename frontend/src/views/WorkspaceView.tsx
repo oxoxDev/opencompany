@@ -1672,7 +1672,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
             <Badge
               variant="outline"
               className={cn("shrink-0 px-1 py-0 text-3xs", ORIGIN_STYLES.agent)}
-              title={`Created by agent ${node.createdBy.id}`}
+              title={`Created by teammate ${node.createdBy.id}`}
               data-testid="workspace-tree-agent-badge"
             >
               {node.createdBy.id}

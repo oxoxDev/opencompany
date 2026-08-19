@@ -193,9 +193,9 @@ export function ApprovalsView({
       // for a one-off and for a week-long permission, and the operator has to be
       // able to tell those apart from the confirmation they just got.
       //
-      // …and only say "the agent" when there IS one (#395). A card with no
+      // …and only say "the teammate" when there IS one (#395). A card with no
       // `agent` is one the runtime performs itself — a paused workflow gate, a
-      // cold-recipient report — and naming an agent there is the same shape of
+      // cold-recipient report — and naming a teammate there is the same shape of
       // small lie the wording above exists to remove. The work is still in
       // flight either way, so both halves say so; only the actor changes.
       // Issue #561: what happens next is the host's answer, not this view's
@@ -231,7 +231,7 @@ export function ApprovalsView({
       if (mayHaveLanded(err, Date.now() - startedAt)) {
         const line =
           verdict === "approve"
-            ? "Approved — the host didn't answer in time, but your decision was recorded. The agent may still be working; no need to approve again."
+            ? "Approved — the host didn't answer in time, but your decision was recorded. The teammate may still be working; no need to approve again."
             : "Declined — the host didn't answer in time, but your decision was recorded. No need to decline again.";
         onResolved(line);
         // Neither a success nor an error: the verdict is durable, the
@@ -627,7 +627,7 @@ function ApprovalCard({
           status={
             deciding
               ? deciding === "approve"
-                ? "Waiting for the agent…"
+                ? "Waiting for the teammate…"
                 : "Recording…"
               : batchTotal > 1
                 ? // Deliberately a count and not a link: the row is decided

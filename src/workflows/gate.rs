@@ -53,6 +53,16 @@
 //! TTL and the operator would be told the agent did not act, about a call no
 //! agent ever made.
 //!
+//! That argument is about the **single-use** grant and only it, which is why
+//! issue #1098 could open the standing arm without touching this one. A
+//! [`StandingGrant`](crate::runtime::grants::StandingGrant) is never redeemed by
+//! anybody: it is matched at the gate, before the call, and the call then
+//! proceeds in place. Nothing has to be re-dispatched, so "nothing would ever
+//! redeem it" is not a property of it. `consume_grant` therefore stays closed on
+//! this path permanently and
+//! [`standing_grant_allows`](crate::harness::policy::ApprovalPolicy) does not —
+//! the asymmetry is the safety argument, not an oversight to tidy up.
+//!
 //! And the seam says so itself. [`ToolInvoker::invoke`](tinyflows::caps::ToolInvoker)
 //! receives `(slug, args, conn)` — no node id, no run state. It cannot name the
 //! node on a card, and on a continuation it could not recognise a call the
@@ -95,15 +105,22 @@
 //!
 //! # Deliberate deviations, stated rather than quietly satisfied
 //!
-//! * **Standing grants cannot apply "identically on both paths"** (a criterion
-//!   in #460's body). A standing grant is scoped to a teammate
-//!   ([`admits_scope`](crate::runtime::grants::StandingGrant::admits_scope)) and
-//!   a `tool_call` node has no teammate — it acts as the company. This module
-//!   therefore matches grants against a synthetic `workflow:{id}` principal,
-//!   which nothing mints for today, so the answer is always **fail-closed**: a
-//!   teammate's standing grant does not open a workflow node's gate. Widening
-//!   that is a consent decision for the maintainer, not one to make by
-//!   defaulting.
+//! * **Standing grants now apply on this path too** (issue #1098). #460 left
+//!   this fail-closed and named the reason: a standing grant was scoped to a
+//!   teammate, a `tool_call` node has none, and *"widening that is a consent
+//!   decision for the maintainer, not one to make by defaulting."* #1098 is that
+//!   decision taken. The workflow is now a real grant subject
+//!   ([`GrantSubject::Workflow`](crate::runtime::grants::GrantSubject)), so a
+//!   permission the operator gave *this workflow* opens its gates until the
+//!   deadline — which is what stops a scheduled run re-asking the same question
+//!   every time it fires.
+//!
+//!   Three things did **not** widen with it. A *teammate's* grant still does not
+//!   open a workflow node's gate: the two subjects are separate namespaces and a
+//!   workflow named like a teammate matches nothing of theirs. The permission is
+//!   still refused unless the call is grantable on its own arguments, so
+//!   `shell` and `http_request` keep asking every run. And the **single-use**
+//!   arm is untouched — see the note below.
 //! * **A `Deny` verdict is not enforced here.** Under `readonly`,
 //!   [`ApprovalPolicy::check`] denies external effects outright. Honouring that
 //!   would be a *new refusal* on a path that runs today, i.e. exactly the
@@ -131,8 +148,9 @@ use oh::agent::tool_policy::{ToolCallContext, ToolPolicy, ToolPolicyDecision, To
 use openhuman_core::openhuman as oh;
 
 use crate::company::Policy;
-use crate::harness::policy::ApprovalPolicy;
+use crate::harness::policy::{ApprovalPolicy, ApprovalRequestQueue};
 use crate::ports::types::{CompanyId, CompanyRecord};
+use crate::runtime::grants::GrantSet;
 
 /// The tool name an `http_request` node's call is classified as (issue #614).
 ///
@@ -237,6 +255,7 @@ pub(crate) async fn apply_policy_gates(
     record: &CompanyRecord,
     workflow_id: &str,
     run_id: &str,
+    grants: &GrantSet,
 ) -> Vec<GatedCall> {
     let gated = policy_gates(
         graph,
@@ -244,6 +263,7 @@ pub(crate) async fn apply_policy_gates(
         &record.id,
         workflow_id,
         run_id,
+        Some(grants),
     )
     .await;
 
@@ -272,18 +292,47 @@ pub(crate) async fn apply_policy_gates(
 /// what it found, so an operator reviewing what was approved is not left with a
 /// hole they cannot account for. One classifier, so the audit line and the gate
 /// can never disagree about the same call.
+///
+/// `grants` is the company's live permission set (issue #1098). `Some` on the
+/// gate path, so a standing permission the operator gave this workflow is
+/// honoured and the node does not park again. **`None` on the #617 audit line**,
+/// deliberately: that line discloses calls this run never offered for approval
+/// at all, and a permission is about not asking *again*. Passing the set there
+/// would suppress a disclosure on the grounds that a *different* question had
+/// once been answered. The two can only differ by the audit naming a call the
+/// gate would have let through, which over-discloses — the safe direction for a
+/// line that reports rather than enforces.
 pub(crate) async fn policy_gates(
     graph: &WorkflowGraph,
     company_policy: &Policy,
     company: &CompanyId,
     workflow_id: &str,
     run_id: &str,
+    grants: Option<&GrantSet>,
 ) -> Vec<GatedCall> {
     // The manifest's `[policy]` verbatim — same mode, same `always_approve`,
     // same `auto_approve_under_usd` the roster runs under. No per-agent budget:
     // a workflow node is not a teammate, and the company-wide ceiling is
     // enforced elsewhere.
-    let policy = ApprovalPolicy::new(company_policy, None).for_authored_workflow_nodes();
+    //
+    // Issue #1098: bound to the workflow, so the standing-permission arm has a
+    // subject to match on. Built **once** for the whole graph rather than per
+    // node — the subject is the workflow, and every node of it spends the same
+    // permission. The agent stays unbound, so the single-use arm stays closed.
+    //
+    // The queue is private-but-grant-sharing for the reason the module note
+    // gives: `check` pushes its projected effect onto `requests`, and a shared
+    // queue would have `park_gated_calls` or the chat cycle drain it into a
+    // second, tool-call-shaped card for a decision this pass already carded.
+    // The grants half must still be the company's real one or the permission is
+    // invisible to the pass that has to honour it.
+    let policy = ApprovalPolicy::new(company_policy, None)
+        .for_authored_workflow_nodes()
+        .with_workflow(workflow_id);
+    let policy = match grants {
+        Some(grants) => policy.with_requests(ApprovalRequestQueue::with_grants(grants.clone())),
+        None => policy,
+    };
     let mut gated = Vec::new();
 
     for node in &graph.nodes {
@@ -606,6 +655,7 @@ description = "Runs Acme."
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }
     }
 
@@ -655,7 +705,14 @@ description = "Runs Acme."
     #[tokio::test]
     async fn a_consequential_call_gates_under_supervised() {
         let mut g = graph(vec![tool_node("run-it", "shell")]);
-        let gated = apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(
+            &mut g,
+            &company("supervised", &[]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert_eq!(gate_ids(&g), ["run-it"]);
         assert_eq!(gated.len(), 1);
@@ -675,7 +732,14 @@ description = "Runs Acme."
     async fn full_autonomy_leaves_the_graph_untouched() {
         let before = graph(vec![tool_node("run-it", "shell")]);
         let mut after = before.clone();
-        let gated = apply_policy_gates(&mut after, &company("full", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(
+            &mut after,
+            &company("full", &[]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert!(gated.is_empty());
         assert_eq!(after.nodes[0].config, before.nodes[0].config);
@@ -698,7 +762,14 @@ description = "Runs Acme."
         node.config = json!({ "slug": "shell", "args": { "command": "=previous.output" } });
         let mut g = graph(vec![node]);
 
-        let gated = apply_policy_gates(&mut g, &company("full", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(
+            &mut g,
+            &company("full", &[]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert_eq!(gate_ids(&g), vec!["run-it"]);
         assert_eq!(gated.len(), 1, "{gated:?}");
@@ -724,7 +795,14 @@ description = "Runs Acme."
         node.config = json!({ "method": "POST", "url": "=item.endpoint" });
         let mut g = graph(vec![node]);
 
-        let gated = apply_policy_gates(&mut g, &company("full", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(
+            &mut g,
+            &company("full", &[]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert_eq!(gated.len(), 1, "{gated:?}");
         assert_eq!(
@@ -752,7 +830,14 @@ description = "Runs Acme."
             tool_node("read", "file_read"),
             tool_node("search", "web_search"),
         ]);
-        let gated = apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(
+            &mut g,
+            &company("supervised", &[]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert!(gated.is_empty(), "{gated:?}");
         assert!(gate_ids(&g).is_empty());
@@ -810,8 +895,14 @@ description = "Runs Acme."
     #[tokio::test]
     async fn always_approve_gates_a_call_the_tier_would_allow() {
         let mut g = graph(vec![tool_node("search", "web_search")]);
-        let gated =
-            apply_policy_gates(&mut g, &company("full", &["web_search"]), "wf", "run-1").await;
+        let gated = apply_policy_gates(
+            &mut g,
+            &company("full", &["web_search"]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert_eq!(gate_ids(&g), ["search"]);
         assert!(gated[0].reason.contains("always-approve"), "{gated:?}");
@@ -825,7 +916,14 @@ description = "Runs Acme."
         node.config = json!({ "slug": "shell", "requires_approval": false });
         let mut g = graph(vec![node]);
 
-        apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
+        apply_policy_gates(
+            &mut g,
+            &company("supervised", &[]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert_eq!(g.nodes[0].config["requires_approval"], json!(true));
     }
@@ -845,7 +943,14 @@ description = "Runs Acme."
         transform.kind = NodeKind::Transform;
         let mut g = graph(vec![agent, transform]);
 
-        let gated = apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(
+            &mut g,
+            &company("supervised", &[]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert!(gated.is_empty(), "{gated:?}");
         assert!(gate_ids(&g).is_empty());
@@ -863,7 +968,14 @@ description = "Runs Acme."
             json!({ "method": "post", "url": "https://api.example.com/v1/pay?token=s3cret" });
         let mut g = graph(vec![node]);
 
-        let gated = apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(
+            &mut g,
+            &company("supervised", &[]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert_eq!(gate_ids(&g), ["fetch"]);
         assert_eq!(gated[0].slug, "http_request");
@@ -886,7 +998,14 @@ description = "Runs Acme."
         let before = node.config.clone();
         let mut g = graph(vec![node]);
 
-        let gated = apply_policy_gates(&mut g, &company("full", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(
+            &mut g,
+            &company("full", &[]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert!(gated.is_empty(), "{gated:?}");
         assert_eq!(g.nodes[0].config, before);
@@ -905,7 +1024,14 @@ description = "Runs Acme."
         node.config = json!({ "method": "GET", "url": "=item.endpoint" });
         let mut g = graph(vec![node]);
 
-        let gated = apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(
+            &mut g,
+            &company("supervised", &[]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert_eq!(gate_ids(&g), ["fetch"]);
         let target = gated[0].target.as_deref().expect("the absence is stated");
@@ -982,7 +1108,14 @@ description = "Runs Acme."
         node.config = json!({});
         let mut g = graph(vec![node]);
 
-        let gated = apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(
+            &mut g,
+            &company("supervised", &[]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert!(gated.is_empty());
         assert!(gate_ids(&g).is_empty());

@@ -4,10 +4,14 @@ import { expect, type Page } from "@playwright/test";
  * How a spec reaches a workflow, since issue #1110.
  *
  * `#/workflows` is the index — every workflow, and none of them open. The
- * per-workflow toolbar (the picker, Run, Test run, Copilot, History, Edit,
- * Delete) exists only once one is opened, so a spec that needs any of it has to
- * open one first. Before #1110 the view auto-selected the first row, and eight
- * specs relied on that without saying so; this module is where they say it.
+ * per-workflow toolbar (Run, Test run, Copilot, History, Resume, Edit, Delete)
+ * exists only once one is opened, so a spec that needs any of it has to open
+ * one first. Before #1110 the view auto-selected the first row, and eight specs
+ * relied on that without saying so; this module is where they say it.
+ *
+ * Issue #1135 made that the only route. The toolbar picker a spec could once
+ * use to hop straight from one workflow to the next is gone — switching is
+ * {@link backToWorkflowIndex} followed by {@link openWorkflow}.
  *
  * Deliberately shared rather than copied into each spec: "how do I get to a
  * workflow" is one answer, and the next change to the flow should have one

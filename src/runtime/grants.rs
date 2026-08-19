@@ -250,7 +250,77 @@ pub enum GrantScope {
     },
 }
 
-/// A standing permission: one tool, one teammate, until a deadline (issue #374).
+/// Who may spend a standing permission (issue #1098).
+///
+/// Two kinds, and the second is the whole of that issue. A scheduled workflow
+/// re-asked the same question on every run because a permission could only name
+/// a teammate, and a graph that is simply running has none — so the case whose
+/// calls were *pre-declared by an operator* was the one case standing permission
+/// could not cover, while an agent choosing its arguments at run time could hold
+/// one.
+///
+/// # Why a workflow and not one of its nodes
+///
+/// The operator consented to a host, and a second call to that host from the
+/// same job is the same proposition they already agreed to. Keying on the node
+/// would re-park it — the workflow-shaped version of slug-exactness, which
+/// [`StandingGrant::scope`] records was rejected for Composio because it "would
+/// re-park every new action and make the grant worth nothing".
+///
+/// The cost is stated rather than hidden: for the six tools that are grantable
+/// with no scope at all (`file_write`, `edit`, `apply_patch`, `csv_export`,
+/// `memory_store`, `publish_artifact`) nothing narrows a workflow permission, so
+/// a node added inside the window inherits it. Three things bound that, and are
+/// why it is the accepted trade: `shell` and `http_request` are
+/// [`Standing::PerCall`](crate::policy::Standing) and never persist at all, the
+/// ceiling is seven days, and a permission is per-tool — "may write files" never
+/// implies "may publish". Narrowing this later means adding a node id to the
+/// workflow variant, and nothing else.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum GrantSubject {
+    /// A roster teammate. Every permission minted before issue #1098.
+    Agent(String),
+    /// One authored workflow, by the stable id its file declares — not the run
+    /// id, which is fresh on every firing and would make each permission die
+    /// with the run that minted it.
+    Workflow(String),
+}
+
+impl GrantSubject {
+    /// A teammate subject from anything string-like.
+    pub fn agent(id: impl Into<String>) -> Self {
+        Self::Agent(id.into())
+    }
+
+    /// A workflow subject from anything string-like.
+    pub fn workflow(id: impl Into<String>) -> Self {
+        Self::Workflow(id.into())
+    }
+}
+
+/// Who could hold a standing permission for `effect`, or `None` when nobody
+/// could (issue #1098).
+///
+/// **The one place this is decided.** Three surfaces ask it — the card's
+/// `broadly_grantable` flag, the resolve route's 400, and the mint — and all
+/// three must agree or an operator is offered a control that then refuses them,
+/// which is the drift issue #444 exists to prevent.
+///
+/// A teammate wins when there is one. A gate has no teammate but does name the
+/// workflow it belongs to, and that is the subject issue #1098 added. `None` is
+/// every other native effect — something the runtime performs itself, where
+/// there is no tool use to hand over and approving once is the only honest
+/// answer.
+pub fn subject_of(effect: &crate::ports::types::Effect) -> Option<GrantSubject> {
+    if let Some(agent) = effect.agent.as_deref() {
+        return Some(GrantSubject::Agent(agent.to_string()));
+    }
+    crate::runtime::workflow_resume::gate_workflow_id(effect)
+        .map(|workflow| GrantSubject::Workflow(workflow.to_string()))
+}
+
+/// A standing permission: one tool, one subject, until a deadline (issues #374,
+/// #1098).
 ///
 /// Deliberately **not** a variant of [`GrantedCall`]. See the module docs: no
 /// `args` and a non-optional expiry are the two properties that make this type
@@ -260,7 +330,21 @@ pub struct StandingGrant {
     /// This grant's id — what a revoke addresses.
     pub id: GrantId,
     /// The roster agent allowed to redeem it. Nobody else matches.
+    ///
+    /// Empty on a workflow permission, which names its subject in
+    /// [`workflow`](Self::workflow) instead. Read
+    /// [`subject`](Self::subject) rather than this field — matching on a bare
+    /// agent string would let an empty one collide.
+    #[serde(default)]
     pub agent: String,
+    /// The authored workflow allowed to redeem it (issue #1098).
+    ///
+    /// `None` on every teammate permission, and on any journal line written
+    /// before this field existed — both of which are agent permissions and
+    /// resolve through [`agent`](Self::agent), so a replayed line reproduces
+    /// today's behaviour exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<String>,
     /// The tool it admits, with any arguments.
     pub tool: String,
     /// Who granted it. Journaled so "who opened this up" is answerable later.
@@ -353,6 +437,20 @@ pub struct StandingGrant {
 }
 
 impl StandingGrant {
+    /// Who may spend this permission (issue #1098).
+    ///
+    /// The one place the two subject fields are reconciled, so no caller has to
+    /// decide what an empty [`agent`](Self::agent) means. A line carrying
+    /// [`workflow`](Self::workflow) is a workflow permission; everything else —
+    /// including every line written before that field existed — is an agent
+    /// permission, which is what makes replay a no-op.
+    pub fn subject(&self) -> GrantSubject {
+        match self.workflow.as_deref() {
+            Some(workflow) => GrantSubject::Workflow(workflow.to_string()),
+            None => GrantSubject::Agent(self.agent.clone()),
+        }
+    }
+
     /// Whether this grant admits a call whose live scope is `scope` (issue
     /// #457).
     ///
@@ -599,7 +697,7 @@ impl GrantSet {
             .insert(grant.id.clone(), grant);
     }
 
-    /// Matches an unexpired standing grant for `(agent, tool, scope)`
+    /// Matches an unexpired standing grant for `(subject, tool, scope)`
     /// **without** removing it — that is the whole difference from
     /// [`consume`](Self::consume).
     ///
@@ -622,9 +720,13 @@ impl GrantSet {
     /// most recent intent is the more permissive one they are living with, and
     /// picking arbitrarily out of a `HashMap` would make redemption depend on
     /// hash order.
+    /// `subject` rather than a bare agent string (issue #1098): a workflow
+    /// permission carries an empty [`StandingGrant::agent`], so a `&str`
+    /// parameter would let one match on emptiness. The enum makes the two kinds
+    /// of subject impossible to confuse at the call site.
     pub fn match_standing(
         &self,
-        agent: &str,
+        subject: &GrantSubject,
         tool: &str,
         scope: Option<&str>,
         now_millis: u64,
@@ -634,7 +736,7 @@ impl GrantSet {
             .standing
             .values()
             .filter(|g| {
-                g.agent == agent
+                &g.subject() == subject
                     && g.tool == tool
                     && g.admits_scope(scope)
                     && g.is_live_at(now_millis)
@@ -968,6 +1070,7 @@ mod test {
         StandingGrant {
             id: GrantId::new(id),
             agent: agent.to_string(),
+            workflow: None,
             tool: tool.to_string(),
             granted_by: operator(),
             approval_id: ApprovalId::new(format!("approval-{id}")),
@@ -978,6 +1081,118 @@ mod test {
             origin_task: None,
             scope: None,
         }
+    }
+
+    /// A permission held by a workflow rather than a teammate (issue #1098).
+    fn standing_workflow(
+        id: &str,
+        workflow: &str,
+        tool: &str,
+        scope: Option<&str>,
+        expires_at_millis: u64,
+    ) -> StandingGrant {
+        StandingGrant {
+            agent: String::new(),
+            workflow: Some(workflow.to_string()),
+            scope: scope.map(str::to_string),
+            ..standing(id, "", tool, expires_at_millis)
+        }
+    }
+
+    /// The two subject fields reconcile in exactly one place, and a line with no
+    /// `workflow` is an agent permission — which is what makes every journal line
+    /// written before issue #1098 replay unchanged.
+    #[test]
+    fn subject_reads_a_workflow_line_as_a_workflow_and_everything_else_as_an_agent() {
+        assert_eq!(
+            standing("g1", "maya", "web_fetch", 9_999).subject(),
+            GrantSubject::agent("maya")
+        );
+        assert_eq!(
+            standing_workflow("g2", "sports_blog", "web_fetch", None, 9_999).subject(),
+            GrantSubject::workflow("sports_blog")
+        );
+    }
+
+    /// A journal line written before the field existed carries no `workflow` key
+    /// at all. It must deserialize, and it must replay as the agent permission it
+    /// was — not as a workflow one keyed on an empty string.
+    #[test]
+    fn a_pre_1098_journal_line_replays_as_an_agent_permission() {
+        let line = r#"{
+            "id": "g-old",
+            "agent": "maya",
+            "tool": "web_fetch",
+            "granted_by": { "kind": "user", "id": "user-1" },
+            "approval_id": "approval-old",
+            "at_millis": 1000,
+            "expires_at_millis": 9999
+        }"#;
+        let replayed: StandingGrant =
+            serde_json::from_str(line).expect("a pre-#1098 line still deserializes");
+        assert_eq!(replayed.workflow, None);
+        assert_eq!(replayed.subject(), GrantSubject::agent("maya"));
+
+        let set = GrantSet::default();
+        set.grant_standing(replayed);
+        assert!(
+            set.match_standing(&GrantSubject::agent("maya"), "web_fetch", None, 2_000)
+                .is_some(),
+            "a replayed line must still admit the calls it always admitted"
+        );
+    }
+
+    /// The two subjects are separate namespaces. A workflow named like a teammate
+    /// must not spend that teammate's permission, in either direction.
+    #[test]
+    fn an_agent_and_a_workflow_of_the_same_name_do_not_share_a_permission() {
+        let set = GrantSet::default();
+        set.grant_standing(standing("g1", "digest", "web_fetch", 9_999));
+
+        assert!(
+            set.match_standing(&GrantSubject::workflow("digest"), "web_fetch", None, 2_000)
+                .is_none(),
+            "a workflow must not spend a teammate's permission"
+        );
+
+        let set = GrantSet::default();
+        set.grant_standing(standing_workflow("g2", "digest", "web_fetch", None, 9_999));
+        assert!(
+            set.match_standing(&GrantSubject::agent("digest"), "web_fetch", None, 2_000)
+                .is_none(),
+            "a teammate must not spend a workflow's permission"
+        );
+    }
+
+    /// The scope machinery is subject-agnostic: a workflow permission narrows by
+    /// host on exactly the terms a teammate's does.
+    #[test]
+    fn a_workflow_permission_is_narrowed_by_its_host_like_any_other() {
+        let set = GrantSet::default();
+        set.grant_standing(standing_workflow(
+            "g1",
+            "sports_blog",
+            "web_fetch",
+            Some("https://www.bbc.co.uk"),
+            9_999,
+        ));
+        let subject = GrantSubject::workflow("sports_blog");
+
+        assert!(
+            set.match_standing(&subject, "web_fetch", Some("https://www.bbc.co.uk"), 2_000)
+                .is_some(),
+            "the host it was granted for keeps passing"
+        );
+        assert!(
+            set.match_standing(&subject, "web_fetch", Some("https://www.espn.com"), 2_000)
+                .is_none(),
+            "a repointed host re-parks — scope equality is the invalidation"
+        );
+        assert!(
+            set.match_standing(&subject, "web_fetch", None, 2_000)
+                .is_none(),
+            "a call whose host cannot be read is refused by a scoped permission"
+        );
     }
 
     /// A grant confined to one Composio toolkit (issue #457).
@@ -1001,10 +1216,16 @@ mod test {
         let set = GrantSet::default();
         set.grant_standing(standing("g1", "ops", "shell", 10_000));
 
-        assert!(set.match_standing("ops", "shell", None, 2_000).is_some());
+        assert!(
+            set.match_standing(&GrantSubject::agent("ops"), "shell", None, 2_000)
+                .is_some()
+        );
         // Matching does not depend on arguments at all — there are none to
         // depend on. Two different calls, same admission.
-        assert!(set.match_standing("ops", "shell", None, 9_999).is_some());
+        assert!(
+            set.match_standing(&GrantSubject::agent("ops"), "shell", None, 9_999)
+                .is_some()
+        );
         assert_eq!(
             set.standing_count(),
             1,
@@ -1012,8 +1233,14 @@ mod test {
         );
 
         // The deadline instant itself is already past.
-        assert!(set.match_standing("ops", "shell", None, 10_000).is_none());
-        assert!(set.match_standing("ops", "shell", None, 10_001).is_none());
+        assert!(
+            set.match_standing(&GrantSubject::agent("ops"), "shell", None, 10_000)
+                .is_none()
+        );
+        assert!(
+            set.match_standing(&GrantSubject::agent("ops"), "shell", None, 10_001)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1022,12 +1249,12 @@ mod test {
         set.grant_standing(standing("g1", "ops", "shell", 10_000));
 
         assert!(
-            set.match_standing("marketing", "shell", None, 2_000)
+            set.match_standing(&GrantSubject::agent("marketing"), "shell", None, 2_000)
                 .is_none(),
             "another teammate is not who the operator granted"
         );
         assert!(
-            set.match_standing("ops", "workspace_write", None, 2_000)
+            set.match_standing(&GrantSubject::agent("ops"), "workspace_write", None, 2_000)
                 .is_none(),
             "another tool is not what the operator granted"
         );
@@ -1044,13 +1271,23 @@ mod test {
         set.grant_standing(scoped("g1", "ops", "composio_execute", "github", 10_000));
 
         assert!(
-            set.match_standing("ops", "composio_execute", Some("github"), 2_000)
-                .is_some(),
+            set.match_standing(
+                &GrantSubject::agent("ops"),
+                "composio_execute",
+                Some("github"),
+                2_000
+            )
+            .is_some(),
             "a second GitHub read is the sentence the operator agreed to"
         );
         assert!(
-            set.match_standing("ops", "composio_execute", Some("gmail"), 2_000)
-                .is_none(),
+            set.match_standing(
+                &GrantSubject::agent("ops"),
+                "composio_execute",
+                Some("gmail"),
+                2_000
+            )
+            .is_none(),
             "'read from GitHub' is not consent to read a mailbox"
         );
     }
@@ -1065,7 +1302,7 @@ mod test {
         set.grant_standing(scoped("g1", "ops", "composio_execute", "github", 10_000));
 
         assert!(
-            set.match_standing("ops", "composio_execute", None, 2_000)
+            set.match_standing(&GrantSubject::agent("ops"), "composio_execute", None, 2_000)
                 .is_none()
         );
     }
@@ -1098,19 +1335,29 @@ mod test {
         // whatever the live call resolves to.
         for live in [Some("github"), Some("gmail"), None] {
             assert!(
-                set.match_standing("ops", "composio_execute", live, 2_000)
+                set.match_standing(&GrantSubject::agent("ops"), "composio_execute", live, 2_000)
                     .is_some(),
                 "an unscoped grant must keep admitting: {live:?}"
             );
         }
         // …and the boundaries it always had still hold.
         assert!(
-            set.match_standing("marketing", "composio_execute", Some("github"), 2_000)
-                .is_none()
+            set.match_standing(
+                &GrantSubject::agent("marketing"),
+                "composio_execute",
+                Some("github"),
+                2_000
+            )
+            .is_none()
         );
         assert!(
-            set.match_standing("ops", "composio_execute", Some("github"), 10_000)
-                .is_none()
+            set.match_standing(
+                &GrantSubject::agent("ops"),
+                "composio_execute",
+                Some("github"),
+                10_000
+            )
+            .is_none()
         );
     }
 
@@ -1135,11 +1382,17 @@ mod test {
     fn revoking_a_standing_grant_stops_it_matching() {
         let set = GrantSet::default();
         set.grant_standing(standing("g1", "ops", "shell", 10_000));
-        assert!(set.match_standing("ops", "shell", None, 2_000).is_some());
+        assert!(
+            set.match_standing(&GrantSubject::agent("ops"), "shell", None, 2_000)
+                .is_some()
+        );
 
         let revoked = set.revoke_standing(&GrantId::new("g1")).expect("was live");
         assert_eq!(revoked.tool, "shell");
-        assert!(set.match_standing("ops", "shell", None, 2_000).is_none());
+        assert!(
+            set.match_standing(&GrantSubject::agent("ops"), "shell", None, 2_000)
+                .is_none()
+        );
         assert_eq!(set.standing_count(), 0);
         assert!(
             set.revoke_standing(&GrantId::new("g1")).is_none(),
@@ -1179,7 +1432,7 @@ mod test {
         assert_eq!(expired[0].id, GrantId::new("old"));
         assert_eq!(set.standing_count(), 1);
         assert!(
-            set.match_standing("ops", "workspace_write", None, 10_000)
+            set.match_standing(&GrantSubject::agent("ops"), "workspace_write", None, 10_000)
                 .is_some()
         );
     }
@@ -1191,7 +1444,7 @@ mod test {
         set.grant_standing(standing("long", "ops", "shell", 50_000));
 
         let matched = set
-            .match_standing("ops", "shell", None, 1_000)
+            .match_standing(&GrantSubject::agent("ops"), "shell", None, 1_000)
             .expect("matches");
         assert_eq!(matched.id, GrantId::new("long"));
     }

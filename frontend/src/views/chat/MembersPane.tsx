@@ -113,7 +113,7 @@ export function MembersPane({
   // two numbers the header's count refers to.
   const subtitle = channelMembers
     ? `${channelMembers.length} in this channel · ${total} in the company`
-    : `${total} ${total === 1 ? "agent" : "agents"} · ${
+    : `${total} ${total === 1 ? "teammate" : "teammates"} · ${
         fromHost ? "defined by this company" : "starter roster"
       }`;
 
@@ -129,8 +129,8 @@ export function MembersPane({
           size="icon"
           className="size-8"
           onClick={onAdd}
-          aria-label="Add member"
-          title="Add member"
+          aria-label="Add teammate"
+          title="Add teammate"
         >
           <UserPlus className="size-4" />
         </Button>
@@ -325,7 +325,7 @@ function MemberRow({
             <MessageSquare className="size-4" /> Message
           </DropdownMenuItem>
           <DropdownMenuCheckboxItem checked={inboxOn} onCheckedChange={onToggleInbox}>
-            Give this agent an inbox
+            Give this teammate an inbox
           </DropdownMenuCheckboxItem>
           {canEditBudget && (
             <>

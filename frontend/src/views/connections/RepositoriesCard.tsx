@@ -174,8 +174,8 @@ export function RepositoriesCard({ client, company, canManage }: Props) {
             <p className="text-sm text-muted-foreground">
               Bind a repository and this host keeps its own copy, refreshed with the token you
               give it. Teammates granted <code className="font-mono">repo</code> can check that
-              copy out and read pull requests. The token stays on the host — it is never written into a workspace, an
-              agent&apos;s environment, or any file your agents can read.
+              copy out and read pull requests. The token stays on the host — it is never written
+              into a workspace, a teammate&apos;s environment, or any file your teammates can read.
             </p>
           </div>
 

@@ -109,7 +109,7 @@ use crate::runtime::delegation_tools;
 ///
 /// The two hand-off delegations differ only in how they get here — a desk key
 /// through [`desk_lead`], a roster id straight through
-/// [`CompanyRecord::resolve_roster_agent_id`] — and this is the type that makes
+/// [`CompanyRecord::resolve_teammate_key`] — and this is the type that makes
 /// that the *only* difference. A hand-off's card, its steer registration, its
 /// depth bound and its relayed reply are properties of handing work over, not
 /// of the namespace the target was named in.
@@ -325,6 +325,14 @@ pub(crate) struct DeskReply {
 pub(crate) struct MessageContext {
     /// The REST chat handler already opened a To-do card for this message
     /// (issue #463), so no path below may open a second one.
+    ///
+    /// The handler has **two** roads to that card and this flag has to cover
+    /// both: the triage naming a title, and — since #580 — the operator's
+    /// composer asking for a workflow, which the handler takes as an override
+    /// and supplies a title for when the triage declined to. Re-deriving this
+    /// from the triage alone was true for the first road and false for the
+    /// second, so a workflow request the triage did not recognise as work
+    /// arrived here looking uncarded and got a second card (issue #1035).
     pub(crate) carded_by_handler: bool,
     /// The message triaged as
     /// [`MessageTriage::Answer`](crate::company::task_intent::MessageTriage)
@@ -474,6 +482,10 @@ pub(crate) struct DelegationRunner<'a> {
     /// the record the moment the work changes hands. `None` for an operator chat
     /// turn, and for a dispatch whose run row could not be minted.
     run_sink: Option<Arc<RunTraceSink>>,
+    /// What the operator's composer said this message is for, when they chose
+    /// (issue #1035). `None` for every path that is not an operator chat turn,
+    /// and for a message whose sender expressed no preference.
+    requested_deliverable: Option<crate::ports::tasks::TaskDeliverable>,
     /// The cycle's approval queue, read (never written) to tell whether a turn
     /// this runner drove parked an approval (issue #465).
     ///
@@ -529,6 +541,7 @@ impl<'a> DelegationRunner<'a> {
             max_delegations,
             task: None,
             run_sink: None,
+            requested_deliverable: None,
             approvals: None,
             workflow_run: None,
             workflow_refs: None,
@@ -575,6 +588,9 @@ impl<'a> DelegationRunner<'a> {
             max_delegations: orchestrator::MAX_DELEGATIONS_PER_TURN,
             task: None,
             run_sink: None,
+            // A workflow run has no operator message and therefore no composer
+            // choice; `None` is the only honest value here.
+            requested_deliverable: None,
             approvals: None,
             workflow_run: Some(run),
             workflow_refs: None,
@@ -767,6 +783,23 @@ impl<'a> DelegationRunner<'a> {
         self
     }
 
+    /// Carries the operator's own statement of what this message is for
+    /// (issue #1035).
+    ///
+    /// A builder rather than a parameter on
+    /// [`handle_operator_message`](Self::handle_operator_message) for the same
+    /// reason [`for_task`](Self::for_task) and [`for_run`](Self::for_run) are:
+    /// it is optional context about the turn, absent on every path that is not a
+    /// person typing into the composer, and threading it as an argument would
+    /// make a dozen test call sites restate `None` to say nothing.
+    pub(crate) fn requested(
+        mut self,
+        deliverable: Option<crate::ports::tasks::TaskDeliverable>,
+    ) -> Self {
+        self.requested_deliverable = deliverable;
+        self
+    }
+
     /// Handles one operator message end-to-end: claim the delegation queue for
     /// this turn (issue #453 — the acquire also clears, so nothing stale leaks
     /// in), run the responder's turn, drain whatever it queued (capped,
@@ -908,8 +941,29 @@ impl<'a> DelegationRunner<'a> {
             true => self.queue.claim_answering(),
             false => self.queue.claim(),
         };
+        // Issue #1035: the operator asked for a workflow, and the REST chat
+        // handler cards on that signal whatever its triage said.
+        //
+        // `is_copilot_thread` is not an extra precaution — it is half of the
+        // handler's own condition, and reproducing only the other half would
+        // invert this fix on exactly one surface. A copilot thread is a
+        // conversation ABOUT one graph, so the handler suppresses the card
+        // there; a runtime that read the deliverable alone would conclude the
+        // handler had carded, and stand down the paths that were the only ones
+        // left to open one. The two conditions travel together or the signal
+        // lies.
+        let workflow_requested = self.requested_deliverable
+            == Some(crate::ports::tasks::TaskDeliverable::Workflow)
+            && !crate::company::copilot::is_copilot_thread(chat_id);
         // Issue #463: did the REST chat handler already card this message?
-        let carded_by_handler = triage.title().is_some();
+        //
+        // Two ways it does, and until #1035 this saw only the first. The triage
+        // naming a title is one; the operator asking for a workflow is the
+        // other, and the handler takes it as an override — `workflow_requested`
+        // supplies a title through `or_else` when the triage declined to. A
+        // message that went down that second road arrived here looking uncarded,
+        // and the paths below opened a card beside the one it already had.
+        let carded_by_handler = triage.title().is_some() || workflow_requested;
         // Everything below that could open a card reads these two facts about
         // the operator's message rather than re-deriving them from text that is
         // no longer the operator's (issues #463, #267).
@@ -1398,11 +1452,19 @@ impl<'a> DelegationRunner<'a> {
             let lead = match &delegation {
                 Delegation::DelegateToDesk { desk, .. } => desk_lead(self.record, desk),
                 // Issue #884: resolved directly, with no desk in between — which
-                // is the point. `resolve_roster_agent_id` is pure over the same
+                // is the point. `resolve_teammate_key` is pure over the same
                 // record, so the second resolution inside `run_delegation`
                 // yields the same member, exactly as `desk_lead` does above.
+                //
+                // It grounds the display-name half of the roster too (#1162).
+                // The tool now queues the canonical id, so on the ordinary path
+                // this is the identity — but `ground` fails open for the
+                // orchestrator when the record cannot be read, and that path
+                // queues the key exactly as the model wrote it. Resolving the
+                // same way here is what stops a name that reached the queue
+                // from being dropped at the drain.
                 Delegation::DelegateToTeammate { teammate, .. } => {
-                    self.record.resolve_roster_agent_id(teammate)
+                    self.record.resolve_teammate_key(teammate).agent()
                 }
                 _ => None,
             };
@@ -2281,11 +2343,15 @@ impl<'a> DelegationRunner<'a> {
                 teammate,
                 instruction,
             } => {
-                let Some(member) = self.record.resolve_roster_agent_id(&teammate) else {
+                let Some(member) = self.record.resolve_teammate_key(&teammate).agent() else {
                     // The mirror of the desk arm's warning, and reachable for the
                     // same narrow reason: the tool grounds the target before
                     // queuing, so this is a teammate removed from the roster
-                    // between the call and the drain.
+                    // between the call and the drain — or one named on the
+                    // fail-open path, which queues the key ungrounded. Resolved
+                    // with the same id-then-name resolve the tool boundary used
+                    // (#1162), so a display name cannot be accepted there and
+                    // silently dropped here.
                     tracing::warn!(
                         company = %self.company,
                         teammate = %teammate,
@@ -3398,6 +3464,7 @@ members = ["engineer"]
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }
     }
 
@@ -3932,6 +3999,102 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             );
             assert_eq!(cards[0].assignee, "engineer");
         }
+    }
+
+    /// One message, one card — including the road #463 could not see (issue #1035).
+    ///
+    /// The REST chat handler opens a card on **two** signals: the triage naming
+    /// a title, and the operator's composer asking for a workflow, which it
+    /// takes as an override and supplies a title for when the triage declined
+    /// to. The runtime re-derived "did the handler card this?" from the triage
+    /// alone, which is true for the first road and false for the second — so a
+    /// workflow request whose wording no lexical rule recognises arrived here
+    /// looking uncarded and got a second card beside the one it already had.
+    ///
+    /// The fixture is the same residue `a_non_chatter_verdict_still_opens_the_direct_card`
+    /// uses, and that is the point: with no deliverable it cards, so a run that
+    /// opens nothing here is the flag doing the work rather than the message
+    /// being unremarkable.
+    #[tokio::test]
+    async fn a_workflow_the_handler_already_carded_opens_no_second_card() {
+        let residue = "the pricing page copy, before Friday if you can";
+        assert!(
+            crate::company::task_intent::triage_message_detailed(residue)
+                .triage
+                .title()
+                .is_none(),
+            "fixture must be a message the triage does NOT name — that is the \
+             road the handler took its override on"
+        );
+
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+        let turn = fx
+            .runner(&turns)
+            .requested(Some(crate::ports::tasks::TaskDeliverable::Workflow))
+            .handle_operator_message("engineer", residue, Some("eng_desk"))
+            .await
+            .expect("operator message handled");
+
+        assert!(
+            fx.cards().await.is_empty(),
+            "the handler carded this message on the operator's request; the \
+             runtime must not open a second one"
+        );
+        assert_eq!(turn.spawned_task, None, "and nothing is linked to one");
+    }
+
+    /// The same message with no composer choice still cards, so the test above
+    /// is not passing because the fixture stopped being trackable.
+    ///
+    /// Without this pair the fix is unfalsifiable in the direction that matters:
+    /// a bug that suppressed *every* card would satisfy the assertion above and
+    /// fail nothing.
+    #[tokio::test]
+    async fn the_same_message_without_a_composer_choice_still_cards() {
+        let residue = "the pricing page copy, before Friday if you can";
+        for choice in [None, Some(crate::ports::tasks::TaskDeliverable::Once)] {
+            let fx = Fixture::new();
+            let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+            fx.runner(&turns)
+                .requested(choice)
+                .handle_operator_message("engineer", residue, Some("eng_desk"))
+                .await
+                .expect("operator message handled");
+            assert_eq!(
+                fx.cards().await.len(),
+                1,
+                "{choice:?} is not a workflow request, so the handler opened \
+                 nothing and this path still owes a card"
+            );
+        }
+    }
+
+    /// A copilot thread is the one surface where the deliverable must NOT be
+    /// read as "the handler carded it" (issue #1035).
+    ///
+    /// The handler's condition is `!confined && deliverable == Workflow`, and
+    /// reproducing only the second half inverts this fix exactly here: a
+    /// conversation ABOUT one graph is not a request to build one, so the
+    /// handler deliberately cards nothing — and a runtime that concluded
+    /// otherwise would stand down the only paths left to open one.
+    #[tokio::test]
+    async fn a_workflow_request_on_a_copilot_thread_still_cards() {
+        let residue = "the pricing page copy, before Friday if you can";
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+        fx.runner(&turns)
+            .requested(Some(crate::ports::tasks::TaskDeliverable::Workflow))
+            .handle_operator_message("engineer", residue, Some("workflow-copilot:weekly_report"))
+            .await
+            .expect("operator message handled");
+
+        assert_eq!(
+            fx.cards().await.len(),
+            1,
+            "the handler suppresses its override on a copilot thread, so this \
+             message has no card yet and the runtime still owes one"
+        );
     }
 
     /// With **no escalation wired** — the default build, and any host without a

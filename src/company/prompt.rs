@@ -45,16 +45,41 @@ const BUNDLE_HEADING: &str = "\n\n## Your brief\n";
 /// This is what makes the agent answer *as* the CEO of Acme rather than falling
 /// back to the runtime's own assistant identity.
 ///
+/// An agent carrying a [`name`](Agent::name) — an operator-added teammate — is
+/// framed as that name *and* the role, because the console addresses it by name
+/// everywhere (DM header, subtitle, composer) and an agent told only its role
+/// contradicts the interface it is speaking through (issue #1105). The name is
+/// stated as an address, not a character: a teammate should answer to it
+/// without inventing a persona around it.
+///
 /// The inline `prompt` is **appended** to that framing rather than replacing it:
 /// an operator writing a prompt is stating how the role should work, not
 /// disclaiming which role it is, and a prompt that replaced the framing would
 /// silently cost the agent its identity.
 pub fn persona_prompt(company_name: &str, agent: &Agent) -> String {
-    let mut prompt = format!(
-        "You are the {role} at {company}. Speak in the first person as this role.",
-        role = agent.role,
-        company = company_name,
-    );
+    // Blank is absent, as it is for `description` and `prompt` below. A name
+    // that just restates the role is dropped too, or the framing reads "You are
+    // Content Writer, the Content Writer at Acme."
+    let named = agent
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case(agent.role.trim()));
+    let mut prompt = match named {
+        Some(name) => format!(
+            "You are {name}, the {role} at {company}. Speak in the first person as this role. \
+             Teammates and the operator address you as {name}; it is how you are called here, \
+             not a separate character to play.",
+            name = name,
+            role = agent.role,
+            company = company_name,
+        ),
+        None => format!(
+            "You are the {role} at {company}. Speak in the first person as this role.",
+            role = agent.role,
+            company = company_name,
+        ),
+    };
     if let Some(description) = agent.description.as_deref() {
         let description = description.trim();
         if !description.is_empty() {
@@ -165,6 +190,7 @@ mod tests {
             global: false,
             id: "a".into(),
             role: role.into(),
+            name: None,
             description: None,
             tier: None,
             tools: Vec::new(),
@@ -185,6 +211,58 @@ mod tests {
         let prompt = persona_prompt("Acme", &agent("Copywriter"));
         assert!(prompt.contains("Copywriter"), "{prompt}");
         assert!(prompt.contains("Acme"), "{prompt}");
+    }
+
+    #[test]
+    fn a_named_teammate_is_framed_as_the_name_and_the_role() {
+        // Issue #1105: the console addresses an operator-added teammate by name
+        // everywhere, so the model has to be told the name it is answering to —
+        // without losing the role, which is what it is here to do.
+        let mut a = agent("Content Writer");
+        a.name = Some("Alex".into());
+
+        let prompt = persona_prompt("Acme", &a);
+        assert!(
+            prompt.contains("You are Alex, the Content Writer at Acme"),
+            "{prompt}"
+        );
+        // Stated as an address rather than a character to inhabit.
+        assert!(prompt.contains("address you as Alex"), "{prompt}");
+        assert!(
+            prompt.contains("not a separate character to play"),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn a_teammate_with_no_name_keeps_the_role_only_framing() {
+        // The unnamed arm must stay byte-identical: every manifest teammate
+        // takes it, and its wording is pinned by tests elsewhere.
+        assert_eq!(
+            persona_prompt("Acme", &agent("Content Writer")),
+            "You are the Content Writer at Acme. Speak in the first person as this role."
+        );
+    }
+
+    #[test]
+    fn a_blank_name_falls_back_to_the_role_only_framing() {
+        let mut a = agent("Content Writer");
+        a.name = Some("   \n ".into());
+        assert_eq!(
+            persona_prompt("Acme", &a),
+            persona_prompt("Acme", &agent("Content Writer"))
+        );
+    }
+
+    #[test]
+    fn a_name_that_restates_the_role_is_not_repeated() {
+        // Otherwise: "You are Content Writer, the Content Writer at Acme."
+        let mut a = agent("Content Writer");
+        a.name = Some("content writer".into());
+        assert_eq!(
+            persona_prompt("Acme", &a),
+            persona_prompt("Acme", &agent("Content Writer"))
+        );
     }
 
     #[test]

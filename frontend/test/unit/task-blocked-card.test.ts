@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Task } from "@/api/tasks";
 import type { ApprovalSummary } from "@/api/types";
 import { taskApprovalBlock } from "@/lib/task-approvals";
-import { TaskItem } from "@/views/TasksView";
+import { TaskItem } from "@/views/TaskCard";
 
 /**
  * The paused card says what it is waiting on, and does not offer Resume as the

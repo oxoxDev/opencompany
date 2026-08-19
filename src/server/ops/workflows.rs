@@ -92,6 +92,7 @@ use crate::error::OpenCompanyError;
 use crate::ports::types::{
     CompanyEvent, CompanyRecord, EventSeq, OverlayWorkflow, WorkflowNodeStatus,
 };
+use crate::ports::workflow_verdict::{RunVerdictFacts, WorkflowRunVerdict};
 use crate::runtime::cron::{CivilTime, CronExpr};
 use crate::server::error::ApiError;
 use crate::server::ops::{ScopedCompany, scoped};
@@ -1256,6 +1257,19 @@ struct RunWorkflowResponse {
     /// caller's body is byte-unchanged.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     cancelled: bool,
+    /// What this run adds up to, in one word (issue #981).
+    ///
+    /// **Always serialized**, unlike every optional field around it, because
+    /// its whole purpose is to be the field a client reads instead of
+    /// re-deriving the reading from the rows. An omitted verdict would push
+    /// every reader straight back into the six-field ladder this replaces.
+    ///
+    /// It is the *only* place this response says a report did not go out. A
+    /// delivery failure never fails the run and never touches `nodes[].status`
+    /// (see [`WorkflowRunVerdict`]), so a console or an API client folding node
+    /// statuses scores a dropped report green — which is exactly what issue
+    /// #981 caught in the field.
+    verdict: WorkflowRunVerdict,
     /// Per-node progress for this run, in the order the nodes finished (issue
     /// #542). Carried for **every** synchronous run, not only a dry one — it is
     /// the same structural per-node timeline `GET …/workflows/runs` returns, so
@@ -1492,29 +1506,50 @@ async fn run_workflow(
     // aborted — the run's outcome was never journaled, so there is nothing
     // truthful to hand back and this is a genuine 500 rather than a run result.
     match handle.await {
-        Ok(Ok(run)) => Ok(RunWorkflowOk::Settled(Box::new(RunWorkflowResponse {
-            output: run.output,
-            pending_approvals: run.pending_approvals,
-            deliveries: run.deliveries,
-            run_id,
-            cancelled: run.cancelled,
-            // Issue #542: the runner collects this per-node trail on every run;
-            // map the port rows onto the wire shape the history route already
-            // uses. `dry_run` is the request's, echoed back as the presence
-            // discriminator a console pointed at an old host would never see.
-            nodes: run.nodes.into_iter().map(WorkflowRunNode::from).collect(),
-            dry_run,
-            // Issue #661 (M5): carried on the synchronous path too, so a console
-            // that pressed Run learns what the run did to the board without a
-            // second read of the history.
-            board: run.board,
-            // Issues #881 / #880: likewise. An operator who pressed Run and
-            // watched eight green nodes come back is exactly the reader these
-            // two exist for — the run drawer is where they first learn the
-            // pipeline delivered nothing and why.
-            blocked_nodes: run.blocked_nodes,
-            approvals: run.approvals,
-        }))),
+        Ok(Ok(run)) => {
+            // Issue #981: read the verdict off the settled run BEFORE its fields
+            // are moved onto the wire shape below.
+            //
+            // `running` and `error` are constants rather than fields, and both
+            // are facts about this arm: a body is written only for a run that
+            // settled, and a run that failed leaves through `Ok(Err(err))` one
+            // arm down as an `ApiError` with no body at all. So the readings
+            // this response can carry are `stopped`, `blocked`, `undelivered`,
+            // `awaiting-approval` and `ok` — never `running`, never `failed`.
+            let verdict = WorkflowRunVerdict::of(RunVerdictFacts {
+                running: false,
+                error: None,
+                cancelled: run.cancelled,
+                blocked_nodes: run.blocked_nodes.len(),
+                deliveries: &run.deliveries,
+                pending_approvals: run.pending_approvals.len(),
+            });
+            Ok(RunWorkflowOk::Settled(Box::new(RunWorkflowResponse {
+                output: run.output,
+                pending_approvals: run.pending_approvals,
+                deliveries: run.deliveries,
+                run_id,
+                cancelled: run.cancelled,
+                verdict,
+                // Issue #542: the runner collects this per-node trail on every
+                // run; map the port rows onto the wire shape the history route
+                // already uses. `dry_run` is the request's, echoed back as the
+                // presence discriminator a console pointed at an old host would
+                // never see.
+                nodes: run.nodes.into_iter().map(WorkflowRunNode::from).collect(),
+                dry_run,
+                // Issue #661 (M5): carried on the synchronous path too, so a
+                // console that pressed Run learns what the run did to the board
+                // without a second read of the history.
+                board: run.board,
+                // Issues #881 / #880: likewise. An operator who pressed Run and
+                // watched eight green nodes come back is exactly the reader
+                // these two exist for — the run drawer is where they first
+                // learn the pipeline delivered nothing and why.
+                blocked_nodes: run.blocked_nodes,
+                approvals: run.approvals,
+            })))
+        }
         Ok(Err(err)) => Err(ApiError(err).into_response()),
         Err(join) => {
             tracing::error!(
@@ -2487,6 +2522,38 @@ struct WorkflowRunOutcome {
     /// count becomes a fresh lie the moment somebody approves one.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     approvals: Vec<crate::ports::WorkflowRunApprovalRow>,
+    /// What this run adds up to, in one word (issue #981).
+    ///
+    /// **Always serialized**, and **derived in a single pass** once the fold
+    /// and the issue-#1009 settle below have finished — see
+    /// [`WorkflowRunOutcome::derive_verdict`]. The value the two construction
+    /// sites give it is overwritten there, which is deliberate: the settle arm
+    /// rewrites `running`, `error` and the blocked relabelling *after* a row is
+    /// pushed, so a verdict computed at construction would be a stale reading
+    /// of a row that has since changed underneath it.
+    ///
+    /// Derived, never journaled. Runs already in a company's history therefore
+    /// re-score on deploy with no migration — and, as issue #981 notes, anyone
+    /// counting successful runs off this endpoint will see their rate drop with
+    /// no change in behaviour, because the dropped reports were always there.
+    verdict: WorkflowRunVerdict,
+}
+
+impl WorkflowRunOutcome {
+    /// Reads this row's verdict off the fields it already carries (issue #981).
+    ///
+    /// Called once per row, in a pass over the whole page, after everything
+    /// that can still change its inputs has run. See [`Self::verdict`].
+    fn derive_verdict(&self) -> WorkflowRunVerdict {
+        WorkflowRunVerdict::of(RunVerdictFacts {
+            running: self.running,
+            error: self.error.as_deref(),
+            cancelled: self.cancelled,
+            blocked_nodes: self.blocked_nodes.len(),
+            deliveries: &self.deliveries,
+            pending_approvals: self.pending_approvals.len(),
+        })
+    }
 }
 
 /// One node's outcome inside a run (issue #371).
@@ -2636,6 +2703,10 @@ async fn list_runs(
                     // approval it has already parked is listed once it settles.
                     blocked_nodes: Vec::new(),
                     approvals: Vec::new(),
+                    // True of a row that has only a start — and re-derived
+                    // anyway by the single pass below, which is what makes it
+                    // right for a row the finish or the settle changes.
+                    verdict: WorkflowRunVerdict::Running,
                 });
             }
             // Issue #1010: the opening bracket, folded at last. The engine has
@@ -2765,6 +2836,8 @@ async fn list_runs(
                     // orphaned row apart from a clean finish.
                     blocked_nodes,
                     approvals,
+                    // Re-derived by the single pass below, like the start arm's.
+                    verdict: WorkflowRunVerdict::Running,
                 });
             }
             _ => {}
@@ -2985,6 +3058,20 @@ async fn list_runs(
         }
     }
 
+    // Issue #981: the run verdicts, read in ONE pass, here — after the fold has
+    // settled every open row and after the #1009 cross-check has flipped the
+    // dead ones to `error: INTERRUPTED_BY_RESTART`.
+    //
+    // Position is the correctness argument. Every input the verdict reads is
+    // written by the settle arm *after* its row was pushed (`running`, `error`,
+    // `cancelled`, `deliveries`, `pendingApprovals`, `blockedNodes`), and two of
+    // them are written again by the cross-check above. Deriving at construction
+    // would score the row the fold had at the time and never revisit it — the
+    // exact staleness a *stored* verdict would have, reintroduced by placement.
+    for run in &mut runs {
+        run.verdict = run.derive_verdict();
+    }
+
     // Newest first: a history panel leads with the run that just happened —
     // ordered by when each run *finished* (issue #1012), which for a settled run
     // is the `at_millis`/`seq` the finish bracket wrote over the start's. The
@@ -3012,6 +3099,45 @@ async fn list_runs(
     let has_more = runs.len() > limit;
     let next_before_seq = has_more.then(|| runs[limit - 1].seq);
     runs.truncate(limit);
+
+    // Issue #1143. A blocked node's `approval_ids` is a receipt of what the run
+    // parked, and a receipt cannot go stale — but the *question* it points at
+    // can. `ApprovalParked` is journaled at `Durability::Process` on the stated
+    // reasoning that losing it is harmless because "the agent parks it again on
+    // its next attempt". That holds for a chat turn, which retries; it is false
+    // for a workflow run, which halted at the blocked node and never re-enters
+    // the gate. So a run that outlived its own approvals goes on reporting that
+    // it waits on cards the queue does not have, and the drawer's "decide in
+    // Approvals" links land on an empty page. #1145 carries the durability
+    // decision; this reconciliation deliberately does not pre-empt it.
+    //
+    // Done HERE, on the read, for the same reason `relabel_blocked` above
+    // relabels rather than rewriting the durable node rows: the journal records
+    // what happened and is not edited to reflect what is true now. After the
+    // truncate, so the join costs one journal snapshot and covers only the rows
+    // actually being returned — and skipped entirely when no returned run
+    // parked anything, which is nearly every read.
+    if runs
+        .iter()
+        .any(|r| r.blocked_nodes.iter().any(|b| !b.approval_ids.is_empty()))
+    {
+        let live: std::collections::HashSet<String> = company
+            .runtime
+            .pending_approvals()
+            .into_iter()
+            .map(|a| a.id.as_ref().to_string())
+            .collect();
+        for run in &mut runs {
+            for blocked in &mut run.blocked_nodes {
+                blocked.stranded = blocked
+                    .approval_ids
+                    .iter()
+                    .filter(|id| !live.contains(id.as_str()))
+                    .count();
+            }
+        }
+    }
+
     Ok(Json(RunsPage {
         runs,
         has_more,
@@ -3616,6 +3742,7 @@ mod tests {
             deliveries: Vec::new(),
             run_id: "run-1".into(),
             cancelled: false,
+            verdict: WorkflowRunVerdict::Ok,
             nodes: Vec::new(),
             dry_run: false,
             board: vec![crate::ports::WorkflowRunBoardRow {
@@ -3642,6 +3769,7 @@ mod tests {
             deliveries: Vec::new(),
             run_id: "run-2".into(),
             cancelled: false,
+            verdict: WorkflowRunVerdict::Ok,
             nodes: Vec::new(),
             dry_run: false,
             board: Vec::new(),
@@ -3675,6 +3803,7 @@ mod tests {
             deliveries: Vec::new(),
             run_id: "run-1".into(),
             cancelled: false,
+            verdict: WorkflowRunVerdict::Blocked,
             nodes: vec![WorkflowRunNode {
                 node_id: "spec".into(),
                 status: WorkflowNodeStatus::Blocked,
@@ -3688,6 +3817,7 @@ mod tests {
                 tools: vec!["publish_artifact".into()],
                 approval_ids: vec!["appr-1".into()],
                 unparkable: 0,
+                stranded: 0,
             }],
             approvals: vec![crate::ports::WorkflowRunApprovalRow {
                 node_id: Some("spec".into()),
@@ -3714,6 +3844,7 @@ mod tests {
             deliveries: Vec::new(),
             run_id: "run-2".into(),
             cancelled: false,
+            verdict: WorkflowRunVerdict::Ok,
             nodes: Vec::new(),
             dry_run: false,
             board: Vec::new(),
@@ -3739,6 +3870,7 @@ mod tests {
             deliveries: Vec::new(),
             run_id: "run-3".into(),
             cancelled: false,
+            verdict: WorkflowRunVerdict::Blocked,
             nodes: Vec::new(),
             dry_run: false,
             board: Vec::new(),
@@ -3747,6 +3879,7 @@ mod tests {
                 tools: vec!["publish_artifact".into()],
                 approval_ids: Vec::new(),
                 unparkable: 2,
+                stranded: 0,
             }],
             approvals: vec![crate::ports::WorkflowRunApprovalRow {
                 node_id: Some("spec".into()),
@@ -3784,6 +3917,7 @@ mod tests {
             }],
             run_id: "run-1".into(),
             cancelled: false,
+            verdict: WorkflowRunVerdict::Ok,
             nodes: Vec::new(),
             dry_run: false,
             board: Vec::new(),
@@ -3819,6 +3953,7 @@ mod tests {
             }],
             run_id: "run-1".into(),
             cancelled: false,
+            verdict: WorkflowRunVerdict::Ok,
             nodes: Vec::new(),
             dry_run: false,
             board: Vec::new(),
@@ -3839,6 +3974,7 @@ mod tests {
             deliveries: Vec::new(),
             run_id: "run-1".into(),
             cancelled: false,
+            verdict: WorkflowRunVerdict::Ok,
             nodes: Vec::new(),
             dry_run: false,
             board: Vec::new(),
@@ -3936,6 +4072,7 @@ mod tests {
                     overlay_desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
+                    setup: None,
                 })
                 .await
                 .unwrap();
@@ -4014,6 +4151,7 @@ mod tests {
                     overlay_desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
+                    setup: None,
                 })
                 .await
                 .unwrap();
@@ -4166,6 +4304,7 @@ mod tests {
                     overlay_desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
+                    setup: None,
                 })
                 .await
                 .unwrap();
@@ -4807,6 +4946,7 @@ mod tests {
                     overlay_desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
+                    setup: None,
                 })
                 .await
                 .unwrap();
@@ -5093,6 +5233,7 @@ mod tests {
                     overlay_desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
+                    setup: None,
                 })
                 .await
                 .unwrap();
@@ -5187,6 +5328,18 @@ mod tests {
                 .expect("append");
         }
 
+        /// A report that reached its destination.
+        fn sent_row(node: &str) -> crate::ports::DeliveryReport {
+            crate::ports::DeliveryReport {
+                node: node.to_string(),
+                kind: "owner".to_string(),
+                target: Some("ada@example.com".to_string()),
+                status: crate::ports::DeliveryStatus::Sent,
+                detail: "emailed the company's admin".to_string(),
+                reason: crate::ports::DeliveryReason::OwnerEmailed,
+            }
+        }
+
         fn undelivered_row(node: &str) -> crate::ports::DeliveryReport {
             crate::ports::DeliveryReport {
                 node: node.to_string(),
@@ -5249,6 +5402,112 @@ mod tests {
             );
             // A run that finished carries no `error` key at all.
             assert!(rows[0].get("error").is_none(), "{body}");
+        }
+
+        /// **Issue #981, part 2, at the HTTP boundary.** The history's own
+        /// reading of the three runs the issue distinguishes.
+        ///
+        /// Journaled, then read back through the real fold — so this also pins
+        /// that the verdict is derived on the read. None of these rows was
+        /// written with one, which is exactly the situation every run already in
+        /// a company's history is in.
+        #[tokio::test]
+        async fn the_history_scores_a_dropped_report_without_calling_the_run_a_failure() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            // Oldest first — the fold reverses, so the assertions below read
+            // newest first.
+            journal_run(
+                &state,
+                &id,
+                "dropped",
+                true,
+                vec![undelivered_row("owner")],
+                None,
+            )
+            .await;
+            journal_run(&state, &id, "clean", false, vec![sent_row("owner")], None).await;
+            journal_run(
+                &state,
+                &id,
+                "broke_and_dropped",
+                false,
+                vec![undelivered_row("owner")],
+                Some("node `draft` errored"),
+            )
+            .await;
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            let rows = body.as_array().expect("array");
+            assert_eq!(rows.len(), 3, "body: {body}");
+
+            // The more serious fact first: a run that broke mid-graph AND did
+            // not deliver reports the break, not the drop. Reversing these two
+            // arms would hide a real failure behind a delivery problem.
+            assert_eq!(rows[0]["workflowId"], "broke_and_dropped", "{body}");
+            assert_eq!(rows[0]["verdict"], "failed", "{body}");
+
+            // A run that delivered fine is unchanged.
+            assert_eq!(rows[1]["workflowId"], "clean", "{body}");
+            assert_eq!(rows[1]["verdict"], "ok", "{body}");
+
+            // The defect: every node `ok`, no error — and the report is gone.
+            assert_eq!(rows[2]["workflowId"], "dropped", "{body}");
+            assert_eq!(rows[2]["verdict"], "undelivered", "{body}");
+            // Not promoted to a failure, and nothing else on the row moved.
+            assert!(rows[2].get("error").is_none(), "{body}");
+            assert!(rows[2].get("cancelled").is_none(), "{body}");
+        }
+
+        /// Every row carries a verdict, including one still in flight — the
+        /// field is unconditional precisely so no reader has to fall back to
+        /// re-deriving it from the six fields around it.
+        #[tokio::test]
+        async fn a_run_still_in_flight_is_scored_running_not_ok() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            // A start with no finish, and a run id the supervisor knows nothing
+            // about would be settled by the #1009 cross-check — so this test
+            // registers it, which is what a genuinely live run looks like.
+            let runtime = state.registry().get(&id).expect("registered");
+            // `_guard` must outlive the read: dropping it deregisters the run,
+            // and the #1009 cross-check would then settle it as interrupted.
+            let (ctx, _guard) = runtime
+                .run_supervisor()
+                .begin("digest", false)
+                .expect("register the run");
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::WorkflowRunStarted {
+                        workflow_id: "digest".to_string(),
+                        run_id: ctx.run_id.clone(),
+                        scheduled: false,
+                    },
+                )
+                .await
+                .expect("append");
+
+            let response = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            let rows = body.as_array().expect("array");
+            assert_eq!(rows.len(), 1, "body: {body}");
+            assert_eq!(rows[0]["running"], true, "{body}");
+            assert_eq!(rows[0]["verdict"], "running", "{body}");
         }
 
         /// Issue #596: the run-output route serves a stored snapshot (200) and
@@ -5723,6 +5982,7 @@ mod tests {
                             tools: vec!["publish_artifact".to_string()],
                             approval_ids: vec!["appr-1".to_string()],
                             unparkable: 0,
+                            stranded: 0,
                         }],
                         approvals: vec![crate::ports::WorkflowRunApprovalRow {
                             node_id: Some("spec".to_string()),
@@ -5751,6 +6011,147 @@ mod tests {
             assert_eq!(
                 rows[0]["nodes"][0]["status"], "blocked",
                 "the node chip must agree with the run's terminal reading: {body}"
+            );
+        }
+
+        /// Issue #1143. The run's receipt names a card the queue no longer
+        /// holds, so the history says so instead of offering it as a decision.
+        ///
+        /// This is the observed dead end: the drawer rendered "decide in
+        /// Approvals" links for `appr-gone`, the operator followed one, and
+        /// Approvals said "All clear". The run's `approvalIds` is a receipt and
+        /// is right to be immutable; what was missing is anything that reads it
+        /// against the live queue. Nothing is parked in this fixture, so the id
+        /// is stranded.
+        #[tokio::test]
+        async fn run_history_marks_a_blocked_approval_the_queue_no_longer_holds() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_start(&state, &id, "digest", "run-s", false).await;
+            let runtime = state.registry().get(&id).expect("registered");
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: "digest".to_string(),
+                        scheduled: true,
+                        run_id: Some("run-s".to_string()),
+                        deliveries: Vec::new(),
+                        pending_approvals: vec!["spec".to_string()],
+                        error: None,
+                        cancelled: false,
+                        notices: Vec::new(),
+                        board: Vec::new(),
+                        blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                            node_id: "spec".to_string(),
+                            tools: vec!["shell".to_string()],
+                            approval_ids: vec!["appr-gone".to_string()],
+                            unparkable: 0,
+                            stranded: 0,
+                        }],
+                        approvals: Vec::new(),
+                    },
+                )
+                .await
+                .expect("append");
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert_eq!(
+                body[0]["blockedNodes"][0]["stranded"], 1,
+                "an approval id the journal no longer holds must read as stranded, \
+                 or the drawer goes on linking to an empty queue: {body}"
+            );
+        }
+
+        /// The other direction, and the reason the test above proves anything.
+        ///
+        /// A field that marked *every* run stranded would satisfy the assertion
+        /// above and be worse than no field at all — it would retire live work.
+        /// Here the approval is genuinely parked, on both halves the runtime
+        /// reads (the gate's map and the journal), so `stranded` stays zero and
+        /// is skipped off the wire entirely.
+        #[tokio::test]
+        async fn run_history_leaves_a_live_approval_decidable() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+
+            let effect = crate::ports::types::Effect {
+                kind: "filing.submit".into(),
+                group: crate::ports::types::EffectGroup::Sign,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::Value::Null,
+                agent: None,
+                run_id: Some("run-live".to_string()),
+            };
+            let approval_id = runtime
+                .approvals
+                .park(runtime.id(), effect.clone())
+                .await
+                .expect("park");
+            runtime
+                .journal()
+                .record_parked(
+                    &approval_id,
+                    &effect,
+                    crate::ports::now_millis(),
+                    crate::runtime::journal::TaskLink::Unlinked,
+                    crate::runtime::journal::ApprovalConversation {
+                        thread: None,
+                        parent: None,
+                    },
+                    None,
+                )
+                .await
+                .expect("record");
+
+            journal_start(&state, &id, "digest", "run-live", false).await;
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: "digest".to_string(),
+                        scheduled: true,
+                        run_id: Some("run-live".to_string()),
+                        deliveries: Vec::new(),
+                        pending_approvals: vec!["spec".to_string()],
+                        error: None,
+                        cancelled: false,
+                        notices: Vec::new(),
+                        board: Vec::new(),
+                        blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                            node_id: "spec".to_string(),
+                            tools: vec!["shell".to_string()],
+                            approval_ids: vec![approval_id.as_ref().to_string()],
+                            unparkable: 0,
+                            stranded: 0,
+                        }],
+                        approvals: Vec::new(),
+                    },
+                )
+                .await
+                .expect("append");
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert!(
+                body[0]["blockedNodes"][0].get("stranded").is_none(),
+                "a parked approval is still decidable, so nothing may be marked \
+                 stranded: {body}"
             );
         }
 
@@ -5885,6 +6286,7 @@ mod tests {
                     overlay_desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
+                    setup: None,
                 })
                 .await
                 .unwrap();
@@ -7279,6 +7681,7 @@ mod tests {
                     overlay_desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
+                    setup: None,
                 })
                 .await
                 .unwrap();
@@ -7576,6 +7979,7 @@ label = "ok"
                     disabled_workflows: Vec::new(),
                     lifecycle: "running".to_string(),
                     template_provenance: None,
+                    setup: None,
                 })
                 .await
                 .unwrap();
@@ -8153,8 +8557,58 @@ label = "ok"
             }
         }
 
+        /// A runner that settles cleanly and hands back one delivery row —
+        /// every node `ok`, no error, nothing cancelled, and a report that did
+        /// not go out. The exact shape issue #981 caught reading green.
+        struct DroppedReportRunner;
+
+        #[async_trait::async_trait]
+        impl WorkflowRunner for DroppedReportRunner {
+            async fn run(
+                &self,
+                _company: &CompanyId,
+                _workflow: &crate::company::WorkflowFile,
+                _input: serde_json::Value,
+                _ctx: &WorkflowRunContext,
+            ) -> crate::Result<WorkflowRun> {
+                Ok(WorkflowRun {
+                    output: serde_json::json!({ "run": {}, "nodes": {} }),
+                    pending_approvals: Vec::new(),
+                    deliveries: vec![crate::ports::DeliveryReport {
+                        node: "done".to_string(),
+                        kind: "channel".to_string(),
+                        target: Some("operator".to_string()),
+                        status: crate::ports::DeliveryStatus::Failed,
+                        detail: "`operator` is not a workflow delivery channel".to_string(),
+                        reason: crate::ports::DeliveryReason::ChannelNotWired,
+                    }],
+                    cancelled: false,
+                    nodes: vec![crate::ports::WorkflowRunNodeRow {
+                        node_id: "done".to_string(),
+                        status: crate::ports::types::WorkflowNodeStatus::Ok,
+                        elapsed_ms: 3,
+                        diagnostics: Vec::new(),
+                    }],
+                    notices: Vec::new(),
+                    board: Vec::new(),
+                    blocked_nodes: Vec::new(),
+                    approvals: Vec::new(),
+                })
+            }
+        }
+
         /// A hosted company whose runner echoes immediately.
         async fn echo_company(home: &std::path::Path) -> axum::Router {
+            company_with_runner(home, Arc::new(EchoRunner)).await
+        }
+
+        /// A hosted company with one overlay graph and the given runner behind
+        /// the port, so the route, the supervisor and the journal write are all
+        /// production code and only the graph walk is stubbed.
+        async fn company_with_runner(
+            home: &std::path::Path,
+            runner: Arc<dyn WorkflowRunner>,
+        ) -> axum::Router {
             let manifest: CompanyManifest =
                 toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
             let id = CompanyId::new("acme");
@@ -8177,6 +8631,7 @@ label = "ok"
                     disabled_workflows: Vec::new(),
                     lifecycle: "running".to_string(),
                     template_provenance: None,
+                    setup: None,
                 })
                 .await
                 .unwrap();
@@ -8185,7 +8640,7 @@ label = "ok"
                 .build()
                 .await
                 .unwrap();
-            runtime.set_workflow_runner(Arc::new(EchoRunner));
+            runtime.set_workflow_runner(runner);
             let state = AppState::new(AppConfig::default());
             state.registry().insert(id.clone(), Arc::new(runtime));
             crate::server::test_support::seed_fixed_admin(&state, "acme").await;
@@ -8224,6 +8679,59 @@ label = "ok"
             );
             // The node trail rides every settled run, dry or not.
             assert_eq!(body["nodes"][0]["nodeId"], "done", "{body}");
+        }
+
+        // ── Issue #981 (part 2): the run's own verdict ───────────────────────
+
+        /// **The defect, at the HTTP boundary.** A run whose report was refused
+        /// answers `200` with every node `ok` and no error — and before this
+        /// there was nothing on the body that said otherwise, so a client
+        /// folding `nodes[].status` (the QA harness among them) scored it green.
+        #[tokio::test]
+        async fn a_run_whose_report_was_dropped_does_not_answer_as_a_clean_run() {
+            let home_dir = home();
+            let app = company_with_runner(home_dir.path(), Arc::new(DroppedReportRunner)).await;
+
+            let response = app
+                .oneshot(run_request(serde_json::json!({})))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+
+            assert_eq!(body["verdict"], "undelivered", "{body}");
+
+            // …and the three facts the verdict must NOT have disturbed. A
+            // delivery failure is not a broken graph: the node ran, so its
+            // status stays `ok`, no `error` appears, and the run is not
+            // cancelled. Flipping any of them would send the copilot's
+            // fix-from-run at a graph that was fine.
+            assert_eq!(body["nodes"][0]["nodeId"], "done", "{body}");
+            assert_eq!(body["nodes"][0]["status"], "ok", "{body}");
+            assert!(body.get("error").is_none(), "{body}");
+            assert!(body.get("cancelled").is_none(), "{body}");
+            // The row is still where the *reason* lives; the verdict is the
+            // reading.
+            assert_eq!(
+                body["deliveries"][0]["reason"], "channel-not-wired",
+                "{body}"
+            );
+        }
+
+        /// The other direction, which is the one that must not regress: a run
+        /// that delivered everything still reads `ok`.
+        #[tokio::test]
+        async fn a_run_that_delivered_fine_still_answers_ok() {
+            let home_dir = home();
+            let app = echo_company(home_dir.path()).await;
+
+            let response = app
+                .oneshot(run_request(serde_json::json!({})))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            assert_eq!(body["verdict"], "ok", "{body}");
         }
     }
 }

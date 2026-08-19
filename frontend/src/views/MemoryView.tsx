@@ -194,8 +194,8 @@ export function MemoryView({ client, company }: Props) {
           <div className="space-y-1">
             <h2 className="text-2xl font-semibold tracking-tight">Brain</h2>
             <p className="text-sm text-muted-foreground">
-              What your company remembers — facts, people, projects, and preferences your agents can
-              recall.
+              What your company remembers — facts, people, projects, and preferences your
+              teammates can recall.
             </p>
           </div>
           <Button onClick={() => setAddOpen(true)} data-testid="memory-add">
@@ -273,9 +273,9 @@ function HealthStrip({
   }
   const tiles: { label: string; value: string }[] = [
     { label: "Total items", value: String(total) },
-    { label: "Agent memory", value: String(stats?.agentChunks ?? 0) },
+    { label: "Teammate memory", value: String(stats?.agentChunks ?? 0) },
     { label: "Task outcomes", value: String(stats?.taskOutcomes ?? 0) },
-    // Across every memory source, not just operator facts — agents write only
+    // Across every memory source, not just operator facts — teammates write only
     // context chunks, so a facts-only figure left this stat at "—" forever.
     { label: "Last updated", value: formatUpdated(stats?.lastUpdatedAtMillis ?? 0) },
   ];

@@ -15,6 +15,7 @@ import type { SignIn } from "@/api/auth";
 import { ApiError, type CompanyStatus } from "@/api/types";
 import { AppShell } from "@/components/app-shell";
 import { CompanyPicker } from "@/components/company-picker";
+import { ConsoleChrome } from "@/components/host-switcher";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
@@ -211,16 +212,22 @@ export function ConnectionConsole({
   // them to authenticate against a roster that does not exist yet.
   if (refused && phase.kind !== "login" && phase.kind !== "setup" && phase.kind !== "no-company") {
     return (
-      <Login
-        client={client}
-        company={defaultCompany}
-        notice={notice}
-        suggestedEmail={suggestedEmail}
-        onSignedIn={reBoot}
-      />
+      <ConsoleChrome>
+        <Login
+          client={client}
+          company={defaultCompany}
+          notice={notice}
+          suggestedEmail={suggestedEmail}
+          onSignedIn={reBoot}
+        />
+      </ConsoleChrome>
     );
   }
 
+  // Every phase but `console` is a full-screen state with no app shell, and so
+  // no sidebar header for the host switcher to live in. `ConsoleChrome` puts it
+  // back — otherwise a host that cannot be reached is a screen with no way off
+  // it, which is exactly the dead end the rail's permanent presence prevented.
   switch (phase.kind) {
     case "loading":
       return (
@@ -232,17 +239,23 @@ export function ConnectionConsole({
       );
 
     case "setup":
-      return <SetupWizard client={client} onDone={reBoot} />;
+      return (
+        <ConsoleChrome>
+          <SetupWizard client={client} onDone={reBoot} />
+        </ConsoleChrome>
+      );
 
     case "login":
       return (
-        <Login
-          client={client}
-          company={phase.company}
-          notice={phase.notice}
-          suggestedEmail={suggestedEmail}
-          onSignedIn={reBoot}
-        />
+        <ConsoleChrome>
+          <Login
+            client={client}
+            company={phase.company}
+            notice={phase.notice}
+            suggestedEmail={suggestedEmail}
+            onSignedIn={reBoot}
+          />
+        </ConsoleChrome>
       );
 
     case "error":
@@ -285,10 +298,12 @@ export function ConnectionConsole({
 
     case "picker":
       return (
-        <CompanyPicker
-          companies={phase.companies}
-          onPick={(id) => void switchCompany(id, phase.companies)}
-        />
+        <ConsoleChrome>
+          <CompanyPicker
+            companies={phase.companies}
+            onPick={(id) => void switchCompany(id, phase.companies)}
+          />
+        </ConsoleChrome>
       );
 
     case "console":
@@ -325,11 +340,20 @@ function clearEntityHash() {
   window.history.replaceState(null, "", `#/${view}`);
 }
 
+/**
+ * A full-screen state, with the host switcher over it.
+ *
+ * Every caller here is a phase with no app shell, and every one of them is a
+ * state an operator may need to leave by choosing a different host — so the
+ * chrome is part of the wrapper rather than something each case remembers.
+ */
 function FullScreen({ children }: { children: React.ReactNode }) {
   return (
-    <div className="grid min-h-svh place-items-center bg-background p-6 text-center">
-      {children}
-    </div>
+    <ConsoleChrome>
+      <div className="grid min-h-svh place-items-center bg-background p-6 text-center">
+        {children}
+      </div>
+    </ConsoleChrome>
   );
 }
 

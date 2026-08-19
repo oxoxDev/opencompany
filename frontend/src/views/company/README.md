@@ -63,6 +63,41 @@ Here it is a fact about the structure that only the operator can fix.
 That divergence is **load-bearing**, not incidental: it is the reason membership
 editing lives here and not on the member pane. See below.
 
+## A teammate on the chart opens (#1102)
+
+Every **roster teammate** this surface names — a staffed seat the roster
+resolves, and a **Not on a desk** chip — is a link to `#/team/<agentId>`, the
+sub-page `TeamView` has routed to `AgentDetailView` since #264. The two
+exceptions are deliberate and are set out below: a seat the roster cannot
+resolve, and the **People** chips. Before this the chart drew teammates and
+wired none of them: a seat's name was plain text, and the chips were bordered
+pills with no `href`, no handler and no tooltip. The destination was never
+missing; only the link was.
+
+Three decisions, so they are not re-argued:
+
+**A real `<a href>`, never a `div` with an `onClick`.** The console routes on
+the hash, so the hash *is* the address. An anchor gets middle-click, cmd-click,
+the browser's own hover preview of the target, and keyboard reach with a focus
+ring — none of which a handler on a `div` gets without re-implementing all four.
+
+**The name is the target, not the whole row.** The seat row is the drag handle
+for re-ordering. A full-row link would make every attempt to drag a seat read as
+a click on it, so the anchor is the name (with a chevron), and it carries
+`draggable={false}` so a drag starting on it falls through to the row.
+
+**A seat the roster cannot resolve is not linked.** `#/team/<id>` for an id the
+host has never heard of lands on the detail view's "no such teammate" state —
+a dead end that only repeats what the badge beside the name already says.
+
+The **People** chips are the deliberate exception, and they say so in their
+styling. A person is a console user, not an agent: `#/team/<id>` resolves
+against the roster, and there is no person detail page to link to instead. So
+the pill treatment is dropped — a filled, borderless label with a `title`
+explaining what it is — rather than left promising a page that does not exist.
+`teamHref()` is the one place an id becomes an address, and it answers `null`
+for a blank one, so no chip can render `#/team/undefined`.
+
 ## How chat reaches this surface (#485)
 
 `#/company/<deskId>` opens the chart with that desk scrolled to, focused, and
@@ -97,6 +132,20 @@ renders normally. `useHashView` hands the second segment back unvalidated, and a
 stale bookmark deserves the company, not a banner. The hash is never rewritten:
 `#/company/<deskId>` is a shareable address.
 
+## Two kinds of message in the desk creator
+
+`DeskCreateDialog` keeps field-level complaints apart from whole-form ones
+(issue #1100). "Give the desk a name." renders **at the Name field** — inline
+under the input, `role="alert"`, wired to the input by `aria-describedby` with
+`aria-invalid` on it — and an invalid submit focuses that input and scrolls it
+into view. What the host says when it refuses the create stays in the banner
+above the footer, because it is about the whole form.
+
+They used to share the banner slot, which put a complaint about the first field
+below the entire roster picker: off-screen in a `max-h-[85vh] overflow-y-auto`
+dialog on any real company, with nothing moving the operator to it, so Create
+read as inert. The distance grew with the roster.
+
 ## Files
 
 | | |
@@ -109,9 +158,17 @@ stale bookmark deserves the company, not a banner. The hash is never rewritten:
 
 `test/unit/org-tree.test.ts` covers the derivation — lead by position,
 provenance, the unresolvable seat, the unplaced roster, and the cap.
+`test/unit/desk-create-name-error.test.ts` covers the create dialog's two
+message slots — which node holds each, where it sits relative to the field, its
+ARIA wiring, and the focus move.
 `test/e2e/org-tree.spec.ts` covers the surface in a browser, including the
 reachability failure this issue is about, and asserts every write survives a
 reload against a stateful stub.
+`test/unit/org-chart-teammate-links.test.ts` renders the chart and reads the
+DOM for #1102: the failure was invisible to every derivation test above, because
+`buildOrgTree` was correct the whole time the surface was inert. It pins the
+`href` rather than a handler — a `div` with an `onClick` would type-check, look
+identical and still break middle-click, cmd-click and the keyboard.
 
 ## Deliberately not here
 

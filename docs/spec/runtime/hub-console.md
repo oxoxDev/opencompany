@@ -20,7 +20,7 @@ VITE_OC_HUB=1 pnpm build
 OPENCOMPANY_CORS_ORIGINS=https://app.example.com opencompany serve --company …
 ```
 
-Operators then add hosts from the "+" in the connection rail
+Operators then add hosts from "Add a host" in the sidebar header's host switcher
 (`https://acme.example.com`), and each is remembered in `localStorage`. There is
 no directory service: a hub knows exactly the hosts somebody told it about.
 

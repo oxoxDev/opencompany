@@ -38,7 +38,11 @@ interface StepperProps {
 export function Stepper({ steps, current, onSelect, className }: StepperProps) {
   return (
     <ol
-      className={cn("flex w-full items-center gap-1", className)}
+      // Wraps rather than stretches. Every step used to take an equal `flex-1`
+      // share of the row, which on a six-step flow left each label ~90px and
+      // `truncate` turned "Business" into "Busine…" — a progress indicator you
+      // cannot read is worse than none.
+      className={cn("flex w-full flex-wrap items-center gap-x-1 gap-y-2", className)}
       aria-label="Setup progress"
       data-slot="stepper"
     >
@@ -48,7 +52,7 @@ export function Stepper({ steps, current, onSelect, className }: StepperProps) {
         // Only a completed step is reachable — see `onSelect`.
         const clickable = done && onSelect !== undefined;
         return (
-          <li key={step.id} className="flex min-w-0 flex-1 items-center gap-1">
+          <li key={step.id} className="flex shrink-0 items-center gap-1">
             <button
               type="button"
               disabled={!clickable}
@@ -60,7 +64,7 @@ export function Stepper({ steps, current, onSelect, className }: StepperProps) {
               data-testid={`step-${step.id}`}
               data-state={done ? "done" : active ? "active" : "todo"}
               className={cn(
-                "flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
+                "flex shrink-0 items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
                 clickable && "hover:bg-muted",
                 !clickable && "cursor-default",
                 active ? "text-foreground" : "text-muted-foreground",
@@ -77,7 +81,9 @@ export function Stepper({ steps, current, onSelect, className }: StepperProps) {
               >
                 {done ? <Check className="size-3" /> : index + 1}
               </span>
-              <span className={cn("truncate", active && "font-medium")}>{step.label}</span>
+              <span className={cn("whitespace-nowrap", active && "font-medium")}>
+                {step.label}
+              </span>
             </button>
             {index < steps.length - 1 && (
               <span

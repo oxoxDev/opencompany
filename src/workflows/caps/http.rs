@@ -136,7 +136,8 @@ fn parse_http_output(output: &str) -> (Value, String) {
 /// Decided — pure functions of the URL and the company's own config, answerable
 /// without performing anything:
 ///
-/// * the scheme (only `http`/`https` reach the real client at all);
+/// * the shape of the URL — scheme, whitespace, userinfo, an IPv6 literal —
+///   each of which the real guard refuses before it reads a host at all;
 /// * a **private / loopback / link-local literal** in the URL, which the real
 ///   guard refuses *regardless of the company's allowlist*;
 /// * the company's [`web_allowed_domains`] list, when it is unambiguous.
@@ -157,13 +158,36 @@ fn parse_http_output(output: &str) -> (Value, String) {
 /// malformed allowlist, an unparseable URL — this returns `None` and checks
 /// nothing rather than guessing.
 ///
+/// That invariant held only by inspection until #1075, and inspection had already
+/// missed a break: allowlist *entries* were normalized with
+/// `trim_end_matches('.')` while the **host** was not, so `https://example.com./x`
+/// against `["example.com"]` was refused here and allowed by the real guard —
+/// exactly the blocked-working-graph failure the paragraph above rules out.
+///
 /// `dry_run_refusal_matches_the_real_client` pins the agreement **behaviourally**,
 /// by driving the same URLs through [`GuardedHttpClient`], so this stays correct
 /// when upstream changes its internals rather than only when someone re-reads
-/// them.
+/// them. It is two-directional as of #1075: a one-directional "both refuse"
+/// comparison structurally cannot see this copy becoming *too strict*, which is
+/// why the trailing-dot break survived it.
 pub(super) fn preflight_refusal(request: &Value, allowed_domains: &[String]) -> Option<String> {
     let url = request.get("url")?.as_str()?.trim();
-    let host = host_of(url)?;
+
+    // The real guard refuses all three before it reads a host.
+    if url.is_empty() {
+        return Some("URL cannot be empty".to_string());
+    }
+    if url.chars().any(char::is_whitespace) {
+        return Some("URL cannot contain whitespace".to_string());
+    }
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Some("Only http:// and https:// URLs are allowed".to_string());
+    }
+
+    let host = match host_of(url) {
+        Ok(host) => host,
+        Err(reason) => return Some(reason.to_string()),
+    };
 
     if is_private_or_local_host(&host) {
         return Some(format!("Blocked local/private host: {host}"));
@@ -194,21 +218,41 @@ pub(super) fn preflight_refusal(request: &Value, allowed_domains: &[String]) -> 
     (!allowed).then(|| format!("URL not in allowed domains: {host}"))
 }
 
-/// The host of an `http`/`https` URL, lowercased, without port or brackets
-/// stripped — `None` for anything this cannot read, which checks nothing.
-fn host_of(url: &str) -> Option<String> {
+/// The host of an `http`/`https` URL as the real guard's `extract_host` reads
+/// it: lowercased, port stripped, **trailing dot stripped**, and rejected —
+/// not read past — when the authority carries userinfo or an IPv6 literal.
+///
+/// Every `Err` is a rule the real guard applies before the allowlist, so the
+/// message is its message. This used to read past userinfo and unwrap IPv6
+/// brackets (a *missing* refusal) and to leave a trailing dot on the host
+/// (a *false* refusal, since [`normalize`] strips one from allowlist entries).
+/// See #1075.
+fn host_of(url: &str) -> Result<String, &'static str> {
     let rest = url
         .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))?;
-    let authority = rest.split(['/', '?', '#']).next()?;
-    // Userinfo is not part of the host; `user@host` must not read as a host.
-    let authority = authority.rsplit('@').next()?;
-    let host = match authority.strip_prefix('[') {
-        // IPv6 literal: the port sits after the closing bracket.
-        Some(inner) => inner.split(']').next()?.to_string(),
-        None => authority.split(':').next()?.to_string(),
-    };
-    (!host.is_empty()).then(|| host.to_lowercase())
+        .or_else(|| url.strip_prefix("https://"))
+        .ok_or("Only http:// and https:// URLs are allowed")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.is_empty() {
+        return Err("URL must include a host");
+    }
+    if authority.contains('@') {
+        return Err("URL userinfo is not allowed");
+    }
+    if authority.starts_with('[') {
+        return Err("IPv6 hosts are not supported in http_request");
+    }
+    let host = authority
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches('.')
+        .to_lowercase();
+    if host.is_empty() {
+        return Err("URL must include a valid host");
+    }
+    Ok(host)
 }
 
 /// Mirrors the real guard's allowlist entry normalization.

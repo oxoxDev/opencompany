@@ -284,6 +284,7 @@ fn record() -> CompanyRecord {
         overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
+        setup: None,
     }
 }
 

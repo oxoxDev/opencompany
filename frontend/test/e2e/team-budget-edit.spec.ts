@@ -30,7 +30,7 @@ function card(page: Page, role: string) {
  * and `getByRole("button", …)` does not resolve it.
  */
 async function openMenu(page: Page, role: string) {
-  await card(page, role).getByLabel("Member actions").click();
+  await card(page, role).getByLabel("Teammate actions").click();
 }
 
 /**

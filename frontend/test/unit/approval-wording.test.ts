@@ -5,26 +5,26 @@ import { approvedByRuntimeLine, approvedLine } from "@/lib/approval-wording";
 /**
  * Issue #561: the confirmation an operator reads after approving.
  *
- * Approving does not resume a suspended call — the host re-dispatches the agent,
+ * Approving does not resume a suspended call — the host re-dispatches the teammate,
  * and since #469 it does that once per turn, when the LAST decision that turn
- * parked lands. The console used to say "the agent is completing the action"
+ * parked lands. The console used to say "the teammate is completing the action"
  * for every click, including the three out of four that release nothing. What
  * these pin is that the sentence follows the host's count.
  */
 describe("the line an approve leaves behind", () => {
-  it("says the agent is picking it up only when this decision released the turn", () => {
-    expect(approvedLine(0)).toBe("Approved — the agent is picking it up now");
+  it("says the teammate is picking it up only when this decision released the turn", () => {
+    expect(approvedLine(0)).toBe("Approved — the teammate is picking it up now");
     expect(approvedLine(0, "send an email")).toBe(
-      "Approved — the agent is picking it up now: send an email",
+      "Approved — the teammate is picking it up now: send an email",
     );
   });
 
   it("names what is still owed when the turn is still blocked", () => {
     expect(approvedLine(1)).toBe(
-      "Approved — waiting on 1 more sign-off before the agent continues",
+      "Approved — waiting on 1 more sign-off before the teammate continues",
     );
     expect(approvedLine(3)).toBe(
-      "Approved — waiting on 3 more sign-offs before the agent continues",
+      "Approved — waiting on 3 more sign-offs before the teammate continues",
     );
   });
 
@@ -37,15 +37,15 @@ describe("the line an approve leaves behind", () => {
     );
   });
 
-  it("never says 'the agent' for work the runtime performs itself", () => {
+  it("never says 'the teammate' for work the runtime performs itself", () => {
     // Issue #395: a paused workflow gate or a cold-recipient report has no
-    // agent to re-dispatch, and naming one is the same small lie.
+    // teammate to re-dispatch, and naming one is the same small lie.
     for (const line of [
       approvedByRuntimeLine(0),
       approvedByRuntimeLine(2),
       approvedByRuntimeLine(undefined),
     ]) {
-      expect(line).not.toContain("agent");
+      expect(line).not.toContain("teammate");
     }
     expect(approvedByRuntimeLine(0)).toBe("Approved — carrying it out now");
     expect(approvedByRuntimeLine(2)).toBe(

@@ -455,6 +455,51 @@ function isTriageRequest(messages) {
   return typeof textOf(first) === "string" && textOf(first).includes("You classify one message");
 }
 
+/**
+ * A planning pass (issue #337), recognised by its own system prompt.
+ *
+ * Like a triage classification, this is not an agent turn: the pass runs with no
+ * tools and expects one JSON object back. Before this arm existed a planning
+ * prompt fell through to the turn arms and came back as prose, which the host
+ * reads as an unparseable answer — so every card dragged into Planning in this
+ * lane settled as a failed pass.
+ */
+function isPlanningRequest(messages) {
+  const first = messages[0];
+  return (
+    typeof textOf(first) === "string" && textOf(first).includes("You are the planning desk")
+  );
+}
+
+/**
+ * The plan this lane answers every planning pass with (issue #1106).
+ *
+ * Deliberately **ambiguous**: it names two teammates the `e2e_harness` roster
+ * really carries, so the host resolves both and the card parks asking who owns
+ * it rather than dispatching. That is the whole behaviour under test, and it is
+ * unreachable from a fixture that names one.
+ *
+ * `prerequisites` is empty on purpose. A missing prerequisite parks the card
+ * too, by a different arm and with a different note — leaving one here would
+ * make a passing test unable to say which mechanism it had exercised.
+ */
+const AMBIGUOUS_PLAN = JSON.stringify({
+  description:
+    "Find what is being said about the topic and write up what matters, with links.",
+  steps: [
+    { title: "Gather the sources", detail: "Search and collect what is current." },
+    { title: "Write the digest", detail: "Summarise with links, newest first." },
+  ],
+  prerequisites: [],
+  risks: ["the sources may be thin on the day it runs"],
+  verification: "a digest exists with at least three linked sources",
+  scope: "the digest only; no publishing",
+  assigneeCandidates: [
+    { id: "engineer", reason: "already automates the collection side of this" },
+    { id: "writer", reason: "owns everything the company publishes in prose" },
+  ],
+});
+
 function chatCompletion(body) {
   const messages = Array.isArray(body?.messages) ? body.messages : [];
   const model = typeof body?.model === "string" ? body.model : "mock-brain";
@@ -479,6 +524,16 @@ function chatCompletion(body) {
   if (isTriageRequest(messages)) {
     process.stderr.write("[mock brain] triage classification (no directive consumed)\n");
     return completion(model, { role: "assistant", content: "chatter" }, "stop");
+  }
+
+  // Beside the triage arm and for the same reason: a planning pass is not an
+  // agent turn, so it must not reach the directive arms below — a card whose
+  // text happened to carry `__MOCK_TOOL_CALL__` would otherwise burn it here
+  // and leave the real turn with a plain reply, which is exactly the bug #678
+  // fixed for triage.
+  if (isPlanningRequest(messages)) {
+    process.stderr.write("[mock brain] planning pass (ambiguous plan, no directive consumed)\n");
+    return completion(model, { role: "assistant", content: AMBIGUOUS_PLAN }, "stop");
   }
 
   // Ahead of the directive arms, and only when the instruction is the LAST

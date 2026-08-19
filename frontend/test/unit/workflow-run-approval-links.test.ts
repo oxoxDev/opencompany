@@ -204,3 +204,64 @@ describe("the synchronous run result panel", () => {
     for (const a of links) expect(a.getAttribute("href")).toBe("#/approvals");
   });
 });
+
+/**
+ * Issue #1143: when the queue no longer holds a blocked node's cards, the drawer
+ * must stop offering them as a decision.
+ *
+ * The dead end this closes, observed on a staging tenant: the drawer rendered
+ * "decide in Approvals: shell, curl", the operator followed a link, and the
+ * Approvals page said "All clear". The run's `approvalIds` is a receipt and is
+ * right to be immutable — what was missing was reading it against the live
+ * queue, which the host now does and reports as `stranded`.
+ *
+ * Both tests fail on the code before it: `stranded` was not rendered, so the
+ * links were painted regardless.
+ */
+describe("a blocked run whose approvals the queue no longer holds", () => {
+  it("says the run cannot be continued instead of linking to an empty queue", async () => {
+    await renderHistory(
+      blockedOutcome({
+        blockedNodes: [
+          {
+            nodeId: "spec",
+            tools: ["publish_artifact", "web_search"],
+            approvalIds: ["appr-1", "appr-2"],
+            stranded: 2,
+          },
+        ],
+      }),
+    );
+    expect(
+      container.querySelectorAll('[data-testid="workflow-blocked-approval-link"]'),
+    ).toHaveLength(0);
+    const line = container.querySelector(
+      '[data-testid="workflow-blocked-approval-stranded"]',
+    );
+    expect(line?.textContent).toContain("cannot be continued");
+    expect(container.textContent).not.toContain("decide in Approvals");
+  });
+
+  it("keeps linking the cards that survive, and counts the ones that did not", async () => {
+    await renderHistory(
+      blockedOutcome({
+        blockedNodes: [
+          {
+            nodeId: "spec",
+            tools: ["publish_artifact", "web_search"],
+            approvalIds: ["appr-1", "appr-2"],
+            stranded: 1,
+          },
+        ],
+      }),
+    );
+    expect(
+      container.querySelectorAll('[data-testid="workflow-blocked-approval-link"]'),
+    ).toHaveLength(2);
+    expect(
+      container.querySelector(
+        '[data-testid="workflow-blocked-approval-partly-stranded"]',
+      )?.textContent,
+    ).toContain("1 more no longer in the queue");
+  });
+});

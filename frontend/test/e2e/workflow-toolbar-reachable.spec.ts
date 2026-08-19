@@ -6,13 +6,21 @@ import {
   type Page,
 } from "@playwright/test";
 
-import { openWorkflow } from "./workflows";
+import { expectWorkflowIndex, openWorkflow } from "./workflows";
 
 /**
  * Issue #824: the workflows toolbar laid out wider than its container and
  * overflowed into an `overflow-hidden` ancestor, so its last control —
  * **New workflow** — was clipped off the right edge. Nothing in that chain
  * scrolls, so the button was not merely off-screen: it could not be clicked.
+ *
+ * Issue #1135 split the bar in two and moved `New workflow` out of the detail
+ * view to the index, so the control the defect was reported against is no
+ * longer on the crowded row at all. That does not retire the spec: the property
+ * it pins is "every control the operator can see is reachable", which now has
+ * to hold on **two** surfaces. So the controls are listed per surface, the
+ * detail row is measured inside a workflow, and the index row on the index —
+ * and the clickability test moved with the button it is about.
  *
  * This is a **layout** defect, so it is only observable in a browser. jsdom
  * computes no geometry, and a unit test asserting the class string would pass
@@ -97,7 +105,10 @@ async function selectWorkflow(page: Page, name: string) {
 }
 
 /**
- * The toolbar's controls, each with the locator that finds it.
+ * The **detail** toolbar's controls, each with the locator that finds it —
+ * every control issue #1135 kept on a workflow's own two rows, in the order it
+ * put them: row 1's way back, then row 2's run intent, secondary group, and the
+ * utility pair ending in Delete.
  *
  * `Pause` is not addressed by name like the rest: its accessible name comes
  * from an `aria-label` that flips to `Resume schedule` once the schedule is
@@ -110,7 +121,15 @@ async function selectWorkflow(page: Page, name: string) {
  * visible, taking the overhang from 22px to 113px, so a version of this spec
  * that skipped it would be measuring the row that fits.
  */
-const CONTROLS: Array<{ label: string; find: (page: Page) => Locator }> = [
+const DETAIL_CONTROLS: Array<{ label: string; find: (page: Page) => Locator }> = [
+  {
+    // Issue #1110: what "Browse" became. It opened the index over the canvas;
+    // the index is the tab's front door now, so the control is the way back to
+    // it. Addressed by test id for the same reason Pause is — it sits in row 1
+    // with the heading rather than in the action row, and its name is prose.
+    label: "All workflows",
+    find: (p) => p.getByTestId("workflow-back-to-index"),
+  },
   {
     label: "Run",
     find: (p) => p.getByRole("button", { name: "Run", exact: false }).first(),
@@ -118,14 +137,6 @@ const CONTROLS: Array<{ label: string; find: (page: Page) => Locator }> = [
   {
     label: "Test run",
     find: (p) => p.getByRole("button", { name: "Test run" }).first(),
-  },
-  {
-    // Issue #1110: what "Browse" became. It opened the index over the canvas;
-    // the index is the tab's front door now, so the control is the way back to
-    // it. Addressed by test id for the same reason Pause is — it sits in the
-    // heading group rather than the action row, and its name is prose.
-    label: "All workflows",
-    find: (p) => p.getByTestId("workflow-back-to-index"),
   },
   {
     label: "Copilot",
@@ -144,6 +155,16 @@ const CONTROLS: Array<{ label: string; find: (page: Page) => Locator }> = [
     label: "Delete",
     find: (p) => p.getByRole("button", { name: "Delete" }).first(),
   },
+];
+
+/**
+ * The index's own row. Short by comparison, and that is the point of #1135 —
+ * but it is the row `New workflow` lives on now, so this is where the control
+ * the original defect clipped has to be measured.
+ */
+const INDEX_CONTROLS: Array<{ label: string; find: (page: Page) => Locator }> = [
+  { label: "Cards", find: (p) => p.getByTestId("workflow-index-cards") },
+  { label: "List", find: (p) => p.getByTestId("workflow-index-list") },
   {
     label: "New workflow",
     find: (p) => p.getByRole("button", { name: "New workflow" }),
@@ -161,7 +182,7 @@ test.describe("workflows toolbar reachability (#824)", () => {
   });
 
   for (const width of [1280, 1024]) {
-    test(`every toolbar control is inside the viewport at ${width}px`, async ({
+    test(`every detail toolbar control is inside the viewport at ${width}px`, async ({
       page,
     }) => {
       await page.setViewportSize({ width, height: 800 });
@@ -174,12 +195,39 @@ test.describe("workflows toolbar reachability (#824)", () => {
       ).toBeVisible();
       await selectWorkflow(page, WORKFLOW_NAME);
 
-      for (const { label, find } of CONTROLS) {
+      for (const { label, find } of DETAIL_CONTROLS) {
         const control = find(page);
         await expect(control, `${label} should be mounted`).toBeVisible();
         // The assertion that matters. `toBeVisible` is true for a button that
         // has been pushed past the right edge — it is painted, just not
         // anywhere reachable. `toBeInViewport` is what distinguishes the two.
+        await expect(
+          control,
+          `${label} should be reachable at ${width}px`,
+        ).toBeInViewport();
+      }
+
+      // Issue #1135: `New workflow` is an index action, and the detail toolbar
+      // is where it used to be stranded on a row of its own. Its absence here
+      // is the other half of the reachability property — a control nobody can
+      // see cannot be clipped.
+      await expect(
+        page.getByRole("button", { name: "New workflow" }),
+        "New workflow belongs to the index, not to one workflow",
+      ).toHaveCount(0);
+    });
+
+    test(`every index toolbar control is inside the viewport at ${width}px`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 800 });
+      await page.goto("/#/workflows");
+      await dismissTour(page);
+      await expectWorkflowIndex(page);
+
+      for (const { label, find } of INDEX_CONTROLS) {
+        const control = find(page);
+        await expect(control, `${label} should be mounted`).toBeVisible();
         await expect(
           control,
           `${label} should be reachable at ${width}px`,
@@ -194,12 +242,15 @@ test.describe("workflows toolbar reachability (#824)", () => {
     // The defect's real cost. Every control above could be in the viewport and
     // this could still fail if something overlapped it, so the last word is an
     // actual click with its actual consequence.
+    //
+    // Issue #1135: on the INDEX, which is where the button lives now. The
+    // "click against the crowded row" reasoning went with it — the crowded row
+    // no longer has this button on it, and the row it does have is the one the
+    // test above measures.
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.goto("/#/workflows");
     await dismissTour(page);
-    // Selected, because that is the crowded row. Clicking against the short
-    // one would prove nothing: the short row never clipped anything.
-    await selectWorkflow(page, WORKFLOW_NAME);
+    await expectWorkflowIndex(page);
 
     const newWorkflow = page.getByRole("button", { name: "New workflow" });
     // Measured before the click, and the reason is not belt-and-braces: a

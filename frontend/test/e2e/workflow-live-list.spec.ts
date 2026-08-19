@@ -6,6 +6,7 @@ import {
 } from "@playwright/test";
 
 import {
+  backToWorkflowIndex,
   expectWorkflowIndex,
   openWorkflow,
   workflowCard,
@@ -127,10 +128,11 @@ async function removeWorkflow(request: APIRequestContext, id: string) {
   await request.delete(`${COMPANY_SCOPE}/workflows/${id}${query}`).catch(() => undefined);
 }
 
-/** The workflow picker's trigger. */
-function picker(page: Page) {
-  return page.getByRole("combobox").first();
-}
+/* Issue #1135: `picker`, the workflow selector's trigger, lived here. The
+ * detail toolbar no longer carries one — the workflow you are in is the
+ * heading, and switching between them is what the index is for — so the rename
+ * test below reads the open workflow's heading and then its index card, which
+ * is every surface the console names a workflow on. */
 
 /**
  * Opens the Workflows tab and waits for the index to settle.
@@ -192,7 +194,7 @@ test("a workflow authored elsewhere reaches the list, with no reload", async ({
   }
 });
 
-test("a workflow renamed elsewhere renames in the picker, with no reload", async ({
+test("a workflow renamed elsewhere renames on screen, with no reload", async ({
   page,
   request,
 }) => {
@@ -210,18 +212,23 @@ test("a workflow renamed elsewhere renames in the picker, with no reload", async
     // edit #259 made possible, and which nothing told this tab about.
     await renameWorkflow(request, id, after, createdVersion);
 
-    // Read off the OPEN workflow's own heading and off the picker beside it,
-    // both of which render the selected workflow's name from the same list the
-    // options come from: the rename has to land on the workflow on screen, not
-    // merely somewhere in a dropdown nobody has open.
+    // Read off the OPEN workflow's own heading first: the rename has to land on
+    // the workflow the operator is looking at, not merely somewhere in a list.
     await expect(
       workflowDetailName(page),
       "a rename elsewhere must reach the open workflow live",
     ).toHaveText(after, { timeout: 20_000 });
-    await expect(picker(page), "…and the picker beside it").toContainText(after, {
+
+    // …and then off the index, which is the other surface the same `workflows`
+    // array feeds. Issue #1135 retired the toolbar picker this used to check;
+    // the index card is where a name that failed to update would now be stale,
+    // and it is checked for the OLD name too, so a list that grew a second row
+    // rather than renaming its one row fails here.
+    await backToWorkflowIndex(page);
+    await expect(workflowCard(page, after), "…and the index card").toHaveCount(1, {
       timeout: 20_000,
     });
-    await expect(picker(page)).not.toContainText(before);
+    await expect(workflowCard(page, before)).toHaveCount(0);
   } finally {
     await removeWorkflow(request, id);
   }

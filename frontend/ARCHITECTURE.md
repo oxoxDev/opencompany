@@ -169,10 +169,20 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
   mail renders empty (issue #173 replaced a localStorage fixture that showed the
   same four invented emails for every teammate).
 
-### Tasks (Kanban) — `src/views/TasksView.tsx`, `src/lib/tasks-sample.ts`
-- Columns To-do/Planning/In progress/Paused/In review/Done; drag to move. New work
-  enters through one prompt box on To-do (issue #301); priority + assignee are
+### Tasks (Kanban) — `src/views/LedgersView.tsx`, `src/views/TaskCard.tsx`
+- **The board has no page of its own.** It is the `tasks` ledger, rendered as
+  that ledger's columns under `#/ledgers/tasks` (issue #1140 retired the
+  standalone Tasks page, which showed the same records through the same
+  component). `src/views/LedgerBoard.tsx` is the board; `TaskCard` is the card
+  it renders when the row behind it is a `Task`.
+- Columns To-do/Planning/In progress/Paused/In review/Done, declared by the host
+  and read off the ledger; drag to move. New work enters through one prompt box
+  landing in To-do (issue #301), which keeps its own `POST …/tasks` dialog
+  because `record_entry` is refused for this ledger; priority + assignee are
   edited on the card afterwards.
+- `#/tasks/<id>` survives as the card detail (`TaskDetailView`, routed by
+  `src/views/TaskDetailRoute.tsx`) — a timeline, a plan brief, a discussion, its
+  attempts and the steer controls, none of which fits on a column.
 - **Source:** ✅ real — `Company.tasks` (GraphQL, `TaskStore`-backed) reads the
   board; `POST …/tasks`, `PATCH`/`DELETE …/tasks/{id}` (REST) write it.
 

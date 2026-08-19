@@ -522,9 +522,9 @@ export function ConnectionsView({ client, company }: Props) {
             <Info className="size-4" />
             <AlertTitle>Only an admin can change what this company connects through</AlertTitle>
             <AlertDescription>
-              A connection belongs to the company — it is the account your agents act through — so
-              an admin manages it. You can see everything that is wired here; ask an admin to add,
-              change or remove one.
+              A connection belongs to the company — it is the account your teammates act
+              through — so an admin manages it. You can see everything that is wired here; ask an
+              admin to add, change or remove one.
             </AlertDescription>
           </Alert>
         )}
@@ -579,7 +579,7 @@ export function ConnectionsView({ client, company }: Props) {
         />
 
         {/* Only renders for a provider this company holds two or more accounts
-            for — the one case where "which account do agents act as" is a
+            for — the one case where "which account do teammates act as" is a
             question the product can answer (issue #820). */}
         <AccountChoiceSection
           client={client}

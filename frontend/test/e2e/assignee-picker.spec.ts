@@ -3,11 +3,13 @@ import { expect, test, type Page, type Request } from "@playwright/test";
 /**
  * Issue #263 — the task assignee is picked from the company roster, not typed.
  *
- * Issue #301 moved *where*: the create box asks for a prompt and nothing else,
- * so a new card is always unassigned (the host hands it to the orchestrator)
- * and the picker lives on the card's own edit surface. These tests therefore
- * exercise the picker through Edit / Reassign rather than through create — the
- * invariant under test is unchanged, only the screen it is reached from.
+ * Issue #301 moved *where*: the create box asked for a prompt and nothing else,
+ * so the picker lived on the card's own edit surface. Issue #1106 gave the
+ * create dialog a picker again — defaulting to unassigned, so a card created
+ * without touching it is still unassigned by construction and the host still
+ * hands it to the orchestrator. These tests therefore keep exercising the picker
+ * through Edit / Reassign: that is the surface that reaches the whole roster,
+ * and the invariant under test is unchanged either way.
  *
  * These run against a live host serving the built console, with the
  * `e2e_harness` company: desks `engineering` / `content` and manifest agents
@@ -49,7 +51,7 @@ async function dismissTour(page: Page) {
 
 /** Creates a card through the board's one prompt box (issue #301). */
 async function createViaPromptBox(page: Page, prompt: string) {
-  await page.goto("/#/tasks");
+  await page.goto("/#/ledgers/tasks");
   await dismissTour(page);
   await page.getByRole("button", { name: "Add task" }).click();
   await expect(page.getByRole("heading", { name: "New task" })).toBeVisible();
@@ -123,7 +125,7 @@ test("the edit dialog offers Unassigned, desks and teammates instead of a text f
   await expect(page.getByRole("option", { name: /^ceo —/ })).toBeVisible();
 
   // A desk with nobody on it stays assignable (EmptyDesk is real), and says so.
-  await expect(page.getByRole("option", { name: /Legal — no members yet/ })).toBeVisible();
+  await expect(page.getByRole("option", { name: /Legal — no teammates yet/ })).toBeVisible();
   // A staffed desk shows its headcount.
   await expect(page.getByRole("option", { name: /Engineering desk — 1 teammate/ })).toBeVisible();
 });
@@ -138,7 +140,7 @@ test("a card assigned to a desk keeps the desk, not the desk's lead", async ({
   await pickAssignee(page, "task-assignee", /Engineering desk/);
   await page.getByRole("button", { name: "Save" }).click();
 
-  await page.goto("/#/tasks");
+  await page.goto("/#/ledgers/tasks");
   await dismissTour(page);
   const created = card(page, title);
   await expect(created).toBeVisible({ timeout: 15_000 });
@@ -156,13 +158,16 @@ test("a card can be assigned to a teammate, and created for nobody at all", asyn
   await openEditDialog(page, (await seeded.json()).id as string);
   await pickAssignee(page, "task-assignee", /^writer —/);
   await page.getByRole("button", { name: "Save" }).click();
-  await page.goto("/#/tasks");
+  await page.goto("/#/ledgers/tasks");
   await dismissTour(page);
   await expect(card(page, forWriter)).toContainText("writer", { timeout: 15_000 });
 
-  // Issue #301: the prompt box collects no assignee, so a card created on the
-  // board is unassigned by construction — the host hands it to the
-  // orchestrator. This is the default the create surface now relies on.
+  // Issue #301, as amended by #1106: the create dialog now *offers* an owner,
+  // but defaults to unassigned and omits the field entirely when it is not
+  // touched — so a card created by filling only the prompt is still unassigned
+  // by construction and the host still hands it to the orchestrator. This
+  // asserts that default, which is what keeps adding the picker a no-op for
+  // anyone who does not use it.
   const forNobody = `e2e unassigned card ${Date.now()}`;
   await createViaPromptBox(page, forNobody);
 

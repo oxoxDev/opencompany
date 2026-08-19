@@ -343,6 +343,66 @@ pub async fn seed_company(
     Ok(id)
 }
 
+/// Registers a company the first-run wizard **designed**, rather than one copied
+/// from a preset.
+///
+/// The sibling of [`seed_company`], and deliberately a separate entry point: a
+/// generated company carries no [`TemplateProvenance`], because it did not come
+/// from a template. Stamping the reference roster's slug there would claim a
+/// lineage the company does not have, and provenance is exposed verbatim on the
+/// API surfaces — an operator reading `ecommerce` would reasonably conclude
+/// their company *is* that template and could be re-seeded from it.
+///
+/// The manifest is expected to have come from
+/// [`manifest_from_setup`](crate::company::setup::manifest_from_setup), which is
+/// what guarantees it validates.
+pub async fn seed_generated_company(
+    state: &AppState,
+    manifest: CompanyManifest,
+    answers: Option<crate::company::setup::SetupAnswers>,
+) -> Result<crate::ports::types::CompanyId> {
+    let problems = manifest.validate();
+    if !problems.is_empty() {
+        // Refused rather than registered: a company that fails validation would
+        // boot into a state the operator cannot fix from the console, and they
+        // typed nothing wrong to get here.
+        return Err(crate::OpenCompanyError::Config(format!(
+            "the company this setup designed is not valid: {}",
+            problems.join("; ")
+        )));
+    }
+    let id = company_id_from_name(&manifest.company.name);
+    register(state, id.clone(), manifest, None).await?;
+
+    // Record what the operator told us, on the company it produced.
+    //
+    // Phase 2 builds this company's workflows from these answers, and the whole
+    // point of storing them is that it never has to ask again. The company-scoped
+    // route already does this; without it here, a company created through the
+    // wizard — the *default* path — would be the one that arrives without them.
+    //
+    // Logged and swallowed: the company is registered and usable, and losing the
+    // answers costs a re-ask later rather than the company itself.
+    if let Some(answers) = answers
+        && let Some(runtime) = state.registry().get(&id)
+    {
+        let store = runtime.store();
+        match store.load(&id).await {
+            Ok(Some(mut record)) => {
+                record.setup = Some(answers);
+                if let Err(error) = store.save(&record).await {
+                    tracing::warn!(company = %id, %error, "could not store the setup answers");
+                }
+            }
+            Ok(None) => tracing::warn!(company = %id, "no record to store the setup answers on"),
+            Err(error) => tracing::warn!(company = %id, %error, "could not read the record back"),
+        }
+    }
+
+    tracing::info!(company = %id, "seeded a company designed by first-run setup");
+    Ok(id)
+}
+
 /// Builds one company over the instance home and puts it in the registry.
 async fn register(
     state: &AppState,

@@ -157,12 +157,12 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
       </div>
       <p className="text-sm text-muted-foreground">
         {!canManage
-          ? "Your agents reach Gmail, Slack & GitHub through Composio. Which account they act through belongs to the company, so an admin manages it — this is what is wired today."
+          ? "Your teammates reach Gmail, Slack & GitHub through Composio. Which account they act through belongs to the company, so an admin manages it — this is what is wired today."
           : attested
-            ? "Your agents reach providers through Composio. This company is linked through this instance's own cluster identity — there is no key to copy and nothing stored here. Connect providers in the grid below."
+            ? "Your teammates reach providers through Composio. This company is linked through this instance's own cluster identity — there is no key to copy and nothing stored here. Connect providers in the grid below."
             : companyKey
-              ? "Your agents reach providers through Composio. This company's own TinyHumans credential already authorizes it — there is no separate Composio token to paste and no provider app to register. Connect providers in the grid below; every agent in the company can then use what you connect."
-              : "Your agents reach providers through Composio. Paste this company's Composio OAuth token — it is the identity the backend bills and isolates, stored securely and never shown again — then connect providers in the grid below. A change takes effect on the next turn, no restart."}
+              ? "Your teammates reach providers through Composio. This company's own TinyHumans credential already authorizes it — there is no separate Composio token to paste and no provider app to register. Connect providers in the grid below; every teammate in the company can then use what you connect."
+              : "Your teammates reach providers through Composio. Paste this company's Composio OAuth token — it is the identity the backend bills and isolates, stored securely and never shown again — then connect providers in the grid below. A change takes effect on the next turn, no restart."}
       </p>
 
       {load === "loading" ? (
@@ -195,7 +195,7 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
           {status && !status.granted && (
             <p className="rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
               This company does not grant the <span className="font-mono">composio</span> tool
-              namespace, so agents will not receive Composio tools even once connected. Add
+              namespace, so teammates will not receive Composio tools even once connected. Add
               <span className="font-mono"> composio</span> to the company&apos;s tool grants first.
             </p>
           )}

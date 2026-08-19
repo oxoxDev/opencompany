@@ -168,7 +168,30 @@ export interface TaskPlan {
    * had no assignee — a plan never reassigns work a person routed.
    */
   proposedAssignee?: string;
+  /**
+   * The teammates that plausibly fit, when more than one did (issue #1106).
+   *
+   * Non-empty means the pass **declined to choose** and the card is waiting on
+   * a person — it is never populated alongside `proposedAssignee`, which is set
+   * only when exactly one candidate resolved. Absent on every plan written
+   * before #1106, and on every unambiguous plan written since.
+   */
+  assigneeCandidates?: AssigneeCandidate[];
   plannedAtMillis: number;
+}
+
+/**
+ * One teammate the planner thinks could take a card, and why (issue #1106).
+ *
+ * `id` is canonical — the host resolves it against the roster before storing
+ * it, and drops anything the roster does not carry, so every candidate rendered
+ * is one the assignee write boundary will accept.
+ */
+export interface AssigneeCandidate {
+  /** A teammate id, or a desk id. Submitted verbatim, never resolved here. */
+  id: string;
+  /** One line on why this one fits. Model prose, shown to a person deciding. */
+  reason: string;
 }
 
 /** A board card as the host returns it. */

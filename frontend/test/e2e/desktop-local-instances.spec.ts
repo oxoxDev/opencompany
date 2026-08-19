@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import { openHostMenu } from "./host-switcher";
+
 /**
  * More than one host on this computer, driven through the whole app.
  *
@@ -160,18 +162,22 @@ function seed(liveBaseUrl: string): Instance[] {
 }
 
 /**
- * The host rows in the rail, counted without going through a role query.
+ * How many hosts the console holds, read off the switcher's closed trigger.
  *
- * `getByRole` skips `aria-hidden` subtrees, and Radix marks the whole page
- * behind an open dialog exactly that way — so a role-based count reads zero
- * while the roster is open, which is when every one of these asserts.
+ * The count has to be answerable while the roster dialog is open, which is when
+ * every one of these asserts — and the menu the rows live in is shut by then.
+ * `data-host-count` is on the trigger for exactly this: the roster size is not
+ * a fact that should require opening a menu, which is the same reason the
+ * trigger also carries the worst status across hosts. (It also sidesteps
+ * `getByRole` skipping the `aria-hidden` subtree behind an open dialog.)
  */
-function railRows(page: Page) {
-  return page.locator('[data-testid^="connection-row-"]');
+function hostCount(page: Page) {
+  return page.getByTestId("host-switcher");
 }
 
 async function openTheRoster(page: Page): Promise<void> {
-  await page.getByTestId("connection-add").click();
+  await openHostMenu(page);
+  await page.getByTestId("host-switcher-add").click();
   await page.getByTestId("add-host-local").click();
   await expect(page.getByTestId("local-instances")).toBeVisible();
 }
@@ -184,8 +190,8 @@ test("a stopped instance is listed and startable, not a broken row", async ({
   await page.goto("/");
 
   // One connection, because one instance is listening. A stopped instance has
-  // no address, so a row for it in the rail could only fail its probe forever.
-  await expect(railRows(page)).toHaveCount(1);
+  // no address, so a row for it in the menu could only fail its probe forever.
+  await expect(hostCount(page)).toHaveAttribute("data-host-count", "1");
 
   await openTheRoster(page);
   const scratch = page.getByTestId("local-instance-scratch");
@@ -194,7 +200,7 @@ test("a stopped instance is listed and startable, not a broken row", async ({
 
   // Started, and now a host the console holds alongside the first.
   await expect(scratch).toHaveAttribute("data-running", "true");
-  await expect(railRows(page)).toHaveCount(2);
+  await expect(hostCount(page)).toHaveAttribute("data-host-count", "2");
 });
 
 test("a host started here can be stopped again without losing the others", async ({
@@ -207,14 +213,14 @@ test("a host started here can be stopped again without losing the others", async
 
   const scratch = page.getByTestId("local-instance-scratch");
   await scratch.getByRole("button", { name: "Start" }).click();
-  await expect(railRows(page)).toHaveCount(2);
+  await expect(hostCount(page)).toHaveAttribute("data-host-count", "2");
 
   await scratch.getByRole("button", { name: "Stop" }).click();
   await expect(scratch).toHaveAttribute("data-running", "false");
   // Back to the live host alone — and crucially *not* to zero: stopping one
   // instance must not prune the rows of the ones still running, which is the
   // failure the single-host prune would have produced.
-  await expect(railRows(page)).toHaveCount(1);
+  await expect(hostCount(page)).toHaveAttribute("data-host-count", "1");
   await expect(page.getByTestId("local-instance-default")).toHaveAttribute(
     "data-running",
     "true",
@@ -234,5 +240,5 @@ test("a second company can be created on this computer", async ({ page, baseURL 
     "true",
   );
   // Three instances now, two of them listening: the new one and the original.
-  await expect(railRows(page)).toHaveCount(2);
+  await expect(hostCount(page)).toHaveAttribute("data-host-count", "2");
 });

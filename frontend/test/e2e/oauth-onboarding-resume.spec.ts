@@ -25,7 +25,15 @@ type Page = import("@playwright/test").Page;
  */
 async function dismissWelcome(page: Page): Promise<void> {
   const skip = page.getByRole("button", { name: "Skip for now" });
+  // Waits rather than sampling. The welcome is held until first-run setup has
+  // read the roster and decided it has nothing to do
+  // (`docs/spec/runtime/company-setup.md`), so it now appears one request later
+  // than it used to — an instantaneous `isVisible()` loses that race and leaves
+  // the dialog blocking every role-based assertion below. Absence is still
+  // tolerated: a company that has already seen the tour never offers it.
+  await skip.waitFor({ state: "visible", timeout: 10_000 }).catch(() => undefined);
   if (await skip.isVisible().catch(() => false)) await skip.click();
+  await expect(skip).toBeHidden();
 }
 
 /** The tour's per-company localStorage key, discovered from the running app. */

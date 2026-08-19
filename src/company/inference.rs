@@ -198,6 +198,48 @@ fn resolve_endpoint(
     }
 }
 
+/// A declaration for the **first-run** connection test, before any company
+/// exists to resolve one from.
+///
+/// [`resolve_effective`] cannot serve the wizard: it reads a company's secret
+/// store and manifest, and during first-run setup there is neither. This builds
+/// the same shape from what the operator has just typed, through the *same*
+/// [`resolve_endpoint`] — so a probe defaults its URL and treats a blank key
+/// exactly as the running system will, rather than by a second set of rules that
+/// agree today and drift later. A test that passes under different rules than
+/// the runtime uses is worse than no test.
+///
+/// `env_default` is what the host already has. Passing it is what makes "leave
+/// the key blank and press Test" mean *test the credential this host was given*
+/// — the hosted case, where the operator has no key of their own and the control
+/// plane injected one. A blank key with no env default resolves to
+/// [`Credential::None`]: correct for keyless Ollama, and honestly
+/// unauthenticated everywhere else, which is what the probe should then report.
+///
+/// [`InferenceSource::Runtime`] because that is what this is — a value an
+/// operator supplied, with nothing persisted anywhere yet.
+pub fn decl_for_probe(
+    provider: &str,
+    base_url: Option<&str>,
+    key: Option<&str>,
+    env_default: Option<&EnvDefault>,
+) -> InferenceDecl {
+    let provider = provider.trim().to_string();
+    let (base_url, credential) = resolve_endpoint(
+        &provider,
+        base_url,
+        key.unwrap_or_default().trim().to_string(),
+        env_default,
+    );
+    InferenceDecl {
+        provider,
+        base_url,
+        models: BTreeMap::new(),
+        source: InferenceSource::Runtime,
+        credential,
+    }
+}
+
 /// The effective base URL for a provider kind, given an optional override.
 ///
 /// `managed`/`openrouter` default to their well-known endpoints; `ollama`

@@ -57,6 +57,12 @@ pub mod mcp_oauth;
 // testing in the default build rather than only where the agent runtime links.
 pub mod prompt;
 pub mod runtime;
+// First-run company setup (issue: docs/spec/runtime/company-setup.md): the
+// curated starting rosters and the rules a proposed roster obeys. Always
+// compiled and model-free on purpose — it is both the input to the optional
+// polish pass and the fallback when that pass cannot run, so a company with no
+// inference credential still gets a real team.
+pub mod setup;
 mod skill_file;
 // Steer (issue #111): pause / cancel / redirect an in-flight task or delegation
 // from the operator chat. Always compiled + openhuman-free so the operator

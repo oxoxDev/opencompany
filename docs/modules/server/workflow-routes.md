@@ -178,25 +178,16 @@ because the orchestrator's `run_workflow` tool and the trigger scheduler drive
 that same port — and a scheduled run is exactly the case where nobody is
 watching the console. An **on-demand** run's response therefore carries
 `deliveries`: one row per attempt (`sent` / `skipped` / `denied` / `failed`)
-with an operator-readable reason. A delivery failure never fails the run, so on
-that run the list is where an operator learns a report did not go out; an
+with an operator-readable reason. A delivery failure never fails the run, so
+that list is where an operator learns *why* a report did not go out; an
 unwired runtime writes a loud `failed` row rather than skipping silently.
 
-A **scheduled** run is journaled too (issue #228): the same
-`WorkflowRunFinished` record a manual run writes, with its `deliveries` rows,
-folded into `GET …/workflows/runs` — so a failed scheduled delivery is as
-operator-readable as a manual one. The scheduler's stdout log still exists, but
-it is the platform team's diagnostic, not the operator surface: the run rows
-carry the full `detail`, while the log never carries a field that could bear an
-address (issue #248).
+### Every run carries a `verdict` (issue #981)
 
-That distinction decides what the scheduler's log line may say. Every row
-carries two reasons: `detail`, the free text the run response and the console
-render, and `reason`, a closed set (`DeliveryReason`). Only `reason` is logged.
-On the transport-failure arms `detail` interpolates the transport's own reply,
-and a mail transport quotes the mailbox it refused — so `detail` on host stdout
-would put a recipient's address on a platform surface. `reason` says what class
-of thing failed and has no field that could carry the address (issue #248).
+The rows say *why* a report did not go out. **`verdict` says what the run adds
+up to** — one word, on both run DTOs, always serialized. See
+[run-verdict.md](run-verdict.md) for the word list, the precedence order, and
+why an undelivered report is its own reading rather than a failure.
 
 Authoring a destination and reading the result back:
 
@@ -229,6 +220,7 @@ curl -X POST "$HOST/api/v1/company/workflows/weekly_digest/run" \
 {
   "output": { "nodes": { "done": { "items": [ { "json": { "text": "…" } } ] } } },
   "pendingApprovals": [],
+  "verdict": "ok",
   "deliveries": [
     { "node": "done", "kind": "owner", "target": "ada@acme.test",
       "status": "sent", "detail": "emailed the company's admin" }
@@ -272,6 +264,7 @@ step waiting on a person is not a failure — and says so structurally:
 {
   "output": { "nodes": { "draft": { "items": [ { "json": { "text": "…" } } ] } } },
   "pendingApprovals": ["spec"],
+  "verdict": "blocked",
   "deliveries": [],
   "nodes": [ { "nodeId": "spec", "status": "blocked", "elapsedMs": 42000 } ],
   "blockedNodes": [

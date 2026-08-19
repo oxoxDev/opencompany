@@ -38,9 +38,15 @@ other's companies, and until `src/store/lock.rs` existed nothing stopped them �
 
 On a server that was survivable, because a second `opencompany serve` against
 one root is a deliberate act. A desktop application is different in kind: it is
-launched by double-clicking, and being launched twice is ordinary. So is the
-common development shape — `opencompany serve` in a terminal against
-`~/.opencompany`, then the desktop app opening the same root.
+launched by double-clicking, and being launched twice is ordinary — two windows
+of the installed app contend for one root with nobody having decided to do
+anything.
+
+A terminal `serve` and the desktop app do **not** collide by default: they
+resolve different roots (see [the desktop root](#the-desktop-root-is-not-the-cli-root)
+below). They collide when something points both at one directory — most often an
+exported `OPENCOMPANY_DATA_DIR`, which is exactly how a developer runs the two
+against the same companies on purpose.
 
 `serve` and `app::boot::prepare_instance` both take an exclusive advisory lock
 on `<root>/.lock` (`flock`/`LockFileEx` via `fs2`) and hold it for the life of
@@ -118,6 +124,39 @@ OPENCOMPANY_DATA_DIR=/tmp/oc-b opencompany serve \
 `--home /tmp/oc-a` places the bundles the same way and takes precedence, but it
 does **not** move the shared workspace — prefer the variable for side-by-side
 hosts.
+
+## The desktop root is not the CLI root
+
+The desktop shell does not use `$HOME/.opencompany`. It resolves the platform
+application-data directory (`src-tauri/src/lib.rs::default_data_dir`) and passes
+it explicitly to `app::prepare_instance`:
+
+| OS      | Desktop root                                             |
+| ------- | -------------------------------------------------------- |
+| macOS   | `~/Library/Application Support/ai.tinyhumans.opencompany` |
+| Windows | `%APPDATA%\ai.tinyhumans.opencompany`                     |
+| Linux   | `$XDG_DATA_HOME/ai.tinyhumans.opencompany`, else `~/.local/share/…` |
+
+`OPENCOMPANY_DATA_DIR` still wins where it is set, so pointing one build at a
+scratch root — or at the CLI's root — is a single variable.
+
+Passed explicitly rather than left to `resolve_home` because that resolver's
+last branch is a *relative* `.opencompany`, which for a double-clicked
+application resolves against whatever working directory the launcher supplied.
+
+The consequence worth stating plainly: **a default desktop install and a default
+`opencompany serve` are two separate instances.** Different companies, different
+`instance-id`, no lock contention, nothing shared. That is deliberate — an
+installed application's state belongs where the platform's backup and uninstall
+tooling looks for it — but it surprises anyone who created a company in one and
+went looking for it in the other.
+
+The desktop takes the same prepare sequence as `serve` through
+`app::boot::prepare_instance`: resolve, lock, migrate, materialize the
+[workspace layout](workspace-layout.md), and probe the journal root. It does
+**not** run `serve`'s storage-backend selection, so the desktop is always
+`fs`-backed — `OPENCOMPANY_STORAGE`, `OPENCOMPANY_MONGODB_URI` and the sqlite
+backend are command-line-only today.
 
 ## Instance identity
 

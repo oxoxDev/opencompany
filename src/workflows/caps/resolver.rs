@@ -137,6 +137,9 @@ impl StoreWorkflowResolver {
             &self.company,
             child_id,
             &audit.run_id,
+            // Issue #1098: the audit reports calls never offered for approval at
+            // all, so it deliberately does not consult standing permissions.
+            None,
         )
         .await;
 
@@ -398,6 +401,7 @@ mod tests {
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }))))
     }
 
@@ -420,6 +424,7 @@ mod tests {
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }))))
     }
 

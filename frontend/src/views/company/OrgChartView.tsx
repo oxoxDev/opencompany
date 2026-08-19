@@ -19,9 +19,11 @@ import {
   useRef,
   useState,
   type DragEvent,
+  type ReactNode,
 } from "react";
 import {
   ChevronDown,
+  ChevronRight,
   ChevronUp,
   Crown,
   Plus,
@@ -69,6 +71,30 @@ import {
 } from "@/views/chat/AddMemberDialog";
 
 const SEAT_MIME = "application/x-opencompany-seat";
+
+/**
+ * Where a teammate named on this chart opens: `#/team/<agentId>`, the sub-page
+ * `TeamView` already routes to `AgentDetailView` (issue #1102).
+ *
+ * A **link**, not a click handler on a `div`. The console routes on the hash,
+ * so an `<a href>` is the real address: middle-click and cmd-click open a
+ * second console, the browser shows the target on hover, and the keyboard
+ * reaches it without this file re-implementing Enter/Space and a focus ring.
+ *
+ * The id is the one the desk itself names — `OrgSeat.id` is `DeskDto.members[i]`
+ * and `TeamMember.id` is the roster id, and `buildOrgTree` resolves the seat by
+ * matching those two. That is exactly the id `AgentDetailView` asks the host
+ * for, so no translation is needed here — and none should be invented.
+ *
+ * `null` for an id that is blank or missing, which is the whole point of
+ * routing through this function: a teammate with no usable id must render as
+ * plain text rather than as a link to `#/team/undefined`, which is a page that
+ * cannot exist and would report the teammate as deleted.
+ */
+function teamHref(agentId: string | null | undefined): string | null {
+  const id = agentId?.trim();
+  return id ? `#/team/${encodeURIComponent(id)}` : null;
+}
 
 interface Props {
   client: OpenCompanyClient;
@@ -746,6 +772,40 @@ function Seat({
     if (sourceDeskId === deskId && Number.isInteger(fromIndex)) onDrop(index);
   }
 
+  // Where this seat opens, or `null` when it opens nowhere. A seat the roster
+  // cannot resolve is deliberately *not* a link: `#/team/<id>` for an id the
+  // host has never heard of lands on the detail view's "no such teammate"
+  // state, so offering the link would send the operator to a dead end to
+  // discover what the badge beside the name already says.
+  const href = seat.known ? teamHref(seat.id) : null;
+
+  const label = (
+    <>
+      {seat.lead && (
+        <Crown
+          role="img"
+          aria-label="Desk lead"
+          className="size-3.5 shrink-0 text-muted-foreground"
+        />
+      )}
+      <span className={cn("truncate", !seat.known && "text-muted-foreground")}>
+        {seat.name}
+      </span>
+      {seat.role && (
+        <span className="truncate text-xs text-muted-foreground">
+          {seat.role}
+        </span>
+      )}
+      {/* A seat naming somebody the roster no longer has. Shown, not hidden:
+          it is a fact about the structure only the operator can fix. */}
+      {!seat.known && (
+        <Badge variant="outline" className="shrink-0 text-3xs">
+          Not on the roster
+        </Badge>
+      )}
+    </>
+  );
+
   return (
     <div
       role="treeitem"
@@ -761,32 +821,27 @@ function Seat({
         busy && "opacity-50",
       )}
     >
-      <span className="flex min-w-0 items-center gap-1.5">
-        {seat.lead && (
-          <Crown
-            role="img"
-            aria-label="Desk lead"
-            className="size-3.5 shrink-0 text-muted-foreground"
-          />
-        )}
-        <span
-          className={cn("truncate", !seat.known && "text-muted-foreground")}
+      {href ? (
+        <a
+          href={href}
+          title={`Open ${seat.name}`}
+          // The name is the target, not the whole row: the row is the drag
+          // handle for re-ordering, and a full-row link would make every
+          // attempt to drag a seat read as a click on it.
+          //
+          // `draggable={false}` so a drag that starts on the name is not the
+          // browser's own drag-a-link gesture — it falls through to the row,
+          // which is the draggable ancestor, and re-ordering keeps working
+          // from anywhere on the seat.
+          draggable={false}
+          className="-mx-1 flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1 outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
         >
-          {seat.name}
-        </span>
-        {seat.role && (
-          <span className="truncate text-xs text-muted-foreground">
-            {seat.role}
-          </span>
-        )}
-        {/* A seat naming somebody the roster no longer has. Shown, not hidden:
-            it is a fact about the structure only the operator can fix. */}
-        {!seat.known && (
-          <Badge variant="outline" className="shrink-0 text-3xs">
-            Not on the roster
-          </Badge>
-        )}
-      </span>
+          {label}
+          <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+        </a>
+      ) : (
+        <span className="flex min-w-0 items-center gap-1.5">{label}</span>
+      )}
       <span className="flex shrink-0 items-center gap-0.5">
         {/* Moving the second seat up is how the lead changes: `members[0]` IS
             the lead, so there is no separate set-lead call to make. */}
@@ -854,14 +909,33 @@ function Unplaced({ tree }: { tree: OrgTree }) {
             desk above.
           </p>
           <ul className="flex flex-wrap gap-1.5">
-            {tree.unassigned.map((member) => (
-              <li
-                key={member.id}
-                className="rounded-md border px-2 py-1 text-xs"
-              >
-                {member.name}
-              </li>
-            ))}
+            {tree.unassigned.map((member) => {
+              // These chips name roster teammates, so they open the same page
+              // a seat does (issue #1102) — they were the worse half of that
+              // bug, bordered pills that read as controls and did nothing.
+              const href = teamHref(member.id);
+              return (
+                <li key={member.id}>
+                  {href ? (
+                    <a
+                      href={href}
+                      title={`Open ${member.name}`}
+                      className="flex items-center gap-1 rounded-md border px-2 py-1 text-xs outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
+                    >
+                      {member.name}
+                      <ChevronRight className="size-3 shrink-0 text-muted-foreground" />
+                    </a>
+                  ) : (
+                    // No usable id, so there is nothing to open. Rendered flat
+                    // rather than as a pill: the border is what made the inert
+                    // version of this chip a lie.
+                    <InertChip title="This teammate has no id, so their page can't be opened.">
+                      {member.name}
+                    </InertChip>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </section>
       )}
@@ -869,24 +943,51 @@ function Unplaced({ tree }: { tree: OrgTree }) {
         <section className="space-y-2">
           <h3 className="text-sm font-medium">People</h3>
           <p className="text-xs text-muted-foreground">
-            The humans who can sign in. Desks staff agents, so the company
+            The humans who can sign in. Desks staff teammates, so the company
             declares no desk for a person, and this chart does not guess one.
           </p>
           <ul className="flex flex-wrap gap-1.5">
+            {/* Deliberately inert, and styled to say so (issue #1102). A person
+                is a console user, not an agent: `#/team/<id>` resolves against
+                the roster, so pointing a person's id at it would 404 every
+                time. There is no person detail page to link to instead, so the
+                pill treatment is dropped rather than left promising one. */}
             {tree.people.map((person) => (
-              <li
-                key={person.id}
-                className="rounded-md border px-2 py-1 text-xs"
-              >
-                {person.name}
-                <span className="ml-1.5 text-muted-foreground">
-                  {person.role}
-                </span>
+              <li key={person.id}>
+                <InertChip title="People sign in to the console. Desks staff agents, so a person has no teammate page.">
+                  {person.name}
+                  <span className="ml-1.5">{person.role}</span>
+                </InertChip>
               </li>
             ))}
           </ul>
         </section>
       )}
     </div>
+  );
+}
+
+/**
+ * A name that is only a name.
+ *
+ * Filled and borderless, with the muted foreground a caption uses: the outlined
+ * pill it replaces was indistinguishable from an outline button, which is why
+ * #1102 reports these as clicked and inert. Nothing here reacts to a pointer —
+ * no hover, no cursor change, no focus ring — because nothing here happens.
+ */
+function InertChip({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <span
+      title={title}
+      className="inline-block rounded-md bg-muted px-2 py-1 text-xs text-muted-foreground"
+    >
+      {children}
+    </span>
   );
 }

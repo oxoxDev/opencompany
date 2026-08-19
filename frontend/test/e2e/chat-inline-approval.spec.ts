@@ -194,7 +194,7 @@ test("declining inline says so in the thread rather than leaving it stalled", as
   // as a stall. The line is addressed to this channel, not to "wherever the
   // operator last looked".
   await expect(
-    page.getByText(/Declined — the agent will not take that action/),
+    page.getByText(/Declined — the teammate will not take that action/),
   ).toBeVisible({ timeout: 30_000 });
 });
 

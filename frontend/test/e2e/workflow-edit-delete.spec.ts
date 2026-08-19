@@ -1,6 +1,7 @@
 import { expect, test, type Page, type APIRequestContext } from "@playwright/test";
 
 import {
+  backToWorkflowIndex,
   expectWorkflowIndex,
   openWorkflow,
   workflowCard,
@@ -29,7 +30,8 @@ import {
  * Edit mode landed after the rest of #259 (the backend, the client and Delete
  * shipped in #279), and its specs are here rather than in their own file
  * because they are the same feature and share this file's fixtures — a graph
- * created over HTTP, the tour dismissal, the picker helper. They cover:
+ * created over HTTP, the tour dismissal, the helper that opens one. They
+ * cover:
  *
  * * an edit round trip that the host actually stored;
  * * the id being **read-only**, not merely rejected on save (the host answers
@@ -130,17 +132,19 @@ async function removeWorkflow(request: APIRequestContext, id: string) {
  * toolbar picker, which was reachable on arrival because the view auto-selected
  * the first row.
  *
- * The picker itself is still there — inside a workflow, where it switches
- * between them — so the assertion #270 was pinned by is kept as a second line
- * here rather than dropped: the trigger must show the **name**, not the raw id.
- * (The picker binds `<SelectItem value={w.id}>` and Base UI's `SelectValue`
- * renders the value, not the item's children, which is how #270 happened; #406
- * is the other half, that the picker is controlled from its first render and so
- * follows a selection this view made for itself.)
+ * Issue #1135 then took the picker out of the detail toolbar altogether: you
+ * are inside this workflow, its name is the heading, and "All workflows" goes
+ * back. #270's property — the console names the workflow, it does not show the
+ * raw id — survives on that heading, which `openWorkflow` asserts by exact
+ * text. The second line here pins the removal itself, so a picker cannot creep
+ * back into the bar the issue cleared.
  */
 async function selectWorkflow(page: Page, name: string) {
   await openWorkflow(page, name);
-  await expect(page.getByRole("combobox").first()).toContainText(name);
+  await expect(
+    page.getByTestId("workflow-detail-toolbar").getByRole("combobox"),
+    "the detail toolbar no longer offers the workflow you are already in",
+  ).toHaveCount(0);
 }
 
 const DELETE = "workflow-delete";
@@ -527,14 +531,16 @@ test("a field error raised on one graph never appears on another", async ({
     // on the node id (rather than on the freshly minted row key) would carry
     // this complaint straight over to the second graph, attached to a field the
     // author never touched.
-    // Issue #1110: switched through the PICKER, not back out through the index.
-    // The picker survives inside a workflow precisely for this — moving from one
-    // graph to the next without a round trip through the list — and it is the
-    // path an author debugging two workflows actually takes. It is also the
-    // harder case for the defect under test: the view never unmounts the
-    // toolbar, so a stale error map has every chance to ride across.
-    await page.getByRole("combobox").first().click();
-    await page.getByRole("option", { name: second.name, exact: true }).click();
+    // Issue #1135: switched through the INDEX, because that is now the only way
+    // to move between two graphs — the toolbar picker this step used to drive
+    // is gone, and "All workflows" is the way out.
+    //
+    // Still the case the defect needs: `WorkflowsView` itself never unmounts on
+    // this trip (only the branch inside it re-renders), so the field-error map
+    // the issue is about survives the switch exactly as it did through the
+    // picker and has every chance to ride across.
+    await backToWorkflowIndex(page);
+    await openWorkflow(page, second.name);
     await expect(workflowDetailName(page)).toHaveText(second.name);
 
     const other = await openEditDialog(page, second.name);

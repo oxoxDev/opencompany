@@ -276,6 +276,11 @@ The cron preview (`#262`), the `PUT`/`DELETE` authoring round trip (`#259`)
 and run-time report delivery (`#228`) are documented together in
 [workflow-routes.md](workflow-routes.md).
 
+What a run **adds up to** — the `verdict` both run DTOs carry, why an
+undelivered report is its own reading rather than a failure, and why it is
+derived on the read rather than journaled (issue #981) — has its own focused
+page: [run-verdict.md](run-verdict.md).
+
 ### Pausing a workflow, and the disarm rule (issue #276)
 
 The pause switch, what it does **not** stop, why it lives in

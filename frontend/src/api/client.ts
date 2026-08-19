@@ -16,6 +16,7 @@ import {
   type ReadMarker,
   type ReadStateResponse,
   type ApiErrorBody,
+  type WorkflowProblem,
   type AppSpec,
   type ApprovalSummary,
   type CapabilityStatusDto,
@@ -967,9 +968,40 @@ function parseJson(text: string): unknown {
 function errorEnvelope(text: string): ApiErrorBody | undefined {
   const parsed = parseJson(text);
   if (typeof parsed !== "object" || parsed === null) return undefined;
-  const { error, code } = parsed as Record<string, unknown>;
+  const { error, code, problems } = parsed as Record<string, unknown>;
   if (typeof error !== "string" || typeof code !== "string") return undefined;
-  return { error, code };
+  const breakdown = workflowProblems(problems);
+  return breakdown ? { error, code, problems: breakdown } : { error, code };
+}
+
+/**
+ * The `problems` array off an envelope, or `undefined` when there is not one.
+ *
+ * Held to the same strictness as the envelope itself, for the same reason: this
+ * is rendered to operators, so an entry is kept only when it carries a real
+ * `message`. Entries are filtered rather than the whole array rejected — a host
+ * that grows a new problem shape should cost the operator that one line, not
+ * the entire breakdown — and an array that filters down to nothing returns
+ * `undefined` so a caller cannot mistake "every entry was junk" for "the host
+ * refused with an empty list".
+ *
+ * `node_id` and `field` are dropped unless they are strings, keeping a
+ * malformed locator from reaching the UI as `[object Object]`.
+ */
+function workflowProblems(value: unknown): WorkflowProblem[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const kept: WorkflowProblem[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const { node_id, field, message } = entry as Record<string, unknown>;
+    if (typeof message !== "string" || !message.trim()) continue;
+    kept.push({
+      ...(typeof node_id === "string" ? { node_id } : {}),
+      ...(typeof field === "string" ? { field } : {}),
+      message,
+    });
+  }
+  return kept.length ? kept : undefined;
 }
 
 /**
@@ -1012,6 +1044,11 @@ function httpError(res: TransportResponse, text: string): ApiError {
     envelope?.error ?? statusMessage(res),
     envelope !== undefined,
   );
+  // Issue #836: the host has sent this breakdown since #1016 and the console
+  // dropped it here, so a refused graph read as one flat sentence with no node
+  // named. Carried, not rendered here — what a surface does with it is the
+  // surface's call.
+  if (envelope?.problems) err.problems = envelope.problems;
   // Not discarded, just not rendered. A proxy error page is the only clue to
   // which hop gave up, which is worth keeping for a bug report even though it
   // is worthless as prose.

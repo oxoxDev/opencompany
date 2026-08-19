@@ -2915,6 +2915,7 @@ mod test {
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();
@@ -3077,6 +3078,7 @@ mode = "full"
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();
@@ -3507,6 +3509,7 @@ mode = "full"
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         };
         FsCompanyStore::new(home.to_path_buf())
             .save(&record)
@@ -3640,6 +3643,7 @@ mode = "full"
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();
@@ -7292,6 +7296,7 @@ mode = "full"
                 tools: vec!["publish_artifact".into()],
                 approval_ids: vec!["appr-1".into()],
                 unparkable: 0,
+                stranded: 0,
             }],
             approvals: vec![crate::ports::WorkflowRunApprovalRow {
                 node_id: Some("spec".into()),
@@ -7727,6 +7732,7 @@ mode = "full"
             .grant_standing(crate::runtime::grants::StandingGrant {
                 id: crate::runtime::grants::GrantId::new("g1"),
                 agent: "ops".into(),
+                workflow: None,
                 tool: "workspace_write".into(),
                 granted_by: Actor {
                     kind: ActorKind::User,

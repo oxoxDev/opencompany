@@ -48,7 +48,7 @@ describe("mcpBridgeState", () => {
 
 /**
  * The add-success message, which is where the screen's other claim used to
- * live: "Agents pick it up on the next rebuild" — fired at the moment the
+ * live: "Teammates pick it up on the next rebuild" — fired at the moment the
  * operator acts, and false twice over on a build with no bridge (nothing picks
  * it up, and since #566 a rebuild is not how pickup happens either).
  */
@@ -59,7 +59,7 @@ describe("mcpAddedMessage", () => {
     // Still a success: the server IS stored, and survives the rebuild that adds
     // the feature. Saying otherwise would report a working add as a failure.
     expect(message).toMatch(/stored/i);
-    expect(message).not.toMatch(/agents pick it up/i);
+    expect(message).not.toMatch(/teammates pick it up/i);
   });
 
   it("promises next-turn pickup when the bridge is present", () => {

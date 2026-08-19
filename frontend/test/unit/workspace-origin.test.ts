@@ -20,7 +20,7 @@ const client = (payload: unknown) =>
 
 describe("originLabel", () => {
   it("names the agent that authored a node", () => {
-    expect(originLabel({ kind: "agent", id: "ceo" })).toBe("Agent · ceo");
+    expect(originLabel({ kind: "agent", id: "ceo" })).toBe("Teammate · ceo");
   });
 
   it("distinguishes a seeded node from one somebody wrote", () => {

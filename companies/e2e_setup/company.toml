@@ -1,0 +1,29 @@
+# A company that ships with NOBODY on it, for the first-run setup lane
+# (docs/spec/runtime/company-setup.md).
+#
+# Every other company here declares its roster in `[[agent]]`, which is exactly
+# why this one exists: first-run setup opens only when the roster is empty, so a
+# company that came with a team can never reach it. `companies/e2e_harness` has
+# three agents and is right for every other spec; this one is the fresh-tenant
+# shape the setup flow is written for.
+#
+# Deliberately no `[[agent]]`, no `[[group_chat]]`, no workflows. Anything added
+# here stops it being a first run.
+
+[company]
+name = "E2E Setup Co"
+output = "Whatever the operator decides"
+human_role = "Everything, until the team is built"
+
+[users]
+# Standing admin invite, the same address `companies/e2e_harness` names: the
+# suite's `global-setup.ts` signs in as it through the real magic-link flow, and
+# a company that does not list it cannot be signed into at all — the host
+# answers an unrecognised address with the same `{"sent": true}` it answers a
+# real one, so the failure surfaces as "no dev_code came back".
+admins = ["harness-e2e@tinyhumans.ai"]
+
+[policy]
+# The default anyway; stated so the spec's expectations do not silently depend
+# on a default changing elsewhere.
+mode = "supervised"

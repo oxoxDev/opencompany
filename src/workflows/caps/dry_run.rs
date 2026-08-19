@@ -330,15 +330,12 @@ mod tests {
     /// and asserts the two agree, so it keeps holding when upstream changes its
     /// internals and fails loudly the day upstream loosens a rule.
     ///
-    /// Only refusals are compared, and that is not a gap: the real guard rejects
-    /// these **before it dials anything**, so the comparison needs no network and
-    /// performs no effect. An *allowed* URL cannot be compared this way, because
-    /// confirming it would mean actually issuing the request — which is the one
-    /// thing neither a dry run nor this suite may do.
-    ///
-    /// The direction that matters is the one this covers. A dry run that refuses
-    /// what a real run would allow blocks a working graph, and an operator cannot
-    /// tell that from a real refusal without arming it anyway.
+    /// This half covers the *too permissive* direction only — the real guard
+    /// rejects every URL below **before it dials anything**, so the comparison
+    /// needs no network and performs no effect. The other direction, a dry run
+    /// stricter than the guard, is covered by
+    /// [`dry_run_does_not_refuse_what_the_real_client_allows`]; asserting only
+    /// this one is what let #1075's trailing-dot break sit on `main` unnoticed.
     #[tokio::test]
     async fn dry_run_refusal_matches_the_real_client() {
         use crate::workflows::caps::http::GuardedHttpClient;
@@ -369,6 +366,92 @@ mod tests {
             assert!(
                 dry.is_err(),
                 "the real client refuses {url} but the dry run reported success —                  that is the false green issue #1048 is about"
+            );
+        }
+
+        // Open-allowlist mode. Each of these is refused by the *shape* of the
+        // URL, before any allowlist is consulted, so an empty list is no excuse
+        // for the dry run to stay quiet — and each one did slip through it until
+        // #1075, because the copy read past userinfo, unwrapped IPv6 brackets and
+        // left a trailing dot on the host.
+        let open_cases = [
+            "https://user@example.com/x",
+            "http://[2606:4700::1111]/x",
+            "http://127.0.0.1./",
+            "ftp://example.com/x",
+        ];
+        let open = GuardedHttpClient::new(Arc::new(SecurityPolicy::default()), Vec::new());
+        for url in open_cases {
+            let request = json!({ "method": "GET", "url": url });
+            let dry = DryRunHttp::new(Vec::new())
+                .request(request.clone(), None)
+                .await;
+            let live = open.request(request, None).await;
+            assert!(
+                live.is_err(),
+                "{url} must be refused by the real client for this comparison to mean anything"
+            );
+            assert!(
+                dry.is_err(),
+                "the real client refuses {url} but the dry run reported success: {dry:?}"
+            );
+        }
+    }
+
+    /// **The other direction: the real guard allows ⇒ the dry run must not refuse.**
+    ///
+    /// [`dry_run_refusal_matches_the_real_client`] only ever asserts that both
+    /// sides refuse, so it is structurally blind to this copy becoming *stricter*
+    /// than the guard — and that is the failure that costs something. Issue
+    /// #1075: `https://example.com./x` against `["example.com"]` was allowed by
+    /// the real guard (which trims the trailing dot off the host) and refused
+    /// here (which trimmed it off allowlist *entries* only), so Test run blocked
+    /// a graph that runs, and an operator could not tell that from a real
+    /// refusal without arming it.
+    ///
+    /// The real client cannot be driven all the way to "allowed" without issuing
+    /// the request, which this suite may not do. So the host is an RFC 2606
+    /// `.invalid` name: it clears every guard rule and the run then stops at DNS
+    /// resolution, which cannot succeed — no connection is ever made. The
+    /// assertion is "the guard did not refuse it", which is the claim under test.
+    #[tokio::test]
+    async fn dry_run_does_not_refuse_what_the_real_client_allows() {
+        use crate::workflows::caps::http::GuardedHttpClient;
+        use openhuman_core::openhuman::security::SecurityPolicy;
+        use std::sync::Arc;
+
+        let allowed = vec!["parity.invalid".to_string()];
+        let cases = [
+            // The regression: a legal fully-qualified host.
+            "https://parity.invalid./x",
+            "https://parity.invalid/x",
+            "https://sub.parity.invalid/x",
+        ];
+
+        let real = GuardedHttpClient::new(Arc::new(SecurityPolicy::default()), allowed.clone());
+        for url in cases {
+            let request = json!({ "method": "GET", "url": url });
+            let live = real.request(request.clone(), None).await;
+            let guard_refused = matches!(
+                &live,
+                Err(EngineError::Capability(message))
+                    if message.contains("allowed websites")
+                        || message.contains("Blocked local/private host")
+                        || message.contains("URL userinfo")
+                        || message.contains("IPv6 hosts are not supported")
+            );
+            assert!(
+                !guard_refused,
+                "{url} must pass the real guard for this comparison to mean anything: {live:?}"
+            );
+
+            let dry = DryRunHttp::new(allowed.clone())
+                .request(request, None)
+                .await;
+            assert!(
+                dry.is_ok(),
+                "the real guard allows {url} but the dry run refused it — a dry run \
+                 stricter than the guard blocks a graph that would run: {dry:?}"
             );
         }
     }

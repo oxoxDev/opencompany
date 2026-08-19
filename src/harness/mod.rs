@@ -142,6 +142,9 @@ mod publish_turn_test;
 /// (a full object copy, then every reference back to the mirror severed), plus
 /// the per-turn ledger that deletes it again. See [`repo`].
 pub mod repo;
+/// First-run company setup's pass: one tool-less model call that designs a
+/// company's starting team from three answers. See [`roster_build`].
+pub mod roster_build;
 pub mod run_trace;
 pub mod run_turn;
 pub mod search;
@@ -3056,16 +3059,19 @@ pub(crate) fn build_roster(
 /// model), and no manifest budget cap — an overlay teammate has no manifest row
 /// at all, so its cap (if any) comes from the record's budget overrides via
 /// [`CompanyRecord::effective_budget`], resolved by the caller. The overlay's
-/// `name` is a display
-/// label only — already surfaced through
-/// [`crate::metering::roster_display_names`] — so the persona is framed from
-/// `role`/`description` alone, exactly like a manifest teammate
-/// ([`build::persona_prompt`]).
+/// `name` is carried across (issue #1105): it is what
+/// [`crate::metering::roster_display_names`] labels this teammate with
+/// everywhere in the console, so
+/// [`persona_prompt`](crate::company::prompt::persona_prompt) needs it to frame the
+/// agent as the person the operator is addressing. Dropping it here — as this
+/// did until #1105 — left the model knowing only its role, so it denied being
+/// the name on its own DM header.
 fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
     ManifestAgent {
         global: false,
         id: overlay.id.clone(),
         role: overlay.role.clone(),
+        name: Some(overlay.name.clone()),
         description: overlay.description.clone(),
         tier: None,
         // Issue #661 / L5: carry the overlay's own per-teammate grant. An empty
@@ -3227,6 +3233,30 @@ mod tests {
             agent_effective_grants(&allow, &manifest.tools),
             allow,
             "an empty grant falls back to the full company allow-list"
+        );
+    }
+
+    /// Issue #1105: the overlay's display name is the only place the operator's
+    /// chosen name exists, and the console shows it on the DM header, subtitle
+    /// and composer. Dropping it here left the persona framed from the role
+    /// alone, so the teammate denied being the person on its own header.
+    #[test]
+    fn overlay_agent_to_manifest_carries_the_display_name() {
+        let overlay = OverlayAgent {
+            id: "alex".into(),
+            name: "Alex".into(),
+            role: "Content Writer".into(),
+            description: None,
+            tools: Vec::new(),
+        };
+
+        let manifest = overlay_agent_to_manifest(&overlay);
+        assert_eq!(manifest.name.as_deref(), Some("Alex"));
+        // And it reaches the one place it has to: the persona the model reads.
+        let persona = crate::company::prompt::persona_prompt("Acme", &manifest);
+        assert!(
+            persona.contains("You are Alex, the Content Writer at Acme"),
+            "{persona}"
         );
     }
 
@@ -3461,6 +3491,7 @@ description = "Builds the product."
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }
     }
 
@@ -5391,6 +5422,7 @@ description = "Sets direction."
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }
     }
 
@@ -6416,6 +6448,7 @@ budget_usd_daily = 0.0
             global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
+            name: None,
             description: None,
             tier: None,
             tools: Vec::new(),
@@ -6535,6 +6568,7 @@ budget_usd_daily = 0.0
             global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
+            name: None,
             description: None,
             tier: None,
             tools: Vec::new(),

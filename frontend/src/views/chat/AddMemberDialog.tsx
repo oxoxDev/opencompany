@@ -28,7 +28,7 @@ interface Props {
   onAdd: (fields: NewMemberFields) => void;
 }
 
-/** Define a teammate. Reached from the member pane's "Add" button. */
+/** Define a teammate. Reached from the team pane's "Add" button. */
 export function AddMemberDialog({ open, onOpenChange, onAdd }: Props) {
   const [name, setName] = useState("");
   const [role, setRole] = useState("");
@@ -58,7 +58,7 @@ export function AddMemberDialog({ open, onOpenChange, onAdd }: Props) {
     >
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Define an agent</DialogTitle>
+          <DialogTitle>Define a teammate</DialogTitle>
           <DialogDescription>Add a teammate to your company&apos;s roster.</DialogDescription>
         </DialogHeader>
         <div className="grid gap-2">
@@ -91,16 +91,16 @@ export function AddMemberDialog({ open, onOpenChange, onAdd }: Props) {
         </div>
         <label className="flex items-center justify-between rounded-lg border p-3">
           <span className="flex items-center gap-2 text-sm">
-            <Mail className="size-4 text-muted-foreground" /> Give this agent an inbox
+            <Mail className="size-4 text-muted-foreground" /> Give this teammate an inbox
           </span>
-          <Switch checked={inbox} onCheckedChange={setInbox} aria-label="Give this agent an inbox" />
+          <Switch checked={inbox} onCheckedChange={setInbox} aria-label="Give this teammate an inbox" />
         </label>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
           <Button onClick={submit} disabled={!name.trim() || !role.trim()}>
-            Add member
+            Add teammate
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -506,6 +506,68 @@ pub fn gate_node_id(effect: &Effect) -> Option<&str> {
         .filter(|node| !node.trim().is_empty())
 }
 
+/// The workflow a parked [`WORKFLOW_APPROVE_KIND`] effect belongs to, or `None`
+/// for any other effect (issue #1098).
+///
+/// The subject half of a workflow standing permission, read off the payload the
+/// park already writes. Kind-checked for the same reason [`gate_node_id`] is: a
+/// non-gate effect carrying a `workflow_id` must not be mistaken for one.
+pub fn gate_workflow_id(effect: &Effect) -> Option<&str> {
+    if effect.kind != WORKFLOW_APPROVE_KIND {
+        return None;
+    }
+    effect
+        .payload
+        .get(PAYLOAD_WORKFLOW_ID)
+        .and_then(Value::as_str)
+        .filter(|workflow| !workflow.trim().is_empty())
+}
+
+/// The call a parked [`WORKFLOW_APPROVE_KIND`] effect is stopping — `(tool,
+/// args)` — or `None` for any other effect, and for a gate whose call the host
+/// could not classify (issue #1098).
+///
+/// # Why this exists
+///
+/// A gate's [`kind`](Effect::kind) is the wrapper `workflow.approve`, not the
+/// tool the node is about to call. Anything that classifies an effect by asking
+/// [`consequence_of`](crate::policy::consequence_of) about its `kind` therefore
+/// asks about a name the declaration table has never heard of, and gets the
+/// undeclared fallback rather than an answer about the real call. That is
+/// correct as a default — an unknown name must fail closed — but it means the
+/// classifier never sees the `web_fetch` the operator is actually looking at.
+///
+/// The call itself is already on the payload: issue #846 wrote
+/// [`PAYLOAD_TOOL`] / [`PAYLOAD_ARGS`] so a workflow card could say *which*
+/// call it is stopping instead of naming a node id. This reads the same two
+/// keys back, so the thing classified is the thing the card showed.
+///
+/// # Absent arguments are `Null`, not an error
+///
+/// [`PAYLOAD_ARGS`] is written only when the node had arguments to write, so a
+/// tool present with no args is an ordinary shape rather than a broken one. It
+/// answers `Value::Null`, which every argument-aware classifier reads as "no
+/// argument I can place" and resolves in the cautious direction — a `web_fetch`
+/// with no readable host is [`Standing::PerCall`](crate::policy::Standing), not
+/// an unscoped permission. Node arguments may also still be unresolved
+/// `=`-expressions at gate time, which lands in the same place for the same
+/// reason.
+pub fn gate_inner_call(effect: &Effect) -> Option<(&str, &Value)> {
+    if effect.kind != WORKFLOW_APPROVE_KIND {
+        return None;
+    }
+    let tool = effect
+        .payload
+        .get(PAYLOAD_TOOL)
+        .and_then(Value::as_str)
+        .filter(|tool| !tool.trim().is_empty())?;
+    // `'static` rather than `&Value::Null`: the return borrows from `effect`, so
+    // a reference to a temporary would not outlive the call.
+    static NO_ARGS: Value = Value::Null;
+    let args = effect.payload.get(PAYLOAD_ARGS).unwrap_or(&NO_ARGS);
+    Some((tool, args))
+}
+
 /// The ledger a gate parked on this run should carry: what the run just
 /// delivered, unioned with what its own trigger input already listed.
 ///
@@ -1275,6 +1337,136 @@ mod tests {
 
     fn effect(workflow: &str, node: &str, input: Value) -> Effect {
         gate_effect(workflow, node, &input, "run-1", &[], &[], None)
+    }
+
+    /// A gate whose call the host classified — the shape issue #846 writes and
+    /// issue #1098 reads back.
+    fn gate_with_call(tool: &str, args: &Value) -> Effect {
+        gate_effect(
+            "sports_blog",
+            "fetch_bbc",
+            &json!({}),
+            "run-1",
+            &[],
+            &[],
+            Some(GateCall {
+                tool,
+                reason: None,
+                args: Some(args),
+                target: None,
+            }),
+        )
+    }
+
+    #[test]
+    fn gate_inner_call_reads_the_call_the_card_shows() {
+        let args = json!({ "url": "https://www.bbc.co.uk/sport" });
+        let gate = gate_with_call("web_fetch", &args);
+
+        let (tool, read_back) = gate_inner_call(&gate).expect("a classified gate names its call");
+        assert_eq!(tool, "web_fetch");
+        assert_eq!(read_back, &args);
+    }
+
+    /// The wrapper is what a naive classifier sees, and it is not the call. This
+    /// is the whole reason the projection exists.
+    #[test]
+    fn gate_inner_call_is_not_the_effect_kind() {
+        let gate = gate_with_call("web_fetch", &json!({ "url": "https://www.bbc.co.uk" }));
+        assert_eq!(gate.kind, WORKFLOW_APPROVE_KIND);
+        assert_eq!(
+            gate_inner_call(&gate).map(|(tool, _)| tool),
+            Some("web_fetch")
+        );
+    }
+
+    /// A gate the host could not classify has no inner call to offer, and must
+    /// not invent one — it stays per-call, as it always did.
+    #[test]
+    fn gate_inner_call_is_none_when_the_call_was_never_named() {
+        let bare = effect("sports_blog", "fetch_bbc", json!({}));
+        assert!(gate_inner_call(&bare).is_none());
+    }
+
+    /// `args` is written only when the node had some, so tool-without-args is an
+    /// ordinary shape. It answers `Null`, which every argument-aware classifier
+    /// resolves in the cautious direction.
+    #[test]
+    fn gate_inner_call_answers_null_for_a_call_with_no_arguments() {
+        let gate = gate_effect(
+            "sports_blog",
+            "fetch_bbc",
+            &json!({}),
+            "run-1",
+            &[],
+            &[],
+            Some(GateCall {
+                tool: "web_fetch",
+                reason: None,
+                args: None,
+                target: None,
+            }),
+        );
+        assert_eq!(gate_inner_call(&gate), Some(("web_fetch", &Value::Null)));
+    }
+
+    /// Kind-checked for the same reason [`gate_node_id`] is: a teammate's own
+    /// `web_fetch` effect carries a tool name too, and must not be read as a
+    /// gate.
+    #[test]
+    fn gate_inner_call_ignores_a_non_gate_effect() {
+        let mut agent_call = gate_with_call("web_fetch", &json!({ "url": "https://x.test" }));
+        agent_call.kind = "web_fetch".to_string();
+        assert!(gate_inner_call(&agent_call).is_none());
+    }
+
+    /// The second half of why a job card was never grantable, independent of its
+    /// `agent: None`. Classifying the wrapper asks about `workflow.approve`, an
+    /// undeclared name that fails closed; classifying the inner call asks about
+    /// the `web_fetch` the operator is looking at.
+    #[test]
+    fn a_gate_is_classified_by_the_call_it_stops_not_by_its_wrapper() {
+        let gate = gate_with_call(
+            crate::policy::consequence::WEB_FETCH,
+            &json!({ "url": "https://www.bbc.co.uk/sport" }),
+        );
+
+        assert!(
+            !crate::policy::consequence_of(&gate.kind, &gate.payload)
+                .standing
+                .is_grantable(),
+            "the wrapper kind is undeclared and must keep failing closed on its own"
+        );
+        assert!(
+            gate.may_be_granted_standing(),
+            "a BBC fetch is ScopedGrantable, and that is the call the card shows"
+        );
+    }
+
+    /// A gate stopping a per-call tool stays per-call. Reading the inner call
+    /// must widen nothing on its own — the classifier still decides.
+    #[test]
+    fn a_gate_stopping_a_per_call_tool_is_still_not_grantable() {
+        let gate = gate_with_call("shell", &json!({ "command": "echo hi" }));
+        assert!(!gate.may_be_granted_standing());
+    }
+
+    /// No readable host means no scope, and `ScopedGrantable` falls back to
+    /// per-call rather than minting a permission that would admit everything.
+    #[test]
+    fn a_gate_whose_url_names_no_host_is_still_not_grantable() {
+        let gate = gate_with_call(crate::policy::consequence::WEB_FETCH, &json!({}));
+        assert!(!gate.may_be_granted_standing());
+    }
+
+    #[test]
+    fn gate_workflow_id_names_the_permission_subject() {
+        let gate = effect("sports_blog", "fetch_bbc", json!({}));
+        assert_eq!(gate_workflow_id(&gate), Some("sports_blog"));
+
+        let mut not_a_gate = gate.clone();
+        not_a_gate.kind = "web_fetch".to_string();
+        assert!(gate_workflow_id(&not_a_gate).is_none());
     }
 
     /// A delivery row with `status`, as `deliver_outputs` would have returned it.

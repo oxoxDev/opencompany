@@ -103,7 +103,7 @@ const AUDIT = () => {
   return { out, measured };
 };
 
-const VIEWS = ['overview', 'company', 'chat', 'tasks', 'workspace', 'approvals', 'workflows', 'settings', 'memory'];
+const VIEWS = ['overview', 'company', 'chat', 'ledgers', 'workspace', 'approvals', 'workflows', 'settings', 'memory'];
 
 const browser = await chromium.launch();
 const ctx = await browser.newContext({ viewport: { width: 1440, height: 950 }, deviceScaleFactor: 1.5 });

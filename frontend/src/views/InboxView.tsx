@@ -177,7 +177,7 @@ export function InboxView({ client, company }: Props) {
         <div className="space-y-1">
           <p className="font-medium text-foreground">No inboxes yet</p>
           <p className="max-w-sm text-sm">
-            Give an agent its own inbox from the <span className="font-medium">Team</span> page —
+            Give a teammate its own inbox from the <span className="font-medium">Team</span> page —
             flip on the inbox toggle for anyone who needs to receive email. Mail sent to that
             address shows up here.
           </p>

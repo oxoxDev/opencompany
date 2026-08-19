@@ -256,6 +256,7 @@ mod tests {
             global: false,
             id: "a".into(),
             role: "Role".into(),
+            name: None,
             description: None,
             tier: tier.map(str::to_string),
             tools: Vec::new(),

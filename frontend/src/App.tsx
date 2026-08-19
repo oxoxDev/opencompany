@@ -1,5 +1,4 @@
 import {
-  type CSSProperties,
   lazy,
   Suspense,
   useCallback,
@@ -21,11 +20,7 @@ import {
   type LocalInstance,
 } from "@/api/transport/desktop";
 import { ApiError } from "@/api/types";
-import {
-  CONNECTION_RAIL_WIDTH,
-  ConnectionRail,
-  connectionRailVisible,
-} from "@/components/connection-rail";
+import { AddHostDialog, ConsoleChrome } from "@/components/host-switcher";
 import { resolveConfig } from "@/config";
 import {
   addConnection,
@@ -36,6 +31,7 @@ import {
   restoreConnections,
   useConnections,
 } from "@/connections/registry";
+import { HostsProvider, type HostsValue } from "@/connections/HostsContext";
 import type { ConnectionId } from "@/connections/types";
 import { ConnectionConsole } from "@/views/ConnectionConsole";
 
@@ -465,71 +461,57 @@ function Console() {
     (embedded.resolved ? connections[0] : undefined);
   const client = active ? clientFor(active.id) : undefined;
 
+  // Everything the switcher needs, assembled once and carried down by context.
+  //
+  // Context rather than props because the switcher now lives in the sidebar
+  // header — two layers below here, inside `ConnectionConsole` — and threading
+  // eight fields through a component whose job is a phase machine would put the
+  // whole roster in the way of every one of its states.
+  const hosts: HostsValue = {
+    connections,
+    selected: active?.id ?? null,
+    onSelect: setSelected,
+    onAdd: (baseUrl) => {
+      const id = addConnection({ baseUrl });
+      setSelected(id);
+      void probe(id);
+    },
+    localInstances: embedded.instances,
+    // Only offered where a host can actually be started: the browser build has
+    // no core to start one in, and passing handlers it cannot honour would put
+    // a button on screen that always fails.
+    onAddLocal: isDesktopRuntime()
+      ? async (label) => {
+          const created = await createLocalInstance(label);
+          await refreshLocal();
+          // Selected straight away: someone who just created a company means to
+          // open it, and the alternative is a new row they have to find.
+          if (created.instanceId) {
+            const opened = listConnections().find(
+              (c) => c.identity?.instanceId === created.instanceId,
+            );
+            if (opened) setSelected(opened.id);
+          }
+        }
+      : undefined,
+    onStartLocal: isDesktopRuntime()
+      ? async (id) => {
+          await startLocalInstance(id);
+          await refreshLocal();
+        }
+      : undefined,
+    onStopLocal: isDesktopRuntime()
+      ? async (id) => {
+          await stopLocalInstance(id);
+          await refreshLocal();
+        }
+      : undefined,
+    hub: Boolean(config.hub),
+  };
+
   return (
-    <div className="flex min-h-svh">
-      <ConnectionRail
-        connections={connections}
-        selected={active?.id ?? null}
-        hub={config.hub}
-        onSelect={setSelected}
-        onAdd={(baseUrl) => {
-          const id = addConnection({ baseUrl });
-          setSelected(id);
-          void probe(id);
-        }}
-        localInstances={embedded.instances}
-        // Only offered where a host can actually be started: the browser build
-        // has no core to start one in, and passing handlers it cannot honour
-        // would put a button on screen that always fails.
-        onAddLocal={
-          isDesktopRuntime()
-            ? async (label) => {
-                const created = await createLocalInstance(label);
-                await refreshLocal();
-                // Selected straight away: someone who just created a company
-                // means to open it, and the alternative is a new row they have
-                // to find in a rail of identical icons.
-                if (created.instanceId) {
-                  const opened = listConnections().find(
-                    (c) => c.identity?.instanceId === created.instanceId,
-                  );
-                  if (opened) setSelected(opened.id);
-                }
-              }
-            : undefined
-        }
-        onStartLocal={
-          isDesktopRuntime()
-            ? async (id) => {
-                await startLocalInstance(id);
-                await refreshLocal();
-              }
-            : undefined
-        }
-        onStopLocal={
-          isDesktopRuntime()
-            ? async (id) => {
-                await stopLocalInstance(id);
-                await refreshLocal();
-              }
-            : undefined
-        }
-      />
-      {/* `--oc-rail-inset` tells the shell's `position: fixed` sidebar where
-          this column actually starts. A fixed element positions against the
-          viewport, so without it the sidebar pins to 0 and slides under the
-          rail — see the note on `sidebar-container`. Zero when no rail is
-          drawn, which is the ordinary single-host web deployment. */}
-      <div
-        className="min-w-0 flex-1"
-        style={
-          {
-            "--oc-rail-inset": connectionRailVisible(connections.length, config.hub)
-              ? CONNECTION_RAIL_WIDTH
-              : "0px",
-          } as CSSProperties
-        }
-      >
+    <HostsProvider value={hosts}>
+      <div className="min-h-svh">
         {active && client ? (
           // Keyed by connection: switching hosts remounts rather than
           // reconciling, so no view can carry one host's in-flight state into
@@ -547,10 +529,19 @@ function Console() {
             suggestedEmail={embedded.operatorEmails[active.id]}
           />
         ) : (
-          <NoConnection starting={!embedded.resolved} />
+          // The switcher rides along, because an operator whose local host is
+          // gone still has somewhere else to connect to — and "Add a host" is
+          // the only way out of a desktop that holds none.
+          <ConsoleChrome>
+            <NoConnection starting={!embedded.resolved} />
+          </ConsoleChrome>
         )}
       </div>
-    </div>
+      {/* Beside the console rather than inside it: creating a host on this
+          computer selects it, and that remounts the console. A dialog mounted
+          within would take itself off screen at the moment it succeeded. */}
+      <AddHostDialog />
+    </HostsProvider>
   );
 }
 
@@ -567,7 +558,8 @@ interface EmbeddedState {
    * Every local instance the core knows about, running or not.
    *
    * The stopped ones are here and nowhere else: they have no address, so they
-   * cannot be connections. The rail's dialog is where they are startable.
+   * cannot be connections. The switcher's "Add a host" dialog is where they
+   * are startable.
    */
   instances: LocalInstance[];
   /**
@@ -605,7 +597,7 @@ function Waiting({ children }: { children: React.ReactNode }) {
  * error rather than an absence. The desktop genuinely can — it holds only the
  * hosts it was told about, and the embedded one may not have started.
  *
- * The rail stays on screen behind this (see `connectionRailVisible`), because
+ * The host switcher stays on screen above this (see `ConsoleChrome`), because
  * an operator whose local host is gone still has somewhere else to connect to,
  * and this is the state in which that matters most.
  */
@@ -621,8 +613,8 @@ function NoConnection({ starting }: { starting: boolean }) {
           <p className="text-sm font-medium">No host to show</p>
           <p className="text-sm text-muted-foreground">
             The host on this computer didn't start — another copy of OpenCompany may be
-            holding its data. Quit the other copy and reopen this one, or add a host with
-            the + on the left.
+            holding its data. Quit the other copy and reopen this one, or add a host from
+            the switcher above.
           </p>
         </div>
       )}

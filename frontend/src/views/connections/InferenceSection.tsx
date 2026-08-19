@@ -232,15 +232,15 @@ export function InferenceSection({
       // Issue #266: only the host knows whether the *running* brain can act on
       // what was just saved. Which brain a company runs is fixed when it is
       // built, so a company that started with no inference source keeps echoing
-      // no matter what lands here — "agents use it on their next turn" was a
+      // no matter what lands here — "teammates use it on their next turn" was a
       // promise the runtime could not keep for exactly the transition an
       // operator makes first. Follow the response instead of asserting.
       if (result.status.restartRequired) {
-        toast.warning("Inference saved — restart the company for agents to use it.", {
+        toast.warning("Inference saved — restart the company for teammates to use it.", {
           description: result.note,
         });
       } else {
-        toast.success("Inference updated. Agents use it on their next turn.");
+        toast.success("Inference updated. Teammates use it on their next turn.");
       }
       setKey("");
       setTest({ kind: "idle" });
@@ -268,7 +268,7 @@ export function InferenceSection({
         models: status && Object.keys(status.models).length ? status.models : undefined,
         key: "",
       });
-      toast.success("Removed the company key. Agents fall back on their next turn.");
+      toast.success("Removed the company key. Teammates fall back on their next turn.");
       setKey("");
       setTest({ kind: "idle" });
       await refresh();
@@ -301,7 +301,7 @@ export function InferenceSection({
         // host's note, which names the process restart that would work.
         toast.warning("Still needs a restart.", { description: result.note });
       } else {
-        toast.success("Restarted. Agents think with the new provider from their next turn.");
+        toast.success("Restarted. Teammates think with the new provider from their next turn.");
       }
       setStatus(result.status);
     } catch (err) {
@@ -363,15 +363,15 @@ export function InferenceSection({
             so each says in one line which it is — the distinction is otherwise
             only in a module doc no operator reads (#637). */}
         <span className="text-xs text-muted-foreground">
-          the key your agents think with — not the company account key
+          the key your teammates think with — not the company account key
         </span>
       </div>
       <p className="text-sm text-muted-foreground">
-        Choose which model provider your agents think with. Bring your own key for OpenRouter, a
+        Choose which model provider your teammates think with. Bring your own key for OpenRouter, a
         custom OpenAI-compatible endpoint, or a local Ollama server — the key is stored securely and
-        never shown again. Switching provider or model takes effect on the agents' next turn. Giving
-        inference to a company that started without any does not: the brain is chosen at startup, so
-        that first setup needs a restart.
+        never shown again. Switching provider or model takes effect on the teammates' next turn.
+        Giving inference to a company that started without any does not: the brain is chosen at
+        startup, so that first setup needs a restart.
       </p>
 
       {load === "loading" ? (
@@ -428,7 +428,7 @@ export function InferenceSection({
                         <span className="font-medium">Restart required.</span> This company started
                         with no inference source, so it is running the offline echo brain and its
                         scheduled workflows cannot fire. The brain is chosen at startup — this
-                        configuration is saved, but agents keep echoing until the company is
+                        configuration is saved, but teammates keep echoing until the company is
                         restarted.
                       </span>
                       {/* The action, not just the diagnosis. Telling a hosted

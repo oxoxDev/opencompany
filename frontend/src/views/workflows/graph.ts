@@ -425,7 +425,7 @@ export function layout(
         kind: n.kind,
         name: n.name,
         // Agent nodes surface their roster id; otherwise the node's summary.
-        summary: n.summary ?? (n.agent ? `Agent: ${n.agent}` : ""),
+        summary: n.summary ?? (n.agent ? `Teammate: ${n.agent}` : ""),
         emoji: meta.emoji,
         color: meta.color,
         runState: runStates[n.id],

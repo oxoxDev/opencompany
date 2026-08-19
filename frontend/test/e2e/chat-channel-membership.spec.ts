@@ -113,7 +113,7 @@ async function mockApi(page: Page, mode: () => DesksMode) {
 }
 
 /** The header's member toggle — its label ends in "members". */
-const membersToggle = (page: Page) => page.getByRole("button", { name: /members$/i });
+const membersToggle = (page: Page) => page.getByRole("button", { name: /teammates$/i });
 
 /** The member pane; the channel rail is the other `complementary` on screen. */
 const pane = (page: Page) => page.getByRole("complementary").last();
@@ -189,7 +189,7 @@ test("#369 a host with no desks surface still shows the whole roster", async ({ 
   // behaviour on purpose — one plain roster, no "in this channel" claim.
   await expect(membersToggle(page)).toHaveText(/17/);
   await openPane(page);
-  await expect(pane(page)).toContainText("17 agents");
+  await expect(pane(page)).toContainText("17 teammates");
   await expect(pane(page).getByRole("heading", { name: "In this channel" })).toHaveCount(0);
   await expect(pane(page).locator("ul").first().locator("li")).toHaveCount(17);
 });

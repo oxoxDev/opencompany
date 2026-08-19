@@ -173,7 +173,7 @@ export function PolicySettings({ client, company }: Props) {
           Approvals
         </CardTitle>
         <CardDescription>
-          How much the agents do on their own, and what they always ask about
+          How much the teammates do on their own, and what they always ask about
           first.
         </CardDescription>
       </CardHeader>

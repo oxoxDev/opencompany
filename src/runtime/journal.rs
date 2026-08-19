@@ -366,6 +366,57 @@ impl JournalRecord {
             Self::GrantConsumed { .. } => Durability::Host,
             // Losing a park loses the *question*: the approval vanishes and the
             // agent parks it again on its next attempt. Nothing external fired.
+            //
+            // **Except for a workflow gate, which has no next attempt (issue
+            // #1145).** The re-park reasoning above is a property of the
+            // *caller*, not of the record, and it was generalised to a caller
+            // that has none. A chat turn re-enters its gate and mints a new
+            // approval, so the cost of the loss is one extra question — the
+            // tolerance is exactly right there, and that is where the volume is.
+            // A workflow run does not: `workflow_resume` turns on the fact that
+            // "resume is a re-run, because a paused run is settled" — the engine
+            // returned, the future completed, and nothing is holding a
+            // continuation. So the parked effect is not a record *of* the
+            // continuation, it **is** the continuation, carrying the whole
+            // trigger input, and `WorkflowGateQueue::rearm` rebuilds the live
+            // gate set at recovery from exactly these still-parked lines. Lose
+            // the line and the run keeps a durable `pending_approvals` naming a
+            // question that exists nowhere: no card to decide, no re-park
+            // coming, and the whole downstream of that pipeline held behind it.
+            //
+            // Not a new guarantee so much as the one this crate already claims
+            // in two other places and did not deliver — `workflow_resume`'s
+            // "restart durability … a host that dies between the park and the
+            // approval loses nothing", and `CompanyCycle::park`'s "survives a
+            // restart with its original `ApprovalId`". Both hold for a *process*
+            // restart and fail for the host death the first one names, because
+            // `Process` is page-cache-resident by definition. The flush is the
+            // same trade `GrantConsumed` accepted four arms up: one flush on a
+            // record written at operator-decision scale.
+            //
+            // **Deliberately NOT extended to an agent node's gated tool call**,
+            // though those park inside a workflow run too and strand it just as
+            // badly. Flushing them would buy nothing: their continuation needs
+            // the workflow id and trigger input, which the tool-call effect does
+            // not carry, so `BlockedNodeQueue` stashes them **in memory** and
+            // — unlike the gate queue — does not rehydrate from the journal at
+            // all (`blocked_nodes`, stated there as the #899 Stage-1 boundary).
+            // A durable record whose continuation died with the process is a
+            // flush that changes nothing, and it would read as a fix. Making
+            // that path survive is #899 Stage 2.
+            //
+            // Keyed on the effect kind rather than on `run_id`, which cannot do
+            // this job: `run_id` is stamped with a *task attempt* id at the
+            // dispatch boundary and with a *workflow run* id by `gate_effect`,
+            // so `is_some()` also selects card runs and blocked-node parks —
+            // the two cases this must not widen to. `WORKFLOW_APPROVE_KIND` is
+            // minted in exactly one place, for exactly the parks whose loss
+            // strands a run nothing will re-enter.
+            Self::ApprovalParked { effect, .. }
+                if effect.kind == crate::runtime::WORKFLOW_APPROVE_KIND =>
+            {
+                Durability::Host
+            }
             Self::ApprovalParked { .. } => Durability::Process,
             // Bookkeeping after the decision. A ghost approval that is approved
             // a second time cannot duplicate the effect, because the effect's
@@ -1769,14 +1820,22 @@ impl RuntimeJournal {
     /// [`JournalRecord::durability`], and this is the single choke point that
     /// passes that decision to the sink:
     ///
-    /// * The three [`Durability::Host`] kinds — `EffectExecuted`,
+    /// * The three unconditional [`Durability::Host`] kinds — `EffectExecuted`,
     ///   `GrantConsumed` and `StandingGrantRevoked` — are on stable storage
     ///   before this returns. So the at-most-once contract holds against
     ///   **losing the machine** for precisely the records whose loss would
     ///   repeat an external action, and a failed flush fails the append — which
     ///   aborts `execute_effect_once` before `perform_effect` and so cannot
     ///   produce the duplicate it is guarding against.
-    /// * The other ten are [`Durability::Process`]: killing the process cannot
+    /// * `ApprovalParked` is [`Durability::Host`] **for a workflow gate only**
+    ///   (issue #1145), and `Process` for every other park. It is the one kind
+    ///   whose level is decided by its contents rather than by its tag, because
+    ///   the reasoning behind `Process` is a property of the caller: a chat turn
+    ///   re-enters its gate and re-parks, a paused workflow run has already
+    ///   settled and never will. For that run the parked effect *is* the
+    ///   continuation, so its loss strands the run permanently rather than
+    ///   costing a second question.
+    /// * The other nine are [`Durability::Process`]: killing the process cannot
     ///   lose them, a host crash can. That is the decision, not a gap left open.
     ///   Losing any of them makes the runtime **re-ask** — an approval is parked
     ///   again, an operator is prompted again, a cycle bracket reads as
@@ -2969,6 +3028,7 @@ mod test {
         StandingGrant {
             id: GrantId::new(id),
             agent: "ops".into(),
+            workflow: None,
             tool: tool.into(),
             granted_by: Actor {
                 kind: crate::ports::types::ActorKind::User,
@@ -3610,6 +3670,12 @@ mod test {
     /// across the line: flipping `EffectExecuted` to `Process` compiles, passes
     /// every other test in this file, and silently gives up the one guarantee
     /// the journal exists for. This is the test that notices.
+    ///
+    /// `every_record_kind`'s `ApprovalParked` sample carries an ordinary effect,
+    /// so it belongs on the `Process` side here. Its workflow-gate arm is the
+    /// one kind whose level depends on contents rather than tag, and it is
+    /// pinned separately below (issue #1145) — deliberately not by loosening
+    /// this list, which is the assertion that would have stopped noticing.
     #[test]
     fn host_durable_kinds_are_exactly_the_three_that_could_repeat_an_action() {
         let all = every_record_kind();
@@ -3637,6 +3703,55 @@ mod test {
              widening it taxes the hot path, narrowing it lets an effect duplicate \
              or a spent grant re-arm"
         );
+    }
+
+    /// One `ApprovalParked` line, built from the given effect kind.
+    fn parked_with_kind(kind: &str) -> JournalRecord {
+        let mut effect = effect();
+        effect.kind = kind.to_string();
+        JournalRecord::ApprovalParked {
+            id: ApprovalId::new("a"),
+            effect,
+            at_millis: 1,
+            task: Some(TaskLink::Unlinked),
+            thread: None,
+            parent: None,
+            cycle: None,
+        }
+    }
+
+    /// **Issue #1145.** A workflow gate's park is host-durable; every other park
+    /// is not.
+    ///
+    /// Both arms in one test because the assertion *is* the distinction. The
+    /// `Host` half alone would pass if every park were flushed — taxing the
+    /// journal's approval path to fix one caller — and the `Process` half alone
+    /// would pass on the code this replaces.
+    ///
+    /// Why the gate is different: a paused workflow run is *settled*, not
+    /// suspended, so nothing re-enters the gate and the parked effect is the
+    /// run's only continuation. A chat turn re-parks on its next attempt, which
+    /// is why its park stays `Process` — and why the volume this record is
+    /// written at is untouched.
+    #[test]
+    fn only_a_workflow_gate_park_is_host_durable() {
+        assert_eq!(
+            parked_with_kind(crate::runtime::WORKFLOW_APPROVE_KIND).durability(),
+            Durability::Host,
+            "a workflow gate's park is the run's only continuation — losing it \
+             strands the run behind a question that exists nowhere, and nothing \
+             re-parks it"
+        );
+
+        // The callers that do re-park, and the volume this record is written at.
+        for kind in ["shell", "http.request", "message.send", "composio_execute"] {
+            assert_eq!(
+                parked_with_kind(kind).durability(),
+                Durability::Process,
+                "{kind} parks are re-asked on the next attempt; flushing them \
+                 taxes the approval path for a question that comes back on its own"
+            );
+        }
     }
 
     /// **Issue #392**: a host-durable record's append really does take the

@@ -52,8 +52,8 @@ export function McpServersView({ client, company }: Props) {
         <div className="space-y-1">
           <h2 className="text-2xl font-semibold tracking-tight">MCP Servers</h2>
           <p className="text-sm text-muted-foreground">
-            The tool servers this company&apos;s agents can call, from its manifest and the ones you
-            add here.
+            The tool servers this company&apos;s teammates can call, from its manifest and the
+            ones you add here.
           </p>
         </div>
 
@@ -62,8 +62,8 @@ export function McpServersView({ client, company }: Props) {
             <Info className="size-4" />
             <AlertTitle>Only an admin can change this company&apos;s tool servers</AlertTitle>
             <AlertDescription>
-              A server here hands every agent a new set of tools, so an admin adds and removes them.
-              You can see what is installed.
+              A server here hands every teammate a new set of tools, so an admin adds and removes
+              them. You can see what is installed.
             </AlertDescription>
           </Alert>
         )}

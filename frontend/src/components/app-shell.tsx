@@ -9,7 +9,6 @@ import {
   Settings2,
   ShieldCheck,
   BookText,
-  SquareKanban,
   Workflow,
 } from "lucide-react";
 
@@ -39,17 +38,21 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { FeedbackDialog } from "@/components/feedback-dialog";
+import { HostSwitcher } from "@/components/host-switcher";
 import {
   AutoCollapse,
   RESTING_ROW,
   SidebarCollapseToggle,
   SidebarControls,
 } from "@/components/sidebar-controls";
+import { SetupController } from "@/setup/SetupController";
 import { TourController } from "@/tour/TourController";
 import { useCompany } from "@/hooks/use-company";
 import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hooks/use-events";
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
+import { BOARD_LEDGER } from "@/lib/board-columns";
+import { taskIdFromSegment } from "@/lib/task-route";
 import { toast } from "sonner";
 
 import {
@@ -84,7 +87,7 @@ import { Conversation } from "@/views/Conversation";
 import { TeamView } from "@/views/TeamView";
 import { ApprovalsView } from "@/views/ApprovalsView";
 import { LedgersView } from "@/views/LedgersView";
-import { TasksView } from "@/views/TasksView";
+import { TaskDetailRoute } from "@/views/TaskDetailRoute";
 import { InboxView } from "@/views/InboxView";
 import { MemoryView } from "@/views/MemoryView";
 import { FeedbackView } from "@/views/FeedbackView";
@@ -140,15 +143,12 @@ const NAV: NavItem[] = [
   // creation and membership since #302 unmounted the flat Desks page.
   { view: "company", label: "Company", icon: Network },
   { view: "chat", label: "Chat", icon: MessagesSquare },
-  // The board, restored and now driven by the `tasks` ledger: its columns,
-  // their order and their labels are the host's declaration, and the cards are
-  // the task records. It keeps its own entry because it is the surface an
-  // operator lives in, and because a card carries far more than a ledger row.
-  { view: "tasks", label: "Tasks", icon: SquareKanban },
-  // Everything else the company records — goals, decisions, and whatever axis
-  // this workspace declared. The board appears here too, as the `tasks`
-  // ledger, so this screen is the whole record rather than most of it; the
-  // two render through the same component.
+  // Everything the company records — goals, decisions, whatever axis this
+  // workspace declared, **and the task board**, which is the `tasks` ledger and
+  // renders here as its columns. There was a Tasks entry beside this one until
+  // issue #1140, showing the same records through the same component, and an
+  // operator who met their work twice had to learn which of the two was the
+  // real one. There is one.
   { view: "ledgers", label: "Ledgers", icon: BookText },
   { view: "workspace", label: "Workspace", icon: FolderClosed },
   { view: "approvals", label: "Approvals", icon: ShieldCheck },
@@ -172,6 +172,15 @@ const NAV: NavItem[] = [
  * budget controls `MembersPane` ported from Team (issue #360) — but they
  * keep answering `#/conversation` and `#/team` until the chat covers the
  * last of what they still do better (a desk's persisted transcript).
+ *
+ * `tasks` is here for a different reason than the rest, and it is the load-
+ * bearing line of issue #1140. The board page is gone, but `#/tasks/<id>` is
+ * the card detail — the timeline, the plan brief, the discussion, the attempts,
+ * the steer controls — and it is linked from chat, from an approval card, from
+ * a workflow run's rows and from every card on the board. Ledgers deliberately
+ * does not reproduce any of it. Drop `tasks` from this list and `useHashView`
+ * discards the head *and* its sub-page, so every one of those links quietly
+ * lands on Overview instead of the card it named.
  */
 const HIDDEN_VIEWS: View[] = [
   "feedback",
@@ -180,9 +189,30 @@ const HIDDEN_VIEWS: View[] = [
   "finances",
   "conversation",
   "team",
+  "tasks",
 ];
 
 const VIEWS: View[] = [...NAV.map((i) => i.view), ...HIDDEN_VIEWS];
+
+/**
+ * `#/tasks` with no card named the board page, which is retired (issue #1140).
+ *
+ * It lands where the board actually lives now, so a bookmark, a habit, or a
+ * link written before the move all still arrive at a board rather than at a
+ * 404 — and so does `#/tasks/<malformed>`, which names no card either. A real
+ * `#/tasks/<id>` returns `null` from here and resolves untouched.
+ *
+ * Module scope, because `useHashView` holds this in a `useCallback` dependency
+ * list: an inline arrow would be a new identity on every render and would
+ * re-resolve the route on each one.
+ */
+const REWRITE_RETIRED = (
+  head: string,
+  sub: string | null,
+): [View, string | null] | null =>
+  head === "tasks" && taskIdFromSegment(sub) === null
+    ? ["ledgers", BOARD_LEDGER]
+    : null;
 
 /** How many workflow run-progress frames (issue #371) the shell keeps for the
  * Workflows canvas. A run emits roughly one per node, so this holds many runs'
@@ -259,7 +289,11 @@ export function AppShell({
 }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
-  const [view, sub, navigate] = useHashView<View>(VIEWS, "overview");
+  const [view, sub, navigate] = useHashView<View>(
+    VIEWS,
+    "overview",
+    REWRITE_RETIRED,
+  );
   // Track the latest non-default segment per view so returning to a tab with
   // sub-pages restores operator context (for example `#/workflows/<id>`), instead
   // of always dropping it to the parent view.
@@ -313,6 +347,36 @@ export function AppShell({
     [navigate],
   );
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  /**
+   * Whether the product tour should hold — first-run setup is on screen, or the
+   * company still has nobody on it (`docs/spec/runtime/company-setup.md`).
+   *
+   * Setup runs first, and the tour waits until there is a team to walk through.
+   * Holding on emptiness rather than only on the dialog is what stops a skipped
+   * setup from handing the operator a tour of empty pages instead.
+   */
+  // Starts held: until `SetupController` has read the roster we do not know
+  // whether setup is about to open, and an unheld tour would flash its welcome
+  // over it.
+  const [setupOpen, setSetupOpen] = useState(true);
+  /** Set by the Team page's prompt to reopen setup after a skip. */
+  const [setupForced, setSetupForced] = useState(false);
+  /**
+   * Did this mount start on a view the operator named?
+   *
+   * Captured once, from the first render's route, so first-run setup can decline
+   * to open over a deep link. `useRef(...).current` rather than state: it is a
+   * property of how the console was opened and must never change afterwards —
+   * the tour drives `view` around, and re-reading it would let a tour step
+   * suppress the very dialog that is meant to precede the tour.
+   */
+  const deepLinked = useRef(view !== "overview" || Boolean(sub)).current;
+  /**
+   * Bumped when setup finishes, so the Team page re-reads a roster that now has
+   * people on it. A counter rather than a boolean: a second run must re-trigger
+   * the read, and a flag that was already `true` would not.
+   */
+  const [teamBuilt, setTeamBuilt] = useState(0);
   // The shell owns every channel's transcript, not `ChatView` — the shell
   // mounts and unmounts `ChatView` per route, so component-local state there
   // would be discarded on every trip away from Chat and back.
@@ -1112,7 +1176,7 @@ export function AppShell({
       // An approve needs no line: the continuation lands as a real reply, which
       // is the whole point of deciding here.
       if (verdict === "deny") {
-        noteInChannel(approval.thread, "Declined — the agent will not take that action.");
+        noteInChannel(approval.thread, "Declined — the teammate will not take that action.");
       }
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : "something went wrong";
@@ -1237,6 +1301,12 @@ export function AppShell({
       <AutoCollapse view={view} />
       <Sidebar collapsible="icon">
         <SidebarHeader>
+          {/* Which host, and how every host is doing. It sits above the collapse
+              toggle because it names where you are — the first thing the column
+              should answer — and it is the only control here that can take you
+              somewhere else entirely. See `host-switcher.tsx`; it replaced the
+              icon rail that used to stand outside this sidebar (issue #1142). */}
+          <HostSwitcher companyName={feed.status.name} />
           <SidebarCollapseToggle />
         </SidebarHeader>
         <SidebarContent data-tour="sidebar">
@@ -1357,21 +1427,19 @@ export function AppShell({
             />
           )}
           {view === "inbox" && <InboxView client={client} company={company} />}
+          {/* All that is left of the Tasks page: the card detail. `sub` is a
+              real id by the time this renders — `REWRITE_RETIRED` sent every
+              other `#/tasks…` address to the board in Ledgers. */}
           {view === "tasks" && (
-            <TasksView
+            <TaskDetailRoute
               client={client}
               company={company}
-              // Issue #464: the board learns that work appeared. The same
-              // counter the chat's in-flight strip reads, so a card opened from
-              // chat lands on the board without a reload.
-              taskEventTick={taskEventTick}
+              taskId={taskIdFromSegment(sub) ?? ""}
               attemptEventTick={attemptEventTick}
-              // Issue #883: a paused card is blocked until every approval its
-              // turn parked is decided, and the board's own read carries none
-              // of them. This is the feed the sidebar badge already polls, so
-              // the card says what it is waiting on without a second request.
-              approvals={feed.approvals}
-              now={feed.now}
+              // Issue #883: so a waiting card can name the blocked call rather
+              // than only counting it. The feed the sidebar badge already polls,
+              // so the screen says what it is waiting on with no second request.
+              parked={feed.approvals}
               // Issue #246: the card → chat half of the round trip. A card
               // opened from a conversation remembers which one, so its detail
               // screen can put the operator back in that thread.
@@ -1379,11 +1447,9 @@ export function AppShell({
                 setActiveThreadId(threadId);
                 setView("conversation");
               }}
-              // Issue #883: "Review" on a blocked card opens the queue narrowed
-              // to that card. Through `navigate` rather than `setView` so the
-              // filter lands in the hash and survives a refresh and the Back
-              // button, like every other sub-page.
-              onReviewApprovals={(taskId) => navigate("approvals", encodeURIComponent(taskId))}
+              // Back, and a deleted card, go to the board — which is the
+              // `tasks` ledger. Through `navigate` so the address follows.
+              onLeave={() => navigate("ledgers", BOARD_LEDGER)}
             />
           )}
           {view === "ledgers" && (
@@ -1400,6 +1466,22 @@ export function AppShell({
               // here; the card's timeline, plan, discussion and attempts stay
               // where they already work.
               onOpenCard={(id) => navigate("tasks", id)}
+              // Issue #464: the board learns that work appeared. The same
+              // counter the chat's in-flight strip reads, so a card opened from
+              // chat lands on the board without a reload.
+              taskEventTick={taskEventTick}
+              // Issue #883: a paused card is blocked until every approval its
+              // turn parked is decided, and neither the ledger's rows nor the
+              // task store carries them. This is the feed the sidebar badge
+              // already polls, so the card says what it is waiting on without a
+              // second request.
+              approvals={feed.approvals}
+              now={feed.now}
+              // Issue #883: "Review" on a blocked card opens the queue narrowed
+              // to that card. Through `navigate` rather than `setView` so the
+              // filter lands in the hash and survives a refresh and the Back
+              // button, like every other sub-page.
+              onReviewApprovals={(taskId) => navigate("approvals", encodeURIComponent(taskId))}
             />
           )}
           {view === "team" && (
@@ -1412,6 +1494,11 @@ export function AppShell({
               // unknown one against the host rather than guessing here.
               sub={sub}
               onOpenAgent={(agentId) => navigate("team", agentId ?? undefined)}
+              // Setup just staffed the company, so the roster read is stale.
+              refreshKey={teamBuilt}
+              // Skipping setup must not be a dead end: an unstaffed company keeps
+              // a visible way back in.
+              onRunSetup={() => setSetupForced(true)}
             />
           )}
           {view === "memory" && <MemoryView client={client} company={company} />}
@@ -1545,7 +1632,17 @@ export function AppShell({
         onOpenChange={setFeedbackOpen}
       />
 
-      <TourController company={company} setView={setView} />
+      <SetupController
+        client={client}
+        company={company}
+        force={setupForced}
+        deepLinked={deepLinked}
+        onForceHandled={() => setSetupForced(false)}
+        onOpenChange={setSetupOpen}
+        onCompleted={() => setTeamBuilt((n) => n + 1)}
+      />
+
+      <TourController company={company} setView={setView} hold={setupOpen} />
     </SidebarProvider>
   );
 }

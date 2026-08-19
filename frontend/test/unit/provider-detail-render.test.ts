@@ -175,7 +175,7 @@ describe("the provider detail view", () => {
       true,
     );
     expect(text()).not.toContain("Default");
-    expect(text()).toContain("Which account agents act as");
+    expect(text()).toContain("Which account teammates act as");
     // And specifically not the claim it replaced: an operator reading this
     // panel must not be told to disconnect an account to control which one acts.
     expect(text()).not.toContain("sends no connection id");
@@ -237,7 +237,7 @@ describe("the provider detail view", () => {
     await render(unconnectedGmail(), true);
     expect(text()).toContain("not connected");
     expect(text()).toContain("Connect an account");
-    expect(text()).toContain("agents have none of its tools");
+    expect(text()).toContain("teammates have none of its tools");
   });
 
   it("shows no usage figure for a provider that was never connected or used", async () => {
@@ -263,7 +263,7 @@ describe("the provider detail view", () => {
     // #396: the native `oauth/{provider}` entry is written and read by nothing.
     // A detail view is where that would look healthiest, so it is stated.
     await render(gmail([account()], ["composio", "native"]), true);
-    expect(text()).toContain("No agent reads it");
+    expect(text()).toContain("No teammate reads it");
   });
 });
 
@@ -358,7 +358,7 @@ describe("the same panel, opened on a remote MCP server (#821)", () => {
 
   it("states what removing a runtime server reaches, and what it does not", async () => {
     await openMcp(mcpServer({ source: "runtime" }));
-    expect(text()).toContain("drops it from every agent's tool belt on the next turn");
+    expect(text()).toContain("drops it from every teammate's tool belt on the next turn");
     expect(text()).toContain("Nothing is revoked at the server's own end");
   });
 
@@ -379,7 +379,7 @@ describe("the same panel, opened on a remote MCP server (#821)", () => {
     // #568, restated where the panel can afford the sentence the row could not:
     // usage above it is history, not evidence that it is reachable now.
     await openMcp(mcpServer({ reachableBy: [] }));
-    expect(text()).toContain("No agent can reach this server");
+    expect(text()).toContain("No teammate can reach this server");
     // #931: the line prints each teammate's display name. An operator-added
     // teammate's id is a minted internal string, and printing it told a reader
     // nothing about who can reach the server — which is the line's whole point.

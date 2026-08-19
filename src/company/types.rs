@@ -447,6 +447,23 @@ pub struct Agent {
     pub id: String,
     /// Human-readable job title.
     pub role: String,
+    /// The display name an operator gave this teammate, when it has one
+    /// (issue #1105).
+    ///
+    /// Set only for an operator-added (overlay) teammate, whose name the
+    /// console shows on the DM header, subtitle and composer; a manifest
+    /// `[[agent]]` is addressed by its role and leaves this `None`. Carried
+    /// here so [`persona_prompt`](crate::company::prompt::persona_prompt) can tell the
+    /// model the name the interface is already calling it — without it the
+    /// agent denies being the person the console names.
+    ///
+    /// `#[serde(skip)]` deliberately: this is an in-memory carrier filled by
+    /// the roster build, not a manifest key. Making it authorable would mean
+    /// adding it to `AgentFile` too (`crate::company::agent_file`), or a
+    /// `name` written in an `agents/*.toml` would be silently ignored while
+    /// the same key worked in `company.toml`.
+    #[serde(skip)]
+    pub name: Option<String>,
     /// What this agent does.
     #[serde(default)]
     pub description: Option<String>,

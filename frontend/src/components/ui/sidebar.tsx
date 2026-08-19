@@ -232,20 +232,16 @@ function Sidebar({
         data-slot="sidebar-container"
         data-side={side}
         className={cn(
-          // `left` is `--oc-rail-inset`, not 0.
+          // `left: 0`, and nothing stands to the left of it any more.
           //
           // This container is `fixed`, so it positions against the VIEWPORT
-          // rather than the column it is written inside. When anything stands
-          // to its left — the connection rail, which appears as soon as there
-          // are two hosts — pinning it to 0 slides the whole sidebar
-          // underneath: every icon and the first characters of every label
-          // disappear behind the rail. The rail already carries `z-50` from an
-          // earlier pass at this, which fixed the clicks landing on the wrong
-          // element and left the sidebar visually cut in half.
-          //
-          // The shell sets the variable; it defaults to 0 so a console with no
-          // rail is unchanged. See `CONNECTION_RAIL_WIDTH`.
-          "fixed inset-y-0 z-10 hidden h-svh w-(--sidebar-width) transition-[left,right,width] duration-200 ease-linear data-[side=left]:left-[var(--oc-rail-inset,0px)] data-[side=left]:group-data-[collapsible=offcanvas]:left-[calc(var(--oc-rail-inset,0px)-var(--sidebar-width))] data-[side=right]:right-0 data-[side=right]:group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)] md:flex",
+          // rather than the column it is written inside. It used to be offset
+          // by `--oc-rail-inset` because the connection rail occupied the first
+          // 56px of the window and pinning this to 0 slid the whole sidebar
+          // underneath it — every icon and the first characters of every label
+          // clipped. Issue #1142 replaced that rail with a switcher in this
+          // sidebar's own header, so the offset has nothing left to clear.
+          "fixed inset-y-0 z-10 hidden h-svh w-(--sidebar-width) transition-[left,right,width] duration-200 ease-linear data-[side=left]:left-0 data-[side=left]:group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)] data-[side=right]:right-0 data-[side=right]:group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)] md:flex",
           // Adjust the padding for floating and inset variants.
           variant === "floating" || variant === "inset"
             ? "p-2 group-data-[collapsible=icon]:w-[calc(var(--sidebar-width-icon)+(--spacing(4))+2px)]"

@@ -134,7 +134,7 @@ export function AssigneeSelect({
         // to staff is a legitimate write. Say that it is empty; don't hide it.
         hint:
           desk.members.length === 0
-            ? "no members yet"
+            ? "no teammates yet"
             : `${desk.members.length} teammate${desk.members.length === 1 ? "" : "s"}`,
       })),
     [desks],

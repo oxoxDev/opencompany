@@ -139,6 +139,13 @@ pub async fn start_with(
 
     let config = AppConfig {
         bind: "127.0.0.1:0".to_string(),
+        // The `[workspace]` section of the root's `config.toml`, resolved by
+        // `prepare_instance`. Not layout — these two are the knobs every
+        // company builder reads — but they come from the same file, and `serve`
+        // sets them from it. A desktop that skipped them ran with the
+        // compiled-in defaults and silently ignored the operator's config.
+        workspace_quota: instance.workspace().quota,
+        workspace_git_enabled: instance.workspace().git_enabled,
         // The standing local admin, and the same seam the hosted control plane
         // fills with `OPENCOMPANY_ADMIN_EMAIL`. Without an eligible address no
         // company on this host can be signed into, whoever created it — the

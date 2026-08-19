@@ -338,6 +338,7 @@ async fn harness(
         overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
+        setup: None,
     };
 
     let pool = HarnessPool::new();
@@ -770,6 +771,7 @@ async fn supervised(deps: &HarnessDeps, grants: &str) -> (HarnessPool, CompanyRe
         overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
+        setup: None,
     };
     record.manifest.tools.allow = manifest(grants).tools.allow;
     let pool = HarnessPool::new();

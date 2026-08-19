@@ -2899,6 +2899,7 @@ mod tests {
         let grant = StandingGrant {
             id: GrantId::new("g610"),
             agent: "ops".to_string(),
+            workflow: None,
             tool: COMPOSIO_EXECUTE.to_string(),
             granted_by: crate::ports::types::Actor {
                 kind: crate::ports::types::ActorKind::User,

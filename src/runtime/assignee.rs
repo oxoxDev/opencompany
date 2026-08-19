@@ -20,7 +20,7 @@
 //! four cases **distinct** — [`AssigneeResolution`] — so a caller can give the
 //! blank card to the orchestrator and still refuse the invalid one.
 
-use crate::ports::types::CompanyRecord;
+use crate::ports::types::{CompanyRecord, TeammateResolution};
 use crate::runtime::delegation_tools::desk_lead;
 
 /// What a card's `assignee` string names on the company roster.
@@ -169,9 +169,18 @@ pub fn dm_key(chat: &str) -> Option<&str> {
 /// [`responder_for`](crate::harness) — a desk whose id happens to match a
 /// teammate id keeps routing as a desk, exactly as it does for an operator
 /// message addressed to that chat. A teammate id is then matched
-/// case-insensitively ([`CompanyRecord::resolve_roster_agent_id`]), because
-/// unlike a desk key it is typed by hand and `resolve_desk_id` was already
+/// case-insensitively, then an operator-added teammate's display name — both
+/// halves through [`CompanyRecord::resolve_teammate_key`], because unlike a
+/// desk key a teammate key is typed by hand and `resolve_desk_id` was already
 /// forgiving about case.
+///
+/// The name arm used to live here. #1162 moved it onto the record, where the
+/// delegation path could reach it too: the same string an operator types into
+/// an Assignee field is the string a model reads off `query_company`'s roster,
+/// and having one of them resolve while the other refused is how #1162
+/// happened. The rationale for trying names at all — teammates added before
+/// #686 keep generated ids forever, and an id never follows a rename — is
+/// documented on that method.
 pub fn resolve(record: &CompanyRecord, assignee: &str) -> AssigneeResolution {
     let key = assignee.trim();
     if key.is_empty() {
@@ -183,27 +192,17 @@ pub fn resolve(record: &CompanyRecord, assignee: &str) -> AssigneeResolution {
             None => AssigneeResolution::EmptyDesk(desk),
         };
     }
-    if let Some(id) = record.resolve_roster_agent_id(key) {
-        return AssigneeResolution::Agent(id);
-    }
-    // Then operator-added teammates by display name. Tried only after the id
-    // namespace so a display name can never shadow a real id. `ops::team` used
-    // to mint these with `id: generate_id()`, making the name the only string
-    // the operator ever saw — matching ids alone left every teammate they added
-    // unassignable on a free-text Assignee field (#214 review). Since #686 the
-    // id is a readable slug, so the typical new teammate now resolves on the
-    // line above; this arm still earns its keep for the two cases a slug does
-    // not cover — teammates added before #686, which keep their generated ids
-    // forever, and any teammate renamed since (the id is minted once and never
-    // follows a rename, so the current display name may be the *only* string
-    // the operator recognises).
-    let by_name = record.overlay_agent_ids_by_name(key);
-    match by_name.len() {
-        0 => AssigneeResolution::Unknown(key.to_string()),
-        1 => AssigneeResolution::Agent(by_name.into_iter().next().expect("one match")),
-        count => AssigneeResolution::AmbiguousTeammate {
+    // Then the teammate namespace: id first, then an operator-added teammate's
+    // display name. Both halves, in that order, live on
+    // `CompanyRecord::resolve_teammate_key` — this was the only surface that
+    // had them until #1162 gave the delegation path the same resolve, and the
+    // two must not be able to disagree about who a name means.
+    match record.resolve_teammate_key(key) {
+        TeammateResolution::Agent(id) => AssigneeResolution::Agent(id),
+        TeammateResolution::Unknown => AssigneeResolution::Unknown(key.to_string()),
+        TeammateResolution::Ambiguous(ids) => AssigneeResolution::AmbiguousTeammate {
             raw: key.to_string(),
-            count,
+            count: ids.len(),
         },
     }
 }
@@ -231,6 +230,7 @@ mod tests {
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }
     }
 

@@ -30,6 +30,29 @@ Panning is an offset on top of whatever the camera is framing, not a separate
 mode: the shot still tracks its subject, just off-centre by the amount you
 dragged, and re-framing (selecting a node, opening the core) resets it.
 
+## Which nodes are named
+
+Labels are rationed, because the graph has more nodes than it has room for
+names (issue #1104).
+
+| When | Named |
+|---|---|
+| at rest | the company, every department, and the roster — agents and people |
+| hovering | the node under the pointer, and only that node |
+| in a focused tree | the node you clicked and its direct children — a pillar names its tasks, an agent names its tools |
+
+Selection always keeps its name, and everything else the pointer reaches keeps
+a `<title>`, so a native tooltip is the floor wherever a drawn label is
+suppressed. Tasks, workflow stages and tools are the numerous tiers, which is
+why they are bare until you point at one.
+
+Whatever that leaves is then decluttered: candidates are placed highest
+priority first and any label whose box overlaps one already placed is dropped
+rather than nudged. The pass measures in **screen px**, not graph units —
+labels hold one on-screen size at every camera depth (`fixedLabel` counter
+scales through `--kg-cam-k`), so zooming changes how far apart nodes are and
+never how wide a name is. `kg/label-plan.ts` holds both steps, pure.
+
 ## What is derived — read this before trusting the org chart
 
 **One thing, and it is not a ring.** Everything the graph draws is now a value
@@ -111,7 +134,8 @@ and who can sign in.
 
 `kg/` holds the graph itself — `model.ts` (the five-ring node/edge model),
 `adapter.ts` (our host's data, shaped into it), `tree-layout.ts` and
-`memory-core.ts` (pure layout and camera maths), and the `KnowledgeGraph` /
+`memory-core.ts` (pure layout and camera maths), `label-plan.ts` (which
+labels survive), and the `KnowledgeGraph` /
 `KnowledgeGraphFullscreen` / `KnowledgeDetail` components. `pulse.ts` holds
 the two board predicates the adapter needs. Theme tokens live under `.oc-kg`
 in `src/index.css`.

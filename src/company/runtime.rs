@@ -368,6 +368,12 @@ pub struct CompanyRuntime {
     pub(crate) builder: Option<Arc<crate::harness::workflow_build::WorkflowBuilder>>,
     #[cfg(feature = "openhuman")]
     pub(crate) workflow_harness_deps: Option<crate::harness::HarnessDeps>,
+    /// The company's first-run setup polish pass, attached the same way as the
+    /// planner and the workflow builder. `None` is not a degraded state here:
+    /// the setup route then returns the curated template unpolished, which is a
+    /// real roster — see `docs/spec/runtime/company-setup.md`.
+    #[cfg(feature = "openhuman")]
+    pub(crate) roster_builder: Option<Arc<crate::harness::roster_build::RosterBuilder>>,
     /// MCP installs and live connections for this runtime. The wrapper owns a
     /// company-home-scoped OpenHuman config while the live registry remains
     /// shared in-process with harness agents.
@@ -444,6 +450,8 @@ impl CompanyRuntime {
             builder: None,
             #[cfg(feature = "openhuman")]
             workflow_harness_deps: None,
+            #[cfg(feature = "openhuman")]
+            roster_builder: None,
             #[cfg(feature = "mcp")]
             mcp: None,
         }
@@ -597,6 +605,24 @@ impl CompanyRuntime {
     #[cfg(feature = "openhuman")]
     pub fn set_workflow_harness_deps(&mut self, deps: crate::harness::HarnessDeps) {
         self.workflow_harness_deps = Some(deps);
+    }
+
+    /// Attaches the company's first-run setup pass after construction, mirroring
+    /// [`set_builder`](Self::set_builder).
+    #[cfg(feature = "openhuman")]
+    pub fn set_roster_builder(
+        &mut self,
+        roster_builder: Arc<crate::harness::roster_build::RosterBuilder>,
+    ) {
+        self.roster_builder = Some(roster_builder);
+    }
+
+    /// The company's first-run setup pass, if one is wired. `None` means setup
+    /// answers a proposal from the curated template alone — a supported path,
+    /// not a broken one.
+    #[cfg(feature = "openhuman")]
+    pub fn roster_builder(&self) -> Option<&Arc<crate::harness::roster_build::RosterBuilder>> {
+        self.roster_builder.as_ref()
     }
 
     /// Attaches the embedded MCP runtime used by REST and harness agents.
@@ -2343,7 +2369,14 @@ impl CompanyRuntime {
                 // is offered on exactly the call the card itself is showing —
                 // which matters for `composio_execute`, where the same tool is
                 // grantable reading a repository and not grantable sending mail.
-                broadly_grantable: p.effect.agent.is_some() && p.effect.may_be_granted_standing(),
+                // Issue #1098 replaced "is there a teammate" with "is there a
+                // subject": a gate has no teammate but names the workflow it
+                // belongs to, and that workflow can hold a permission. Decided by
+                // the same `subject_of` the resolve route's 400 and the mint use,
+                // so the control the card offers and the answer a resolve gets
+                // cannot disagree.
+                broadly_grantable: crate::runtime::grants::subject_of(&p.effect).is_some()
+                    && p.effect.may_be_granted_standing(),
                 // Always false here. Whether a *reader* may see the contents is
                 // a property of who is asking, and this projection is
                 // deliberately principal-free (issue #618) — the redaction

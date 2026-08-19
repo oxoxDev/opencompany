@@ -469,10 +469,51 @@ pub struct TaskPlan {
     /// The teammate the planner would hand it to. Applied to the card **only**
     /// when the card had no assignee and this names a real one — a plan never
     /// reassigns work a person already assigned.
+    ///
+    /// Set only when the pass resolved **exactly one** candidate (issue #1106).
+    /// Two or more is an open choice, not a proposal, and lands in
+    /// [`assignee_candidates`](Self::assignee_candidates) instead — the two are
+    /// never both populated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposed_assignee: Option<String>,
+    /// The teammates that plausibly fit, when more than one did (issue #1106).
+    ///
+    /// Non-empty means the pass **declined to choose** and the card is waiting
+    /// on a person: an unassigned card whose planner named two teammates who
+    /// could each take it is not a card with a proposal, it is a card with a
+    /// question. Empty is every other case — the card was already assigned, or
+    /// exactly one candidate resolved (see
+    /// [`proposed_assignee`](Self::proposed_assignee)), or none did.
+    ///
+    /// Additive on the wire like every field above it, so a board holding
+    /// pre-#1106 plans reads back unchanged: those carry a `proposedAssignee`
+    /// and no candidates, which is exactly the shape a one-candidate pass writes
+    /// today.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assignee_candidates: Vec<AssigneeCandidate>,
     /// When the pass that produced this brief finished.
     pub planned_at_millis: u64,
+}
+
+/// One teammate the planner thinks could take a card, and why (issue #1106).
+///
+/// The reason is the whole point. A bare list of two ids asks an operator to
+/// re-derive the judgement the planner already made; the line beside each is
+/// what lets them answer without opening two agent pages.
+///
+/// `id` is **canonical** — resolved against the roster by the host before it is
+/// stored, never the raw string the model emitted. A candidate the roster does
+/// not recognise is dropped rather than shown, for the same reason
+/// `proposed_assignee` drops one: the console must not offer a pick that the
+/// write boundary would then refuse.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssigneeCandidate {
+    /// The canonical roster key: a teammate id, or a desk id.
+    pub id: String,
+    /// One line on why this one fits. Model prose, shown to a person who is
+    /// about to decide; nothing dispatches off it.
+    pub reason: String,
 }
 
 /// One metered planning pass attributed to a task.
@@ -1280,6 +1321,7 @@ mod test {
             verification: "the PR exists and CI is green".to_string(),
             scope: "the changelog only; no code changes".to_string(),
             proposed_assignee: Some("maya".to_string()),
+            assignee_candidates: Vec::new(),
             planned_at_millis: 42,
         }
     }

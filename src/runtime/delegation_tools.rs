@@ -40,7 +40,7 @@
 use serde_json::{Value, json};
 
 use crate::brain::medulla::wire::ToolManifestEntry;
-use crate::ports::types::CompanyRecord;
+use crate::ports::types::{CompanyRecord, TeammateResolution};
 
 /// The `spawn_task` tool name — open a tracked task card on the board.
 pub const SPAWN_TASK_TOOL: &str = "spawn_task";
@@ -254,7 +254,7 @@ cannot be used. Answer directly instead."
     // A teammate's id is the most common invented target (the orchestrator
     // reaches for the person it has in mind rather than the desk they sit on),
     // so name the mistake instead of only listing the alternatives.
-    let Some(agent) = record.resolve_roster_agent_id(key) else {
+    let Some(agent) = record.resolve_teammate_key(key).agent() else {
         return format!(
             "There is no \"{key}\" desk. Valid desk ids: {list}. Call `delegate_to_desk` again \
 with one of those ids."
@@ -395,6 +395,9 @@ fn chain_trail(chain: &[String]) -> String {
 /// * **Not a teammate** — `key` resolves to no roster agent. When it names a
 ///   *desk* the message says so and points at [`DELEGATE_TO_DESK_TOOL`], the
 ///   mirror of [`unknown_desk_message`]'s teammate arm.
+/// * **More than one teammate** — `key` is a display name two operator-added
+///   teammates answer to. Real, but not routable; the refusal names the
+///   colliding ids so the model can pick one (issue #1162).
 /// * **Yourself** — the target is the caller. Its turn is the one running.
 /// * **Out of reach** — a real teammate the caller may not hand work to: not on
 ///   a desk with them, and not on any desk their
@@ -409,8 +412,14 @@ pub fn reject_teammate_target(
     allowed: &[String],
     key: &str,
 ) -> Option<String> {
-    let Some(target) = record.resolve_roster_agent_id(key) else {
-        return Some(unknown_teammate_message(record, caller, allowed, key));
+    let target = match record.resolve_teammate_key(key) {
+        TeammateResolution::Agent(id) => id,
+        TeammateResolution::Unknown => {
+            return Some(unknown_teammate_message(record, caller, allowed, key));
+        }
+        TeammateResolution::Ambiguous(ids) => {
+            return Some(ambiguous_teammate_message(key, ids));
+        }
     };
     let caller = caller?;
     if target == caller {
@@ -468,6 +477,23 @@ work to. Do the work yourself, or say what you cannot do."
     }
 }
 
+/// The refusal for a `delegate_to_teammate` target that names **more than one**
+/// teammate (issue #1162).
+///
+/// Grounding a display name gave this case somewhere to happen: two
+/// operator-added teammates may carry the same name, and their ids are what
+/// tell them apart. Taking the first would be the misrouting
+/// [`CompanyRecord::overlay_agent_ids_by_name`] exists to end, and the plain
+/// "there is no such teammate" message would be a lie about a teammate that
+/// demonstrably exists — so the collision is named, with the ids to retry with.
+fn ambiguous_teammate_message(key: &str, ids: Vec<String>) -> String {
+    let list = agent_list(ids).unwrap_or_else(|| "-".to_string());
+    format!(
+        "\"{key}\" is the name of more than one teammate here, so it does not say who to hand \
+this to. Call `{DELEGATE_TO_TEAMMATE_TOOL}` again with one of their ids: {list}."
+    )
+}
+
 /// Why a **teammate** hand-off would close a loop rather than make progress — or
 /// `None` when the target is a step forward (issue #884).
 ///
@@ -483,7 +509,10 @@ pub fn reject_teammate_cycle_target(
     chain: &[String],
     key: &str,
 ) -> Option<String> {
-    let target = record.resolve_roster_agent_id(key)?;
+    // The same id-then-name resolve the refusal above grounds with (#1162): a
+    // hand-off written as a display name has to reach this guard as the id it
+    // means, or A→B→A spelled with a name would slip past the chain check.
+    let target = record.resolve_teammate_key(key).agent()?;
     let scoped = teammate_scope_key(&target);
     if !chain.iter().any(|entry| entry == &scoped) {
         return None;
@@ -802,6 +831,7 @@ members = ["counsel"]
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }
     }
 

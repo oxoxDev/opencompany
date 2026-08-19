@@ -172,6 +172,17 @@ fn record(id: &CompanyId) -> CompanyRecord {
         )]),
         disabled_workflows: vec!["digest".to_string()],
         template_provenance: Some(sample_provenance()),
+        setup: Some(sample_setup_answers()),
+    }
+}
+
+/// The answers a first-run setup stored. Non-empty in all three fields so a
+/// backend that persisted only some of them fails the round-trip below.
+fn sample_setup_answers() -> crate::company::setup::SetupAnswers {
+    crate::company::setup::SetupAnswers {
+        industry: "E-commerce — homeware".to_string(),
+        team_hint: "plus customer support".to_string(),
+        automate: "Meta ads, order dispatch".to_string(),
     }
 }
 
@@ -841,6 +852,14 @@ pub async fn assert_export_totality(
         Some(sample_provenance()),
         "template provenance did not round-trip through the store"
     );
+    // First-run setup's answers persist for every backend too. Phase 2 builds
+    // this company's workflows from them, so a backend that dropped them would
+    // make the operator describe their business a second time.
+    assert_eq!(
+        loaded.setup,
+        Some(sample_setup_answers()),
+        "setup answers did not round-trip through the store"
+    );
     // Issue #168: the runtime-authored graph bodies round-trip too — an export
     // that dropped them would lose every console-created workflow.
     assert_eq!(
@@ -1192,6 +1211,20 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
             verification: "the notes are live".to_string(),
             scope: "the notes only".to_string(),
             proposed_assignee: Some("maya".to_string()),
+            // Issue #1106. Populated here even though a real plan never carries
+            // both this and `proposed_assignee` — this fixture's job is to make
+            // a silently-dropped field fail, and a field left empty would
+            // round-trip through a backend that drops it entirely.
+            assignee_candidates: vec![
+                crate::ports::tasks::AssigneeCandidate {
+                    id: "maya".to_string(),
+                    reason: "writes the release notes today".to_string(),
+                },
+                crate::ports::tasks::AssigneeCandidate {
+                    id: "devrel".to_string(),
+                    reason: "owns everything that ships to developers".to_string(),
+                },
+            ],
             planned_at_millis: 1_234,
         }),
         ..task("t-planned", "planning", 9)

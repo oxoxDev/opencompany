@@ -128,7 +128,7 @@ export interface McpStanding {
  */
 export function mcpStanding(server: McpServer, health: McpHealth | undefined): McpStanding {
   const summary = !server.enabled
-    ? "turned off — no agent receives its tools"
+    ? "turned off — no teammate receives its tools"
     : server.authConfigured
       ? "on, calling with a stored credential"
       : "on, calling with no credential";

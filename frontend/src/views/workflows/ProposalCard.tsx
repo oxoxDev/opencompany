@@ -13,6 +13,7 @@
 
 import { AlertTriangle, Check, Loader2, X } from "lucide-react";
 
+import { type WorkflowProblem, workflowProblemLocator } from "@/api/types";
 import type { GraphDiff } from "@/api/workflow-proposal";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -35,6 +36,17 @@ interface Props {
   blocked?: string;
   /** The host's refusal, when an Apply was attempted and came back rejected. */
   error?: string;
+  /**
+   * The per-node breakdown behind {@link error}, when the host sent one
+   * (issue #836).
+   *
+   * Rendered under the sentence rather than instead of it: the sentence is what
+   * the host chose to say, and the list is where it happened. An operator whose
+   * proposal touched one node reads the same thing twice and loses nothing; an
+   * operator whose proposal broke three nodes gets the three node ids that
+   * sentence had flattened together.
+   */
+  problems?: WorkflowProblem[];
   onApply: () => void;
   onDismiss: () => void;
 }
@@ -45,6 +57,7 @@ export function ProposalCard({
   state,
   blocked,
   error,
+  problems,
   onApply,
   onDismiss,
 }: Props) {
@@ -80,7 +93,26 @@ export function ProposalCard({
       {error && (
         <Alert variant="destructive" className="mt-2 py-1.5">
           <AlertTriangle className="size-3" />
-          <AlertDescription className="text-2xs leading-snug">{error}</AlertDescription>
+          <AlertDescription className="text-2xs leading-snug">
+            {error}
+            {/* Issue #836: the node and field the host named, when it named
+                any. Keyed by index because a problem carries no id of its own
+                and the same node can legitimately raise two — the list is
+                render-only and never reordered, so index is stable here. */}
+            {problems && problems.length > 0 && (
+              <ul className="mt-1 space-y-0.5" data-testid="workflow-proposal-problems">
+                {problems.map((problem, i) => {
+                  const locator = workflowProblemLocator(problem);
+                  return (
+                    <li key={i}>
+                      {locator && <span className="font-medium">{locator} — </span>}
+                      {problem.message}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </AlertDescription>
         </Alert>
       )}
 

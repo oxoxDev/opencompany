@@ -50,14 +50,14 @@ export const TOUR: TourStop[] = [
     target: '[data-tour="nav-chat"]',
     placement: "right",
     title: "Your AI staff",
-    body: "The agents that actually do the work each have a channel and a direct message here. Open the members pane to see the whole roster.",
+    body: "The teammates that actually do the work each have a channel and a direct message here. Open the team pane to see the whole roster.",
   },
   {
     view: "workflows",
     target: '[data-tour="nav-workflows"]',
     placement: "right",
     title: "Workflows",
-    body: "Turn recurring work into a repeatable workflow — a graph of steps your agents run end to end.",
+    body: "Turn recurring work into a repeatable workflow — a graph of steps your teammates run end to end.",
   },
   {
     view: "approvals",
@@ -74,7 +74,7 @@ export const TOUR: TourStop[] = [
     target: '[data-tour="nav-settings"]',
     placement: "right",
     title: "Connect your tools",
-    body: "Plug in the tools your company already uses — Gmail, Slack, GitHub — so your agents can act for real.",
+    body: "Plug in the tools your company already uses — Gmail, Slack, GitHub — so your teammates can act for real.",
   },
   {
     view: "chat",

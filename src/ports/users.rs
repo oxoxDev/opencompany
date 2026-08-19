@@ -185,6 +185,27 @@ pub fn normalize_email(raw: &str) -> String {
     raw.trim().to_lowercase()
 }
 
+/// Whether `raw` is usable as a `[users].admins` entry.
+///
+/// The one definition, so the manifest validator and the first-run wizard cannot
+/// disagree about which addresses are acceptable. Pinned by
+/// `tests/fixtures/setup-admin-email.json`, which the console's own test reads —
+/// the console cannot call this, so a fixture is what keeps its
+/// re-implementation honest.
+///
+/// Deliberately loose. It is not a mail-server-grade check and must not become
+/// one: the demand is only that the entry survives [`normalize_email`] as
+/// something [`LoginIdentity::parse`] reads as a mailbox. An entry with no `@`
+/// normalizes to a bare word, which parses as the `none`-mode **local owner**
+/// identity rather than the email admin it was meant to be — a bootstrapped user
+/// stored under that key is then a different principal than the manifest author
+/// intended. A stricter rule would reject addresses this host accepts everywhere
+/// else, which is its own bug.
+pub fn is_usable_admin_email(raw: &str) -> bool {
+    let normalized = normalize_email(raw);
+    !normalized.is_empty() && normalized.contains('@')
+}
+
 /// The scheme prefix marking a [`LoginIdentity::Wallet`] key.
 const WALLET_PREFIX: &str = "wallet:";
 

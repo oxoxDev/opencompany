@@ -152,6 +152,16 @@ fingerprinted over document **bodies**, so editing a routed note reaches the nex
 turn rather than the next restart. See
 [context-routing.md](orchestration/context-routing.md).
 
+**A named teammate is told its name.** A manifest `[[agent]]` is addressed by its
+role, and its persona reads *"You are the Content Writer at Acme."* An
+operator-added teammate also has a display name — the one the console puts on the
+DM header, the subtitle and the composer — and its persona names it too: *"You are
+Alex, the Content Writer at Acme. … Teammates and the operator address you as
+Alex; it is how you are called here, not a separate character to play."* The name
+is an addressing handle, not an identity to build a character around, and it never
+replaces the role. A name that is blank, or that only restates the role, falls
+back to the role-only wording (issue #1105).
+
 **`prompt` is appended, never substituted.** The generated line is what binds the
 agent to *this* role at *this* company; a prompt that replaced it would silently
 cost the agent its identity and hand it back the runtime's own assistant

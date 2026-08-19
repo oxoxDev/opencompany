@@ -37,6 +37,7 @@ function status(...fields: SetupField[]): SetupStatus {
       oauth_in_build: false,
     },
     companies: [],
+  inference: { ready: false, provider: null, base_url: null },
   };
 }
 

@@ -19,19 +19,34 @@ function readSegments(): string[] {
  * The second segment comes back unvalidated: only the owning view knows which
  * of its sub-pages exist, so it does that check itself and falls back to its
  * own default.
+ *
+ * `rewrite` is how a retired address keeps working. It sees the raw segments
+ * before anything else does and may name a different view to resolve to;
+ * returning `null` — what it does for every ordinary address — leaves the
+ * resolution exactly as it was. It runs *before* the validity check on purpose,
+ * so an address whose view no longer exists can be sent somewhere real instead
+ * of silently collapsing onto `fallback`.
+ *
+ * The redirect lands through `canonicalize` below, which replaces rather than
+ * pushes — and that is not an implementation detail. A retired address that
+ * *pushed* its replacement would sit one Back away, bounce the operator forward
+ * again on arrival, and trap them in a loop they cannot leave.
  */
 export function useHashView<T extends string>(
   valid: readonly T[],
   fallback: T,
+  rewrite?: (head: string, sub: string | null) => [T, string | null] | null,
 ): [T, string | null, (view: T, sub?: string) => void] {
   const resolve = useCallback((): [T, string | null] => {
     const [head, sub] = readSegments();
+    const rewritten = rewrite?.(head ?? "", sub ?? null);
+    if (rewritten) return rewritten;
     // An unknown head takes its sub-page with it: the sub-page names a page of
     // a view that isn't on screen, so carrying it onto `fallback` would point
     // the fallback view at a sub-page it doesn't have.
     if (!(valid as readonly string[]).includes(head)) return [fallback, null];
     return [head as T, sub ?? null];
-  }, [valid, fallback]);
+  }, [valid, fallback, rewrite]);
 
   const [route, setRoute] = useState<[T, string | null]>(resolve);
 

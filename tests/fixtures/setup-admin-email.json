@@ -1,0 +1,45 @@
+{
+  "_comment": "The one rule for 'is this usable as [users].admins?'. Read by BOTH src/company/manifest.rs's validator (via its test) and frontend/src/lib/company-setup.ts (adminEmailProblem). The host rule is deliberately LOOSE \u2014 normalize_email is trim+lowercase, and the only structural demand is an '@' \u2014 because it exists to stop an entry normalizing to something LoginIdentity::parse would misread, not to police what a mail server accepts. A console that applied a stricter regex would reject addresses the host would happily take, which is its own bug. Add a case here before changing either side.",
+  "cases": [
+    {
+      "why": "the ordinary case",
+      "input": "ada@example.com",
+      "usable": true
+    },
+    {
+      "why": "case and surrounding space are normalized away, not rejected",
+      "input": "  Ada@Example.COM  ",
+      "usable": true
+    },
+    {
+      "why": "a plus tag is a real mailbox",
+      "input": "ada+setup@example.com",
+      "usable": true
+    },
+    {
+      "why": "the host does not demand a dot in the domain",
+      "input": "root@localhost",
+      "usable": true
+    },
+    {
+      "why": "the reported bug: a bare word is not an address",
+      "input": "as",
+      "usable": false
+    },
+    {
+      "why": "nothing typed",
+      "input": "",
+      "usable": false
+    },
+    {
+      "why": "whitespace only",
+      "input": "   ",
+      "usable": false
+    },
+    {
+      "why": "a name without a mailbox",
+      "input": "Ada Lovelace",
+      "usable": false
+    }
+  ]
+}

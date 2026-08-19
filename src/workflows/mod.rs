@@ -56,6 +56,10 @@ mod parallel_gate_fanout_test;
 pub mod replay;
 pub mod runner;
 pub mod translate;
+/// Issue #1098: a scheduled workflow granted a standing permission stops
+/// re-asking on every run — two runs, because a single-run test cannot see it.
+#[cfg(test)]
+mod workflow_standing_grant_test;
 
 pub use caps::{HarnessAgentRunner, build_capabilities};
 pub use delivery::{DeliveryParking, WorkflowDeliveryDeps, deliver_outputs, deliver_outputs_dry};

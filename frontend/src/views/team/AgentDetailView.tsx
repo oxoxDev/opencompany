@@ -130,14 +130,14 @@ export function AgentDetailView({
       setAgent(updated);
       setDraft(draftFrom(updated));
       setEditing(false);
-      toast.success("Agent updated.");
+      toast.success("Teammate updated.");
     } catch (error) {
       toast.error(
         error instanceof ApiError && error.status === 409
           ? error.message
           : error instanceof Error
             ? error.message
-            : "Couldn't save this agent.",
+            : "Couldn't save this teammate.",
       );
     } finally {
       setSaving(false);
@@ -155,21 +155,21 @@ export function AgentDetailView({
 
         {load === "missing" && (
           <EmptyState
-            title="This agent is no longer on the roster."
+            title="This teammate is no longer on the roster."
             body="It may have been removed. Go back to the team to see who is here now."
           />
         )}
 
         {load === "unsupported" && (
           <EmptyState
-            title="This host can't open an agent yet."
-            body="Opening an agent needs a newer host. The roster still works."
+            title="This host can't open a teammate yet."
+            body="Opening a teammate needs a newer host. The roster still works."
           />
         )}
 
         {load === "error" && (
           <EmptyState
-            title="Couldn't load this agent."
+            title="Couldn't load this teammate."
             body="The company host didn't answer. Try again in a moment."
           />
         )}
@@ -180,7 +180,7 @@ export function AgentDetailView({
 
             <Section
               title="Instructions"
-              subtitle="What this agent was defined to do. It frames every turn the agent takes."
+              subtitle="What this teammate was defined to do. It frames every turn they take."
               action={
                 agent.editable.length > 0 &&
                 !editing && (
@@ -231,11 +231,11 @@ export function AgentDetailView({
                     data-testid="agent-description"
                   >
                     {agent.description?.trim() ||
-                      "No instructions were written for this agent."}
+                      "No instructions were written for this teammate."}
                   </p>
                   {agent.editable.length === 0 && (
                     <p className="text-xs text-muted-foreground" data-testid="agent-readonly-note">
-                      This agent is part of your company blueprint, so its name, role and
+                      This teammate is part of your company blueprint, so its name, role and
                       instructions are set in company.toml. Its daily budget can still be changed
                       from the team page.
                     </p>
@@ -314,8 +314,8 @@ function Tools({ agent }: { agent: AgentDetailDto }) {
       title="Tools"
       subtitle={
         summary.standardGrant
-          ? "This agent lists no tools of its own, so it holds everything the company allows."
-          : "What this agent asked for, narrowed by what the company allows."
+          ? "This teammate lists no tools of its own, so it holds everything the company allows."
+          : "What this teammate asked for, narrowed by what the company allows."
       }
     >
       {summary.effective.length === 0 ? (
@@ -324,8 +324,8 @@ function Tools({ agent }: { agent: AgentDetailDto }) {
               fact. An agent that asked for nothing under a company that allows
               nothing has been refused nothing. */}
           {summary.standardGrant
-            ? "This agent has no tools, because the company allows none."
-            : "This agent has no tools. Nothing it asked for is covered by the company tool list."}
+            ? "This teammate has no tools, because the company allows none."
+            : "This teammate has no tools. Nothing it asked for is covered by the company tool list."}
         </p>
       ) : (
         <div className="flex flex-wrap gap-2" data-testid="agent-tools">
@@ -362,11 +362,11 @@ function Desks({ agent }: { agent: AgentDetailDto }) {
   return (
     <Section
       title="Desks"
-      subtitle="The desks this agent works on. A desk hands its work to its lead first."
+      subtitle="The desks this teammate works on. A desk hands its work to its lead first."
     >
       {agent.desks.length === 0 ? (
         <p className="text-sm text-muted-foreground" data-testid="agent-desks-empty">
-          This agent is not on any desk.
+          This teammate is not on any desk.
         </p>
       ) : (
         <div className="flex flex-wrap gap-2" data-testid="agent-desks">

@@ -47,6 +47,7 @@ plan and proposes a graph for review. This document is only the planning half.
 |---|---|---|
 | planned, nothing blocking, a valid assignee | `in_progress` | the plan; the dispatch edge fires |
 | planned, a hard prerequisite missing (or no valid assignee) | `todo` | the plan **and** the named gap |
+| planned, but **more than one** teammate could own it | `todo` | the plan **and** the candidates, with a reason each |
 | the pass failed (model error, timeout, unparseable output) | `todo` | the reason only — **no** plan |
 
 A failed pass writes no partial brief on purpose. A plan half-produced by a
@@ -178,6 +179,45 @@ chose. The operator's routing decision is not the planner's to overrule; a
 proposal is still recorded on the brief either way, so the suggestion is visible
 without being applied. A proposal the roster does not recognise is dropped
 rather than shown.
+
+### Ambiguous ownership (issue #1106)
+
+The pass answers with **candidates**, not a single name: every teammate or desk
+that could genuinely take the card, best first, capped at three. What happens
+next is a function of how many survive resolution — and of nothing else. Who
+authored a teammate's profile does not enter into it, and neither does which of
+the four roster sources it came from.
+
+| Resolved candidates | Card assigned? | Outcome |
+|---|---|---|
+| any number | yes | dispatches — an assignee a person set is never second-guessed |
+| 0 | no | `todo`, with the existing "nobody on the roster" reason |
+| 1 | no | applied as `proposedAssignee`, dispatches — the pre-#1106 behaviour |
+| 2 or 3 | no | `todo`, **candidates on the brief**, nothing assigned |
+
+Two or more is a question, not a proposal, so `proposedAssignee` stays empty and
+`assigneeCandidates` carries the list instead — the two are never both set. The
+console renders the candidates as a chooser and one click assigns, through the
+same `PATCH …/tasks/{id}` the reassign row uses.
+
+**The dedup is load-bearing.** Candidates are deduplicated by their *canonical*
+id, not by the string the model wrote, and only then counted. A model that names
+one teammate twice — by id and again by display name, or in two casings —
+resolves to one key both times, and without the dedup that card would park
+asking a person to choose between a teammate and itself.
+
+**No fuzzy matching**, here or anywhere below it: candidates go through the same
+exact-match `runtime::assignee::resolve` the write boundary uses, so anything the
+roster does not carry is dropped rather than approximated. The model proposes;
+the host only enforces that each name is real. That is the same split the
+workflow copilot's grounding takes.
+
+**Why ask rather than pick.** A roster has four sources — the global baseline,
+the company blueprint, the console's `POST …/team`, and the orchestrator's own
+`add_agent` — and only one of them is the operator. Descriptions are thinnest
+exactly where two roles overlap most, and a card's owner may have been added by
+an agent the operator never configured. Recording a pick for them to correct
+assumes they would recognise a wrong one; asking does not.
 
 ---
 

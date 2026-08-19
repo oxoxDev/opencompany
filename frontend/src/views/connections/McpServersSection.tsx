@@ -391,8 +391,8 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
         </div>
       )}
       <p className="text-sm text-muted-foreground">
-        Remote MCP tool servers your agents can call. Add an HTTP endpoint and (optionally) a token —
-        the token is stored securely and never shown again.
+        Remote MCP tool servers your teammates can call. Add an HTTP endpoint and (optionally) a
+        token — the token is stored securely and never shown again.
       </p>
 
       {/* Issue #567: this screen's routes ship in every build, the agent-side
@@ -402,12 +402,12 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
       {bridge === "absent" && (
         <Alert data-testid="mcp-bridge-absent">
           <AlertTriangle className="size-4" />
-          <AlertTitle>No agent can use tool servers in this deployment</AlertTitle>
+          <AlertTitle>No teammate can use tool servers in this deployment</AlertTitle>
           <AlertDescription>
             The MCP bridge isn&apos;t compiled into this build, so servers added here are stored and
             can be probed, but no teammate ever receives their tools. The configuration survives —
             rebuild this deployment with the <code className="font-mono">mcp</code> feature and the
-            servers below start reaching agents on the next turn.
+            servers below start reaching teammates on the next turn.
           </AlertDescription>
         </Alert>
       )}
@@ -539,9 +539,9 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                           >
                             <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
                             <span>
-                              No agent can reach this server — no teammate&apos;s tool grants cover{" "}
+                              No teammate can reach this server — no tool grant covers{" "}
                               <code className="font-mono">mcp:{server.name}</code>. Widen a company or
-                              per-agent tool grant, or this server is unused.
+                              per-teammate tool grant, or this server is unused.
                             </span>
                           </p>
                         ) : (

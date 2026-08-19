@@ -16,6 +16,7 @@ import { ClipboardList, Info, Milestone, Sparkles, User, UserRound, Users, Workf
 import { DERIVED_NOTICE } from './adapter';
 import { orderGraphDepartments, SELF_ID, toolSlugOf, type KGNode, type KGNodeKind, type KnowledgeGraph as KGData } from './model';
 import { branchPath, branchWidth, cyclicDeltaF, edgeArc, focusWheel, radialRestLayout, responsiveRingR, rotateAbout, shortestAngleDelta, treeLayout, wheelPoint, wheelStageGeom, wheelStageSpot, type RestLayoutResult, type TreeLayoutResult, type TreeNodePos } from './tree-layout';
+import { focusLabelIds, LABEL_PRIORITY, planLabels, type LabelCandidate } from './label-plan';
 import { rafThrottle } from './raf-throttle';
 import { buildToolWiki, isMcpSlug, prettifySlug } from './agent-wiki';
 import { cameraRect, lerpRect, memoryNodePos, pickRestTier, R_CORE, type MemoryGraph, type Rect } from './memory-core';
@@ -51,7 +52,7 @@ const CAT: Record<KGNodeKind, { color: string; Icon: LucideIcon; label: string; 
   step: { color: 'var(--brain-2)', Icon: Milestone, label: 'Stages', r: 6 },
   task: { color: 'var(--muted)', Icon: ClipboardList, label: 'SOP tasks', r: 7 },
   person: { color: 'var(--warn)', Icon: UserRound, label: 'Humans', r: 10 },
-  employee: { color: 'var(--accent)', Icon: User, label: 'AI agents', r: 10 },
+  employee: { color: 'var(--accent)', Icon: User, label: 'AI teammates', r: 10 },
   tool: { color: 'var(--kg-tool)', Icon: Wrench, label: 'Tools', r: 7.5 },
 };
 
@@ -87,6 +88,11 @@ const EDGE_COLOR: Record<string, string> = {
 // for the on-canvas label; the full title lives in the hover tooltip + card.
 const shortLabel = (n: KGNode) =>
   n.kind === 'task' && n.label.length > 20 ? `${n.label.slice(0, 18).trimEnd()}…` : n.label;
+
+// On-screen label size per tier, in px. Quoted at rest and held there at every
+// camera depth by `fixedLabel`, which is why the declutter can measure in px.
+const labelFontPx = (kind: KGNodeKind): number =>
+  kind === 'self' || kind === 'team' ? 10 : kind === 'task' ? 8.5 : 9;
 
 // 'about how long ago' for the harness card's last-run line
 const agoLabel = (iso: string): string => {
@@ -257,6 +263,11 @@ export function KnowledgeGraph({
     startX: number; startY: number; originX: number; originY: number; moved: boolean;
   } | null>(null);
   const camRectRef = useRef<Rect>({ x: 0, y: 0, w: W, h: H });
+  // The camera's published zoom (`cur.w / W`), mirrored into state so the label
+  // declutter — which measures in screen px — re-runs when the zoom settles.
+  // The simulation may already be asleep by then, so its tick cannot carry this.
+  const [camK, setCamK] = useState(1);
+  const camKRef = useRef(1);
   const [, setTick] = useState(0);
 
   const agentById = useMemo(() => new Map(agents.map((a) => [`emp:${a.id}`, a])), [agents]);
@@ -971,6 +982,14 @@ export function KnowledgeGraph({
           // zoom factor for the constant-size label counter-scale
           svg.style.setProperty('--kg-cam-k', String(cur.w / W));
         }
+        // Only the SCALE reaches the declutter: a pan shifts every label box by
+        // the same vector and cannot change which pairs overlap, so dragging
+        // the graph never costs a re-render here.
+        const k = cur.w / W;
+        if (Math.abs(k - camKRef.current) > 0.002) {
+          camKRef.current = k;
+          setCamK(k);
+        }
       }
 
       // communication pulses along the live spokes (skip under reduced motion)
@@ -1489,7 +1508,7 @@ export function KnowledgeGraph({
         [
           { label: 'Notes', color: HUB_COLOR, Icon: CAT.self.Icon },
           { label: 'Human', color: CAT.person.color, Icon: CAT.person.Icon },
-          { label: 'AI agent', color: CAT.employee.color, Icon: CAT.employee.Icon },
+          { label: 'AI teammate', color: CAT.employee.color, Icon: CAT.employee.Icon },
           { label: 'Tool', color: CAT.tool.color, Icon: CAT.tool.Icon },
           { label: 'Workflow', color: CAT.workflow.color, Icon: CAT.workflow.Icon },
           { label: 'Stage', color: CAT.step.color, Icon: CAT.step.Icon },
@@ -1612,7 +1631,7 @@ export function KnowledgeGraph({
     <SopTaskDetailCard
       task={selectedTask}
       assigneeName={selectedTaskWorkerNode?.label ?? selectedTask.assigneeId}
-      assigneeKindLabel={selectedTask.assigneeKind === 'person' ? 'human employee' : 'AI agent'}
+      assigneeKindLabel={selectedTask.assigneeKind === 'person' ? 'human employee' : 'AI teammate'}
       assigneeColor={selectedTask.assigneeKind === 'person' ? 'var(--warn)' : 'var(--accent)'}
       runtime={taskRuntime}
       tools={toolChips(selectedTaskWorker)}
@@ -1756,6 +1775,93 @@ export function KnowledgeGraph({
   useEffect(() => {
     panRef.current = { x: 0, y: 0 };
   }, [focusId, selectedAgentId, selectedToolId, selectedTaskId, selectedHumanId, selectedMemoryId, coreExpanded]);
+
+  // ── what gets drawn per node, and which labels survive (issue #1104) ────────
+  // Radius and opacity are settled here rather than mid-render because the
+  // label declutter needs both: a label is only a candidate if its node is
+  // actually legible, and the label hangs off the node's radius.
+  const visuals = new Map<string, { r: number; opacity: number; dim: boolean; hidden: boolean }>();
+  for (const n of nodes) {
+    // inside the memory only the core + the pillar gateways stay visible
+    const dim = coreExpanded
+      ? n.kind !== 'self' && n.kind !== 'team'
+      : lit
+        ? !lit.has(n.id)
+        : false;
+    // tier radius + a connection-count bump for workers and tools, so
+    // heavily-wired nodes read heavier at a glance
+    const degree = (adjacency.get(n.id)?.size ?? 1) - 1;
+    const r = CAT[n.kind].r + (isWorker(n.kind) || n.kind === 'tool' ? Math.min(2.5, degree * 0.3) : 0);
+    // hierarchy brightness at rest; dimmed nodes drop to 0.15 on hover,
+    // in focus, ONLY the flanking pillar gateways stay visible beside
+    // the tree — nothing behind the pillar you are looking at —
+    // every other unfocused node rides the carousel fully hidden
+    // flanks show a PORTION of their department: the gateway
+    // reads at 0.6, its condensed cluster at a whisper — transparent so
+    // it never overbears the stage; everything further is fully hidden
+    const sectorTeam = n.kind === 'team' ? n.id : teamForFocus(n.id);
+    const inFlankSector = !!(sectorTeam && flankTeams?.has(sectorTeam));
+    const isFlank = !!flankTeams?.has(n.id);
+    visuals.set(n.id, {
+      r,
+      dim,
+      hidden: !!(dim && !coreExpanded && focusSet && !inFlankSector),
+      opacity: dim
+        ? coreExpanded
+          ? 0.06
+          : focusSet
+            ? isFlank
+              ? 0.6
+              : inFlankSector
+                ? 0.2
+                : 0
+            : 0.15
+        : TIER_OPACITY[n.kind],
+    });
+  }
+
+  // Who is worth naming. At rest that is the company, its departments and the
+  // roster — the agents and people complaint 1 in #1104 is about; the tasks,
+  // stages and tools below them are far more numerous and stay bare. In focus
+  // it is the node you clicked and its direct children, so a pillar names its
+  // tasks and an agent names its tools instead of the whole tree shouting at
+  // once. Hover names exactly one node — the chain still lights (that is what
+  // shows structure) but it no longer drags a crowd of labels with it.
+  const selectedOrgId = selectedAgentId ?? selectedHumanId ?? selectedTaskId ?? selectedToolId;
+  const focusChildren = focusTree ? focusLabelIds(focusTree.branches, focusId) : null;
+  const labelCandidates: LabelCandidate[] = [];
+  for (const n of nodes) {
+    const v = visuals.get(n.id)!;
+    // a node faded to a whisper has nothing to label, and a label there would
+    // still take a box from a node you can actually see
+    if (v.opacity < 0.3) continue;
+    let priority: number | null = null;
+    if (hoverId === n.id) priority = LABEL_PRIORITY.hovered;
+    else if (selectedOrgId === n.id) priority = LABEL_PRIORITY.selected;
+    else if (n.kind === 'self') priority = LABEL_PRIORITY.self;
+    else if (focusSet) {
+      if (n.id === focusId) priority = LABEL_PRIORITY.focused;
+      else if (n.id === focusTeamId) priority = LABEL_PRIORITY.team;
+      else if (focusChildren?.has(n.id)) priority = LABEL_PRIORITY.child;
+    } else if (n.kind === 'team') priority = LABEL_PRIORITY.team;
+    else if (isWorker(n.kind)) priority = LABEL_PRIORITY.worker;
+    if (priority === null) continue;
+    // inside a band, the busier node keeps its name
+    const degree = (adjacency.get(n.id)?.size ?? 1) - 1;
+    labelCandidates.push({
+      id: n.id,
+      text: shortLabel(n),
+      x: n.x,
+      y: n.y,
+      dy: v.r + 11 + (labelDy.get(n.id) ?? 0),
+      fontPx: labelFontPx(n.kind),
+      priority: priority + Math.min(degree, 50) / 100,
+    });
+  }
+  // `camK` (state) rather than the live ref: reading it here is what ties the
+  // declutter to the zoom, and `camK * W` is the camera width it was published
+  // from. x/y come off the ref — they only move every box by a shared vector.
+  const labelSet = planLabels(labelCandidates, { x: camRectRef.current.x, y: camRectRef.current.y, w: camK * W }, W);
 
   // ── the graph itself (reused inline + fullscreen) ───────────────────────────
   const graphInner = (
@@ -1968,42 +2074,10 @@ export function KnowledgeGraph({
         {nodes.map((n) => {
           const cat = CAT[n.kind];
           const color = nodeColor(n);
-          // inside the memory only the core + the pillar gateways stay visible
-          const dim = coreExpanded
-            ? n.kind !== 'self' && n.kind !== 'team'
-            : lit
-              ? !lit.has(n.id)
-              : false;
-          const inFocus = focusSet?.has(n.id) ?? false;
+          const { r, opacity: nodeOpacity, dim, hidden } = visuals.get(n.id)!;
           const selected = selectedAgentId === n.id || selectedToolId === n.id || selectedTaskId === n.id || selectedHumanId === n.id;
-          const showLabel = n.kind === 'self' || n.kind === 'team' || inFocus || (hoverId ? (lit?.has(n.id) ?? false) : false);
+          const showLabel = labelSet.has(n.id);
           const Icon = cat.Icon;
-          // tier radius + a connection-count bump for workers and tools, so
-          // heavily-wired nodes read heavier at a glance
-          const degree = (adjacency.get(n.id)?.size ?? 1) - 1;
-          const r = cat.r + (isWorker(n.kind) || n.kind === 'tool' ? Math.min(2.5, degree * 0.3) : 0);
-          // hierarchy brightness at rest; dimmed nodes drop to 0.15 on hover,
-          // in focus, ONLY the flanking pillar gateways stay visible beside
-          // the tree — nothing behind the pillar you are looking at —
-          // every other unfocused node rides the carousel fully hidden
-          // flanks show a PORTION of their department: the gateway
-          // reads at 0.6, its condensed cluster at a whisper — transparent so
-          // it never overbears the stage; everything further is fully hidden
-          const sectorTeam = n.kind === 'team' ? n.id : teamForFocus(n.id);
-          const inFlankSector = !!(sectorTeam && flankTeams?.has(sectorTeam));
-          const isFlank = !!flankTeams?.has(n.id);
-          const hidden = !!(dim && !coreExpanded && focusSet && !inFlankSector);
-          const nodeOpacity = dim
-            ? coreExpanded
-              ? 0.06
-              : focusSet
-                ? isFlank
-                  ? 0.6
-                  : inFlankSector
-                    ? 0.2
-                    : 0
-                : 0.15
-            : TIER_OPACITY[n.kind];
 
           // the company rendered as its memory: the Notes constellation of real
           // memory notes, folder-tinted, links as hairlines. Collapsed
@@ -2204,9 +2278,9 @@ export function KnowledgeGraph({
                   y={r + 11 + (labelDy.get(n.id) ?? 0)}
                   textAnchor="middle"
                   fontFamily="var(--font-mono)"
-                  fontWeight={n.kind === 'self' || n.kind === 'team' ? 600 : 400}
-                  fill={n.kind === 'team' ? color : 'var(--text-2)'}
-                  style={fixedLabel(n.kind === 'self' || n.kind === 'team' ? 10 : n.kind === 'task' ? 8.5 : 9)}
+                  fontWeight={n.kind === 'self' || n.kind === 'team' || hoverId === n.id ? 600 : 400}
+                  fill={hoverId === n.id ? 'var(--text)' : n.kind === 'team' ? color : 'var(--text-2)'}
+                  style={fixedLabel(labelFontPx(n.kind))}
                 >
                   {shortLabel(n)}
                 </text>

@@ -1,6 +1,6 @@
 import { Building2 } from "lucide-react";
 
-import { TEAM_TONES } from "@/lib/team";
+import { TEAM_TONES, avatarFor, avatarSrc } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import { initials } from "./model";
 
@@ -19,6 +19,12 @@ interface Props {
    * facepile claims to say.
    */
   markOnly?: boolean;
+  /**
+   * The mascot key from `avatarFor`. Optional: a caller holding a `Member`
+   * passes the id-seeded one so the face matches everywhere that teammate
+   * appears, and a caller with only a name falls back to seeding on that.
+   */
+  avatar?: string;
   className?: string;
 }
 
@@ -29,7 +35,7 @@ interface Props {
  * avatar from a contact-list one — DM rows, message gutters, and the member
  * pane all draw the same tile at different sizes.
  */
-export function Avatar({ name, tone, company, markOnly, className }: Props) {
+export function Avatar({ name, tone, company, markOnly, avatar, className }: Props) {
   if (company) {
     return (
       <span
@@ -44,16 +50,43 @@ export function Avatar({ name, tone, company, markOnly, className }: Props) {
     );
   }
 
+  // `markOnly` is the caller saying "this tile is too small to read". The
+  // mascot is subject to the same limit as the initials it replaces — at 16px
+  // it is a smudge — so the tone tile stays the answer there rather than a
+  // detailed drawing nobody can resolve.
+  if (markOnly) {
+    return (
+      <span
+        className={cn(
+          "flex shrink-0 items-center justify-center rounded-md text-xs font-semibold",
+          toneClass(tone),
+          className,
+        )}
+        aria-hidden
+      />
+    );
+  }
+
+  // The tone tile stays underneath the image on purpose: it is what shows if
+  // the avatar 404s or has not loaded yet, so the gutter never collapses to a
+  // blank square mid-scroll.
   return (
     <span
       className={cn(
-        "flex shrink-0 items-center justify-center rounded-md text-xs font-semibold",
+        "relative flex shrink-0 items-center justify-center overflow-hidden rounded-md text-xs font-semibold",
         toneClass(tone),
         className,
       )}
       aria-hidden
     >
-      {markOnly ? null : initials(name)}
+      <span className="absolute inset-0 flex items-center justify-center">{initials(name)}</span>
+      <img
+        src={avatarSrc(avatar ?? avatarFor(name))}
+        alt=""
+        loading="lazy"
+        decoding="async"
+        className="relative size-full object-cover"
+      />
     </span>
   );
 }

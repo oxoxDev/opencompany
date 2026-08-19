@@ -39,6 +39,7 @@ function member(id: string, role: string, name = id): TeamMember {
     role,
     description: "",
     tone: "a",
+    avatar: "a",
     inboxEnabled: false,
     effectiveTools: [],
     desks: [],

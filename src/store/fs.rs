@@ -754,6 +754,11 @@ struct Meta {
     /// provenance existed (the `#[serde(default)]` keeps those loading).
     #[serde(default)]
     template_provenance: Option<crate::ports::types::TemplateProvenance>,
+    /// What the operator told first-run setup about their business. Absent on
+    /// meta files written before setup existed, and for any company whose
+    /// operator never answered; `#[serde(default)]` keeps those loading.
+    #[serde(default)]
+    setup: Option<crate::company::setup::SetupAnswers>,
 }
 
 impl Default for Meta {
@@ -774,6 +779,7 @@ impl Default for Meta {
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }
     }
 }
@@ -872,6 +878,7 @@ impl CompanyStore for FsCompanyStore {
             overlay_desk_tools: meta.overlay_desk_tools,
             disabled_workflows: meta.disabled_workflows,
             template_provenance: meta.template_provenance,
+            setup: meta.setup,
         }))
     }
 
@@ -895,6 +902,7 @@ impl CompanyStore for FsCompanyStore {
             overlay_desk_tools: record.overlay_desk_tools.clone(),
             disabled_workflows: record.disabled_workflows.clone(),
             template_provenance: record.template_provenance.clone(),
+            setup: record.setup.clone(),
         };
         write_atomic(&bundle.meta_json(), &serde_json::to_string(&meta)?).await?;
         Ok(())
@@ -2256,6 +2264,7 @@ mod test {
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         };
         store.save(&record).await.unwrap();
 
@@ -2313,6 +2322,7 @@ mod test {
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();
@@ -2371,6 +2381,7 @@ mod test {
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();

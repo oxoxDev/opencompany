@@ -138,7 +138,7 @@ is substantially merged, add `frontend/e2e/` covering exactly:
 2. Conversation: send → reply renders in the right desk;
 3. Approvals: pending → approve → confirmation;
 4. Workspace: create + edit note → survives reload;
-5. Tasks: drag between columns → survives reload.
+5. Tasks: Ledgers → `tasks`, drag between columns → survives reload.
 
 ## 5. Per-workstream exit criteria
 

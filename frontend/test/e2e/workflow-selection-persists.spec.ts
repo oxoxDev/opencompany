@@ -52,14 +52,10 @@ async function deleteWorkflow(request: APIRequestContext, id: string) {
 /**
  * Which workflow is open, read off the detail view's own heading.
  *
- * Issue #1110 moved this assertion off the toolbar picker. The picker is still
- * there — inside a workflow — but it is no longer what says "this workflow is
- * the one on screen": the tab now opens on the index, where nothing is, and the
- * heading is the surface that names the workflow whose canvas is up. Asserting
- * on the picker would still pass for a view that opened the right workflow and
- * would also pass for one that never left the index, since a stale combobox
- * would simply be absent and `toContainText` on nothing is an error rather than
- * a clear report.
+ * Issue #1110 moved this assertion off the toolbar picker, and issue #1135
+ * removed that picker outright. Either way the heading is the surface that says
+ * "this workflow is the one on screen": the tab opens on the index, where
+ * nothing is open, and the heading is what the detail view names itself with.
  */
 function openWorkflowName(page: Page) {
   return workflowDetailName(page);
@@ -136,8 +132,8 @@ test("workflows tab selection is preserved across tab switches (#864)", async ({
   const firstId = `e2e-864-first-${stamp}`;
   const secondId = `e2e-864-second-${stamp}`;
   // Stamped like every other probe here: a run that dies before its cleanup
-  // leaves these workflows behind, and a static name would then match twice in
-  // the picker and fail the NEXT run on a strict-mode violation.
+  // leaves these workflows behind, and a static name would then match twice on
+  // the index and fail the NEXT run on a strict-mode violation.
   const firstName = `Workflow selector probe A ${stamp}`;
   const secondName = `Workflow selector probe B ${stamp}`;
 

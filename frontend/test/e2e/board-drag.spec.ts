@@ -27,17 +27,16 @@ import { expect, test, type APIRequestContext, type Locator, type Page } from "@
  *
  * # Why this one drives `#/ledgers/tasks`
  *
- * There are two boards now, and they are the same component: `LedgerBoard`
- * renders the task board at `#/tasks` and every ledger's columns under
- * `#/ledgers/<slug>`, with the card as a slot. The drag mechanics — all three
- * fixes above — live in that component, so testing either entry point tests
- * them.
+ * Because that is where the board is. `LedgerBoard` renders every ledger's
+ * columns under `#/ledgers/<slug>`, and the task board is one of them — the
+ * `tasks` ledger — since issue #1140 retired the standalone Tasks page that had
+ * been showing the same records through the same component.
  *
- * This spec drives the **ledger** one deliberately. It is the newer path and the
- * one whose layout differs (a nav beside it, the board inside a pane rather
- * than filling the window), so it is where a geometry regression would show up
- * first; `board-columns.spec.ts` covers the task board's own screen. Between
- * them both entry points are exercised, and neither can regress silently.
+ * The drag mechanics, all three fixes above, live in that shared component. So
+ * this spec and `board-columns.spec.ts` now drive the same address for
+ * different claims: this one owns the *gesture* (geometry, the miss, the edge
+ * scroll) and that one owns the board's *shape* (which columns, in what order,
+ * and where new work enters).
  *
  * Two things about the port are worth stating, because both are places where a
  * lazy rewrite would have quietly stopped testing anything:

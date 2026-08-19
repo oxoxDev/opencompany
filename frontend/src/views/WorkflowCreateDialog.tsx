@@ -47,6 +47,7 @@ import {
   hasConfigForm,
 } from "@/lib/workflow-node-config";
 import { draftBanners, draftLanding } from "@/lib/workflow-draft";
+import { isSafeId, slugifyWorkflowId } from "@/lib/workflow-id";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
 import { CronPreviewLine } from "@/views/CronPreviewLine";
@@ -460,12 +461,6 @@ function draftEdges(graph: WorkflowGraph): DraftEdge[] {
   }));
 }
 
-/** A safe on-disk id: only letters, digits, `_`, and `-` — a subset of what the
- * host's `safe_wid` accepts (any single path component), chosen to keep ids
- * simple and unambiguous without a round-trip to the server first. */
-function isSafeId(id: string): boolean {
-  return /^[A-Za-z0-9_-]+$/.test(id);
-}
 
 export function WorkflowCreateDialog({
   client,
@@ -539,6 +534,35 @@ export function WorkflowCreateDialog({
   /** The submit-time error banner, so a failed submit can scroll it into view
    * and focus it rather than leave the message off-screen (#813 defect 6). */
   const errorRef = useRef<HTMLDivElement>(null);
+  /**
+   * Whether the id is the operator's to own (issue #1053).
+   *
+   * `false` means the field is still derivable and the name may keep writing it;
+   * `true` means somebody decided it — the operator typed one, or a copilot
+   * draft supplied one — and the name must stop touching it. **Clobbering a
+   * deliberate id is a worse bug than the one being fixed**, so this latches on
+   * and only resets when the dialog reopens.
+   */
+  const [idTouched, setIdTouched] = useState(false);
+  /**
+   * Write an id somebody **chose** — the operator, a copilot draft, a prefilled
+   * correction — and latch it against derivation in the same step.
+   *
+   * One doorway on purpose (issue #1053 review). The latch was originally
+   * applied at each site that set a chosen id, and `runDraft`'s hydrate was
+   * missed: a create-mode draft landed its id and the next keystroke in Name
+   * slugged over it. Pairing the two writes here means a future path cannot set
+   * a chosen id *without* claiming it — the bug is removed as a class, not as an
+   * instance. Outside the reset effect, bare `setId` now means exactly one
+   * thing: a derived id. The reset effect is the one exception and has to be —
+   * it hydrates every field through `next*` locals so the pristine fingerprint
+   * is taken from the values it applies (issue #1006), so its id write cannot
+   * go through here. It sets `idTouched` itself, in the same pass.
+   */
+  function setAuthoredId(next: string) {
+    setIdTouched(true);
+    setId(next);
+  }
   /**
    * Identity of the dialog's current contents (issue #1052).
    *
@@ -615,6 +639,10 @@ export function WorkflowCreateDialog({
   // and keeping the edit would keep the stale token with it.
   useEffect(() => {
     if (!open) return;
+    // Issue #1053: a fresh open starts derivable again. Edit mode and the
+    // prefilled-draft branch below both re-latch it, because both arrive with an
+    // id somebody already chose.
+    setIdTouched(Boolean(workflow));
     // Issue #1052: a draft still in flight belongs to the contents being
     // replaced right now, not to these. Bumping first is what makes its
     // response land as `drop` instead of overwriting a freshly-reset form.
@@ -663,6 +691,12 @@ export function WorkflowCreateDialog({
     // be a latent bug if that invariant ever drifted.
     if (prefilledDraft) {
       const g = prefilledDraft.workflow;
+      // Issue #1053: chosen by the copilot, not left blank — editing the name
+      // afterwards must not slug over it. Only the latch is written here; the id
+      // itself rides `nextId` like every other hydrated field, so the pristine
+      // fingerprint below is taken from the value this open actually applies
+      // (issue #1006) rather than from state React has not committed yet.
+      setIdTouched(true);
       nextId = workflow?.id ?? g.id;
       nextName = g.name.trim();
       nextDescription = g.description ?? "";
@@ -849,13 +883,25 @@ export function WorkflowCreateDialog({
   function changeName(value: string) {
     setName(value);
     clearSubmitError();
+    // Issue #1053: the form used to reject "Weekly digest" for a missing id,
+    // then reject "weekly digest" for an unsafe one — twice, for something it
+    // could derive. Derived only while the id is nobody's yet, and never in edit
+    // mode, where the id keys the saved graph and re-slugging it is a rename.
+    if (editing || idTouched) return;
+    const derived = slugifyWorkflowId(value);
+    // An empty derivation means the name had nothing usable in it. Leave the
+    // field alone rather than writing "" — an empty id is itself invalid, and
+    // blanking a good id on a bad keystroke is the clobber this guard prevents.
+    if (derived) setId(derived);
   }
 
   /** Same for the id, which is what `validate()` complains about FIRST (missing,
    * or not a safe id) and the most common 409 from the host — so it is the
    * banner an author is most often looking at while fixing its cause. */
   function changeId(value: string) {
-    setId(value);
+    // Issue #1053: the operator has taken the field — the name stops writing it,
+    // including when they clear it back to empty, which is a decision too.
+    setAuthoredId(value);
     clearSubmitError();
   }
 
@@ -942,7 +988,11 @@ export function WorkflowCreateDialog({
     if (field === "schedule") {
       problem = scheduleProblem(value);
     } else if (field === "destinationTarget") {
-      problem = destinationTargetProblem(node.destinationKind, value, wiredChannels);
+      problem = destinationTargetProblem(
+        node.destinationKind,
+        value,
+        wiredChannels,
+      );
     } else if (field.startsWith("config:")) {
       const key = field.slice("config:".length);
       const spec = configFieldSpecs(node.kind).find((s) => s.key === key);
@@ -1200,7 +1250,8 @@ export function WorkflowCreateDialog({
         const graph = drafted.workflow;
         // Hydrate via the same helpers edit mode uses, so a drafted graph and a
         // saved one populate the form identically.
-        setId(graph.id);
+        // Issue #1053: the copilot chose this id, so the name stops writing it.
+        setAuthoredId(graph.id);
         setName(graph.name);
         setDescription(graph.description ?? "");
         setNodes(draftNodes(graph));

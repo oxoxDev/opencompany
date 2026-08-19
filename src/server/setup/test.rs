@@ -68,6 +68,7 @@ async fn with_company(state: &AppState, home: &std::path::Path) -> CompanyId {
             overlay_policy: None,
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();
@@ -322,6 +323,7 @@ async fn a_write_to_an_env_owned_field_is_refused() {
                 .into_iter()
                 .collect(),
             template: None,
+            company: None,
         },
         &env,
     )
@@ -866,4 +868,339 @@ async fn spec_reports_setup_complete_once_a_company_is_registered() {
         "the raw stamp stays false — `authorize` reads it, and a host with \
          companies authorizes through its admin rather than anonymously"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The roster proposal, before any company exists
+// ---------------------------------------------------------------------------
+
+async fn post_roster(state: AppState, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/setup/roster")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    (status, body_json(response).await)
+}
+
+/// The wizard's whole reason for a second route: it needs a roster *before*
+/// there is a company to scope one to. The company-scoped twin resolves a
+/// `CompanyRuntime` and would 404 here.
+#[tokio::test]
+async fn a_roster_is_proposed_before_any_company_exists() {
+    let home = home();
+    let state = fresh_state(home.path());
+    assert!(state.registry().is_empty(), "the premise: no company yet");
+
+    let (status, body) = post_roster(
+        state,
+        serde_json::json!({
+            "industry": "E-commerce — I sell homeware online",
+            "automate": "Meta ads, order dispatch, daily reports",
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["template"], "ecommerce", "{body}");
+    let agents = body["agents"].as_array().expect("agents");
+    assert!(
+        (4..=6).contains(&agents.len()),
+        "a proposal must be a workable team, got {}: {body}",
+        agents.len()
+    );
+    // Every row has to be directly usable as an apply's roster, so a missing
+    // field would surface as a half-built company rather than as a 400 here.
+    for agent in agents {
+        for key in ["name", "role", "description"] {
+            assert!(
+                agent[key].as_str().is_some_and(|v| !v.trim().is_empty()),
+                "agent is missing `{key}`: {agent}"
+            );
+        }
+    }
+}
+
+/// The default build links no harness, so the curated team is the whole answer.
+/// It must still be a real team and must say where it came from — an operator
+/// shown a canned roster with no indication judges the product on a team it
+/// never designed.
+#[tokio::test]
+async fn with_no_model_the_curated_team_ships_and_says_so() {
+    let home = home();
+    let (status, body) = post_roster(
+        fresh_state(home.path()),
+        serde_json::json!({ "industry": "zzzz qqqq" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["template"], "generic", "{body}");
+    assert_eq!(
+        body["source"], "fallback",
+        "the default build has no harness, so nothing designed this: {body}"
+    );
+}
+
+/// An operator who types nothing still gets a team. The last two questions are
+/// skippable by design, and stranding someone on the wizard is worse than a
+/// generic roster.
+#[tokio::test]
+async fn an_empty_body_still_yields_a_team() {
+    let home = home();
+    let (status, body) = post_roster(fresh_state(home.path()), serde_json::json!({})).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["agents"].as_array().expect("agents").len() >= 4,
+        "{body}"
+    );
+}
+
+/// The proposal creates nothing. The wizard shows it for review first, and the
+/// company is built by the apply — so a wizard abandoned at the review step
+/// leaves the host exactly as it was.
+#[tokio::test]
+async fn proposing_creates_no_company() {
+    let home = home();
+    let state = fresh_state(home.path());
+    let (status, _) =
+        post_roster(state.clone(), serde_json::json!({ "industry": "software" })).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        state.registry().is_empty(),
+        "the proposal route must not register a company"
+    );
+}
+
+/// The same gate the rest of this flow uses: open while unconfigured on
+/// loopback, closed on a routable host where it would let whoever reached a
+/// fresh deployment first drive it.
+#[tokio::test]
+async fn a_routable_host_refuses_an_anonymous_proposal() {
+    let home = home();
+    let (status, _) = post_roster(
+        routable_state(home.path()),
+        serde_json::json!({ "industry": "software" }),
+    )
+    .await;
+
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "an unauthenticated caller must not reach this on a routable host"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Applying a company the wizard designed
+// ---------------------------------------------------------------------------
+
+/// The manifest as it was persisted. `CompanyRuntime` exposes no accessor, and
+/// the record is the thing a restart would read back anyway.
+async fn seeded_manifest(home: &std::path::Path, id: &str) -> CompanyManifest {
+    let store = crate::store::FsCompanyStore::new(home.to_path_buf());
+    store
+        .load(&CompanyId::new(id))
+        .await
+        .expect("load")
+        .expect("the seeded company has a record")
+        .manifest
+}
+
+fn designed_company(email: Option<&str>) -> serde_json::Value {
+    let mut company = serde_json::json!({
+        "industry": "E-commerce — I sell homeware online",
+        "automate": "Meta ads, order dispatch",
+        "agents": [
+            { "name": "Meta Ads", "role": "Meta Ads Specialist", "description": "Campaigns and budgets." },
+            { "name": "Dispatch", "role": "Order Dispatch Coordinator", "description": "Paid to delivered." },
+            { "name": "Accounts", "role": "Accountant", "description": "Margins and spend." },
+            { "name": "Ops", "role": "Operations Lead", "description": "Unblocks the team." }
+        ]
+    });
+    if let Some(email) = email {
+        company["adminEmail"] = serde_json::Value::String(email.to_string());
+    }
+    company
+}
+
+/// The merge, end to end over HTTP: three answers and a reviewed roster become
+/// a registered company, with no template involved.
+#[tokio::test]
+async fn an_apply_seeds_the_company_the_wizard_designed() {
+    let home = home();
+    let state = fresh_state(home.path());
+    assert!(state.registry().is_empty(), "the premise: nothing yet");
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({ "company": designed_company(Some("ada@example.com")) }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let seeded = body["seeded_company"]
+        .as_str()
+        .expect("a company was seeded");
+    assert!(
+        state.registry().get(&CompanyId::new(seeded)).is_some(),
+        "the seeded company is registered"
+    );
+    let manifest = seeded_manifest(home.path(), seeded).await;
+    // Every designed teammate is on the roster. NOT an exact count: a company
+    // also receives the global baseline agents (`src/globals/`), so asserting a
+    // total here would pin this test to how many globals ship rather than to
+    // anything this flow decides.
+    let roles: Vec<&str> = manifest.agents.iter().map(|a| a.role.as_str()).collect();
+    for designed in [
+        "Meta Ads Specialist",
+        "Order Dispatch Coordinator",
+        "Accountant",
+        "Operations Lead",
+    ] {
+        assert!(
+            roles.contains(&designed),
+            "{designed} is missing from {roles:?}"
+        );
+    }
+    // The dead end this closes: without the address, email sign-in completes
+    // and nobody can log in.
+    assert_eq!(manifest.users.admins, vec!["ada@example.com".to_string()]);
+    // Indistinguishable from a provisioned company.
+    assert_eq!(
+        manifest.policy.mode,
+        crate::company::PROVISIONED_POLICY_MODE
+    );
+}
+
+/// A designed company beats a template slug. An operator who answered three
+/// questions and edited a roster has expressed a preference a preset cannot
+/// override — and sending both must never produce two companies.
+#[tokio::test]
+async fn a_designed_company_wins_over_a_template() {
+    let home = home();
+    let state = fresh_state(home.path());
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({
+            "template": "agentic_marketing_agency",
+            "company": designed_company(None),
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(state.registry().list().len(), 1, "exactly one company");
+    let seeded = body["seeded_company"].as_str().expect("seeded");
+    let roles: Vec<String> = seeded_manifest(home.path(), seeded)
+        .await
+        .agents
+        .into_iter()
+        .map(|a| a.role)
+        .collect();
+    // The designed roster landed; the template's did not. Named rather than
+    // counted, because the global baseline agents are on here too.
+    assert!(
+        roles.iter().any(|r| r == "Order Dispatch Coordinator"),
+        "the designed roster is missing: {roles:?}"
+    );
+    assert!(
+        !roles.iter().any(|r| r == "Creative Director"),
+        "the marketing template's roster leaked in: {roles:?}"
+    );
+}
+
+/// The re-run guard applies to a designed company exactly as it does to a
+/// template: setup must never hand an operator a second starter company.
+#[tokio::test]
+async fn a_second_apply_does_not_seed_another_company() {
+    let home = home();
+    let state = fresh_state(home.path());
+    with_company(&state, home.path()).await;
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({ "company": designed_company(None) }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["seeded_company"].is_null(),
+        "a host with a company must not be handed a second: {body}"
+    );
+    assert_eq!(state.registry().list().len(), 1);
+}
+
+/// The roster arrives over the wire after an operator edited it, so neither the
+/// bounds nor the de-duplication can be assumed to have survived. Validation
+/// runs again on the way in rather than trusting the client.
+#[tokio::test]
+async fn an_edited_roster_is_revalidated_on_the_way_in() {
+    let home = home();
+    let state = fresh_state(home.path());
+
+    let mut company = designed_company(None);
+    // Two rows that slug alike, and a blank one — all three are things a client
+    // could send and `validate` would refuse.
+    company["agents"] = serde_json::json!([
+        { "name": "Ops", "role": "Ops Lead", "description": "a" },
+        { "name": "Ops", "role": "ops  lead", "description": "b" },
+        { "name": "", "role": "   ", "description": "c" },
+        { "name": "Accounts", "role": "Accountant", "description": "d" }
+    ]);
+
+    let (status, body) = post_setup(state.clone(), serde_json::json!({ "company": company })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let seeded = body["seeded_company"].as_str().expect("seeded");
+    let manifest = seeded_manifest(home.path(), seeded).await;
+    assert!(
+        manifest.validate().is_empty(),
+        "a registered company must be valid: {:?}",
+        manifest.validate()
+    );
+    let ids: Vec<&str> = manifest.agents.iter().map(|a| a.id.as_str()).collect();
+    let mut unique = ids.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), ids.len(), "duplicate ids survived: {ids:?}");
+}
+
+/// Phase 2 builds this company's workflows from the same answers, so it must
+/// never have to ask again. The company-scoped route already stores them; the
+/// wizard is the *default* path, and a company created through it arriving
+/// without them would be the one that gets re-interrogated.
+#[tokio::test]
+async fn the_answers_are_stored_on_the_company_the_wizard_built() {
+    let home = home();
+    let state = fresh_state(home.path());
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({ "company": designed_company(Some("ada@example.com")) }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let seeded = body["seeded_company"].as_str().expect("seeded");
+    let store = crate::store::FsCompanyStore::new(home.path().to_path_buf());
+    let record = store
+        .load(&CompanyId::new(seeded))
+        .await
+        .expect("load")
+        .expect("record");
+    let answers = record.setup.expect("the answers were stored");
+    assert_eq!(answers.industry, "E-commerce — I sell homeware online");
+    assert_eq!(answers.automate, "Meta ads, order dispatch");
 }

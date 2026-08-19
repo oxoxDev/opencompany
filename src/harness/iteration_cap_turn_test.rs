@@ -266,6 +266,7 @@ async fn company_agent(
         global: false,
         id: "ceo".to_string(),
         role: "Chief Executive".to_string(),
+        name: None,
         description: None,
         tier: None,
         tools: Vec::new(),

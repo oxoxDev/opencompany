@@ -55,6 +55,7 @@ async fn state_with(home: &std::path::Path, connections: ConnectionsRuntime) -> 
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();

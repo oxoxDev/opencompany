@@ -18,6 +18,15 @@ import { LIVE_BRAIN } from "./capabilities";
  * order, and render. A column the host declares but the console never shows —
  * a broken ledger read, a dropped label — fails here and nowhere else. It is
  * also the guard on intake: one prompt box, landing in To-do.
+ *
+ * **It drives `#/ledgers/tasks`, not `#/tasks`.** The standalone Tasks page was
+ * retired in issue #1140 and the board it showed is the `tasks` ledger's
+ * columns, rendered by the same component it always was. The two claims that
+ * deletion could have taken with it — that work can still be *created*, and
+ * that a card can still be *opened* — are asserted below rather than left to
+ * the reader, because both fail silently: a console with no intake looks like a
+ * company with nothing to do, and a dead card link looks like a link that
+ * worked.
  */
 
 const API = "/api/v1/company";
@@ -81,8 +90,41 @@ function columnLabels(page: Page) {
   return page.getByTestId("ledger-board").getByTestId("column-label");
 }
 
-test("the board renders the six #183 columns in order, with Backlog gone", async ({ page }) => {
+/**
+ * Issue #1140 — the two things retiring the Tasks page could have taken.
+ *
+ * `#/tasks` is in every operator's history and fingers, and `#/tasks/<id>` is
+ * linked from chat, from an approval card and from a workflow run's rows. The
+ * first has to land on the board and the second has to keep opening the card,
+ * and both failures are quiet: the router drops an address it does not know and
+ * renders Overview, which looks like a link that worked.
+ */
+test("the retired #/tasks lands on the board, and #/tasks/<id> still opens the card", async ({
+  page,
+  request,
+}) => {
+  const title = `e2e retired route ${Date.now()}`;
+  const seeded = await request.post(`${API}/tasks`, { data: { title } });
+  expect(seeded.ok()).toBeTruthy();
+  const id = (await seeded.json()).id as string;
+
   await page.goto("/#/tasks");
+  await dismissTour(page);
+
+  // The board, and the address rewritten to name where it actually is. A push
+  // rather than a replace would leave `#/tasks` one Back away, bouncing the
+  // operator forward again on arrival.
+  await expect(columnLabels(page)).toHaveText(EXPECTED_COLUMNS, { timeout: 15_000 });
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/tasks");
+
+  // And the card detail, which Ledgers deliberately does not reproduce.
+  await page.goto(`/#/tasks/${id}`);
+  await expect(page.getByRole("heading", { name: title })).toBeVisible({ timeout: 15_000 });
+  expect(new URL(page.url()).hash).toBe(`#/tasks/${id}`);
+});
+
+test("the board renders the six #183 columns in order, with Backlog gone", async ({ page }) => {
+  await page.goto("/#/ledgers/tasks");
   await dismissTour(page);
 
   // The columns are a read now, not a literal, so the board is not itself
@@ -93,7 +135,7 @@ test("the board renders the six #183 columns in order, with Backlog gone", async
 });
 
 test("new work enters through one prompt box and lands in To-do", async ({ page, request }) => {
-  await page.goto("/#/tasks");
+  await page.goto("/#/ledgers/tasks");
   await dismissTour(page);
 
   // Exactly one entry point on the whole board (issue #206's rule, kept).
@@ -102,12 +144,23 @@ test("new work enters through one prompt box and lands in To-do", async ({ page,
   await addTask.click();
   await expect(page.getByRole("heading", { name: "New task" })).toBeVisible();
 
-  // One field. Title / Note / Priority / Assignee are gone from create — the
-  // host defaults the last two and the card's edit surface owns them (#278).
+  // Title / Note / Priority stay gone from create — the host defaults priority
+  // and the card's edit surface owns them (#278).
   await expect(page.locator("#new-prompt")).toBeVisible();
-  for (const gone of ["#new-title", "#new-note", "#new-assignee"]) {
+  for (const gone of ["#new-title", "#new-note", "#new-priority"]) {
     await expect(page.locator(gone)).toHaveCount(0);
   }
+
+  // Assignee came *back* in #1106, and is the one exception to "one field".
+  // #301 removed it on the reasoning that the host defaults it; what that missed
+  // is that the host's default is a planning pass which picks an owner, and picks
+  // one silently when two teammates fit. Offering it here is the pre-empt.
+  //
+  // The rule that keeps this from re-breaking what #301 fixed is the *default*,
+  // asserted below rather than the control's absence: an operator who ignores it
+  // types a prompt, hits Create, and gets exactly the unassigned card they got
+  // before — the field is omitted from the body entirely when untouched.
+  await expect(page.locator("#new-assignee")).toHaveCount(1);
 
   // A prompt longer than the title cap: the title is shortened and the full
   // text survives in the note, so nothing the operator typed is lost.
@@ -116,7 +169,7 @@ test("new work enters through one prompt box and lands in To-do", async ({ page,
   await page.locator("#new-prompt").fill(long);
   await page.getByRole("button", { name: "Create", exact: true }).click();
 
-  type Row = { title: string; note?: string; column: string };
+  type Row = { title: string; note?: string; column: string; assignee: string };
   const find = async (): Promise<Row | undefined> => {
     const rows = (await (await request.get(`${API}/tasks`)).json()) as Row[];
     return rows.find((r) => r.title.startsWith(marker));
@@ -128,6 +181,10 @@ test("new work enters through one prompt box and lands in To-do", async ({ page,
   expect(created.column).toBe("todo");
   expect(created.title.length).toBeLessThanOrEqual(81); // 80 + the ellipsis
   expect(created.note).toBe(long);
+  // The #1106 default, and the reason adding the control is a no-op for anyone
+  // who does not use it: the prompt was the only thing filled in, so the card is
+  // unassigned exactly as it was before the picker existed.
+  expect(created.assignee).toBe("");
 });
 
 /**
@@ -171,7 +228,7 @@ test("dragging into Planning moves the card without dispatching it", async ({ pa
   expect(seeded.ok()).toBeTruthy();
   const id = (await seeded.json()).id as string;
 
-  await page.goto("/#/tasks");
+  await page.goto("/#/ledgers/tasks");
   await dismissTour(page);
 
   const card = page.locator("div[draggable=true]").filter({ hasText: title }).first();
@@ -269,7 +326,7 @@ test("a card dropped into Planning is planned and settled, never left parked", a
   expect(seeded.ok()).toBeTruthy();
   const id = (await seeded.json()).id as string;
 
-  await page.goto("/#/tasks");
+  await page.goto("/#/ledgers/tasks");
   await dismissTour(page);
 
   const card = page.locator("div[draggable=true]").filter({ hasText: title }).first();

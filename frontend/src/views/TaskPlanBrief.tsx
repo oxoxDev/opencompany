@@ -12,24 +12,36 @@
 // gap is one somebody has to act on, and burying that under a numbered list of
 // steps would make the useful case the slow one.
 //
-// Everything here is read-only. The console never posts a plan — the host's
+// The plan itself is read-only. The console never posts a plan — the host's
 // create body has no field for one — so a verdict cannot be forged from a
 // browser, and nothing in this file needs to guard against that.
+//
+// One thing here does write, and it writes the *card*, not the plan: when a pass
+// declined to choose an owner (issue #1106) the brief renders the candidates it
+// named and hands a pick back through `onPick`, which the detail screen turns
+// into the same `PATCH …/tasks/{id} {assignee}` its reassign row already sends.
+// The rule the read-only note was protecting is intact — nothing here can author
+// a prerequisite verdict — and the write goes through the one boundary that
+// validates an assignee against the roster.
 
+import { useState } from "react";
 import {
   AlertTriangle,
   CircleHelp,
   ClipboardCheck,
   Clock,
   HelpCircle,
+  Loader2,
   ShieldAlert,
   TriangleAlert,
+  Users,
   XCircle,
   CheckCircle2,
   type LucideIcon,
 } from "lucide-react";
 
 import type { PrereqStatus, Prerequisite, TaskPlan } from "@/api/tasks";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 /**
@@ -90,10 +102,24 @@ export function tallyPrerequisites(plan: TaskPlan): {
 }
 
 /** The whole brief: what the plan is, what it needs, and how it will be judged. */
-export function TaskPlanBrief({ plan }: { plan: TaskPlan }) {
+export function TaskPlanBrief({
+  plan,
+  onPick,
+}: {
+  plan: TaskPlan;
+  /**
+   * Receives a candidate's id when the operator answers the ownership question
+   * (issue #1106). Omitted on any surface that cannot write the card — the
+   * candidates then render as a read-only record of what the pass declined to
+   * decide, which is still the runner-up that used to be lost.
+   */
+  onPick?: (id: string) => void | Promise<void>;
+}) {
   return (
     <div className="flex flex-col gap-5" data-testid="task-plan-brief">
       <Headline plan={plan} />
+
+      <OwnerChoice plan={plan} onPick={onPick} />
 
       {plan.description && (
         <p className="text-sm leading-relaxed text-foreground/90">{plan.description}</p>
@@ -241,6 +267,101 @@ function Headline({ plan }: { plan: TaskPlan }) {
           </span>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The ownership question, when the pass declined to answer it (issue #1106).
+ *
+ * Rendered above the description and below only the headline, because a card
+ * sitting in To-do with an unanswered question is not waiting on anything in the
+ * plan — it is waiting on the person reading it, and burying that under the
+ * brief would make the actionable case the one you have to scroll for. It is the
+ * same reasoning that puts blockers above steps.
+ *
+ * Each row carries its reason. A bare pair of ids would hand the operator back
+ * the judgement the planner already made and ask them to re-derive it; the line
+ * beside each name is what lets them answer without opening two agent pages.
+ *
+ * Nothing is pre-selected and there is no default button. A highlighted "best"
+ * option would be the silent pick this issue exists to remove, wearing a
+ * suggestion's clothes.
+ */
+function OwnerChoice({
+  plan,
+  onPick,
+}: {
+  plan: TaskPlan;
+  onPick?: (id: string) => void | Promise<void>;
+}) {
+  const [picking, setPicking] = useState<string | null>(null);
+  const candidates = plan.assigneeCandidates ?? [];
+  if (candidates.length === 0) return null;
+
+  return (
+    <div
+      className="flex flex-col gap-3 rounded-lg border border-status-blocked/30 bg-status-blocked-soft px-3 py-2.5"
+      data-testid="plan-owner-choice"
+    >
+      <div className="flex items-start gap-2">
+        <Users className="mt-0.5 size-4 shrink-0 text-status-blocked-text" />
+        <p className="min-w-0 text-sm leading-relaxed">
+          <span className="font-medium">Who owns this?</span>{" "}
+          <span className="text-muted-foreground">
+            More than one teammate could take it, so it is waiting on you rather
+            than being handed to whichever one the plan named first.
+          </span>
+        </p>
+      </div>
+
+      <ul className="flex flex-col gap-1.5">
+        {candidates.map((candidate) => (
+          <li
+            key={candidate.id}
+            className="flex items-start gap-2 rounded-md bg-background/60 px-2.5 py-2"
+          >
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium">{candidate.id}</p>
+              {candidate.reason && (
+                <p className="mt-0.5 text-sm leading-relaxed text-muted-foreground">
+                  {candidate.reason}
+                </p>
+              )}
+            </div>
+            {onPick && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 shrink-0"
+                disabled={picking !== null}
+                onClick={() => {
+                  setPicking(candidate.id);
+                  // The screen reloads the card on success and surfaces its own
+                  // failure toast; either way this component is about to be
+                  // re-rendered from fresh data, so the only state it owns is
+                  // "a click is in flight".
+                  void Promise.resolve(onPick(candidate.id)).finally(() =>
+                    setPicking(null),
+                  );
+                }}
+              >
+                {picking === candidate.id && (
+                  <Loader2 className="mr-1.5 size-3.5 animate-spin" />
+                )}
+                Assign
+              </Button>
+            )}
+          </li>
+        ))}
+      </ul>
+
+      {onPick && (
+        <p className="text-2xs text-muted-foreground">
+          Someone else can take it too — the reassign row on this card offers the
+          whole roster.
+        </p>
+      )}
     </div>
   );
 }

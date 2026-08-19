@@ -176,9 +176,11 @@ export type DeliveryStatus =
 /**
  * One attempt to route a reached `output` node's report to its destination.
  *
- * This is the ONLY place an operator learns a report was not delivered: a
- * delivery failure never fails the run, so it has nowhere else to surface. An
- * output node the run never reached contributes no row at all.
+ * A delivery failure never fails the run and never moves a node's status, so
+ * these rows — and, since issue #981, the run's own
+ * {@link WorkflowRunVerdict} — are the only places an operator learns a report
+ * was not delivered. The rows are the *reason*; the verdict is the *reading*.
+ * An output node the run never reached contributes no row at all.
  */
 export interface DeliveryReport {
   /** The output node whose report this was. */
@@ -207,6 +209,30 @@ export interface DeliveryReport {
    */
   reason?: string;
 }
+
+/**
+ * What a run adds up to, in one word — **the host's reading, not ours** (issue
+ * #981).
+ *
+ * The console used to own the only definition of "did this run succeed", and a
+ * definition living in one client is a definition every other client has to
+ * guess at. The obvious guess is wrong: delivery happens after the engine
+ * returns, so a run whose report was refused still reports every node `ok`, and
+ * anything folding `nodes[].status` — the QA harness included — scored a
+ * dropped report green.
+ *
+ * The seven words are unchanged from the ladder this console has always used,
+ * in the same precedence order; only the place they are decided has moved. See
+ * {@link runTone}.
+ */
+export type WorkflowRunVerdict =
+  | "running"
+  | "failed"
+  | "stopped"
+  | "blocked"
+  | "undelivered"
+  | "awaiting-approval"
+  | "ok";
 
 /** The result of a run: the engine's final state and any pending approvals. */
 export interface WorkflowRunResult {
@@ -268,6 +294,16 @@ export interface WorkflowRunResult {
    * nearly every run. Rendered by the run drawer since issue #1014.
    */
   board?: WorkflowRunBoardRow[];
+  /**
+   * What this run adds up to, as the host reads it (issue #981).
+   *
+   * Optional on the type, **never** on the wire from a host that has it: a
+   * response predating #981 carries no key at all, and the reading has to be
+   * derived locally in that case. It is the only field on this body that says a
+   * report did not go out — `nodes[].status` deliberately does not move for a
+   * delivery failure, because the nodes really did run.
+   */
+  verdict?: WorkflowRunVerdict;
 }
 
 /**
@@ -369,6 +405,19 @@ export interface WorkflowBlockedNode {
    * operator at Approvals would send them to an empty page. Absent when zero.
    */
   unparkable?: number;
+  /**
+   * How many of `approvalIds` the host no longer holds (issue #1143).
+   *
+   * The same end state as `unparkable`, reached later: the card was opened, so
+   * the run recorded an id for it, but the question did not survive and the
+   * queue has nothing to decide. Pointing the operator at Approvals for these
+   * sends them to an empty page — which is the dead end #1143 was filed for.
+   *
+   * Computed by the host on each read of run history rather than stored, so it
+   * reflects the queue as it is now. Absent when zero, which is every healthy
+   * run.
+   */
+  stranded?: number;
 }
 
 /** What became of one gated tool call a run tried to park (issue #880). */
@@ -548,6 +597,16 @@ export interface WorkflowRunOutcome {
    * on a run that touched no card.
    */
   board?: WorkflowRunBoardRow[];
+  /**
+   * What this run adds up to, as the host reads it (issue #981).
+   *
+   * **Derived by the host, never journaled**, so a run recorded long before
+   * this field existed still comes back with one — the whole history re-scores
+   * on deploy rather than on a migration. Optional on the type only because a
+   * *host* predating #981 sends no key; when that happens {@link runTone} falls
+   * back to deriving it here, which is where the definition used to live.
+   */
+  verdict?: WorkflowRunVerdict;
 }
 
 export function listWorkflows(

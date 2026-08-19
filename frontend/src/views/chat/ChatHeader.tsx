@@ -92,7 +92,7 @@ export function ChatHeader({
       >
         <Users className="size-3.5" />
         <span className="tabular-nums">{memberCount}</span>
-        <span className="sr-only">{membersOpen ? "Hide" : "Show"} members</span>
+        <span className="sr-only">{membersOpen ? "Hide" : "Show"} teammates</span>
       </Button>
     </header>
   );

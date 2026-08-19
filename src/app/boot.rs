@@ -2,12 +2,21 @@
 //!
 //! `serve` in `src/bin/opencompany.rs` is the command-line entry point, and it
 //! does several things before it ever builds a router: it resolves the data
-//! root, migrates a legacy bundle nest, and prepares the agent journal. An
-//! embedder — the desktop shell, which links this crate rather than spawning
-//! the binary — has to do exactly the same things, and a second copy of that
-//! sequence would drift from the first the moment either changed.
+//! root, locks it, migrates a legacy bundle nest, materializes the canonical
+//! workspace layout, and prepares the agent journal. An embedder — the desktop
+//! shell, which links this crate rather than spawning the binary — has to do
+//! exactly the same things, and a second copy of that sequence would drift from
+//! the first the moment either changed.
 //!
-//! So the sequence lives here, and the binary is one of its callers.
+//! So the sequence lives here, in [`prepare_instance`]. `serve` still runs its
+//! own copy: it resolves `--home` and the data root separately (they can
+//! diverge, which is what `store::home_divergence_warning` is for) and it takes
+//! the environment-mutating half of the journal preparation, which an embedder
+//! must not. Anything added to one belongs in the other until that split is
+//! closed — the [`DataLayout`](crate::store::DataLayout) step below is here
+//! because it was in `serve` only, so a desktop instance never created its
+//! `memory/`, `store/`, `files/`, `logs/` or `tmp/` directories and never
+//! cleared stale scratch on restart.
 //!
 //! ## The `set_var` hazard, which is why this is not just a function call
 //!
@@ -31,7 +40,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::Result;
+use crate::app::config::{ConfigFile, WorkspaceConfig};
 use crate::app::journal::JournalRoot;
+use crate::store::DataLayout;
 use crate::store::lock::HomeLock;
 
 /// A prepared instance root: locked, migrated, and with its journal resolved.
@@ -44,6 +55,7 @@ use crate::store::lock::HomeLock;
 pub struct EmbeddedInstance {
     home: PathBuf,
     journal: JournalRoot,
+    workspace: WorkspaceConfig,
     _lock: HomeLock,
 }
 
@@ -56,6 +68,18 @@ impl EmbeddedInstance {
     /// The resolved agent journal root.
     pub fn journal(&self) -> &JournalRoot {
         &self.journal
+    }
+
+    /// The `[workspace]` section of the root's `config.toml`, resolved against
+    /// its defaults.
+    ///
+    /// Returned rather than only applied, because two of its fields are not
+    /// layout at all: `quota` and `git_enabled` belong on the embedder's
+    /// [`AppConfig`](crate::AppConfig) exactly as `serve` puts them there. An
+    /// embedder that ignores them runs with the compiled-in defaults and
+    /// silently disregards an operator's `config.toml`.
+    pub fn workspace(&self) -> &WorkspaceConfig {
+        &self.workspace
     }
 
     /// The `(name, value)` an embedder must export **before** starting any
@@ -82,19 +106,42 @@ impl EmbeddedInstance {
 ///    bundle layout, and two processes migrating one root concurrently is the
 ///    worst moment to discover they were sharing it.
 /// 3. **Migrate** the legacy nest, exactly as `serve` does.
-/// 4. **Prepare** the journal, proving its root is writable — an unwritable one
+/// 4. **Materialize** the canonical workspace layout — `memory/`, `store/`,
+///    `files/`, `logs/`, `tmp/` — clearing the ephemeral `tmp/` scratch first
+///    when `[workspace].clear_tmp_on_startup` allows it (the default). Before
+///    the journal, because both write under the root and a layout failure is
+///    the cheaper of the two to hit.
+/// 5. **Prepare** the journal, proving its root is writable — an unwritable one
 ///    aborts here rather than at the first agent turn.
+///
+/// One root, not two. An embedder passes the single directory it owns, so the
+/// company bundles, the `config.toml` and the workspace layout all resolve
+/// under it — the aligned shape
+/// [`home_divergence_warning`](crate::store::home_divergence_warning) is silent
+/// about. `serve` is the caller that can split them, with `--home` pointing the
+/// bundles somewhere other than `OPENCOMPANY_DATA_DIR`, and it keeps its own
+/// copy of this sequence for that reason.
 pub async fn prepare_instance(home: Option<PathBuf>) -> Result<EmbeddedInstance> {
     let home = crate::store::resolve_home(home)?;
     let lock = crate::store::lock::acquire(&home)?;
     // The announced variant, same as `serve`: a migration that moved bundles is
     // something an operator should see in the log rather than infer later.
     crate::store::migrate::migrate_legacy_nest_announced(&home)?;
+    // Read after the migration: an un-migrated install's `config.toml` may
+    // still be one level down, and moving it up is what the step above does.
+    let workspace = ConfigFile::load(&home)?
+        .map(|file| file.workspace)
+        .unwrap_or_default()
+        .resolve();
+    DataLayout::new(&home)
+        .ensure(workspace.clear_tmp_on_startup)
+        .await?;
     let journal = prepare_journal(&home).await?;
 
     Ok(EmbeddedInstance {
         home,
         journal,
+        workspace,
         _lock: lock,
     })
 }
@@ -180,6 +227,82 @@ mod test {
         panic!(
             "a released root must become takeable, but {attempts} attempts over \
              {RELEASE_TIMEOUT:?} were all refused; last error: {last}"
+        );
+    }
+
+    /// The gap this closed: `serve` materialized the workspace layout and the
+    /// desktop did not, so an embedded instance never had `memory/`, `store/`,
+    /// `files/`, `logs/` or `tmp/` and never cleared stale scratch on restart.
+    #[tokio::test]
+    async fn preparing_materializes_the_workspace_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let instance = prepare_instance(Some(dir.path().to_path_buf()))
+            .await
+            .unwrap();
+
+        let layout = DataLayout::new(instance.home());
+        for expected in [
+            layout.memory_dir(),
+            layout.store_dir(),
+            layout.files_dir(),
+            layout.logs_dir(),
+            layout.tmp_dir(),
+        ] {
+            assert!(
+                expected.is_dir(),
+                "{} must exist after prepare_instance",
+                expected.display()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn preparing_clears_tmp_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = DataLayout::new(dir.path()).tmp_dir().join("stale.txt");
+        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        std::fs::write(&stale, "from a previous run").unwrap();
+
+        drop(
+            prepare_instance(Some(dir.path().to_path_buf()))
+                .await
+                .unwrap(),
+        );
+
+        assert!(
+            !stale.exists(),
+            "the ephemeral tmp/ scratch must not survive a restart"
+        );
+    }
+
+    /// `[workspace]` in the root's `config.toml` is honoured by the embedded
+    /// path, not only by `serve` — both the layout knob and the two fields the
+    /// embedder has to put on its own `AppConfig`.
+    #[tokio::test]
+    async fn preparing_reads_the_workspace_section_from_config_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[workspace]\nclear_tmp_on_startup = false\ngit_enabled = true\nmax_blob_mb = 8.0\n",
+        )
+        .unwrap();
+        let keep = DataLayout::new(dir.path()).tmp_dir().join("keep.txt");
+        std::fs::create_dir_all(keep.parent().unwrap()).unwrap();
+        std::fs::write(&keep, "kept").unwrap();
+
+        let instance = prepare_instance(Some(dir.path().to_path_buf()))
+            .await
+            .unwrap();
+
+        assert!(
+            keep.exists(),
+            "clear_tmp_on_startup = false must be honoured"
+        );
+        assert!(instance.workspace().git_enabled);
+        assert_eq!(
+            instance.workspace().quota.max_blob_bytes,
+            8 * 1024 * 1024,
+            "the embedder must see the configured blob cap, not the default"
         );
     }
 

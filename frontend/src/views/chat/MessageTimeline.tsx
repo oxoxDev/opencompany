@@ -291,7 +291,7 @@ function ChannelIntro({
       </p>
       {/* The two openings a new channel actually has. Held back until the
           history has answered, for the same reason the sentence above is:
-          offering "add an agent here" over a channel that turns out to be full
+          offering "add a teammate here" over a channel that turns out to be full
           of conversation reads as data loss. */}
       {empty && !loading && channel.kind === "channel" && (
         <ActionCards onAddPeople={onAddPeople} />
@@ -314,8 +314,8 @@ function ActionCards({ onAddPeople }: { onAddPeople?: () => void }) {
     <div className="mt-5 flex flex-wrap gap-4">
       <ActionCard
         icon={Bot}
-        title="Create agent"
-        hint="Add an agent here."
+        title="Create teammate"
+        hint="Add a teammate here."
         href="#/company"
       />
       <ActionCard

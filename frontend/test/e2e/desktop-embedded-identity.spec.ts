@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import { openHostMenu } from "./host-switcher";
+
 /**
  * Issue #615 — one "This computer" row, however many times the app restarts.
  *
@@ -211,7 +213,7 @@ test("a relaunch at a new port re-addresses the connection instead of adding one
   });
 
   // Launch 1.
-  await page.goto("/#/tasks");
+  await page.goto("/#/ledgers/tasks");
   await expect.poll(async () => (await embedded(page))[0]?.baseUrl, { timeout: 30_000 }).toBe(
     CLOSED_PORTS[0],
   );
@@ -253,11 +255,10 @@ test("a relaunch at a new port re-addresses the connection instead of adding one
 
   // And the row that survived is the working one: this status comes back from a
   // real request to the real host, through the console's own probe.
-  await expect(page.getByTestId(`connection-row-${first.id}`)).toHaveAttribute(
-    "data-status",
-    "live",
-    { timeout: 30_000 },
-  );
+  await openHostMenu(page);
+  await expect(page.getByTestId(`host-row-${first.id}`)).toHaveAttribute("data-status", "live", {
+    timeout: 30_000,
+  });
 });
 
 test("the rows an older version left behind collapse on the next launch", async ({
@@ -281,7 +282,7 @@ test("the rows an older version left behind collapse on the next launch", async 
     ].map((p) => ({ ...p, defaultCompany: null, credential: { kind: "cookie" } })),
   });
 
-  await page.goto("/#/tasks");
+  await page.goto("/#/ledgers/tasks");
   await expect.poll(async () => (await embedded(page)).length, { timeout: 30_000 }).toBe(1);
 
   const [adopted] = await embedded(page);

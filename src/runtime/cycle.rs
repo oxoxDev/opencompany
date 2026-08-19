@@ -44,7 +44,7 @@ use crate::runtime::delegation_tools::{
     DELEGATE_TO_DESK_TOOL, DelegateArgs, SPAWN_TASK_TOOL, SpawnTaskArgs, desk_lead,
     unknown_desk_message,
 };
-use crate::runtime::grants::{GrantId, GrantScope, GrantedCall, StandingGrant};
+use crate::runtime::grants::{GrantId, GrantScope, GrantSubject, GrantedCall, StandingGrant};
 use crate::runtime::journal::{ApprovalConversation, ExecutedEffect, TaskLink};
 use crate::runtime::types::CycleReport;
 use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
@@ -962,9 +962,13 @@ approval.]"
         let Some(effect) = self.rt.approval_gate.parked_effect(id) else {
             return Ok(());
         };
-        if effect.agent.is_none() {
+        // Issue #1098: a teammate, or the authored workflow a gate belongs to.
+        // Neither means the runtime itself is performing this, and there is
+        // genuinely nothing to hold a permission — the refusal below is the same
+        // one it always was, now stated about a subject rather than an agent.
+        if crate::runtime::grants::subject_of(&effect).is_none() {
             return Err(OpenCompanyError::InvalidRequest(format!(
-                "'{}' is performed by the runtime itself, so there is no teammate's tool use to \
+                "'{}' is performed by the runtime itself, so there is nobody's tool use to \
                  grant; approve it once instead",
                 effect.kind
             )));
@@ -986,6 +990,20 @@ approval.]"
         by: Actor,
         scope: GrantScope,
     ) -> Result<()> {
+        // Issue #1098: a gate carries no teammate but can still hold a standing
+        // permission for its workflow, so that case is taken before the native
+        // fall-through below. Only for `GrantScope::Tool` — a `Once` approval of
+        // a gate is still performed natively, because the single-use grant this
+        // would otherwise mint has nobody to redeem it (see `crate::workflows::gate`).
+        if effect.agent.is_none()
+            && let GrantScope::Tool { expires_at_millis } = scope
+            && let Some(subject @ GrantSubject::Workflow(_)) =
+                crate::runtime::grants::subject_of(&effect)
+        {
+            return self
+                .mint_standing_grant(id, subject, effect, by, expires_at_millis)
+                .await;
+        }
         let Some(agent) = effect.agent.clone() else {
             let key = format!("approval:{id}");
             // The card that asked for this sign-off (issue #351). It is not
@@ -1003,8 +1021,14 @@ approval.]"
         match scope {
             GrantScope::Once => self.mint_grant(id, agent, effect).await,
             GrantScope::Tool { expires_at_millis } => {
-                self.mint_standing_grant(id, agent, effect, by, expires_at_millis)
-                    .await
+                self.mint_standing_grant(
+                    id,
+                    GrantSubject::Agent(agent),
+                    effect,
+                    by,
+                    expires_at_millis,
+                )
+                .await
             }
         }
     }
@@ -1024,7 +1048,7 @@ approval.]"
     async fn mint_standing_grant(
         &self,
         id: &ApprovalId,
-        agent: String,
+        subject: GrantSubject,
         effect: Effect,
         by: Actor,
         expires_at_millis: u64,
@@ -1034,12 +1058,33 @@ approval.]"
             .journal
             .approval_conversation(id)
             .unwrap_or_default();
+        // Issue #1098: a gate's `kind` is the `workflow.approve` wrapper, so the
+        // tool and arguments the permission is *about* are the inner call issue
+        // #846 wrote onto the payload — the same call the card showed. Every
+        // other effect is its own call and answers `None` here.
+        let (tool, args) = crate::runtime::workflow_resume::gate_inner_call(&effect)
+            .map(|(tool, args)| (tool.to_string(), args.clone()))
+            .unwrap_or_else(|| (effect.kind.clone(), effect.payload.clone()));
+        // Issue #457: which slice of the tool the card was actually about, read
+        // off the **parked effect's own payload** — the arguments the operator
+        // was shown — rather than re-derived from anything live, so the grant
+        // records the sentence they consented to. `None` for every tool whose
+        // name is the whole of what it can do.
+        //
+        // Computed here rather than inline in the literal below, which would
+        // borrow `tool` after the field above has moved it.
+        let scope = crate::policy::consequence::standing_scope_of(&tool, &args);
+        let (agent, workflow) = match subject {
+            GrantSubject::Agent(agent) => (agent, None),
+            GrantSubject::Workflow(workflow) => (String::new(), Some(workflow)),
+        };
         let grant = StandingGrant {
             id: GrantId::generate(),
             agent,
+            workflow,
             // The tool, and nothing about the arguments. A standing grant has no
             // `args` field to copy them into — that is the type's whole point.
-            tool: effect.kind.clone(),
+            tool,
             granted_by: by,
             approval_id: id.clone(),
             at_millis: now_millis(),
@@ -1053,19 +1098,19 @@ approval.]"
             // Issue #796: the task this call was parked from, carried so a
             // standing grant can reclaim the task's checkout across parks.
             origin_task: self.approval_work_key(id),
-            // Issue #457: which slice of the tool the card was actually about.
-            // Read off the **parked effect's own payload** — the arguments the
-            // operator was shown — rather than re-derived from anything live, so
-            // the grant records the sentence they consented to. `None` for every
-            // tool whose name is the whole of what it can do.
-            scope: crate::policy::consequence::standing_scope_of(&effect.kind, &effect.payload),
+            // Derived from the same `(tool, args)` the grant records, which for
+            // a gate is the inner call rather than the wrapper — read with the
+            // same function the live side uses, so the two cannot drift into a
+            // permission that never matches its own call.
+            scope,
         };
         self.rt.journal.record_standing_granted(&grant).await?;
         tracing::debug!(
             approval_id = %id,
             grant_id = %grant.id,
-            tool = %effect.kind,
+            tool = %grant.tool,
             agent = %grant.agent,
+            workflow = ?grant.workflow,
             expires_at_millis,
             "[approval] minted a standing grant; this tool will not ask again until it expires"
         );

@@ -33,7 +33,7 @@ import { Bot, Loader2, Send } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { getInferenceStatus, type CognitionPath } from "@/api/inference";
-import { ApiError } from "@/api/types";
+import { ApiError, type WorkflowProblem } from "@/api/types";
 import {
   listWorkflowToolSlugs,
   updateWorkflow,
@@ -82,6 +82,8 @@ interface Review {
   state: ProposalState;
   /** The host's refusal of an apply, when one came back. */
   error?: string;
+  /** The per-node breakdown behind {@link error}, when the host sent one (#836). */
+  errorProblems?: WorkflowProblem[];
 }
 
 export function CopilotPanel({
@@ -342,7 +344,12 @@ export function CopilotPanel({
     async (messageId: string, proposal: WorkflowProposal) => {
       setReviews((prev) => ({
         ...prev,
-        [messageId]: { ...prev[messageId], state: "applying", error: undefined },
+        [messageId]: {
+          ...prev[messageId],
+          state: "applying",
+          error: undefined,
+          errorProblems: undefined,
+        },
       }));
       try {
         const saved = await updateWorkflow(
@@ -354,7 +361,12 @@ export function CopilotPanel({
         );
         setReviews((prev) => ({
           ...prev,
-          [messageId]: { ...prev[messageId], state: "applied", error: undefined },
+          [messageId]: {
+            ...prev[messageId],
+            state: "applied",
+            error: undefined,
+            errorProblems: undefined,
+          },
         }));
         onApplied(saved);
       } catch (e) {
@@ -366,9 +378,17 @@ export function CopilotPanel({
             : "The change could not be applied.";
         // Back to `pending`, not to a dead end: the diff stays on screen and the
         // operator can dismiss it or retry after reloading.
+        // Issue #836: the host names the node and field it refused on; before
+        // this the console kept only the flattened sentence.
+        const problems = e instanceof ApiError ? e.problems : undefined;
         setReviews((prev) => ({
           ...prev,
-          [messageId]: { ...prev[messageId], state: "pending", error: message },
+          [messageId]: {
+            ...prev[messageId],
+            state: "pending",
+            error: message,
+            errorProblems: problems,
+          },
         }));
         if (conflict && e instanceof ApiError) onConflict?.(e.message);
       }
@@ -380,7 +400,12 @@ export function CopilotPanel({
   const dismiss = useCallback((messageId: string) => {
     setReviews((prev) => ({
       ...prev,
-      [messageId]: { ...prev[messageId], state: "dismissed", error: undefined },
+      [messageId]: {
+        ...prev[messageId],
+        state: "dismissed",
+        error: undefined,
+        errorProblems: undefined,
+      },
     }));
   }, []);
 
@@ -642,6 +667,7 @@ export function CopilotPanel({
                     state={reviews[m.id].state}
                     blocked={blockedReason(m.id, reviews[m.id])}
                     error={reviews[m.id].error}
+                    problems={reviews[m.id].errorProblems}
                     onApply={() => void apply(m.id, reviews[m.id].proposal!)}
                     onDismiss={() => dismiss(m.id)}
                   />

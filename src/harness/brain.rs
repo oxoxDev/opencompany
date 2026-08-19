@@ -2661,7 +2661,12 @@ impl HarnessBrain {
         let mut channel_responses = Vec::new();
         for event in &req.events {
             match event {
-                CompanyEvent::OperatorMessage { text, chat, .. } => {
+                CompanyEvent::OperatorMessage {
+                    text,
+                    chat,
+                    deliverable,
+                    ..
+                } => {
                     // Issue #416: a workflow copilot thread is answered by a
                     // CONFINED turn, not by the company orchestrator.
                     //
@@ -2762,6 +2767,12 @@ impl HarnessBrain {
                     let record = self.record();
                     let turn = self
                         .delegation_runner(&run_turn, &record)
+                        // Issue #1035: the operator's own statement of what this
+                        // message is for. The REST handler already acts on it;
+                        // until now the runtime never saw it, so it could not
+                        // tell a message the handler had carded from one it had
+                        // not.
+                        .requested(*deliverable)
                         .handle_operator_message(&responder, text, chat_id)
                         .await?;
                     let mut operator_steps = turn.steps;
@@ -3130,6 +3141,7 @@ description = "Runs Acme."
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }
     }
 
@@ -3302,6 +3314,7 @@ description = "Builds it."
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }
     }
 
@@ -5326,6 +5339,7 @@ members = ["engineer"]
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }
     }
 
@@ -5705,6 +5719,7 @@ name = "Design"
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
         assert_eq!(brain.desk_lead("design"), Some("engineer".to_string()));
@@ -5768,6 +5783,7 @@ members = ["eng1", "eng2"]
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
         assert_eq!(brain.desk_lead("eng"), Some("cto".to_string()));
@@ -5826,6 +5842,7 @@ members = ["eng1", "eng2"]
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();
@@ -7226,6 +7243,7 @@ members = ["eng1", "eng2"]
             .grant_standing(crate::runtime::grants::StandingGrant {
                 id: crate::runtime::grants::GrantId::new("g1"),
                 agent: "ceo".into(),
+                workflow: None,
                 tool: "workspace_write".into(),
                 granted_by: crate::ports::types::Actor {
                     kind: crate::ports::types::ActorKind::User,

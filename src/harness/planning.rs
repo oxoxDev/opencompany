@@ -94,8 +94,8 @@ use crate::harness::build::{grants_cover, model_for_tier};
 use crate::harness::provider::HarnessModel;
 use crate::ports::now_millis;
 use crate::ports::tasks::{
-    COLUMN_IN_PROGRESS, COLUMN_PLANNING, COLUMN_TODO, PlanStep, PrereqKind, PrereqStatus,
-    Prerequisite, TaskPlan, TaskRecord,
+    AssigneeCandidate, COLUMN_IN_PROGRESS, COLUMN_PLANNING, COLUMN_TODO, PlanStep, PrereqKind,
+    PrereqStatus, Prerequisite, TaskPlan, TaskRecord,
 };
 use crate::ports::types::{CompanyRecord, TokenUsage};
 use crate::runtime::advance::{SYSTEM_ATTRIBUTION, append_result};
@@ -127,6 +127,13 @@ const MAX_OUTPUT_TOKENS: u32 = 4_000;
 const MAX_STEPS: usize = 12;
 const MAX_PREREQUISITES: usize = 12;
 const MAX_RISKS: usize = 8;
+/// Cap on the teammates a pass may put in front of a person (issue #1106).
+///
+/// Deliberately much tighter than the caps above, because this one is not about
+/// rendering cost — it is the difference between a decision and a survey.
+/// Proposing three is a judgement; proposing nine is a refusal wearing a list,
+/// and it would park cards that today route correctly.
+const MAX_ASSIGNEE_CANDIDATES: usize = 3;
 /// Cap for the prose blocks (description, scope, verification), in codepoints.
 const MAX_PROSE_CHARS: usize = 2_000;
 /// Cap for a step's detail and a prerequisite's note, in codepoints.
@@ -344,7 +351,29 @@ pub async fn run_planning_pass(runtime: Arc<CompanyRuntime>, task_id: String) {
     record_usage(&runtime, &planner, &task_id, &usage).await;
 
     let prerequisites = verify_prerequisites(&runtime, &evidence, &draft.prerequisites).await;
-    let proposed = resolve_proposed_assignee(&evidence, draft.proposed_assignee.as_deref());
+    let candidates = resolve_assignee_candidates(&evidence, &draft.assignee_candidates);
+    // Issue #1106. One surviving candidate is a proposal and behaves exactly as
+    // it did before this change. Two or more is an open question, and a question
+    // is not something to answer by taking the first element — so nothing is
+    // proposed, and the candidates travel on the brief instead.
+    let proposed = match candidates.as_slice() {
+        [only] => Some(only.id.clone()),
+        _ => None,
+    };
+    // Resolved *before* the brief is built, because whether this card carries an
+    // ownership question is part of the brief. A card with a usable owner has no
+    // question to persist: it dispatches, and a candidate list stored beside a
+    // teammate who is already doing the work is one the console would render as
+    // an unanswered "Who owns this?" — with live Assign buttons — on a card
+    // nobody was ever asked about.
+    //
+    // The validity filter is part of that: a card still naming a teammate who
+    // has since left the roster has no usable owner, so it is ambiguous like any
+    // other unowned card rather than being answered with "the plan did not name
+    // a teammate who could take it", which would be false.
+    let assignee = settled_assignee(&evidence.card_assignee, proposed.clone())
+        .filter(|a| evidence.assignee_is_valid(a));
+    let ambiguous = assignee.is_none() && candidates.len() > 1;
     let plan = TaskPlan {
         description: cap(&draft.description, MAX_PROSE_CHARS),
         steps: draft
@@ -368,11 +397,37 @@ pub async fn run_planning_pass(runtime: Arc<CompanyRuntime>, task_id: String) {
         verification: cap(&draft.verification, MAX_PROSE_CHARS),
         scope: cap(&draft.scope, MAX_PROSE_CHARS),
         proposed_assignee: proposed.clone(),
+        // Only ever carried when the pass declined to choose. A one-candidate
+        // pass writes the pre-#1106 shape: a `proposedAssignee` and no list.
+        assignee_candidates: if ambiguous {
+            candidates.clone()
+        } else {
+            Vec::new()
+        },
         planned_at_millis: now_millis(),
     };
 
-    let assignee = settled_assignee(&evidence.card_assignee, proposed);
-    let Some(assignee) = assignee.filter(|a| evidence.assignee_is_valid(a)) else {
+    // Issue #1106: park rather than pick, when the card has no usable owner and
+    // the pass named more than one teammate who could take it.
+    //
+    // `ambiguous` already carries `assignee.is_none()` — an assignee a person set
+    // is never second-guessed, so a card with a valid owner dispatches even when
+    // the planner could name three others who would also have fitted. That is
+    // the same precedence the proposal already had; this only adds a case to the
+    // branch that had nothing to say.
+    if ambiguous {
+        settle_blocked(
+            &runtime,
+            &task_id,
+            token,
+            plan,
+            None,
+            &ambiguity_reason(&candidates),
+        )
+        .await;
+        return;
+    }
+    let Some(assignee) = assignee else {
         settle_blocked(
             &runtime,
             &task_id,
@@ -692,7 +747,7 @@ impl Evidence {
         assignee::resolve(&self.record, key).canonical().is_some()
     }
 
-    /// The manifest teammate a resolved assignee ultimately routes work to, for
+    /// The roster teammate a resolved assignee ultimately routes work to, for
     /// the permission check.
     ///
     /// A **desk** resolves to its lead, deliberately: the lead is who actually
@@ -700,8 +755,17 @@ impl Evidence {
     /// work can happen. Checking "the desk" would be checking nothing.
     ///
     /// `None` — and therefore an honest `unknown` verdict — for a desk with no
-    /// lead yet, and for an overlay teammate, which carries no manifest `tools`
-    /// list to resolve grants from.
+    /// lead yet.
+    ///
+    /// It used to answer `None` for an overlay teammate too, on the grounds that
+    /// one carried no `tools` list to resolve grants from. That stopped being
+    /// true at issue #661 / L5, which gave [`OverlayAgent`] its own grant, and
+    /// [`gather_evidence`] now resolves it through the same
+    /// `agent_effective_grants` as a manifest agent. So a runtime teammate gets a
+    /// real permission verdict rather than a blanket `unknown` — the same answer
+    /// the roster builder would give, which is the point.
+    ///
+    /// [`OverlayAgent`]: crate::ports::types::OverlayAgent
     fn working_teammate(&self, key: &str) -> Option<&TeammateBrief> {
         let resolution = assignee::resolve(&self.record, key);
         let working = resolution.working_agent()?;
@@ -744,7 +808,29 @@ async fn gather_evidence(
         })?;
 
     let allow = record.manifest.tools.allow.clone();
-    let teammates: Vec<TeammateBrief> = record
+    // The roster the company actually runs, not the half of it the manifest
+    // declares (issue #1106, CodeRabbit on #1157).
+    //
+    // A teammate reaches the roster from four places — the global baseline, the
+    // company bundle, the console's `POST …/team`, and the orchestrator's own
+    // `add_agent` — and only the first two are manifest `[[agent]]` rows. Reading
+    // `manifest.agents` alone showed the planner a roster that
+    // `assignee::resolve` would happily accept names from and the planner had
+    // never been told about, so a runtime teammate could not be proposed, could
+    // not be named an assignee prerequisite, and — since #1106 — could not be one
+    // of the candidates a person is asked to choose between. That is exactly the
+    // case #1106 reports: no shipped bundle carries two teammates who overlap the
+    // way its DevRel/social pair does, so at least one of them was added here.
+    //
+    // Manifest first, then every overlay id the manifest does not already claim —
+    // the same precedence and the same skip rule `harness::build_roster` uses to
+    // materialise the live roster, so what the planner is shown is what will run.
+    //
+    // Grants resolve through the same `agent_effective_grants` as a manifest
+    // agent: an overlay's own `tools` list (issue #661 / L5), or the standard
+    // company-wide grant when it is empty, exactly as an omitted manifest `tools`
+    // line means.
+    let mut teammates: Vec<TeammateBrief> = record
         .manifest
         .agents
         .iter()
@@ -755,12 +841,44 @@ async fn gather_evidence(
             grants: crate::runtime::builder::agent_effective_grants(&allow, &a.tools),
         })
         .collect();
+    teammates.extend(
+        record
+            .overlay_agents
+            .iter()
+            .filter(|overlay| !record.manifest.agents.iter().any(|a| a.id == overlay.id))
+            .map(|overlay| TeammateBrief {
+                id: overlay.id.clone(),
+                role: overlay.role.clone(),
+                description: overlay.description.clone(),
+                grants: crate::runtime::builder::agent_effective_grants(&allow, &overlay.tools),
+            }),
+    );
 
+    // Every desk the company has, with the members it actually has.
+    //
+    // `effective_desk_members` rather than the manifest's declared list: it is
+    // the shared source of truth the REST `list_desks` handler and the harness
+    // `desk_lead` resolver both read, so it carries operator-added members and
+    // the operator's ordering — and ordering is load-bearing here, because the
+    // first member is the desk's lead and the lead is who a desk assignment
+    // actually routes work to.
     let desks: Vec<(String, Vec<String>)> = record
         .manifest
         .group_chats
         .iter()
-        .map(|g| (g.id.clone(), g.members.clone()))
+        .map(|g| g.id.clone())
+        .chain(record.overlay_desks.iter().map(|d| d.id.clone()))
+        .fold(Vec::new(), |mut acc: Vec<String>, id| {
+            if !acc.contains(&id) {
+                acc.push(id);
+            }
+            acc
+        })
+        .into_iter()
+        .map(|id| {
+            let members = record.effective_desk_members(&id);
+            (id, members)
+        })
         .collect();
 
     // The SAME projection `GET …/connections` builds (issue #316 already made
@@ -972,7 +1090,20 @@ struct PlanDraft {
     #[serde(default)]
     scope: String,
     #[serde(default)]
-    proposed_assignee: Option<String>,
+    assignee_candidates: Vec<CandidateDraft>,
+}
+
+/// One assignee candidate as the model named it (issue #1106).
+///
+/// `id` is whatever the model wrote — it is resolved against the roster, and
+/// dropped if the roster does not carry it, before anything is persisted.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CandidateDraft {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    reason: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1148,8 +1279,20 @@ fn system_prompt() -> String {
          \x20 \"risks\": [\"what could go wrong\"],\n\
          \x20 \"verification\": \"how a person will know it worked\",\n\
          \x20 \"scope\": \"what is in scope, and explicitly what is not\",\n\
-         \x20 \"proposedAssignee\": \"a teammate or desk id from the roster, or null\"\n\
+         \x20 \"assigneeCandidates\": [{{ \"id\": \"a teammate or desk id from the roster\", \
+         \"reason\": \"one line on why this one fits\" }}]\n\
          }}\n\n\
+         Rules for assigneeCandidates:\n\
+         - Name every teammate or desk that could genuinely take this card, best first, at most \
+         {MAX_ASSIGNEE_CANDIDATES}. One is the normal answer.\n\
+         - Name a second only when you would not be able to defend picking the first over it. Two \
+         entries means \"a person should choose\", and a person is asked — so a list padded with a \
+         teammate you do not actually rate costs them a decision they did not need to make.\n\
+         - Return an empty list when nobody on the roster fits. Do not invent an id to fill it.\n\
+         - `id` must be an id from the roster below, copied exactly. Anything the roster does not \
+         carry is dropped, so a near-miss spelling is the same as saying nothing.\n\
+         - The reason is read by a person deciding between the entries. Say what makes THIS one \
+         fit, not what the task is.\n\n\
          Rules for prerequisites, which matter more than anything else here:\n\
          - List ONLY what the work genuinely cannot proceed without. Every entry you add can stop \
          this card from starting, so a speculative one costs a person a round trip.\n\
@@ -1188,7 +1331,10 @@ fn evidence_prompt(e: &Evidence) -> String {
 
     out.push_str("\n## Roster\n");
     if e.teammates.is_empty() {
-        out.push_str("- (no teammates on the manifest roster)\n");
+        // "the roster", not "the manifest roster": since #1106 this list is the
+        // effective roster, so an empty one means the company has nobody at all
+        // rather than nobody *declared*.
+        out.push_str("- (no teammates on the roster)\n");
     }
     for t in &e.teammates {
         let grants = if t.grants.is_empty() {
@@ -1661,22 +1807,82 @@ fn verify_assignee(e: &Evidence, name: &str) -> (PrereqStatus, String) {
     }
 }
 
-/// Canonicalises the model's proposed assignee, or drops it.
+/// Canonicalises the assignee candidates the model named, dropping what the
+/// roster does not carry (issue #1106).
 ///
-/// The plan may only ever *offer* a name; whether it is used at all is decided
-/// by [`run_planning_pass`], which applies it only to a card nobody has
-/// assigned. A name the roster does not recognise is dropped here rather than
-/// written onto the brief, so the console never shows a proposal that could not
-/// be acted on.
-fn resolve_proposed_assignee(evidence: &Evidence, proposed: Option<&str>) -> Option<String> {
-    let raw = proposed?.trim();
-    if raw.is_empty() {
-        return None;
+/// The plan may only ever *offer* names; what is done with them is decided by
+/// [`run_planning_pass`], which applies a candidate only to a card nobody has
+/// assigned and only when exactly one survives this function. A name the roster
+/// does not recognise is dropped here rather than written onto the brief, so the
+/// console never shows a pick that the write boundary would then refuse.
+///
+/// # Why the dedup is load-bearing
+///
+/// Candidates are deduplicated by their **canonical** id, not by what the model
+/// wrote. A model that names the same teammate twice — `"DevRel"` and
+/// `"devrel"`, or a teammate by display name and again by id — resolves to one
+/// key both times, and without this that card would park asking a person to
+/// choose between a teammate and itself. Dedup before the count is taken is what
+/// makes "two candidates" mean two teammates.
+///
+/// The first spelling of a duplicate keeps its reason: the model was told to
+/// order these best-first, so the earlier line is the one it stood behind.
+///
+/// No fuzzy matching, here or anywhere below: [`assignee::resolve`] is the same
+/// exact-match resolver the write boundary uses, so a candidate this accepts is
+/// one a person can actually be handed.
+fn resolve_assignee_candidates(
+    evidence: &Evidence,
+    drafts: &[CandidateDraft],
+) -> Vec<AssigneeCandidate> {
+    let mut out: Vec<AssigneeCandidate> = Vec::new();
+    for draft in drafts {
+        let raw = draft.id.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let Some(id) = assignee::resolve(&evidence.record, raw)
+            .canonical()
+            .filter(|c| !c.is_empty())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if out.iter().any(|existing| existing.id == id) {
+            continue;
+        }
+        out.push(AssigneeCandidate {
+            id,
+            reason: cap(draft.reason.trim(), MAX_LABEL_CHARS),
+        });
+        if out.len() == MAX_ASSIGNEE_CANDIDATES {
+            break;
+        }
     }
-    assignee::resolve(&evidence.record, raw)
-        .canonical()
-        .filter(|c| !c.is_empty())
-        .map(str::to_string)
+    out
+}
+
+/// The note line a card parks with when the pass declined to choose.
+///
+/// Rendered in the same shape as the blocked-on-prerequisites reason — a
+/// sentence, then one bullet per item — because both are the card telling a
+/// person what it is waiting on, and reading two different layouts for that
+/// would be gratuitous.
+fn ambiguity_reason(candidates: &[AssigneeCandidate]) -> String {
+    let lines: Vec<String> = candidates
+        .iter()
+        .map(|c| {
+            if c.reason.is_empty() {
+                format!("- `{}`", c.id)
+            } else {
+                format!("- `{}` — {}", c.id, c.reason)
+            }
+        })
+        .collect();
+    format!(
+        "planned, but more than one teammate could take it — pick who owns it:\n{}",
+        lines.join("\n")
+    )
 }
 
 #[cfg(test)]

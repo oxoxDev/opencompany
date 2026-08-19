@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { AppSpec, CompanyStatus } from "@/api/types";
+import { HostsProvider } from "@/connections/HostsContext";
 import { ConnectionConsole } from "@/views/ConnectionConsole";
 
 /**
@@ -49,6 +50,7 @@ function client(over: {
         oauth_in_build: false,
       },
       companies: (over.companies ?? []).map((c) => c.id),
+      inference: { ready: false, provider: null, base_url: null },
     }),
   } as unknown as OpenCompanyClient;
 }
@@ -56,13 +58,30 @@ function client(over: {
 let container: HTMLDivElement;
 let root: Root;
 
+/**
+ * The console reads its host roster from context, because the switcher that
+ * shows it lives in the sidebar header two layers down (#1142). An empty
+ * roster draws no switcher at all, so these screens are exactly what they
+ * were — which is what this wrapper is for: supplying the contract without
+ * adding anything to the tree under test.
+ */
 async function show(c: OpenCompanyClient) {
   await act(async () => {
     root.render(
-      createElement(ConnectionConsole, {
-        connectionId: "test-connection",
-        client: c,
-        defaultCompany: null,
+      createElement(HostsProvider, {
+        value: {
+          connections: [],
+          selected: null,
+          onSelect: () => {},
+          onAdd: () => {},
+          localInstances: [],
+          hub: false,
+        },
+        children: createElement(ConnectionConsole, {
+          connectionId: "test-connection",
+          client: c,
+          defaultCompany: null,
+        }),
       }),
     );
   });

@@ -263,13 +263,21 @@ pub fn plan_named(name: &str) -> Option<CapabilityPlan> {
 /// and the leak it closes is larger: triage escalations are driven by *chat
 /// volume*, so a company left able to classify indefinitely past its ceiling
 /// would keep paying per operator message with nothing to stop it.
+///
+/// [`SampleKind::SetupCall`] is counted too, and its exposure is the smallest of
+/// the three: a company runs first-run setup once. It is included so the ceiling
+/// covers every completion billed to the tenant rather than only the ones that
+/// happen to belong to a teammate.
 pub fn tokens_in(samples: &[UsageSample]) -> u64 {
     samples
         .iter()
         .filter(|s| {
             matches!(
                 s.kind,
-                SampleKind::Inference | SampleKind::PlanningCall | SampleKind::TriageCall
+                SampleKind::Inference
+                    | SampleKind::PlanningCall
+                    | SampleKind::TriageCall
+                    | SampleKind::SetupCall
             )
         })
         .map(|s| s.input_tokens.saturating_add(s.output_tokens))

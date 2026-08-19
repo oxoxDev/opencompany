@@ -69,6 +69,7 @@ pub(crate) async fn state_with_company(home: &std::path::Path) -> AppState {
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();
@@ -215,6 +216,7 @@ async fn state_with_rich_company(home: &std::path::Path) -> AppState {
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();
@@ -1130,6 +1132,7 @@ async fn skills_and_workflows_resolve_from_source_dir() {
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();
@@ -1205,6 +1208,7 @@ async fn company_skills_project_the_pinned_snapshot_of_a_registry_install() {
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();
@@ -1321,6 +1325,7 @@ async fn workflows_resolve_from_the_record_overlay_with_no_source_dir() {
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();
@@ -1416,6 +1421,7 @@ async fn workflows_summary_lists_an_overlay_workflow_with_no_enabled_entry() {
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();
@@ -1512,6 +1518,7 @@ async fn graphql_lists_a_company_override_of_a_global_id_by_its_own_content() {
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();
@@ -1584,6 +1591,7 @@ async fn graphql_hides_a_company_disabled_global_workflow() {
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();

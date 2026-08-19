@@ -11,7 +11,7 @@
 //
 // The three-state answer matters more than it looks. `mcpInBuild` is optional on
 // the wire: a host predating the field sends nothing, and rendering that silence
-// as "no agent can use these" would be a fresh lie in the other direction. Only
+// as "no teammate can use these" would be a fresh lie in the other direction. Only
 // an explicit `false` is absence.
 
 import type { CapabilityStatusDto } from "@/api/types";
@@ -56,6 +56,6 @@ export function mcpBridgeState(status: CapabilityStatusDto | null | undefined): 
  */
 export function mcpAddedMessage(name: string, bridge: McpBridgeState): string {
   return bridge === "absent"
-    ? `Added ${name}. It is stored, but no agent can call it until this deployment is rebuilt with the MCP bridge.`
-    : `Added ${name}. Agents pick it up on their next turn.`;
+    ? `Added ${name}. It is stored, but no teammate can call it until this deployment is rebuilt with the MCP bridge.`
+    : `Added ${name}. Teammates pick it up on their next turn.`;
 }

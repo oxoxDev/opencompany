@@ -113,10 +113,11 @@ const SEARCH_GRANTED_COMPANIES: [&str; 8] = [
     "signals_opportunity_studio",
 ];
 
-/// Templates that must NEVER reach the metered search backend: `e2e_harness` is
-/// a deterministic fixture (a priced network call would make it non-hermetic and
-/// flaky), and `openhuman_demo` is a walkthrough nobody opted into spend for.
-const SEARCH_DENIED_COMPANIES: [&str; 2] = ["e2e_harness", "openhuman_demo"];
+/// Templates that must NEVER reach the metered search backend: `e2e_harness` and
+/// `e2e_setup` are deterministic fixtures (a priced network call would make them
+/// non-hermetic and flaky), and `openhuman_demo` is a walkthrough nobody opted
+/// into spend for.
+const SEARCH_DENIED_COMPANIES: [&str; 3] = ["e2e_harness", "e2e_setup", "openhuman_demo"];
 
 /// Templates that simply do not grant `search` today. Unlike
 /// [`SEARCH_DENIED_COMPANIES`] there is no rule keeping them off the priced
