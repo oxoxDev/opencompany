@@ -11,6 +11,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:pages-sdk": "tsc -p tsconfig.pages-sdk.json && vite build --config pages-sdk/vite.config.ts && vite build --config pages-sdk/vite.react.config.ts",
     "preview": "vite preview",
     "typecheck": "tsc -b --noEmit",
     "typecheck:e2e": "tsc -p tsconfig.e2e.json",

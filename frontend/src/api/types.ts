@@ -814,6 +814,23 @@ export interface SetBudgetInput {
  * paths (the ingest webhook and the IMAP poller) file into the same store this
  * projects, so received mail shows up here.
  */
+/**
+ * One agent-authored dashboard page's manifest, from `GET {scope}/pages`.
+ * Mirrors the `page.toml` a page's `Pages/<slug>/` bundle carries
+ * (`docs/spec/runtime/pages.md`) — the page's own compiled bundle is served
+ * separately, at `GET {scope}/pages/{slug}` (the iframe host document) and
+ * `GET {scope}/pages/{slug}/bundle.mjs` (the compiled JS).
+ */
+export interface PageManifestDto {
+  slug: string;
+  title: string;
+  /** Optional in the DTO: `page.toml`'s `description` is omitted when absent. */
+  description?: string;
+  /** Optional in the DTO: `page.toml`'s `icon` is omitted when absent. */
+  icon?: string;
+  navVisible: boolean;
+}
+
 export interface InboxDto {
   /** The inbox key (a teammate's local part / slug). */
   key: string;

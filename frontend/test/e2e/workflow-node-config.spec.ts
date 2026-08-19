@@ -1,5 +1,7 @@
 import { expect, test, type Page, type APIRequestContext } from "@playwright/test";
 
+import { workflowDetailName } from "./workflows";
+
 /**
  * Issue #541: the five withheld node kinds (`tool_call`, `http_request`,
  * `switch`, `output_parser`, `sub_workflow`) grew config forms in the workflow
@@ -30,13 +32,6 @@ async function dismissTour(page: Page) {
   }
   await skip.click();
   await expect(skip).toBeHidden();
-}
-
-/** Selects the workflow named `name` in the picker and waits for it to settle. */
-async function selectWorkflow(page: Page, name: string) {
-  await page.getByRole("combobox").first().click();
-  await page.getByRole("option", { name, exact: true }).click();
-  await expect(page.getByRole("combobox").first()).toContainText(name);
 }
 
 /** Best-effort teardown so a failed spec does not poison the next run. */
@@ -121,9 +116,14 @@ test("authoring a tool_call node's config through the form round-trips to the ho
 
     // Reopen from the saved graph (a fresh load, not local state) and click the
     // node: the inspector's Config block shows the slug the host round-tripped.
+    //
+    // Issue #1110: creating landed on the new workflow's own URL, so the reload
+    // comes back on its detail view with no picking to do — which is also this
+    // spec's incidental proof that a `#/workflows/<id>` survives a reload.
+    await expect(page).toHaveURL(new RegExp(`#/workflows/${id}$`));
     await page.reload();
     await dismissTour(page);
-    await selectWorkflow(page, name);
+    await expect(workflowDetailName(page)).toHaveText(name, { timeout: 30_000 });
 
     const node = page.locator('.react-flow__node[data-id="act"]');
     await expect(node).toBeVisible({ timeout: 15_000 });

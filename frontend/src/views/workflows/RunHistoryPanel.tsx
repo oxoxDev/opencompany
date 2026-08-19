@@ -18,6 +18,7 @@ import type {
   WorkflowRunOutcome,
 } from "@/api/workflows";
 
+import { BlockedNodeApprovals } from "./BlockedNodeApprovals";
 import { failedNodeOf, nodeName } from "./graph";
 import {
   awaitingCount,
@@ -507,6 +508,7 @@ function RunHistoryRow({
         // that, with the honest caveat that the continuation re-runs the agent's
         // turn and may ask again if it diverges. The unparkable-only case still
         // cannot continue and says so.
+        <>
         <p
           className="text-2xs text-[var(--status-blocked-text)]"
           data-testid="workflow-run-blocked"
@@ -532,6 +534,14 @@ function RunHistoryRow({
             ? `Approve ${parked === 1 ? "it" : "them"} in Approvals and this run continues on its own — approving re-runs the step, so a changed decision may ask again.`
             : "Nothing here can be approved; change the policy and run the workflow again."}
         </p>
+        {/* Issue #1014 (PR-B): the gated tool names per blocked node and a link
+            per parked card to the Approvals queue — the sentence above says
+            "decide it in Approvals" and, until this, pointed nowhere. */}
+        <BlockedNodeApprovals
+          blockedNodes={blocked}
+          approvalRows={run.approvals}
+        />
+        </>
       ) : run.running ? (
         // Same root cause as the tone bug: a run still walking its graph has no
         // error, no cancellation and no deliveries yet, so it fell through to

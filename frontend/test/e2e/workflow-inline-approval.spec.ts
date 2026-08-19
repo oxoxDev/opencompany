@@ -1,5 +1,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
+import { gotoWorkflow } from "./workflows";
+
 /**
  * End-to-end proof for issue #1002 — a run parked on a gated node is unblocked
  * from the workflow window, without leaving it.
@@ -163,17 +165,11 @@ async function captureResolves(page: Page, bodies: unknown[]) {
   });
 }
 
-function picker(page: Page) {
-  return page.getByRole("combobox").first();
-}
-
-/** Opens Workflows, selects the spec's graph, and runs it. */
+/** Opens Workflows, opens the spec's graph, and runs it. */
 async function runTheWorkflow(page: Page) {
-  await page.goto("/#/workflows");
-  await expect(picker(page)).toBeEnabled({ timeout: 30_000 });
-  await picker(page).click();
-  await page.getByRole("option", { name: WORKFLOW.name, exact: true }).click();
-  await expect(picker(page)).toContainText(WORKFLOW.name);
+  // Issue #1110: `#/workflows` is the index. Run belongs to one workflow, so
+  // the graph is opened from the list before there is anything to run.
+  await gotoWorkflow(page, WORKFLOW.name);
   await page.getByRole("button", { name: "Run", exact: true }).click();
   await expect(page.getByTestId("workflow-run-result")).toBeVisible({ timeout: 60_000 });
 }

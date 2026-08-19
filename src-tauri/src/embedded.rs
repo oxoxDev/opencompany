@@ -84,7 +84,32 @@ impl Drop for EmbeddedHost {
     }
 }
 
-/// Boots a host over `data_dir`.
+/// What a host does about a data root that holds no company yet.
+///
+/// The two answers to the same question, and only one may be given per host.
+/// A host that seeds is a host that is *already set up* — `AppSpec` reports
+/// `setup_complete` as `stamp || !registry.is_empty()` — so seeding does not
+/// merely add a company, it suppresses the first-run wizard the console would
+/// otherwise open (`views/setup/SetupWizard.tsx`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirstRun {
+    /// Register a starter company from the default preset when the root is
+    /// empty, so the application is enterable with no terminal and no
+    /// decisions ([issue #632](https://github.com/tinyhumansai/opencompany/issues/632)).
+    ///
+    /// What the instance rooted at the data dir does, which is every install
+    /// that predates a roster.
+    SeedStarterCompany,
+    /// Register only what the root already holds, leaving an empty root empty.
+    ///
+    /// What an instance an operator *asked for* does. They are standing in
+    /// front of the application having just named a company, so the decisions
+    /// the wizard asks for are ones they are already making — and a seeded
+    /// starter company would answer them silently and hide the wizard for good.
+    RunSetupWizard,
+}
+
+/// Boots a host over `data_dir`, seeding a starter company on an empty root.
 ///
 /// `data_dir` is passed explicitly rather than resolved from the environment.
 /// A desktop app knows its platform data directory and should say so — and the
@@ -92,6 +117,19 @@ impl Drop for EmbeddedHost {
 /// `USERPROFILE` is set, which for a double-clicked application is wherever the
 /// launcher happened to put it.
 pub async fn start(data_dir: PathBuf) -> opencompany::Result<EmbeddedHost> {
+    start_with(data_dir, FirstRun::SeedStarterCompany).await
+}
+
+/// Boots a host over `data_dir`, deciding what an empty root means.
+///
+/// See [`FirstRun`]. Everything else — the lock, the migration, the journal
+/// check, the loopback bind — is identical, because the two kinds of host
+/// differ in exactly one decision and must not be allowed to drift in any
+/// other.
+pub async fn start_with(
+    data_dir: PathBuf,
+    first_run: FirstRun,
+) -> opencompany::Result<EmbeddedHost> {
     // Resolve, lock, migrate, and prove the journal root is writable — the same
     // sequence `serve` runs, shared rather than copied so the two cannot drift.
     // The lock is what refuses a second instance over one data root, including
@@ -119,12 +157,25 @@ pub async fn start(data_dir: PathBuf) -> opencompany::Result<EmbeddedHost> {
     // empty registry would render the "no companies" dead end this exists to
     // remove, and the race is winnable — the address is handed to the webview
     // the moment `start` returns.
-    let companies =
-        opencompany::desktop::bootstrap_companies(&state, opencompany::desktop::DEFAULT_PRESET_ID)
+    let companies = match first_run {
+        FirstRun::SeedStarterCompany => opencompany::desktop::bootstrap_companies(
+            &state,
+            opencompany::desktop::DEFAULT_PRESET_ID,
+        )
+        .await?
+        .into_iter()
+        .map(|id| id.as_ref().to_string())
+        .collect::<Vec<_>>(),
+        // The adopt half of the same call, and *only* that half. Adoption is
+        // not optional for either kind of host: a company the setup wizard
+        // wrote into this root is a bundle on disk, and a host that skipped
+        // adoption would come back from every restart serving nothing.
+        FirstRun::RunSetupWizard => opencompany::desktop::adopt_companies(&state)
             .await?
             .into_iter()
-            .map(|id| id.as_ref().to_string())
-            .collect::<Vec<_>>();
+            .map(|(id, _)| id.as_ref().to_string())
+            .collect::<Vec<_>>(),
+    };
 
     let (address, serving) = opencompany::server::bind("127.0.0.1:0", state).await?;
     let server = tokio::spawn(async move {

@@ -307,6 +307,7 @@ mod test {
             node_id: format!("node-{n}"),
             status: WorkflowNodeStatus::Ok,
             elapsed_ms: 1,
+            diagnostics: Vec::new(),
         }
     }
 

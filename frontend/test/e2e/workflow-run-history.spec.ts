@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { LIVE_BRAIN, LIVE_BRAIN_REASON } from "./capabilities";
+import { openFirstWorkflow } from "./workflows";
 
 /**
  * Issue #228: the Workflows view reads a workflow's finished runs back from the
@@ -45,14 +46,18 @@ async function dismissTour(page: import("@playwright/test").Page) {
 }
 
 /**
- * The History toggle, once the view has settled.
+ * The History toggle, once a workflow is open.
  *
- * Waits for it rather than probing `count()` immediately: the button renders
- * only after the workflow list resolves and a workflow is selected, so an
- * instant check races the first paint and would silently skip on a host that
- * DOES serve the route — turning a real failure into a green run. Only a
- * genuine timeout means the host predates `…/workflows/runs`, and that is the
- * one case worth skipping for.
+ * Issue #1110: the caller opens a workflow first. The toggle is a per-workflow
+ * control and the tab no longer opens inside one, so waiting for it on the
+ * index would time out and — through the `test.skip` below — report a host that
+ * does not serve `…/workflows/runs`, which would be a lie about the host to
+ * cover a spec that never navigated. Opening the workflow explicitly keeps the
+ * skip meaning only what it says.
+ *
+ * Still waits rather than probing `count()` immediately: the button renders
+ * only after the graph resolves, so an instant check races the first paint and
+ * would silently skip on a host that DOES serve the route.
  */
 async function historyToggle(page: import("@playwright/test").Page) {
   const toggle = page.getByTestId("workflow-history-toggle");
@@ -77,18 +82,30 @@ test("the console asks the host for the selected workflow's runs, not the whole 
   });
 
   await page.goto("/#/workflows");
+  await dismissTour(page);
 
-  // The view fetches history once a workflow is selected (the list auto-selects
-  // the first entry), so wait for the request rather than racing it.
-  await expect.poll(() => requested.length, { timeout: 30_000 }).toBeGreaterThan(0);
+  // Issue #1110: the tab opens on the INDEX, and the index reads the run
+  // journal UNSCOPED on purpose — one request has to feed every card's health
+  // line, and `?workflow=` covers exactly one graph. Stating that here is what
+  // makes the rule below a narrowing rather than a contradiction.
+  await expect
+    .poll(
+      () => requested.some((url) => !new URL(url).searchParams.get("workflow")),
+      { timeout: 30_000 },
+    )
+    .toBe(true);
 
-  for (const url of requested) {
-    const params = new URL(url).searchParams;
-    expect(
-      params.get("workflow"),
-      `history must be scoped server-side, got: ${url}`,
-    ).toBeTruthy();
-  }
+  // Open one, and the read that backs ITS history panel must name it. A console
+  // that fetched the company-wide page and filtered client-side would never
+  // issue this request — and would tell a rarely-run workflow it "hasn't
+  // finished a run yet" the moment busier workflows filled the page.
+  const id = await openFirstWorkflow(page);
+  await expect
+    .poll(
+      () => requested.some((url) => new URL(url).searchParams.get("workflow") === id),
+      { timeout: 30_000 },
+    )
+    .toBe(true);
 });
 
 test("the run-history panel opens and shows only the selected workflow's runs", async ({
@@ -96,6 +113,8 @@ test("the run-history panel opens and shows only the selected workflow's runs", 
 }) => {
   await page.goto("/#/workflows");
   await dismissTour(page);
+  // Issue #1110: History belongs to one workflow, so one has to be open.
+  await openFirstWorkflow(page);
 
   const toggle = await historyToggle(page);
   await toggle.click();
@@ -126,6 +145,11 @@ test("running a workflow adds it to the durable history and it survives a reload
 
   await page.goto("/#/workflows");
   await dismissTour(page);
+  // Issue #1110: open the workflow this test runs. The reload below keeps the
+  // `#/workflows/<id>` this pushes, so the console comes back on the same
+  // workflow's detail view — which is what makes the second read a re-read of
+  // the same journal rather than of whichever workflow sorted first.
+  await openFirstWorkflow(page);
 
   const toggle = await historyToggle(page);
   await toggle.click();

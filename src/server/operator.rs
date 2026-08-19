@@ -1082,6 +1082,11 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             node_id,
             status,
             elapsed_ms,
+            // Issue #1014: the null-resolved config paths ride the durable event
+            // and the run-response history, but the live operator SSE frame
+            // stays the three structural scalars it already was — the console
+            // surfaces diagnostics from the run-detail drawer, not this stream.
+            diagnostics: _,
         } => {
             let mut o = envelope("workflow_node_finished");
             o["workflowId"] = json!(workflow_id);
@@ -7346,6 +7351,7 @@ mode = "full"
             node_id: "ceo".into(),
             status: crate::ports::types::WorkflowNodeStatus::Error,
             elapsed_ms: 1234,
+            diagnostics: Vec::new(),
         }))
         .expect("workflow_node_finished reaches the console");
         assert_eq!(node["type"], "workflow_node_finished");

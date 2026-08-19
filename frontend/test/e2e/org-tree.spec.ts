@@ -55,6 +55,16 @@ const ROSTER = [
   { id: "turing", name: "Turing", role: "Researcher" },
 ];
 
+/**
+ * The toast layer (issue #1099).
+ *
+ * Since #1099 an *action* on this page answers in a toast; the `role="alert"`
+ * banner is left to a chart that could not be loaded. Located by sonner's own
+ * attribute, like `toast-dismissal.spec.ts` — the toast carries `role="status"`,
+ * which several live regions on this page share.
+ */
+const toasts = (page: Page) => page.locator("[data-sonner-toast]");
+
 /** Every write the console made, so the request shape can be asserted on. */
 let writes: { method: string; path: string; body?: unknown }[] = [];
 let roster = [...ROSTER];
@@ -513,10 +523,29 @@ test("#839 refuses a company-page teammate add when the host has no team write p
   await dialog.getByLabel("Role").fill("Unavailable");
   await dialog.getByRole("button", { name: "Add member" }).click();
 
-  await expect(page.getByRole("alert")).toContainText(
-    "does not support creating teammates",
-  );
-  await expect(page.locator("text=Not Saved")).toHaveCount(0);
+  await expect(toasts(page)).toContainText("can't create teammates");
+  await expect(chart(page).locator("text=Not Saved")).toHaveCount(0);
+});
+
+test("#1099 a teammate added from the company page is confirmed by name", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await openChart(page);
+
+  await page.getByRole("button", { name: "New teammate" }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Name").fill("Katherine");
+  await dialog.getByLabel("Role").fill("Navigator");
+  await dialog.getByRole("button", { name: "Add member" }).click();
+
+  // The whole of #1099 on this surface: the operator is told, by name, rather
+  // than left to infer the add from a chart that repaints a moment later.
+  await expect(toasts(page)).toContainText("Added Katherine.");
+  // And it is a *success*, not the warning a half-landed add gets — asserted
+  // through sonner's own type attribute so the two cannot be confused by
+  // wording alone.
+  await expect(toasts(page).first()).toHaveAttribute("data-type", "success");
 });
 
 test("#311 the lead can be changed from the chart and survives a reload", async ({
@@ -573,10 +602,12 @@ test("#839 a teammate created but not placed is still on the chart to place by h
   await dialog.getByLabel("Role").fill("Compiler");
   await dialog.getByRole("button", { name: "Add member" }).click();
 
-  await expect(page.getByRole("alert")).toContainText(
-    "could not be added to the selected desk",
-  );
-  await expect(page.getByRole("alert")).toContainText("Hopper");
+  const halfLanded = toasts(page).first();
+  await expect(halfLanded).toContainText("couldn't be added to that desk");
+  await expect(halfLanded).toContainText("Hopper");
+  // Not dressed as a success (#1099): a teammate the host took but could not
+  // place is exactly the outcome "Added Hopper." would have lied about.
+  await expect(halfLanded).toHaveAttribute("data-type", "warning");
   // Created on the host, so it must be on the chart's unplaced list — the one
   // place a teammate with no desk belongs, and where the operator picks them
   // up to place by hand. Asserted against that list rather than the page: the

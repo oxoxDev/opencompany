@@ -49,22 +49,22 @@ oauth          | tested       | (default)                       | In the default
 platform-jwt   | tested       | (default)                       | In the default set (see Cargo.toml for why it ships by default).
 openhuman      | tested       | openhuman,tinycortex            | `rust-gated` runs `--tests`, which selects lib+bin units and every tests/ target.
 tinycortex     | tested       | openhuman,tinycortex            | Same lane, same unfiltered `--tests`.
-tinymemory     | partial      | tinymemory                      | store::memory store::select
+tinymemory     | partial      | acp,runner,tinymemory | store::memory store::select
 tinyplace      | tested       | tinyplace                       | Runs the whole `--lib` deliberately (issue #477) — it gates code across the tree.
 
 # --- Partial: a lane exists, but filtered ----------------------------------
 
 sqlite         | partial      | sqlite                          | store::sqlite
 mongodb        | partial      | mongodb                         | store::mongodb store::select
-acp            | partial      | acp                             | server::acp harness::acp_run_turn
-runner         | partial      | runner                          | runner
+acp            | partial      | acp,runner,tinymemory | server::acp harness::acp_run_turn
+runner         | partial      | acp,runner,tinymemory | runner
 mcp            | partial      | openhuman,mcp,telegram,media    | harness::build::tests app::types
 media          | partial      | openhuman,mcp,telegram,media    | harness::build::tests harness::toolbelt
-composio       | partial      | openhuman,tinycortex,composio   | harness::composio::isolation_tests harness::composio::ops_helper_tests harness::composio::live::live_tests server::ops::composio::tests::gated_tests
+composio       | partial      | openhuman,tinycortex,chargebee,paypal,composio | harness::composio::isolation_tests harness::composio::ops_helper_tests harness::composio::live::live_tests server::ops::composio::tests::gated_tests
 export         | partial      | export                          | store::export
 imap           | partial      | imap,smtp                       | server::ops::imap
-chargebee      | partial      | openhuman,tinycortex,chargebee  | chargebee
-paypal         | partial      | openhuman,tinycortex,paypal     | paypal
+chargebee      | partial      | openhuman,tinycortex,chargebee,paypal,composio | chargebee
+paypal         | partial      | openhuman,tinycortex,chargebee,paypal,composio | paypal
 sidecar        | partial      | sidecar                         | brain::sidecar
 
 # --- Owed a lane: gated tests exist, and they are currently RED -------------

@@ -931,6 +931,7 @@ mod test {
                     node_id: "ceo".to_string(),
                     status: crate::ports::types::WorkflowNodeStatus::Ok,
                     elapsed_ms: 12,
+                    diagnostics: Vec::new(),
                 },
             )
             .await
@@ -1341,6 +1342,7 @@ mod test {
                     node_id: "ceo".to_string(),
                     status: crate::ports::types::WorkflowNodeStatus::Ok,
                     elapsed_ms: 3,
+                    diagnostics: Vec::new(),
                 },
             )
             .await

@@ -184,6 +184,100 @@ export async function embeddedHost(): Promise<EmbeddedInfo | null> {
   }
 }
 
+/** One host this machine runs. Mirrors `LocalInstanceInfo` in Rust. */
+export interface LocalInstance {
+  /** Stable within this machine, and the name of its data directory. */
+  id: string;
+  /** What the operator called it. Free text, and renameable. */
+  label: string;
+  dataDir: string;
+  running: boolean;
+  /** Present exactly when `running` — a stopped instance has no port. */
+  baseUrl?: string;
+  /**
+   * The host's own durable identity, which is what a connection row is keyed
+   * on. The address is not: it is a fresh ephemeral port every launch.
+   */
+  instanceId?: string;
+  operatorEmail?: string;
+  companies?: string[];
+  /** Why it is not running. Usually another process holding its data root. */
+  error?: string;
+}
+
+/**
+ * Every host this machine runs, listening or not.
+ *
+ * `[]` in a browser, which runs none. Also `[]` on a shell built before the
+ * roster existed: the command is simply absent there, and `App` falls back to
+ * {@link embeddedHost} — one instance is what that shell has anyway, so the
+ * degrade is exact rather than approximate.
+ */
+export async function localInstances(): Promise<LocalInstance[] | null> {
+  const desktop = tauriCore();
+  if (!desktop) return [];
+  try {
+    const answer = await desktop.invoke<LocalInstance[]>("oc_local_instances");
+    // Anything that is not an array is a shell that does not implement this.
+    // Checked rather than defaulted to `[]`: an unknown command answers
+    // `undefined` on some bridges and rejects on others, and both mean the same
+    // thing — ask `oc_embedded` instead.
+    return Array.isArray(answer) ? answer : null;
+  } catch (error) {
+    // `null`, not `[]`: "this shell has no roster command" and "this machine
+    // runs nothing" are different answers, and only the first has a fallback.
+    console.warn("[desktop] this shell has no instance roster", error);
+    return null;
+  }
+}
+
+/**
+ * Adds a host on this machine over a data root of its own, and starts it.
+ *
+ * A root of its own is the whole mechanism: two hosts over one root overwrite
+ * each other's companies, which is why the core locks it. So a second local
+ * company is a second root, not a second process.
+ */
+export async function createLocalInstance(label: string): Promise<LocalInstance> {
+  const desktop = tauriCore();
+  if (!desktop) throw new Error("running a host locally needs the desktop application");
+  return desktop.invoke<LocalInstance>("oc_create_local_instance", { label });
+}
+
+export async function startLocalInstance(id: string): Promise<LocalInstance> {
+  const desktop = tauriCore();
+  if (!desktop) throw new Error("running a host locally needs the desktop application");
+  return desktop.invoke<LocalInstance>("oc_start_local_instance", { id });
+}
+
+/**
+ * Stops a host, freeing its port and its data root.
+ *
+ * Freeing the root is the part worth wanting: it is what lets an
+ * `opencompany serve` in a terminal take over the same company.
+ */
+export async function stopLocalInstance(id: string): Promise<LocalInstance> {
+  const desktop = tauriCore();
+  if (!desktop) throw new Error("running a host locally needs the desktop application");
+  return desktop.invoke<LocalInstance>("oc_stop_local_instance", { id });
+}
+
+export async function renameLocalInstance(id: string, label: string): Promise<LocalInstance> {
+  const desktop = tauriCore();
+  if (!desktop) throw new Error("running a host locally needs the desktop application");
+  return desktop.invoke<LocalInstance>("oc_rename_local_instance", { id, label });
+}
+
+/**
+ * Drops a host from the roster. **The data stays on disk** — the core does the
+ * reversible half only, because the other half is someone's company.
+ */
+export async function forgetLocalInstance(id: string): Promise<void> {
+  const desktop = tauriCore();
+  if (!desktop) throw new Error("running a host locally needs the desktop application");
+  await desktop.invoke<void>("oc_forget_local_instance", { id });
+}
+
 /**
  * Redeems a pairing code for this machine.
  *

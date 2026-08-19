@@ -737,6 +737,56 @@
     --kg-tool: var(--kg-brain-2);
 }
 
+/* ============================================================================
+ * Markdown prose — inline code.
+ *
+ * `@plugin "@tailwindcss/typography"` at the top of this file ships two
+ * defaults nobody here asked for:
+ *
+ *     .prose :where(code)…::before { content: "`" }
+ *     .prose :where(code)…::after  { content: "`" }
+ *
+ * They exist because the plugin styles hand-written HTML, where a reader has
+ * no other cue that a span is code. What `components/markdown.tsx` feeds it is
+ * the *output* of a markdown parser, so the fences have already been consumed:
+ * the plugin drew them back on, and every surface using the shared `Markdown`
+ * component — chat, memory, ledgers, artifacts, workflows — rendered
+ * `` `UsageDto` `` where it meant `UsageDto` (issue #1108).
+ *
+ * What makes the override stick is the cascade *layer*, not the selector:
+ * `prose` is a utility, so everything the plugin emits lands in
+ * `@layer utilities`, and an unlayered rule outranks every layer no matter
+ * where it sits in the file. So these rules must stay unlayered — wrapping
+ * them in `@layer base` or `@layer utilities` to tidy the file up hands the
+ * backticks straight back. `test/unit/markdown-inline-code.test.ts` compiles
+ * this file and checks the outcome rather than the text, so that mistake
+ * fails a test instead of shipping.
+ * ========================================================================== */
+
+.prose :where(code):not(:where([class~="not-prose"] *))::before,
+.prose :where(code):not(:where([class~="not-prose"] *))::after {
+    content: none;
+}
+
+/* Without the backticks an inline span is set apart from the prose around it
+ * by its face alone, which at 0.875em is a weak signal in a chat line. It gets
+ * its own ground instead: `--muted` with a hairline, so the chip still reads
+ * where whatever is behind it is itself tinted — a hovered chat row is
+ * `bg-muted/40`, and a `remark-gfm` table header is tinted too. Sized in `em`
+ * so the chip tracks the text it wraps rather than the root font size.
+ *
+ * `pre *` is excluded on purpose. The plugin clears the ground inside a fenced
+ * block (`pre code { background-color: transparent; padding: 0 }`), and being
+ * unlayered this rule would otherwise outrank that too — every fenced block
+ * would gain a second, bordered ground inside its own.
+ */
+.prose :where(code):not(:where(pre *, [class~="not-prose"] *)) {
+    background-color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: calc(var(--radius) * 0.6);
+    padding: 0.125em 0.375em;
+}
+
 @layer base {
     * {
         @apply border-border outline-ring/50;
@@ -769,6 +819,154 @@
             animation-iteration-count: 1 !important;
             transition-duration: 0.01ms !important;
             scroll-behavior: auto !important;
+        }
+    }
+}
+
+/* ============================================================================
+ * Scrollbars (issue #1109)
+ *
+ * One rule set, at the document level, so every scroll container in the console
+ * — the 69 that exist and the next one somebody adds — is themed without opting
+ * in. The browser default is a wide, pale, permanently-on bar that belongs to
+ * the operating system rather than to this canvas; against `bg-card` in dark it
+ * reads as a light stripe down the side of the panel.
+ *
+ * Three decisions worth stating, because each had an obvious alternative:
+ *
+ * 1. THE BAR NEVER LEAVES. It rests at 22% of `--muted-foreground` (30% in
+ *    dark) instead of `width: 0`. A scrollbar is the only thing on screen that says "there is
+ *    more below", and hiding it until the reader scrolls means hiding it until
+ *    after they needed it — worst on exactly the panels where the thing they
+ *    are looking for is an action at the bottom of a list. So the fade is a
+ *    fade in weight, not in existence.
+ *
+ * 2. THE GEOMETRY IS CONSTANT. Only the thumb's colour changes between states;
+ *    the track keeps its width whether the thumb is bright or faint. That is
+ *    what makes `scrollbar-gutter: stable` unnecessary here: the gutter would
+ *    fix a reflow that this never causes, and applying it globally would carve
+ *    a permanent 10px notch out of every `overflow-auto` box that does not
+ *    overflow — including the tightly-sized panels (`RunHistoryPanel`,
+ *    `NodeDetailPanel`, `CopilotPanel`) and the small `<pre>` blocks inside
+ *    them, whose padding would go visibly lopsided.
+ *
+ * 3. THE ACTIVE STATE COMES FROM JS, NOT `:hover`. `:hover` matches every
+ *    ancestor of the pointer up to `html`, so a hover reveal lights every
+ *    nested scroller as soon as the pointer is anywhere in the window.
+ *    `src/lib/scroll-activity.ts` marks the element that actually scrolled with
+ *    `data-scrolling` and clears it after an idle beat; one capturing listener
+ *    covers the whole document. The thumb's own `:hover` still fires — that one
+ *    is the real scrollbar part under the cursor, and it is precise.
+ *
+ * The weights are `color-mix` over `--muted-foreground` with a transparent
+ * track, so the thumb composites onto whatever surface it happens to sit on and
+ * `.dark` retunes it for free. Dark carries slightly more alpha: the same
+ * percentage over `--surface-dark-1` reads fainter than it does over white.
+ * ========================================================================== */
+
+:root {
+    --scrollbar-size: 10px;
+    /* A transparent border plus `background-clip: padding-box` insets the pill
+       inside the track, so the thumb is a 6px capsule floating in a 10px lane
+       rather than a bar wedged against the edge. Matches the rail our own
+       `ScrollArea` component draws (`w-2.5`), so native and custom scrollbars
+       read as the same object. */
+    --scrollbar-inset: 2px;
+    --scrollbar-thumb-rest: color-mix(in oklab, var(--muted-foreground) 22%, transparent);
+    --scrollbar-thumb-active: color-mix(in oklab, var(--muted-foreground) 48%, transparent);
+    --scrollbar-thumb-grab: color-mix(in oklab, var(--muted-foreground) 70%, transparent);
+}
+
+.dark {
+    --scrollbar-thumb-rest: color-mix(in oklab, var(--muted-foreground) 30%, transparent);
+    --scrollbar-thumb-active: color-mix(in oklab, var(--muted-foreground) 58%, transparent);
+    --scrollbar-thumb-grab: color-mix(in oklab, var(--muted-foreground) 80%, transparent);
+}
+
+@layer base {
+    /* ---- Chromium and WebKit -------------------------------------------
+     * These pseudo elements only exist on boxes that actually scroll, so no
+     * element selector is needed — or wanted.
+     *
+     * Chromium honours them ONLY while `scrollbar-width` and `scrollbar-color`
+     * are untouched: set either standard property and it drops the custom
+     * scrollbar entirely and paints its own thin one. That is why the two
+     * halves below are mutually exclusive rather than layered "one as a
+     * fallback for the other" — verified in a real browser, where declaring
+     * both gave Chromium a square 11px native bar and left this whole block
+     * dead. `@supports` splits them on the only thing that actually differs:
+     * Firefox does not know the pseudo element.
+     */
+    ::-webkit-scrollbar {
+        width: var(--scrollbar-size);
+        height: var(--scrollbar-size);
+    }
+    ::-webkit-scrollbar-track,
+    ::-webkit-scrollbar-corner {
+        background: transparent;
+    }
+    /* Windows and Linux draw stepper arrows on a default scrollbar. They are
+       not part of this vocabulary and there is nothing to theme them with. */
+    ::-webkit-scrollbar-button {
+        display: none;
+    }
+    ::-webkit-scrollbar-thumb {
+        background-color: var(--scrollbar-thumb-rest);
+        background-clip: padding-box;
+        border: var(--scrollbar-inset) solid transparent;
+        border-radius: 9999px;
+        transition: background-color var(--duration-base) var(--ease-standard);
+    }
+    [data-scrolling]::-webkit-scrollbar-thumb {
+        background-color: var(--scrollbar-thumb-active);
+    }
+    /* After the active rule, so a thumb under the cursor stays the strongest
+       weight while the content it controls is moving. */
+    ::-webkit-scrollbar-thumb:hover,
+    ::-webkit-scrollbar-thumb:active {
+        background-color: var(--scrollbar-thumb-grab);
+    }
+
+    /* ---- Firefox --------------------------------------------------------
+     * No pill and no inset — the standard properties offer a width keyword and
+     * two colours, and that is the whole surface. `thin` plus the same thumb
+     * weights still lands in the same visual family as the block above.
+     *
+     * `scrollbar-color` inherits, so the root declaration reaches every
+     * scroller under it and `[data-scrolling]` overrides it in the same
+     * cascade. `scrollbar-width` does NOT inherit — again, checked rather than
+     * assumed — so it has to be stated for every element; `:where()` keeps that
+     * at zero specificity so `.no-scrollbar` still wins on the one surface that
+     * deliberately trades its bar away (the sidebar nav).
+     */
+    @supports not selector(::-webkit-scrollbar) {
+        :where(*) {
+            scrollbar-width: thin;
+        }
+        html {
+            scrollbar-color: var(--scrollbar-thumb-rest) transparent;
+        }
+        [data-scrolling] {
+            scrollbar-color: var(--scrollbar-thumb-active) transparent;
+        }
+    }
+
+    /* The global reduced-motion block above cannot reach a scrollbar pseudo
+       element (`*` does not match one), and killing the transition alone would
+       leave the bar snapping between two weights — motion by another name. So
+       the fade is not shortened here, it is removed: the bar simply holds its
+       active weight all the time, which is the state the reader would otherwise
+       have to provoke. */
+    @media (prefers-reduced-motion: reduce) {
+        ::-webkit-scrollbar-thumb {
+            background-color: var(--scrollbar-thumb-active);
+            transition: none;
+        }
+        @supports not selector(::-webkit-scrollbar) {
+            html,
+            [data-scrolling] {
+                scrollbar-color: var(--scrollbar-thumb-active) transparent;
+            }
         }
     }
 }

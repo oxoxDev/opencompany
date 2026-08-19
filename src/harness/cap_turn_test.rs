@@ -56,17 +56,21 @@ const AGENT: &str = "ceo";
 
 /// The tool-iteration cap a turn actually runs under.
 ///
-/// `build_agent` never calls `.config(...)`, so the agent falls back to
-/// openhuman's `AgentConfig::default()`, whose `max_tool_iterations` is 10
-/// (`config/schema/agent.rs`, `default_agent_max_tool_iterations`).
+/// `build_agent` states this explicitly via `set_max_tool_iterations`
+/// (issue #988) rather than falling back to openhuman's
+/// `AgentConfig::default()` (`config/schema/agent.rs`,
+/// `default_agent_max_tool_iterations`, which is 10 and no longer what any
+/// built agent runs under).
 ///
-/// Hardcoding it is deliberate and it is checked, not assumed: the scripts
-/// below depend on knowing exactly which model call is the wrap-up, and
+/// Bound to [`MAX_TOOL_ITERATIONS`](crate::harness::build::MAX_TOOL_ITERATIONS)
+/// rather than re-hardcoded, and it is checked, not assumed: the scripts below
+/// depend on knowing exactly which model call is the wrap-up, and
 /// [`capped_script`] asserts the observed call count matches. If a vendor bump
-/// or a `.config(...)` call moves the cap, these tests fail with a message that
-/// says the cap moved — rather than silently scripting the wrong turn shape and
-/// passing for the wrong reason.
-const CAP: usize = 10;
+/// or another `set_max_tool_iterations` call moves the effective cap without
+/// moving the constant, these tests fail with a message that says the cap
+/// moved — rather than silently scripting the wrong turn shape and passing for
+/// the wrong reason.
+const CAP: usize = crate::harness::build::MAX_TOOL_ITERATIONS;
 
 /// The checkpoint the scripted model writes when it is asked to wrap up.
 ///

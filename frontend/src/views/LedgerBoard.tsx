@@ -30,8 +30,46 @@
 // 3. **The trailing gutter exists.** A flex scroll container drops its
 //    `padding-inline-end`, so without the spacer the last column hugs the edge
 //    and a near miss becomes the common case.
+//
+// # Empty columns collapse to a rail (issue #1101)
+//
+// A healthy company's board reads as dead. To-do, Planning and In progress are
+// the three columns that fit an ordinary window, and they are exactly the three
+// that empty out first — so an operator opens Tasks, gets three confident
+// zeros, and never learns that the 101 cards they came for are two columns off
+// the right edge. The board that has moved the most work is the board that
+// looks the most finished.
+//
+// So a column holding nothing shrinks to a ~40px rail — its label set vertically
+// and its zero underneath — and the columns holding the work take the room back.
+// Three properties keep that from breaking the board's main gesture, and each
+// one is a line somebody will be tempted to delete:
+//
+// * **A rail is still a whole drop target.** Empty columns are precisely the
+//   ones you drag *into*: To-do is where returned work lands, In progress is
+//   where a card is handed to its assignee. The drop handlers sit on the column
+//   wrapper, which is the element that shrinks — never on the expanded body.
+// * **A rail opens under the drag.** `over` already tracks the column the
+//   pointer is on, so the same state that draws the drop highlight suppresses
+//   the collapse. Dropping into an empty column looks the way it always did.
+// * **Nothing collapses unless something else is populated.** A board that is
+//   empty everywhere would otherwise render as six rails and no board, which is
+//   a worse answer to "show me the work" than the one this fixes.
+//
+// Clicking a rail pins it open, and a pinned column stays open until the
+// operator collapses it again. Nothing else may re-collapse it: a column that
+// folded itself back up while somebody was reading it would be this bug's
+// mirror image.
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { ChevronsLeft } from "lucide-react";
 
 import type { TaskColumn } from "@/lib/board-columns";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -72,6 +110,15 @@ const EDGE_SPEED_PX = 16;
  */
 const CARD_MIME = "application/x-opencompany-task";
 
+/**
+ * The collapsed column's width.
+ *
+ * Wide enough for the vertical label and the count badge under it, narrow
+ * enough that three of them cost less than half of one open column — which is
+ * the whole point: the room has to go somewhere the operator can use it.
+ */
+const RAIL_WIDTH = "w-10";
+
 export interface BoardProps<T extends BoardRow> {
   /** The columns, in board order. The host declares them; nothing here does. */
   columns: TaskColumn[];
@@ -105,6 +152,10 @@ export function LedgerBoard<T extends BoardRow>({
 }: BoardProps<T>) {
   const [dragId, setDragId] = useState<string | null>(null);
   const [over, setOver] = useState<string | null>(null);
+  // The columns the operator has clicked open. Only a click puts an id in here
+  // and only a click takes it out again — see the header note on why nothing
+  // else is allowed to.
+  const [pinned, setPinned] = useState<ReadonlySet<string>>(() => new Set());
   const boardRef = useRef<HTMLDivElement | null>(null);
   // Refs rather than state: this is driven by `dragover` at pointer rate and
   // must not re-render the board on every move.
@@ -129,10 +180,13 @@ export function LedgerBoard<T extends BoardRow>({
       const board = boardRef.current;
       if (!board) return;
       const { left, right } = board.getBoundingClientRect();
-      const ramp = (depth: number) => Math.min(1, Math.max(0, 1 - depth / EDGE_BAND_PX));
+      const ramp = (depth: number) =>
+        Math.min(1, Math.max(0, 1 - depth / EDGE_BAND_PX));
       let speed = 0;
-      if (clientX < left + EDGE_BAND_PX) speed = -EDGE_SPEED_PX * ramp(clientX - left);
-      else if (clientX > right - EDGE_BAND_PX) speed = EDGE_SPEED_PX * ramp(right - clientX);
+      if (clientX < left + EDGE_BAND_PX)
+        speed = -EDGE_SPEED_PX * ramp(clientX - left);
+      else if (clientX > right - EDGE_BAND_PX)
+        speed = EDGE_SPEED_PX * ramp(right - clientX);
       if (speed === 0) {
         stopEdgeScroll();
         return;
@@ -156,6 +210,41 @@ export function LedgerBoard<T extends BoardRow>({
   // A drag interrupted by anything that unmounts the board — switching ledgers,
   // opening a card — must not leave a frame running against a detached node.
   useEffect(() => stopEdgeScroll, [stopEdgeScroll]);
+
+  const togglePin = useCallback((id: string) => {
+    setPinned((current) => {
+      const next = new Set(current);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  }, []);
+
+  /**
+   * Each column's rows, bucketed once.
+   *
+   * A `filter` per column is one pass over every row per column, which at the
+   * hundred-card boards this issue was reported on is six passes on every
+   * `dragover`. Bucketing keeps declaration order within a column, which is the
+   * order the caller handed the rows in.
+   */
+  const held = useMemo(() => {
+    const buckets = new Map<string, T[]>(
+      columns.map((column) => [column.id, []]),
+    );
+    for (const row of rows) buckets.get(statusOf(row))?.push(row);
+    return buckets;
+  }, [columns, rows, statusOf]);
+
+  /**
+   * Whether an empty column is allowed to collapse at all.
+   *
+   * Only once some *other* column has work in it. A board that is empty
+   * everywhere has nothing to make room for, and six rails would answer "show
+   * me the work" worse than the three honest zeros this issue is about.
+   */
+  const collapsible =
+    !loading &&
+    columns.some((column) => (held.get(column.id)?.length ?? 0) > 0);
 
   /** Reads the dragged row out of the event, falling back to our own state. */
   const dragged = (event: React.DragEvent): T | undefined => {
@@ -202,10 +291,31 @@ export function LedgerBoard<T extends BoardRow>({
       className="flex min-h-0 flex-1 gap-4 overflow-x-auto py-1"
     >
       {columns.map((column) => {
-        const held = rows.filter((row) => statusOf(row) === column.id);
+        const cards = held.get(column.id) ?? [];
+        const head = columnHeader?.(column);
+        // A column whose header slot is filled carries an affordance — the
+        // intake `+` is the one this board was built for — and a rail has
+        // nowhere to put it. Collapsing it would hide a control rather than
+        // some whitespace, so it stays open. `false` counts as empty: a caller
+        // writing `column.id === ADD_TASK_COLUMN && <Plus/>` returns it for
+        // every other column.
+        const hasHead = head != null && head !== false && head !== "";
+        const collapsed =
+          collapsible &&
+          cards.length === 0 &&
+          !hasHead &&
+          !pinned.has(column.id) &&
+          over !== column.id;
+        // Offered only where it undoes something: on a column the operator
+        // pinned open that would otherwise have collapsed itself.
+        const canCollapse =
+          collapsible && cards.length === 0 && pinned.has(column.id);
         return (
           <div
             key={column.id}
+            data-testid="board-column"
+            data-column={column.id}
+            data-collapsed={collapsed ? "true" : "false"}
             onDragOver={(event) => {
               event.preventDefault();
               // Runs before the board's own dragover (this is the inner
@@ -214,9 +324,18 @@ export function LedgerBoard<T extends BoardRow>({
               if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
               setOver(column.id);
             }}
-            onDragLeave={() =>
-              setOver((current) => (current === column.id ? null : current))
-            }
+            onDragLeave={(event) => {
+              // Only when the pointer has genuinely left the column. A rail
+              // that opens under the drag replaces its own contents, and an
+              // element removed from under a pointer can fire `dragleave` —
+              // which without this guard would collapse the column again on
+              // the frame it opened, forever.
+              if (
+                event.currentTarget.contains(event.relatedTarget as Node | null)
+              )
+                return;
+              setOver((current) => (current === column.id ? null : current));
+            }}
             onDrop={(event) => {
               event.preventDefault();
               // Claim the drop, so anything still reaching the board's own
@@ -232,52 +351,116 @@ export function LedgerBoard<T extends BoardRow>({
               if (row && statusOf(row) !== column.id) onMove(row, column.id);
             }}
             className={cn(
-              "flex min-h-0 w-72 shrink-0 flex-col rounded-xl border bg-card/40 transition-colors",
+              "flex min-h-0 shrink-0 flex-col rounded-xl border bg-card/40 transition-colors",
+              collapsed ? RAIL_WIDTH : "w-72",
               over === column.id && "border-primary/40 bg-accent/40",
             )}
           >
-            <div className="mx-3 flex shrink-0 items-center gap-2 border-b py-2.5">
-              <span className="text-sm font-medium">{column.label}</span>
-              <span className="rounded-full bg-muted px-1.5 text-2xs font-medium tabular-nums text-muted-foreground">
-                {held.length}
-              </span>
-              <div className="ml-auto">{columnHeader?.(column)}</div>
-            </div>
-            <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2">
-              {loading && held.length === 0 ? (
-                <Skeleton className="h-20 rounded-lg" />
-              ) : (
-                held.map((row) => (
-                  <div
-                    key={row.id}
-                    draggable
-                    onDragStart={(event) => {
-                      setDragId(row.id);
-                      if (event.dataTransfer) {
-                        event.dataTransfer.effectAllowed = "move";
-                        // The id is what a drop reads back. The `text/plain`
-                        // copy is what makes the drag well-formed for browsers
-                        // that abort one carrying no data at all.
-                        event.dataTransfer.setData(CARD_MIME, row.id);
-                        event.dataTransfer.setData("text/plain", row.id);
-                      }
-                    }}
-                    onDragEnd={() => {
-                      setDragId(null);
-                      setOver(null);
-                      stopEdgeScroll();
-                    }}
+            {collapsed ? (
+              // The whole rail is the control, so the target is the thing the
+              // eye reads rather than a chevron tucked inside it. The label and
+              // count are `aria-hidden` and restated in the button's own name:
+              // read as text they run together ("To-do0"), and a vertical
+              // writing mode is a paint instruction that a screen reader cannot
+              // see at all.
+              <button
+                type="button"
+                onClick={() => togglePin(column.id)}
+                aria-label={`Expand ${column.label}, ${cards.length} cards`}
+                title={`Expand ${column.label}`}
+                className="flex min-h-0 flex-1 cursor-pointer flex-col items-center gap-2 rounded-xl py-3 outline-none transition-colors hover:bg-accent/60 focus-visible:ring-3 focus-visible:ring-ring/50"
+              >
+                <span
+                  aria-hidden
+                  data-testid="column-label"
+                  className="min-h-0 [writing-mode:vertical-rl] truncate text-sm font-medium text-muted-foreground"
+                >
+                  {column.label}
+                </span>
+                <span
+                  aria-hidden
+                  className="mt-auto rounded-full bg-muted px-1.5 text-2xs font-medium tabular-nums text-muted-foreground"
+                >
+                  {cards.length}
+                </span>
+              </button>
+            ) : (
+              <>
+                <div className="mx-3 flex shrink-0 items-center gap-2 border-b py-2.5">
+                  <span
+                    data-testid="column-label"
+                    className="text-sm font-medium"
                   >
-                    {renderCard(row, dragId === row.id)}
+                    {column.label}
+                  </span>
+                  <span className="rounded-full bg-muted px-1.5 text-2xs font-medium tabular-nums text-muted-foreground">
+                    {cards.length}
+                  </span>
+                  <div className="ml-auto flex items-center gap-1">
+                    {head}
+                    {canCollapse && (
+                      <button
+                        type="button"
+                        onClick={() => togglePin(column.id)}
+                        aria-label={`Collapse ${column.label}`}
+                        title={`Collapse ${column.label}`}
+                        className="flex size-5 cursor-pointer items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+                      >
+                        <ChevronsLeft className="size-3.5" />
+                      </button>
+                    )}
                   </div>
-                ))
-              )}
-              {!loading && held.length === 0 && (
-                <p className="mt-2 flex h-38 items-center justify-center rounded-lg bg-muted/50 px-1 text-center text-xs text-muted-foreground">
-                  {emptyHint}
-                </p>
-              )}
-            </div>
+                </div>
+                <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2">
+                  {loading && cards.length === 0 ? (
+                    <Skeleton className="h-20 rounded-lg" />
+                  ) : (
+                    cards.map((row) => (
+                      <div
+                        key={row.id}
+                        draggable
+                        onDragStart={(event) => {
+                          setDragId(row.id);
+                          if (event.dataTransfer) {
+                            event.dataTransfer.effectAllowed = "move";
+                            // The id is what a drop reads back. The `text/plain`
+                            // copy is what makes the drag well-formed for browsers
+                            // that abort one carrying no data at all.
+                            event.dataTransfer.setData(CARD_MIME, row.id);
+                            event.dataTransfer.setData("text/plain", row.id);
+                          }
+                        }}
+                        onDragEnd={() => {
+                          setDragId(null);
+                          setOver(null);
+                          stopEdgeScroll();
+                        }}
+                      >
+                        {renderCard(row, dragId === row.id)}
+                      </div>
+                    ))
+                  )}
+                  {!loading && cards.length === 0 && (
+                    <p
+                      className={cn(
+                        "mt-2 flex h-38 items-center justify-center rounded-lg px-1 text-center text-xs",
+                        over === column.id && dragId
+                          ? // A column that opened to receive a card says so. The
+                            // rail is a small target and the operator is holding
+                            // something: the empty column has to read as a landing
+                            // spot, not as the same "nothing here" it shows at rest.
+                            "border border-dashed border-primary/50 bg-accent/60 font-medium text-foreground"
+                          : "bg-muted/50 text-muted-foreground",
+                      )}
+                    >
+                      {over === column.id && dragId
+                        ? "Drop it here"
+                        : emptyHint}
+                    </p>
+                  )}
+                </div>
+              </>
+            )}
           </div>
         );
       })}

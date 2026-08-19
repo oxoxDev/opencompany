@@ -200,6 +200,11 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   workspace_create: "Add a note to its workspace",
   workspace_rename: "Rename a note in its own folder",
   workspace_delete: "Delete a note from its own folder",
+  // Agent-authored internal dashboard pages. Only the two that park need
+  // words here, same rule as the workspace mutations above: `pages_list` and
+  // `pages_read` never reach an approval card.
+  pages_write: "Publish a dashboard page",
+  pages_delete: "Delete a dashboard page",
   // Issue #245's pair. Both park per call, so each reaches an operator on the
   // approval card and again in the Standing permissions list — and both names
   // read like reads, which is exactly when a label has to say what is actually

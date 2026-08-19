@@ -292,51 +292,17 @@ divergence in an auth extractor being precisely the class of bug that cannot be
 afforded. With a real listener, every Playwright spec and every proxy test is
 valid evidence about embedded mode too.
 
-`None` when it could not start — most often because another process holds the
-data root. The console renders that as a row; the desktop still holds remote
-hosts, which is the point of holding several.
+Not started when its root could not be taken — most often because another
+process holds it. The console renders that as a row; the desktop still holds
+remote hosts, which is the point of holding several.
 
-### First run
+## Several hosts on one machine
 
-`embedded::start` calls `opencompany::desktop::bootstrap_companies` before it
-binds, because a host with an empty registry cannot be signed into
-([issue #632](https://github.com/tinyhumansai/opencompany/issues/632)). Sign-in
-is per-company — `/api/v1/companies/{id}/auth/…`, or the sole-company alias —
-so an empty registry leaves the console rendering a login form for a company
-that does not exist.
-
-The two ways a company normally reaches the registry are both closed to a
-packaged application. Nobody types `serve --company <dir>` at a double-clicked
-app, and `POST /api/v1/companies` demands the `platform` scope, which
-`PlatformScope` grants only against a configured `platform_auth` — a prosumer
-host has no machine credential to hand out, deliberately. So the desktop
-bootstraps its own:
-
-1. **Adopt** every company bundle the data root already holds, skipping
-   `archived` ones (archiving removes a company from the registry on purpose,
-   and re-registering it at the next launch would undo that quietly). The
-   bundle is the only authority — a desktop company has no source directory to
-   re-read — and `RuntimeBuilder::build` carries the persisted record's
-   console-created desks, agents and workflows forward.
-2. **Seed** the `DEFAULT_PRESET_ID` preset when there were none, stamping the
-   preset slug as the record's template provenance. Fallback rather than
-   unconditional: seeding on every launch would hand the operator a second
-   starter company per run.
-
-`AppConfig.admin_email` is set to `DESKTOP_OPERATOR_EMAIL` — the same seam the
-hosted control plane fills with `OPENCOMPANY_ADMIN_EMAIL`, and the reason a
-person is eligible to sign in at all (`eligibility` in `src/server/users/`
-admits an existing user, a bootstrap admin, or an invite, and a fresh install
-has none of the three). The seeded manifest names the same address in its own
-`[users].admins`, so the company is self-describing if it is ever served
-elsewhere.
-
-Nothing is mailed: the host binds loopback, so `is_local_only` holds and
-`auth/request` returns the login code in its own response (`dev_code`), which
-the console redeems in place. `oc_embedded` carries `operatorEmail` so the
-sign-in form can offer the address — a person cannot guess it, and every other
-address gets the same silent `202`. It is a suggestion, not a lock: the field
-stays editable, which is what an operator who invites someone else needs.
+The desktop runs a roster of local hosts rather than exactly one, so an
+operator can keep two companies side by side on one machine. How the roster is
+stored, which empty root gets a starter company and which gets the first-run
+wizard, and how to run the shell in development are in
+[`desktop-instances.md`](desktop-instances.md).
 
 ### One row, however many launches
 
@@ -347,13 +313,23 @@ previous launch's row left behind pointing at a closed port. They persist, so
 they accumulated, and they all carry the same label; the sidebar filled with
 indistinguishable "This computer" entries, all but one broken (issue #615).
 
-`oc_embedded` therefore also reports `instance_id`, read from the data root
+Every local host therefore reports `instance_id`, read from the data root
 (see [`instance.rs`](../../../src/app/instance.rs)) rather than derived from the
-address, and the console registers this host through `adoptEmbeddedHost` rather
-than `addConnection`. That function matches on the identity, re-points the
-remembered connection at the new port, and drops anything else claiming to be
-this application's host — enforcing the invariant that at most one embedded
-connection exists at a time.
+address, and the console registers them through `adoptLocalHosts` rather than
+`addConnection`. That function matches each running instance on its identity,
+re-points the remembered connection at the new port, and drops the profiles no
+running instance claimed.
+
+It takes the whole set in one call for a reason the single-host version could
+not survive. `adoptEmbeddedHost` dropped *any other* embedded profile as last
+launch's ghost — and with a roster, another embedded profile is ordinarily the
+operator's second company. The prune has to see every live instance before it
+removes anything, so it is one call rather than a loop of them.
+`adoptEmbeddedHost` remains as the one-host wrapper for the degrade above.
+
+Only **running** instances become connections. A stopped one has no address, so
+a row for it could do nothing but fail its probe forever; it is visible — and
+startable — in the rail's dialog instead.
 
 Reusing the remembered id is what carries the tour state, the last-read channel
 and the mail draft across a relaunch, all of them keyed by connection id. A

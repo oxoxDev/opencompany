@@ -51,12 +51,18 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # Builds the Vite/React operator console (frontend/) into a static bundle that
 # the runtime image serves at `/` (same-origin, no separate nginx container).
 # Matches the node version frontend/Dockerfile pins.
+#
+# `build:pages-sdk` builds `@opencompany/site` — the component subset +
+# postMessage client agent-authored dashboard pages import — into
+# `dist/pages-sdk/`, nested inside the same `dist/` the console itself builds
+# to, so the single `COPY --from=console /console/dist /app/console` below
+# already carries it into the runtime image with no second COPY needed.
 FROM node:22-slim AS console
 WORKDIR /console
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend/ ./
-RUN npm run build
+RUN npm run build && npm run build:pages-sdk
 
 # ── local development ─────────────────────────────────────────────────────
 # Used by docker-compose.dev.yml. The repository is bind-mounted over

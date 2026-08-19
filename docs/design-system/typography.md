@@ -75,6 +75,36 @@ carrying `data-numeric`, set once in the base layer rather than per component.
 
 ---
 
+## Markdown prose
+
+`components/markdown.tsx` is the one renderer behind every surface that shows
+agent-written text — chat, memory, ledgers, artifacts, workflows — and it wraps
+its output in `prose prose-sm dark:prose-invert`, styled by
+`@tailwindcss/typography`.
+
+The plugin is written for hand-authored HTML, so two of its defaults are wrong
+here and `index.css` overrides them:
+
+| Default | Override | Why |
+| --- | --- | --- |
+| `code::before`/`::after` draw a literal `` ` `` | `content: none` | The markdown parser already consumed the fences; the plugin drew them back on, so every type name rendered as `` `UsageDto` `` (issue #1108) |
+| Inline `code` gets no ground of its own | `--muted` + hairline `--border`, `0.125em 0.375em` padding | At `0.875em` the mono face alone is a weak signal in a chat line |
+
+Two things about those overrides that are easy to undo by accident:
+
+- **They must stay unlayered.** `prose` is a utility, so everything the plugin
+  emits lands in `@layer utilities`, and an unlayered rule outranks every
+  layer. Tidying them into `@layer base` hands the backticks back.
+- **The chip rule excludes `pre *`.** The plugin clears the ground inside a
+  fenced block; being unlayered, this rule would otherwise outrank that too and
+  paint a second, bordered ground inside every code block.
+
+`frontend/test/unit/markdown-inline-code.test.ts` compiles `index.css` with the
+real plugin and resolves the cascade against a rendered document, so both of
+those fail a test rather than shipping.
+
+---
+
 ## Sizes below the scale
 
 **None remain.** Below 10px is not a size, it is a bug, and the console no

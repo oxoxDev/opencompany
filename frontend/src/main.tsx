@@ -5,6 +5,7 @@ import { ThemeProvider } from "next-themes";
 import { App } from "./App";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
+import { startScrollActivity } from "@/lib/scroll-activity";
 import "./index.css";
 
 /**
@@ -31,5 +32,12 @@ function mount(): void {
     </StrictMode>,
   );
 }
+
+// Started before the first render and never disposed: it is one capturing
+// listener for the life of the document, and every scroll container in the app
+// — including ones mounted much later — depends on it for the `data-scrolling`
+// mark the themed scrollbars in `index.css` lift on. Outside React on purpose,
+// so StrictMode's double-invoked effects cannot arm it twice.
+startScrollActivity();
 
 mount();

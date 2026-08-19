@@ -30,6 +30,7 @@ import {
   Users,
   X,
 } from "lucide-react";
+import { toast } from "sonner";
 
 import { listPeople } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
@@ -43,6 +44,12 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  addMemberFailure,
+  NO_TEAM_WRITE_PLANE,
+  reportAddMember,
+  type AddMemberOutcome,
+} from "@/lib/member-feedback";
 import {
   addableTo,
   buildOrgTree,
@@ -124,6 +131,10 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
         client.status(company).catch(() => null),
       ]);
       if (mine !== gen.current) return;
+      // Cleared here rather than at the top of the write that triggered this
+      // read: since #1099 the banner belongs to the load alone, so a chart that
+      // loads is the only thing that can retire the message saying it did not.
+      setError(null);
       setTree(
         buildOrgTree(
           status?.name || company || "This company",
@@ -232,12 +243,16 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
    */
   async function mutate(key: string, run: () => Promise<unknown>) {
     setBusy(key);
-    setError(null);
     try {
       await run();
       await boot();
     } catch (e) {
-      setError(
+      // Toasted, not banked in the banner above the chart (issue #1099). The
+      // banner is the page's own state — it belongs to a chart that could not
+      // be *loaded*, and it sits with the Retry button that clears it. A write
+      // the operator just attempted is an action, and every other action in
+      // this console answers in a toast.
+      toast.error(
         e instanceof Error ? e.message : "Something went wrong. Try again.",
       );
     } finally {
@@ -254,13 +269,16 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
   async function addMember(fields: NewMemberFields) {
     const deskId = addMemberDeskId;
     setBusy("add-member");
-    setError(null);
     // Whether the host has the teammate, which decides whether the chart needs
     // re-reading on the way out. A desk add that fails after the teammate is
     // created leaves the two disagreeing: the roster has someone the chart has
     // never heard of, so the message telling the operator to place them by hand
     // would point at a dropdown that does not list them yet.
     let createdOnHost = false;
+    // What to say once the chart has been re-read — decided here, raised after
+    // `boot()`, so a refetch that contradicts the write contradicts the message
+    // too rather than arriving a beat behind it.
+    let outcome: AddMemberOutcome;
     try {
       let created: TeamMemberDto;
       try {
@@ -275,32 +293,43 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
         createdOnHost = true;
       } catch (e) {
         if (e instanceof ApiError && e.status === 404) {
+          // No local-only fallback here, unlike the roster and the chat empty
+          // state: a console-only teammate has no host id to place on a desk
+          // and would vanish on the next chart read.
           throw new Error(
-            "This host does not support creating teammates from the Company page.",
+            `${NO_TEAM_WRITE_PLANE} They can't be created from the Company page.`,
           );
         }
         throw e;
       }
+      outcome = { kind: "added", name: fields.name };
       if (deskId) {
         try {
           await client.addDeskMember(deskId, created.id, company);
         } catch (e) {
-          throw new Error(
-            `Teammate ${fields.name} was created, but could not be added to the selected desk: ${e instanceof Error ? e.message : "unknown error"}`,
-          );
+          // Created but unplaced — a real half-landing, and the operator has
+          // to know which half, because the fix is on the chart in front of
+          // them rather than in the dialog they just closed.
+          outcome = {
+            kind: "partial",
+            name: fields.name,
+            missed: `they couldn't be added to that desk: ${e instanceof Error ? e.message : "unknown error"}`,
+            fix: "They're on the roster — drag them onto the desk from here.",
+          };
         }
       }
       await boot();
       setAddMemberOpen(false);
     } catch (e) {
       setAddMemberOpen(false);
-      setError(e instanceof Error ? e.message : "Could not create teammate.");
+      outcome = addMemberFailure(e, "Could not create teammate.");
       if (createdOnHost) {
         await boot();
       }
     } finally {
       setBusy(null);
     }
+    reportAddMember(outcome);
   }
 
   return (

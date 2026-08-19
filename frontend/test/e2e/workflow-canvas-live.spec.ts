@@ -1,6 +1,7 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
 import { LIVE_BRAIN, LIVE_BRAIN_REASON } from "./capabilities";
+import { workflowDetailName } from "./workflows";
 
 /**
  * Issue #863: the canvas paints per-node state WHILE a run walks the graph.
@@ -147,7 +148,10 @@ test.describe("workflow canvas during a live run", () => {
     try {
       await page.goto(`/#/workflows/${id}`);
       await dismissTour(page);
-      await expect(page.getByRole("combobox").first()).toContainText(`Live canvas ${id}`, {
+      // Issue #1110: a `#/workflows/<id>` link opens that workflow's detail
+      // view directly, so this reads the heading the detail view names itself
+      // with rather than the picker it used to be asserted through.
+      await expect(workflowDetailName(page)).toHaveText(`Live canvas ${id}`, {
         timeout: 30_000,
       });
 

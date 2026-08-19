@@ -1,5 +1,9 @@
-// Issue #303: browse the company's workflows as CARDS or as a LIST, with a
-// toggle, instead of only through the toolbar's dropdown.
+// Issue #303: the company's workflows as CARDS or as a LIST.
+//
+// Issue #1110 promoted it from a panel that opened over the canvas to the body
+// of `#/workflows` itself, which is why it no longer draws a header: the tab's
+// own toolbar carries the title, the count, the Cards/List toggle and New
+// workflow, and this renders the list under it.
 //
 // Why this exists at all: before #303 the only way to see the company's
 // workflows was the `<Select>` in the toolbar — a combobox shows one workflow at
@@ -15,11 +19,8 @@
 // N+1 on every render of this panel. Showing "no schedule" without having
 // looked would be a lie, so the card says nothing at all about schedules.
 
-import { LayoutGrid, List as ListIcon } from "lucide-react";
-
 import type { WorkflowRunOutcome, WorkflowSummary } from "@/api/workflows";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 
 import { failedNodeOf } from "./graph";
@@ -34,20 +35,30 @@ const STRIP_RUNS = 5;
 export function WorkflowIndex({
   workflows,
   runsByWorkflow,
-  selectedId,
   onSelect,
   mode,
-  onModeChange,
   loading,
   runsLoaded,
 }: {
   workflows: WorkflowSummary[];
   /** The recent runs of each workflow, newest first, from the company-wide page. */
   runsByWorkflow: Map<string, WorkflowRunOutcome[]>;
-  selectedId: string | null;
+  /**
+   * Open one workflow. Issue #1110: there is no `selectedId` counterpart, and
+   * that is the point — selecting IS leaving this surface, so nothing here is
+   * ever "the selected one". The cards used to carry `aria-pressed`, which
+   * announced every one of them to a screen reader as a toggle that was off;
+   * they are links to a page, and they read as buttons that do something now.
+   */
   onSelect: (id: string) => void;
+  /**
+   * Cards or list. Owned and rendered by the caller (issue #1110): the index is
+   * the whole body of `#/workflows` now, so its heading and the tab's heading
+   * were the same bar drawn twice — "Workflows 7" over "All workflows 7", with
+   * the toggle stranded under the duplicate. The control moved up into the one
+   * toolbar; this component reads the answer and renders it.
+   */
   mode: IndexMode;
-  onModeChange: (mode: IndexMode) => void;
   loading: boolean;
   /**
    * Whether the run page has come back yet.
@@ -59,77 +70,42 @@ export function WorkflowIndex({
   runsLoaded: boolean;
 }) {
   return (
-    <div className="flex h-full flex-col" data-testid="workflow-index">
-      <div className="flex items-center justify-between gap-2 border-b px-4 py-2">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium">All workflows</span>
-          <Badge variant="secondary">{workflows.length}</Badge>
+    <div className="h-full overflow-auto p-4" data-testid="workflow-index">
+      {loading ? (
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {[0, 1, 2].map((i) => (
+            <Skeleton key={i} className="h-28 rounded-xl" />
+          ))}
         </div>
-        <div className="flex items-center gap-1 rounded-lg border p-0.5">
-          <Button
-            size="sm"
-            variant={mode === "cards" ? "secondary" : "ghost"}
-            className="h-7 px-2"
-            onClick={() => onModeChange("cards")}
-            aria-pressed={mode === "cards"}
-            data-testid="workflow-index-cards"
-          >
-            <LayoutGrid className="mr-1.5 size-3.5" />
-            Cards
-          </Button>
-          <Button
-            size="sm"
-            variant={mode === "list" ? "secondary" : "ghost"}
-            className="h-7 px-2"
-            onClick={() => onModeChange("list")}
-            aria-pressed={mode === "list"}
-            data-testid="workflow-index-list"
-          >
-            <ListIcon className="mr-1.5 size-3.5" />
-            List
-          </Button>
+      ) : workflows.length === 0 ? (
+        <p className="text-sm text-muted-foreground">
+          This company has no saved workflows yet.
+        </p>
+      ) : mode === "cards" ? (
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {workflows.map((w) => (
+            <WorkflowCard
+              key={w.id}
+              workflow={w}
+              runs={runsByWorkflow.get(w.id) ?? []}
+              runsLoaded={runsLoaded}
+              onSelect={() => onSelect(w.id)}
+            />
+          ))}
         </div>
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-auto p-4">
-        {loading ? (
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {[0, 1, 2].map((i) => (
-              <Skeleton key={i} className="h-28 rounded-xl" />
-            ))}
-          </div>
-        ) : workflows.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            This company has no saved workflows yet.
-          </p>
-        ) : mode === "cards" ? (
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {workflows.map((w) => (
-              <WorkflowCard
-                key={w.id}
-                workflow={w}
-                runs={runsByWorkflow.get(w.id) ?? []}
-                runsLoaded={runsLoaded}
-                selected={w.id === selectedId}
-                onSelect={() => onSelect(w.id)}
-              />
-            ))}
-          </div>
-        ) : (
-          <div className="divide-y rounded-xl border">
-            {workflows.map((w) => (
-              <WorkflowRow
-                key={w.id}
-                workflow={w}
-                runs={runsByWorkflow.get(w.id) ?? []}
-                runsLoaded={runsLoaded}
-                selected={w.id === selectedId}
-                onSelect={() => onSelect(w.id)}
-              />
-            ))}
-          </div>
-        )}
-      </div>
+      ) : (
+        <div className="divide-y rounded-xl border">
+          {workflows.map((w) => (
+            <WorkflowRow
+              key={w.id}
+              workflow={w}
+              runs={runsByWorkflow.get(w.id) ?? []}
+              runsLoaded={runsLoaded}
+              onSelect={() => onSelect(w.id)}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -140,24 +116,19 @@ function WorkflowCard({
   workflow,
   runs,
   runsLoaded,
-  selected,
   onSelect,
 }: {
   workflow: WorkflowSummary;
   runs: WorkflowRunOutcome[];
   runsLoaded: boolean;
-  selected: boolean;
   onSelect: () => void;
 }) {
   return (
     <button
       type="button"
       onClick={onSelect}
-      aria-pressed={selected}
       data-testid="workflow-card"
-      className={`flex flex-col gap-2 rounded-xl border bg-card/60 p-3 text-left transition hover:bg-accent/40 ${
-        selected ? "ring-2 ring-primary/40" : ""
-      }`}
+      className="flex flex-col gap-2 rounded-xl border bg-card/60 p-3 text-left transition hover:bg-accent/40"
     >
       <div className="flex items-start justify-between gap-2">
         <span className="min-w-0 truncate text-sm font-semibold">{workflow.name}</span>
@@ -195,24 +166,19 @@ function WorkflowRow({
   workflow,
   runs,
   runsLoaded,
-  selected,
   onSelect,
 }: {
   workflow: WorkflowSummary;
   runs: WorkflowRunOutcome[];
   runsLoaded: boolean;
-  selected: boolean;
   onSelect: () => void;
 }) {
   return (
     <button
       type="button"
       onClick={onSelect}
-      aria-pressed={selected}
       data-testid="workflow-list-row"
-      className={`flex w-full flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-left transition hover:bg-accent/40 ${
-        selected ? "bg-accent/30" : ""
-      }`}
+      className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-left transition hover:bg-accent/40"
     >
       <span className="min-w-0 flex-1 truncate text-sm font-medium">{workflow.name}</span>
       {workflow.editable === false && (

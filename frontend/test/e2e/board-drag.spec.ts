@@ -93,7 +93,30 @@ async function dismissTour(page: Page) {
 }
 
 const board = (page: Page) => page.getByTestId("ledger-board");
-const column = (page: Page, index: number) => board(page).locator("div.w-72").nth(index);
+const column = (page: Page, index: number) => board(page).getByTestId("board-column").nth(index);
+
+/**
+ * Opens every column that has collapsed itself to a rail (issue #1101).
+ *
+ * An empty column is now ~40px wide, and every geometry claim in this file is
+ * about the board at its full six-column width: whether the last one is a
+ * whole drop target, and whether a drag held against the edge can scroll to
+ * reach it. A board of five rails and one column does not overflow at all, so
+ * without this the edge-scroll assertion would pass by never being tested.
+ *
+ * Clicking a rail pins it open, which is the operator's own control — so this
+ * puts the board in a state a person can reach, rather than defeating the
+ * feature with a style override.
+ */
+async function expandAll(page: Page) {
+  const rails = board(page).locator("button[aria-label^='Expand ']");
+  // Bounded: each click removes one rail, and the board has six columns.
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    if ((await rails.count()) === 0) return;
+    await rails.first().click();
+  }
+  await expect(rails).toHaveCount(0);
+}
 
 /** Opens the board and waits for the host's columns to arrive. */
 async function openBoard(page: Page) {
@@ -103,6 +126,7 @@ async function openBoard(page: Page) {
   // has one. Every assertion below measures a column's box; none of them mean
   // anything against a board still showing none.
   await expect(column(page, DONE)).toHaveCount(1, { timeout: 15_000 });
+  await expandAll(page);
 }
 
 /** Seeds a card straight into In review and opens the board on it. */

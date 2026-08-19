@@ -1,9 +1,25 @@
-import { type CSSProperties, lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Loader2 } from "lucide-react";
 
 import { signInWithHubToken, verifyCode } from "@/api/auth";
 import { isAddressableBaseUrl, isDesktopRuntime } from "@/api/transport";
-import { embeddedHost } from "@/api/transport/desktop";
+import {
+  createLocalInstance,
+  embeddedHost,
+  localInstances,
+  startLocalInstance,
+  stopLocalInstance,
+  type LocalInstance,
+} from "@/api/transport/desktop";
 import { ApiError } from "@/api/types";
 import {
   CONNECTION_RAIL_WIDTH,
@@ -13,8 +29,9 @@ import {
 import { resolveConfig } from "@/config";
 import {
   addConnection,
-  adoptEmbeddedHost,
+  adoptLocalHosts,
   clientFor,
+  listConnections,
   probe,
   restoreConnections,
   useConnections,
@@ -220,25 +237,84 @@ function Console() {
     // A browser has nothing to ask, so it is resolved before it starts.
     resolved: !isDesktopRuntime(),
     id: null,
+    instances: [],
+    operatorEmails: {},
   }));
-  useEffect(() => {
-    let cancelled = false;
-    void embeddedHost().then((host) => {
-      if (cancelled) return;
-      // `resolved` is set either way: "asked, and there is none" is a distinct
-      // answer from "not asked yet", and only one of them is a failure.
+
+  /**
+   * Asks the core what it is running, and reconciles the connection list.
+   *
+   * Called on launch and after every start, stop, create and removal, rather
+   * than each of those patching a local copy of the roster. The core holds the
+   * sockets, so it is the only thing that knows which instances are actually
+   * listening — a roster mirrored in React is one that disagrees the first time
+   * a start fails.
+   */
+  const refreshLocal = useCallback(async (): Promise<void> => {
+    const instances = await localInstances();
+    if (instances === null) {
+      // A shell predating the roster. It runs exactly one host and answers only
+      // `oc_embedded`, so ask that instead — the degrade is exact, not partial.
+      const host = await embeddedHost();
+      // Adopted once. A second call would re-run the prune against a set it has
+      // already reconciled, for a value this one already has.
+      const id = host ? adoptLocalHosts([host])[0] : null;
       setEmbedded({
         resolved: true,
-        id: host
-          ? adoptEmbeddedHost({ baseUrl: host.baseUrl, instanceId: host.instanceId })
-          : null,
-        operatorEmail: host?.operatorEmail,
+        id,
+        instances: [],
+        operatorEmails: id && host?.operatorEmail ? { [id]: host.operatorEmail } : {},
       });
+      return;
+    }
+
+    // Only the running ones become connections. A stopped instance has no
+    // address, so a row for it could do nothing but fail its probe forever; it
+    // is visible — and startable — in the roster instead.
+    const running = instances.filter(
+      (instance): instance is LocalInstance & { baseUrl: string } =>
+        instance.running && typeof instance.baseUrl === "string",
+    );
+    const ids = adoptLocalHosts(
+      running.map((instance) => ({
+        baseUrl: instance.baseUrl,
+        instanceId: instance.instanceId,
+        label: instance.label,
+      })),
+      // The whole roster, not just the running half. Without it a stopped
+      // instance is indistinguishable from a data root this application no
+      // longer serves, and the prune forgets its profile — which is the
+      // connection id every `scopedKey` under it is named after.
+      instances
+        .map((instance) => instance.instanceId)
+        .filter((id): id is string => id !== undefined),
+    );
+    const operatorEmails: Record<ConnectionId, string> = {};
+    running.forEach((instance, index) => {
+      if (instance.operatorEmail) operatorEmails[ids[index]] = instance.operatorEmail;
+    });
+
+    setEmbedded({
+      resolved: true,
+      // The first running instance, which is the one rooted at the data dir on
+      // every machine that has not deliberately stopped it. What the desktop
+      // opens on when nothing else is selected.
+      id: ids[0] ?? null,
+      instances,
+      operatorEmails,
+    });
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void refreshLocal().catch((error: unknown) => {
+      console.error("[desktop] could not read the local hosts", error);
+      if (!cancelled) setEmbedded((prior) => ({ ...prior, resolved: true }));
     });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refreshLocal]);
 
   const connections = useConnections();
   /**
@@ -401,6 +477,43 @@ function Console() {
           setSelected(id);
           void probe(id);
         }}
+        localInstances={embedded.instances}
+        // Only offered where a host can actually be started: the browser build
+        // has no core to start one in, and passing handlers it cannot honour
+        // would put a button on screen that always fails.
+        onAddLocal={
+          isDesktopRuntime()
+            ? async (label) => {
+                const created = await createLocalInstance(label);
+                await refreshLocal();
+                // Selected straight away: someone who just created a company
+                // means to open it, and the alternative is a new row they have
+                // to find in a rail of identical icons.
+                if (created.instanceId) {
+                  const opened = listConnections().find(
+                    (c) => c.identity?.instanceId === created.instanceId,
+                  );
+                  if (opened) setSelected(opened.id);
+                }
+              }
+            : undefined
+        }
+        onStartLocal={
+          isDesktopRuntime()
+            ? async (id) => {
+                await startLocalInstance(id);
+                await refreshLocal();
+              }
+            : undefined
+        }
+        onStopLocal={
+          isDesktopRuntime()
+            ? async (id) => {
+                await stopLocalInstance(id);
+                await refreshLocal();
+              }
+            : undefined
+        }
       />
       {/* `--oc-rail-inset` tells the shell's `position: fixed` sidebar where
           this column actually starts. A fixed element positions against the
@@ -431,9 +544,7 @@ function Console() {
             // Only ever the embedded host's own operator. Offering it on a
             // remote connection would put a local address in front of someone
             // signing in to a server that has never heard of it.
-            suggestedEmail={
-              active.id === embedded.id ? embedded.operatorEmail : undefined
-            }
+            suggestedEmail={embedded.operatorEmails[active.id]}
           />
         ) : (
           <NoConnection starting={!embedded.resolved} />
@@ -443,23 +554,31 @@ function Console() {
   );
 }
 
-/** Where the embedded host got to, and what it turned into. */
+/** Where the hosts on this machine got to, and what they turned into. */
 interface EmbeddedState {
   /** Whether the core has answered. `false` only ever means "still asking". */
   resolved: boolean;
-  /** The connection it became, or `null` when there is no embedded host. */
+  /**
+   * The connection the *first running* local instance became, or `null` when
+   * none is running. What the desktop opens on.
+   */
   id: ConnectionId | null;
   /**
-   * The address that host signs a person in as (#632).
+   * Every local instance the core knows about, running or not.
    *
-   * Held here rather than on the connection because it is a fact about the host
-   * running *inside this application* — the one host this client starts itself
-   * and can therefore be told about without asking. A remote host has no such
-   * answer, and offering it one would be inventing an address.
-   *
-   * Absent on a shell predating the field, exactly as `instanceId` is.
+   * The stopped ones are here and nowhere else: they have no address, so they
+   * cannot be connections. The rail's dialog is where they are startable.
    */
-  operatorEmail?: string;
+  instances: LocalInstance[];
+  /**
+   * The address each local connection signs a person in as (#632), by
+   * connection id.
+   *
+   * Per connection rather than one field, because with a roster there are
+   * several — and offering one host's operator address on another host's login
+   * form is how a person signs in to the wrong company.
+   */
+  operatorEmails: Record<ConnectionId, string>;
 }
 
 function FullScreen({ children }: { children: React.ReactNode }) {

@@ -4,8 +4,10 @@
 //!
 //! - **[`proxy`]** — every host's HTTP and event traffic, in Rust so that CORS
 //!   does not apply and the credential never enters the webview.
-//! - **[`embedded`]** — the host running in this process, for someone with no
+//! - **[`embedded`]** — a host running in this process, for someone with no
 //!   server to point at.
+//! - **[`local`]** — the roster of those hosts, so one machine can run several
+//!   companies side by side rather than exactly one.
 //! - **[`keychain`]** — where a paired device's token lives, so the webview
 //!   holds a handle and never the secret.
 //! - **[`commands`]** — the thin Tauri surface over all three.
@@ -18,21 +20,29 @@ pub mod acp;
 pub mod commands;
 pub mod embedded;
 pub mod keychain;
+pub mod local;
 pub mod proxy;
 
 use std::path::PathBuf;
 
-use crate::embedded::EmbeddedHost;
+use crate::local::LocalHosts;
 
 /// Process-wide state the commands read.
 pub struct AppHandleState {
     pub data_dir: PathBuf,
-    /// `None` when the embedded host could not start — most often because
-    /// another instance already holds the data root. That is a state the
-    /// console renders, not a reason to refuse to launch: the whole point of
-    /// the desktop is that it can also talk to *remote* hosts, and a second
-    /// window being unable to serve locally must not stop it doing that.
-    pub embedded: Option<EmbeddedHost>,
+    /// Every host this machine runs, and which of them are listening.
+    ///
+    /// A roster rather than an `Option<EmbeddedHost>`: an operator running two
+    /// companies on one laptop is the ordinary case this shell is for, and a
+    /// single-valued field is exactly what makes the second one impossible.
+    /// Behind a mutex because starting and stopping are operator actions
+    /// arriving on command threads, not just a boot-time read.
+    ///
+    /// An instance that could not start is a row carrying its reason — most
+    /// often another process holding its data root — not a reason to refuse to
+    /// launch. The desktop also talks to *remote* hosts, and a busy root must
+    /// not stop it doing that.
+    pub local: tokio::sync::Mutex<LocalHosts>,
 }
 
 /// The platform directory this instance keeps its data in.
@@ -85,27 +95,23 @@ pub fn run() {
 
     let data_dir = default_data_dir();
 
-    // The runtime starts here, before the webview, because the embedded host
-    // has to be listening before the console asks for its address.
-    let runtime = tokio::runtime::Runtime::new().expect("start an async runtime");
-    let embedded = runtime.block_on(async {
-        match embedded::start(data_dir.clone()).await {
-            Ok(host) => Some(host),
-            Err(error) => {
-                // Not fatal. Most often this is the data root already being held
-                // — by another window, or by an `opencompany serve` in a
-                // terminal — and the right answer is to launch anyway and let
-                // the operator connect to that host instead of this one.
-                tracing::warn!(%error, "no embedded host; remote connections still work");
-                None
-            }
-        }
-    });
+    // Tauri's own runtime, entered before the webview, because the local hosts
+    // have to be listening before the console asks for their addresses.
+    //
+    // Deliberately *not* a `tokio::runtime::Runtime` built here. The hosts
+    // started at boot must live on the same runtime as the ones an operator
+    // starts later from a command — and commands run on Tauri's. Two runtimes
+    // would mean a `start` awaited from a command while the boot-time hosts'
+    // server tasks belong to a runtime nothing else holds a handle to.
+    let local = tauri::async_runtime::block_on(LocalHosts::load(data_dir.clone()));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(proxy::SharedProxy::default())
-        .manage(AppHandleState { data_dir, embedded })
+        .manage(AppHandleState {
+            data_dir,
+            local: tokio::sync::Mutex::new(local),
+        })
         .invoke_handler(tauri::generate_handler![
             commands::oc_connect,
             commands::oc_pair_device,
@@ -115,6 +121,12 @@ pub fn run() {
             commands::oc_request,
             commands::oc_subscribe,
             commands::oc_embedded,
+            commands::oc_local_instances,
+            commands::oc_create_local_instance,
+            commands::oc_start_local_instance,
+            commands::oc_stop_local_instance,
+            commands::oc_rename_local_instance,
+            commands::oc_forget_local_instance,
         ])
         .run(tauri::generate_context!())
         .expect("run the desktop shell");

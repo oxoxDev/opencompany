@@ -75,6 +75,21 @@ pub fn load_or_create(home: &Path) -> String {
     minted
 }
 
+/// Reads an instance id from `home` without minting or writing one.
+///
+/// [`load_or_create`] is the boot path and is deliberately side-effecting: it
+/// persists an id so the host has a stable identity. That is wrong for a caller
+/// that only wants to *know* — the desktop lists data roots it is not running
+/// (`src-tauri/src/local.rs`), and minting into each one would write to every
+/// root an operator has ever stopped, purely as a side effect of drawing a list.
+///
+/// `None` when the root holds no id yet, or holds something that is not one.
+pub fn peek(home: &Path) -> Option<String> {
+    let existing = std::fs::read_to_string(home.join(INSTANCE_ID_FILE)).ok()?;
+    let existing = existing.trim();
+    is_well_formed(existing).then(|| existing.to_string())
+}
+
 /// Mints a fresh id from `src`.
 fn mint(src: &dyn TokenSource) -> String {
     let mut bytes = [0u8; INSTANCE_ID_BYTES];
@@ -105,6 +120,35 @@ mod test {
         fn fill(&self, out: &mut [u8]) {
             out.fill(self.0);
         }
+    }
+
+    /// `peek` reads, and — the point of it existing — never writes.
+    #[test]
+    fn peeking_reports_an_id_without_creating_one() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(peek(dir.path()), None, "an empty root has no id to report");
+        assert!(
+            !dir.path().join(INSTANCE_ID_FILE).exists(),
+            "peeking must not mint: the desktop peeks at roots it is not running"
+        );
+
+        let id = load_or_create(dir.path());
+        assert_eq!(peek(dir.path()).as_deref(), Some(id.as_str()));
+    }
+
+    /// A hand-edited file is not an id, and `peek` says so rather than
+    /// replacing it — replacing is `load_or_create`'s job, on the boot path.
+    #[test]
+    fn peeking_refuses_a_malformed_id() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(INSTANCE_ID_FILE), "not-an-id").unwrap();
+
+        assert_eq!(peek(dir.path()), None);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(INSTANCE_ID_FILE)).unwrap(),
+            "not-an-id",
+            "peeking leaves the file alone"
+        );
     }
 
     #[test]

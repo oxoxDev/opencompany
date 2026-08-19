@@ -26,6 +26,33 @@ path = "examples/live_company_turn.rs"
 required-features = ["openhuman"]
 
 [dependencies]
+# Compiles agent-authored `Page.tsx` (issue: agent-authored dashboard pages)
+# into browser-runnable JS inside `pages_write` (`src/harness/pages_tools.rs`).
+# The runtime image's builder stage (see `Dockerfile`) has no Node — only the
+# separate frontend Docker build stage does — so turning agent-written TSX into
+# something a browser can run has to happen as a Rust-native step, at request
+# time, inside this binary. `swc_core` is a pure-Rust TS/JSX compiler with no
+# system libs and no Node subprocess, which is the one property that makes that
+# possible. Feature-gated to the narrow slice actually used, to keep compile
+# times down: `ecma_parser` + `ecma_parser_typescript` parse TSX,
+# `ecma_transforms_typescript` strips the type annotations,
+# `ecma_transforms_react` rewrites JSX to `jsx`/`jsxs` calls against the
+# automatic `"react/jsx-runtime"` import, `ecma_visit` walks the parsed
+# `ImportDecl`s for the import allow-list check, and `ecma_codegen` renders the
+# transformed AST back to JS text. None of swc's bundler, minifier, CSS, or
+# plugin-host surfaces are enabled. Optional: `src/harness/pages_tools.rs` only
+# compiles under the `openhuman` feature (all of `src/harness/` does), so this
+# links only there — the default build stays offline and unaffected.
+swc_core = { version = "77", optional = true, features = [
+    "ecma_ast",
+    "ecma_parser",
+    "ecma_parser_typescript",
+    "ecma_transforms_typescript",
+    "ecma_transforms_react",
+    "ecma_visit",
+    "ecma_codegen",
+    "common",
+] }
 async-graphql = "7"
 async-graphql-axum = "7"
 async-trait = "0.1"
@@ -48,7 +75,15 @@ mime_guess = "2"
 # `futures_io`'s traits rather than tokio's.
 tokio-util = { version = "0.7", features = ["compat", "io"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` is load-bearing: the operator SSE frames (`project_event`
+# in `src/server/operator.rs`) are built by appending keys in a fixed order,
+# and the unit tests assert that exact order. That feature used to reach the
+# build only by feature-unification luck (an unrelated dependency enabling it);
+# the pages feature's dependency reshuffle dropped it, so the frames silently
+# re-sorted alphabetically (BTreeMap) and the order assertions failed. Declare
+# it here so the json!:insert ordering the SSE stream and its tests rely on is
+# deterministic rather than whoever else happens to enable it.
+serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 toml = "1"
 # The *writing* half of `config.toml`, for the first-run setup flow
@@ -309,7 +344,7 @@ tiny = ["tinyagents"]
 # Enables `tiny` so the `tinyagents` crate is in scope: the harness's inference
 # models implement its `ChatModel<()>` trait (openhuman's old `Provider` trait
 # was deleted upstream); it is the same vendored crate `openhuman_core` uses.
-openhuman = ["tiny", "dep:openhuman_core", "dep:reqwest", "dep:anyhow", "dep:log", "dep:tinyflows", "dep:regex", "dep:uuid"]
+openhuman = ["tiny", "dep:openhuman_core", "dep:reqwest", "dep:anyhow", "dep:log", "dep:tinyflows", "dep:regex", "dep:uuid", "dep:swc_core"]
 # MCP server management and agent tools share OpenHuman's in-process registry.
 # Enabling it necessarily enables the embedded harness and OpenHuman MCP
 # domain, while the default build remains unchanged.

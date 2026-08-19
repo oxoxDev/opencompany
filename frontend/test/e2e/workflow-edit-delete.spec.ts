@@ -1,5 +1,12 @@
 import { expect, test, type Page, type APIRequestContext } from "@playwright/test";
 
+import {
+  expectWorkflowIndex,
+  openWorkflow,
+  workflowCard,
+  workflowDetailName,
+} from "./workflows";
+
 /**
  * Issue #259: a saved workflow used to be write-once. There was no `PUT` and no
  * `DELETE`, so a typo'd cron or a node pointed at the wrong teammate was
@@ -115,17 +122,24 @@ async function removeWorkflow(request: APIRequestContext, id: string) {
 }
 
 /**
- * Selects the workflow named `name` in the picker and waits for the selection
- * to settle.
+ * Opens the workflow named `name`, from the index, and waits for its detail
+ * view to settle.
  *
- * Asserts the trigger shows the **name**. It used to show the raw id — the
- * picker binds `<SelectItem value={w.id}>` and Base UI's `SelectValue` renders
- * the value, not the item's children — which is #270, fixed on this branch
- * because it is the same picker this issue's Delete affordance sits next to.
+ * Issue #1110: `#/workflows` is the index, and Edit and Delete are controls of
+ * one workflow — they exist only once one is open. This used to drive the
+ * toolbar picker, which was reachable on arrival because the view auto-selected
+ * the first row.
+ *
+ * The picker itself is still there — inside a workflow, where it switches
+ * between them — so the assertion #270 was pinned by is kept as a second line
+ * here rather than dropped: the trigger must show the **name**, not the raw id.
+ * (The picker binds `<SelectItem value={w.id}>` and Base UI's `SelectValue`
+ * renders the value, not the item's children, which is how #270 happened; #406
+ * is the other half, that the picker is controlled from its first render and so
+ * follows a selection this view made for itself.)
  */
 async function selectWorkflow(page: Page, name: string) {
-  await page.getByRole("combobox").first().click();
-  await page.getByRole("option", { name, exact: true }).click();
+  await openWorkflow(page, name);
   await expect(page.getByRole("combobox").first()).toContainText(name);
 }
 
@@ -133,14 +147,34 @@ const DELETE = "workflow-delete";
 const EDIT = "workflow-edit";
 const SUBMIT = "workflow-dialog-submit";
 
-/** Opens the edit dialog for the currently selected workflow. */
-async function openEditDialog(page: Page) {
+/**
+ * Opens the edit dialog for the currently selected workflow, which must be the
+ * one called `name`.
+ *
+ * The title used to read a bare "Edit workflow" from every call site. It now
+ * names the graph it is editing (issue #1006), because the dialog is reachable
+ * from a canvas, a card and a run, and an operator whose selection moved
+ * underneath them had nothing on screen to notice it with. Asserting the name
+ * here is therefore not a cosmetic check: it is what proves the dialog opened
+ * on the graph the caller selected.
+ */
+async function openEditDialog(page: Page, name: string) {
   const button = page.getByTestId(EDIT);
   await expect(button, "an overlay-backed workflow must be editable").toBeEnabled();
   await button.click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog.getByText("Edit workflow", { exact: true })).toBeVisible();
+  await expect(dialog.getByText(`Edit “${name}”`, { exact: true })).toBeVisible();
   return dialog;
+}
+
+/**
+ * Accepts the one discard confirmation an edited dialog raises on the next
+ * close (issue #1006). Cancel out of a touched form now asks before throwing
+ * the work away, and Playwright dismisses an unhandled `confirm` — which reads
+ * as "no, keep editing" and leaves the dialog open.
+ */
+function acceptDiscard(page: Page) {
+  page.once("dialog", (d) => void d.accept());
 }
 
 /** Reads a workflow's stored graph back from the host. */
@@ -204,7 +238,7 @@ test("deleting is confirm-gated, and the confirmation says what goes and what st
   }
 });
 
-test("confirming the delete removes it from the picker and from the host", async ({
+test("confirming the delete returns to the index, and removes it from the host", async ({
   page,
   request,
 }) => {
@@ -231,11 +265,15 @@ test("confirming the delete removes it from the picker and from the host", async
       "confirming must dismiss the dialog, not leave its backdrop blocking the app",
     ).toBeHidden({ timeout: 15_000 });
 
-    // Gone from the picker: the selection moves off it and it is no longer an
-    // option.
-    await expect(page.getByRole("combobox").first()).not.toContainText(name, {
-      timeout: 15_000,
-    });
+    // Issue #1110: back on the INDEX, and the deleted workflow is not in it.
+    // The old assertion — that the picker no longer names it — could only be
+    // made from inside whichever neighbouring workflow the view auto-selected
+    // next, which is the behaviour this issue removed: deleting what you were
+    // working on returns you to the list, it does not hand you somebody else's
+    // graph. The URL going back to `#/workflows` is the other half of that.
+    await expectWorkflowIndex(page);
+    await expect(page).toHaveURL(/#\/workflows$/, { timeout: 15_000 });
+    await expect(workflowCard(page, name)).toHaveCount(0, { timeout: 15_000 });
 
     // And gone from the host — the console did not merely hide it.
     await expect
@@ -352,7 +390,7 @@ test("an author can change a saved workflow's schedule, and the id is read-only"
     await dismissTour(page);
     await selectWorkflow(page, name);
 
-    const dialog = await openEditDialog(page);
+    const dialog = await openEditDialog(page, name);
 
     // Hydrated from the saved graph, not blank — the whole point of edit mode.
     await expect(dialog.getByLabel("Id", { exact: true })).toHaveValue(id);
@@ -406,7 +444,7 @@ test("a stale save surfaces the conflict banner and writes nothing", async ({
     await dismissTour(page);
     await selectWorkflow(page, name);
 
-    const dialog = await openEditDialog(page);
+    const dialog = await openEditDialog(page, name);
 
     // Someone else saves while this dialog holds the token it loaded a moment
     // ago. Forced for real, as with the delete conflict above. `expectedVersion`
@@ -434,6 +472,7 @@ test("a stale save surfaces the conflict banner and writes nothing", async ({
 
     // And the way out is the banner Delete already had, waiting behind the
     // dialog rather than vanishing with it.
+    acceptDiscard(page);
     await dialog.getByRole("button", { name: "Cancel" }).click();
     const banner = page.getByTestId("workflow-conflict");
     await expect(banner).toBeVisible();
@@ -441,7 +480,7 @@ test("a stale save surfaces the conflict banner and writes nothing", async ({
     await expect(banner).toBeHidden({ timeout: 15_000 });
 
     // Reloaded, the same edit goes through — so the loop terminates.
-    const reopened = await openEditDialog(page);
+    const reopened = await openEditDialog(page, name);
     await reopened.getByRole("combobox", { name: "Schedule" }).click();
     await page.getByRole("option", { name: /Weekly/ }).click();
     await reopened.getByTestId(SUBMIT).click();
@@ -472,7 +511,7 @@ test("a field error raised on one graph never appears on another", async ({
     await selectWorkflow(page, first.name);
 
     // Raise a real blur-time error on the first graph's trigger row.
-    const dialog = await openEditDialog(page);
+    const dialog = await openEditDialog(page, first.name);
     await dialog.getByRole("combobox", { name: "Schedule" }).click();
     await page.getByRole("option", { name: /Custom cron/ }).click();
     const cron = dialog.getByRole("textbox", { name: "Custom cron schedule" });
@@ -481,14 +520,24 @@ test("a field error raised on one graph never appears on another", async ({
     // The rule, not the standing hint under the field (which also says
     // "5-field cron") — those are different strings for a reason.
     await expect(dialog).toContainText(/A schedule is a 5-field cron/);
+    acceptDiscard(page);
     await dialog.getByRole("button", { name: "Cancel" }).click();
 
     // Both graphs have a trigger node whose id is `start`, so an error map keyed
     // on the node id (rather than on the freshly minted row key) would carry
     // this complaint straight over to the second graph, attached to a field the
     // author never touched.
-    await selectWorkflow(page, second.name);
-    const other = await openEditDialog(page);
+    // Issue #1110: switched through the PICKER, not back out through the index.
+    // The picker survives inside a workflow precisely for this — moving from one
+    // graph to the next without a round trip through the list — and it is the
+    // path an author debugging two workflows actually takes. It is also the
+    // harder case for the defect under test: the view never unmounts the
+    // toolbar, so a stale error map has every chance to ride across.
+    await page.getByRole("combobox").first().click();
+    await page.getByRole("option", { name: second.name, exact: true }).click();
+    await expect(workflowDetailName(page)).toHaveText(second.name);
+
+    const other = await openEditDialog(page, second.name);
     await expect(
       other,
       "a stale field error must not follow the author to another graph",

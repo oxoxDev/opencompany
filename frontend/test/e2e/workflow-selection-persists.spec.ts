@@ -1,5 +1,7 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
+import { expectWorkflowIndex, openWorkflow, workflowDetailName } from "./workflows";
+
 const COMPANY_SCOPE = "/api/v1/company";
 
 /** Dismisses the first-run tour if it is still visible. */
@@ -47,21 +49,26 @@ async function deleteWorkflow(request: APIRequestContext, id: string) {
   await request.delete(`${COMPANY_SCOPE}/workflows/${id}${query}`).catch(() => undefined);
 }
 
-/** The workflow picker's trigger. */
-function picker(page: Page) {
-  return page.getByRole("combobox").first();
-}
-
-async function selectWorkflow(page: Page, name: string) {
-  await picker(page).click();
-  await page.getByRole("option", { name, exact: true }).click();
-  await expect(picker(page)).toContainText(name);
+/**
+ * Which workflow is open, read off the detail view's own heading.
+ *
+ * Issue #1110 moved this assertion off the toolbar picker. The picker is still
+ * there — inside a workflow — but it is no longer what says "this workflow is
+ * the one on screen": the tab now opens on the index, where nothing is, and the
+ * heading is the surface that names the workflow whose canvas is up. Asserting
+ * on the picker would still pass for a view that opened the right workflow and
+ * would also pass for one that never left the index, since a stale combobox
+ * would simply be absent and `toContainText` on nothing is an error rather than
+ * a clear report.
+ */
+function openWorkflowName(page: Page) {
+  return workflowDetailName(page);
 }
 
 async function openWorkflows(page: Page) {
   await page.goto("/#/workflows");
   await dismissTour(page);
-  await expect(picker(page)).toBeEnabled({ timeout: 30_000 });
+  await expectWorkflowIndex(page);
 }
 
 async function mockCompanySwitchApi(page: Page) {
@@ -139,22 +146,22 @@ test("workflows tab selection is preserved across tab switches (#864)", async ({
     await createWorkflow(request, secondId, secondName);
 
     await openWorkflows(page);
-    await selectWorkflow(page, secondName);
-    await expect(picker(page)).toContainText(secondName);
+    await openWorkflow(page, secondName);
+    await expect(page).toHaveURL(new RegExp(`#/workflows/${secondId}$`));
 
     await page.getByRole("button", { name: "Workspace" }).click();
     await page.getByRole("button", { name: "Workflows" }).click();
-    await expect(picker(page)).toContainText(secondName);
+    await expect(openWorkflowName(page)).toHaveText(secondName);
 
     await page.goto(`/#/workflows/${firstId}`);
     // A full navigation, so the view has to fetch the workflow list again
-    // before the picker can name anything — the default 5s assertion timeout
+    // before the heading can name anything — the default 5s assertion timeout
     // is the flake, not the console.
-    await expect(picker(page)).toContainText(firstName, { timeout: 30_000 });
+    await expect(openWorkflowName(page)).toHaveText(firstName, { timeout: 30_000 });
 
     await page.getByRole("button", { name: "Workspace" }).click();
     await page.getByRole("button", { name: "Workflows" }).click();
-    await expect(picker(page)).toContainText(firstName);
+    await expect(openWorkflowName(page)).toHaveText(firstName);
   } finally {
     await deleteWorkflow(request, firstId);
     await deleteWorkflow(request, secondId);
@@ -168,10 +175,23 @@ test("a company switch does not reuse the previous company's workflow route (#86
   await page.goto("/#/workflows/shared-workflow");
 
   await page.locator('[role="button"]').filter({ hasText: "Acme" }).click();
-  await expect(picker(page)).toContainText("Acme shared workflow", { timeout: 30_000 });
+  await expect(openWorkflowName(page)).toHaveText("Acme shared workflow", {
+    timeout: 30_000,
+  });
 
   await page.getByRole("button", { name: "Switch company" }).click();
   await page.getByRole("menuitem", { name: "Other", exact: true }).click();
-  await expect(picker(page)).toContainText("Other default workflow", { timeout: 30_000 });
-  await expect(page).toHaveURL(/#\/workflows\/other-default$/);
+  // Issue #1110 sharpened what this test proves. It used to assert the switch
+  // landed on the OTHER company's first workflow — `#/workflows/other-default`
+  // — which was the auto-select answering a question nobody asked, and which
+  // only happened to differ from the id being left behind. The switch now lands
+  // on the index, and the assertion is the one #864 was actually about: the
+  // previous company's route is gone from the address bar, and nothing was
+  // opened in its place.
+  await expectWorkflowIndex(page);
+  await expect(page).toHaveURL(/#\/workflows$/);
+  await expect(openWorkflowName(page)).toHaveCount(0);
+  // `other` has a `shared-workflow` of its own, so a view that merely kept the
+  // id would have resolved to a real graph and looked correct.
+  await expect(page.getByText("Other shared workflow", { exact: true })).toBeVisible();
 });

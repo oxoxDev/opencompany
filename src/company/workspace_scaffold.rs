@@ -102,6 +102,26 @@ pub const AGENTS_ROOT: &str = "Agents";
 /// Not scaffolded at boot — see [`SYSTEM_ROOTS`] and [`ensure_desk_folder`].
 pub const DESKS_ROOT: &str = "Desks";
 
+/// The reserved root folder holding one subfolder per agent-authored
+/// dashboard page: `Pages/<slug>/`.
+///
+/// Not scaffolded at boot, for the same reason [`DESKS_ROOT`] is not: nothing
+/// writes here until an agent creates its first page. Named here — rather
+/// than only inside `harness::pages_tools`, which compiles only under the
+/// `openhuman` feature — because [`crate::server::ops::pages`] (always
+/// compiled) needs the identical root name to serve what
+/// `harness::pages_tools::pages_tools` wrote. One literal, two callers.
+pub const PAGES_ROOT: &str = "Pages";
+
+/// The page manifest node's name inside `Pages/<slug>/`.
+pub const PAGE_MANIFEST_NAME: &str = "page.toml";
+/// The page source node's name inside `Pages/<slug>/`.
+pub const PAGE_SOURCE_NAME: &str = "Page.tsx";
+/// The compiled page node's name inside `Pages/<slug>/`.
+pub const PAGE_COMPILED_NAME: &str = "Page.compiled.mjs";
+/// The mime [`crate::server::ops::pages`] serves [`PAGE_COMPILED_NAME`] as.
+pub const PAGE_COMPILED_MIME: &str = "application/javascript";
+
 /// The operator-only workspace subtree.
 ///
 /// Agents never receive this root or anything beneath it through their

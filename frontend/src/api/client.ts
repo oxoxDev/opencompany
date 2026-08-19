@@ -33,6 +33,7 @@ import {
   type GrantScope,
   type InboxDto,
   type InboxMessageDto,
+  type PageManifestDto,
   type ResolveReceipt,
   type SetBudgetInput,
   type StandingGrant,
@@ -827,6 +828,54 @@ export class OpenCompanyClient {
       `${this.scope(company)}/inboxes/${encodeURIComponent(key)}/read`,
       ids ? { ids } : undefined,
     );
+  }
+
+  /**
+   * The company's agent-authored dashboard pages (Pages tab). Each manifest
+   * names a slug served at `pageUrl(slug, company)` — the iframe host
+   * document that mounts the page's compiled bundle. Hosts without the
+   * surface 404; callers treat that as "no pages".
+   */
+  listPages(company?: string | null): Promise<PageManifestDto[]> {
+    return this.request<PageManifestDto[]>("GET", `${this.scope(company)}/pages`);
+  }
+
+  /**
+   * The URL to load as an iframe `src` for one page — a fixed HTML shell the
+   * host serves (not agent content) that sets up an import map for `react`,
+   * `react-dom/client`, and `@opencompany/site`, then mounts the page's own
+   * `bundle.mjs`. Absolute, since the iframe's `src` is resolved against its
+   * own (opaque, sandboxed) document rather than the console's.
+   *
+   * The iframe is a normal navigation and so can only carry the credentials a
+   * browser attaches to a same-origin request — the operator's HttpOnly
+   * session cookie. It cannot send this client's `authorization` /
+   * `x-opencompany-session` headers, so the shell and its bundle load only
+   * when the console is same-origin with the host (the console's supported
+   * deployment); a cross-origin console therefore cannot host pages.
+   */
+  pageUrl(slug: string, company?: string | null): string {
+    return `${this.baseUrl}${this.scope(company)}/pages/${encodeURIComponent(slug)}`;
+  }
+
+  /**
+   * Runs one GraphQL operation — query or mutation — against the host's
+   * `/graphql` endpoint, with this client's own credentials. This is the
+   * console's one real GraphQL entry point; `PagesView`'s postMessage bridge
+   * (`docs/spec/runtime/pages.md` §6) forwards a sandboxed page's requests
+   * through this exact method rather than opening a second client, so a page
+   * and the console proper can never disagree about how a request is
+   * authenticated or parsed.
+   *
+   * Deliberately untyped in `variables`/return shape: the caller (a page
+   * author, indirectly) supplies an arbitrary document, so there is no fixed
+   * response type to declare here the way every other method has one.
+   */
+  graphqlRequest(
+    query: string,
+    variables?: Record<string, unknown>,
+  ): Promise<{ data?: unknown; errors?: unknown }> {
+    return this.request("POST", "/graphql", { query, variables });
   }
 
   /**

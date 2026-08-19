@@ -307,6 +307,22 @@ pub struct WorkflowRunNodeRow {
     pub status: WorkflowNodeStatus,
     /// Wall-clock duration of the node's execution, in milliseconds.
     pub elapsed_ms: u64,
+    /// The node's non-fatal data-binding diagnostics (issue #1014): the config
+    /// path of every `=`-expression that resolved to `null` during this node's
+    /// execution — the engine's own list of the broken wiring behind a bad tool
+    /// call (see `tinyflows::expr::NullResolution::location`).
+    ///
+    /// **Paths only, never a resolved value.** A null resolution has no value by
+    /// definition, and only the config *location* rides here — the same
+    /// no-payload stance the row's `status`/`elapsed_ms` take, so nothing a
+    /// model or upstream node produced can leak onto the run response or the
+    /// journal-folded history.
+    ///
+    /// `#[serde(default)]` + `skip_serializing_if` so a row serialized before
+    /// this field existed folds back with an empty list, and a node with no
+    /// unresolved wiring serializes byte-for-byte as it did before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
 }
 
 /// What a workflow run's node did to the task board, as a closed set (issue

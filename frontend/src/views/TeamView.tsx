@@ -29,6 +29,7 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { emptyDraft, type AgentDraft, type AgentFieldKey } from "@/lib/agent";
+import { addMemberFailure, reportAddMember } from "@/lib/member-feedback";
 import {
   fromDto,
   initials,
@@ -237,27 +238,45 @@ export function TeamView({ client, company, sub, onOpenAgent }: Props) {
         // No team write plane on this host — keep the edit local-only. An inbox
         // needs a persisted teammate to hang off, so it can't be enabled here.
         setMembers((m) => [...m, newMember(fields)]);
-        if (fields.inbox) toast.error("This host can't persist teammates, so no inbox was created.");
+        reportAddMember({
+          kind: "console-only",
+          name: fields.name,
+          note: fields.inbox ? "No inbox was created." : undefined,
+        });
         setAddOpen(false);
         return;
       }
-      toast.error(error instanceof Error ? error.message : "Couldn't add teammate.");
+      reportAddMember(addMemberFailure(error));
       return;
     }
 
     // Enable the inbox against the host's real agent id *before* refetching, so
     // the reloaded roster already reports the toggle as on.
+    let inboxMissed = false;
     if (fields.inbox) {
       try {
         await setInboxEnabled(client, company, created.id, true);
       } catch {
-        toast.error("Teammate added, but their inbox couldn't be switched on.");
+        inboxMissed = true;
       }
     }
     // Persisted on the host — refetch so the card reflects the real record
     // (id, merge order, inbox state) rather than a locally-guessed one.
     await boot();
     setAddOpen(false);
+    // Announced after the refetch, not on the response: the roster the operator
+    // is looking at is the one being claimed about, so a read that contradicted
+    // the write would contradict the toast too rather than follow it.
+    reportAddMember(
+      inboxMissed
+        ? {
+            kind: "partial",
+            name: fields.name,
+            missed: "their inbox couldn't be switched on.",
+            fix: "Turn it on from their actions menu.",
+          }
+        : { kind: "added", name: fields.name },
+    );
   }
 
   async function removeMember(member: TeamMember) {

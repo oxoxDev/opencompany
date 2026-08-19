@@ -128,6 +128,21 @@ async function installDesktopShell(page: Page, fixture: Fixture): Promise<void> 
       core: {
         invoke(command: string, args: Record<string, string> = {}) {
           switch (command) {
+            // The roster, which is what a current console asks first. One
+            // instance, rooted at the data dir — the shape every machine has
+            // before anyone adds a second company.
+            case "oc_local_instances":
+              return Promise.resolve([
+                {
+                  id: "default",
+                  label: "This computer",
+                  dataDir: "/tmp/e2e-embedded",
+                  running: true,
+                  baseUrl,
+                  instanceId: f.instanceId,
+                  companies: [],
+                },
+              ]);
             case "oc_embedded":
               return Promise.resolve({
                 baseUrl,

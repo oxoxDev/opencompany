@@ -294,6 +294,17 @@ feature-gated off.
   dismisses one whose duration plus a grace period is spent. Hovering to read, a
   backgrounded tab, and an explicit `duration: Infinity` are all still honoured,
   so callers keep raising plain `toast.*` calls and need not think about it.
+- **How a write answers:** a toast, everywhere. The inline `role="alert"` banner
+  is reserved for a surface that could not *load* — it is a state of the page and
+  it sits with the Retry that clears it, whereas the answer to an action the
+  operator just took has to survive the dialog closing over it. Issue #1099 is
+  the case that fixed the split: adding a teammate said nothing on success from
+  any of its three surfaces (Team, Company, the chat empty state) and reported
+  failure two different ways. `src/lib/member-feedback.ts` now owns that one
+  answer — the views decide *what happened*, it decides what that is called and
+  how loudly. Half-landed writes stay distinguishable from clean ones
+  (`toast.warning`, as `PeopleView`'s invite already did), because a teammate
+  whose inbox never came up is not a clean add.
 
 ## Implementation order (delivered)
 

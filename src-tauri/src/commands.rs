@@ -13,6 +13,7 @@
 use tauri::State;
 use tauri::ipc::Channel;
 
+use crate::local::LocalInstanceInfo;
 use crate::proxy::{
     Connection, Credential, ProxyRequest, ProxyResponse, SharedProxy, may_carry_a_credential,
 };
@@ -307,15 +308,94 @@ pub async fn oc_forget_device(
     Ok(())
 }
 
-/// Where the in-process host is listening, if one is running.
+/// Where the host rooted at the data dir is listening, if it is running.
+///
+/// Kept alongside [`oc_local_instances`], which supersedes it, because the two
+/// halves of this application ship independently: a `pnpm dev` console built
+/// before the roster existed calls only this, and a shell built before it
+/// answers only this. Both degrade to the single-instance behaviour instead of
+/// to an unhandled `no such command`.
 #[tauri::command]
-pub fn oc_embedded(state: State<'_, crate::AppHandleState>) -> Option<EmbeddedInfo> {
-    state.embedded.as_ref().map(|host| EmbeddedInfo {
-        base_url: host.base_url(),
-        data_dir: state.data_dir.display().to_string(),
-        instance_id: host.instance_id().to_string(),
-        operator_email: host.operator_email().to_string(),
-    })
+pub async fn oc_embedded(
+    state: State<'_, crate::AppHandleState>,
+) -> Result<Option<EmbeddedInfo>, String> {
+    let local = state.local.lock().await;
+    Ok(local.default_instance().and_then(|instance| {
+        Some(EmbeddedInfo {
+            base_url: instance.base_url?,
+            data_dir: instance.data_dir,
+            instance_id: instance.instance_id?,
+            operator_email: instance.operator_email?,
+        })
+    }))
+}
+
+/// Every host this machine runs, listening or not.
+///
+/// The listing is the whole surface: creating, starting and stopping all
+/// answer with the affected instance, and the console re-reads this rather
+/// than keeping its own idea of the roster. One source of truth, on the side
+/// that actually holds the sockets.
+#[tauri::command]
+pub async fn oc_local_instances(
+    state: State<'_, crate::AppHandleState>,
+) -> Result<Vec<LocalInstanceInfo>, String> {
+    Ok(state.local.lock().await.list())
+}
+
+/// Adds a host over a fresh data root on this machine, and starts it.
+///
+/// Its own root, never a second process over an existing one: two hosts over
+/// one root overwrite each other's companies, which is why `prepare_instance`
+/// locks it in the first place.
+#[tauri::command]
+pub async fn oc_create_local_instance(
+    state: State<'_, crate::AppHandleState>,
+    label: String,
+) -> Result<LocalInstanceInfo, String> {
+    state.local.lock().await.create(&label).await
+}
+
+#[tauri::command]
+pub async fn oc_start_local_instance(
+    state: State<'_, crate::AppHandleState>,
+    id: String,
+) -> Result<LocalInstanceInfo, String> {
+    state.local.lock().await.start(&id).await
+}
+
+/// Stops a host, freeing its port and — the part that matters — its data root,
+/// so a terminal `opencompany serve` can take it.
+#[tauri::command]
+pub async fn oc_stop_local_instance(
+    state: State<'_, crate::AppHandleState>,
+    id: String,
+) -> Result<LocalInstanceInfo, String> {
+    state.local.lock().await.stop(&id)
+}
+
+#[tauri::command]
+pub async fn oc_rename_local_instance(
+    state: State<'_, crate::AppHandleState>,
+    id: String,
+    label: String,
+) -> Result<LocalInstanceInfo, String> {
+    state.local.lock().await.rename(&id, &label)
+}
+
+/// Drops a host from the roster. **Leaves its data on disk** — see
+/// [`crate::local::LocalHosts::forget`].
+#[tauri::command]
+pub async fn oc_forget_local_instance(
+    state: State<'_, crate::AppHandleState>,
+    id: String,
+) -> Result<(), String> {
+    let mut local = state.local.lock().await;
+    // Stopping first is what makes the removal complete: a forgotten instance
+    // whose host kept listening would hold its root against the terminal, and
+    // stay reachable from a console row nothing lists any more.
+    let _ = local.stop(&id);
+    local.forget(&id)
 }
 
 #[cfg(test)]
@@ -340,13 +420,100 @@ mod test {
         })
         .expect("serialise");
 
-        let object = wire.as_object().expect("an object");
+        // Sorted, for the same reason as the instance row below: the closed set
+        // is the claim. `PairedDevice`'s field order happens to be alphabetical
+        // today, so an ordered comparison passes by coincidence rather than by
+        // design — and would go red the moment a field is inserted out of that
+        // position, for a reason that has nothing to do with what this test is
+        // about.
+        let mut keys: Vec<&str> = wire
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
         assert_eq!(
-            object.keys().map(String::as_str).collect::<Vec<_>>(),
-            vec!["company", "deviceId", "expiresAtMillis"],
+            keys,
+            ["company", "deviceId", "expiresAtMillis"],
             "pairing must answer with these three fields and nothing else"
         );
         assert!(!wire.to_string().to_lowercase().contains("token"));
+    }
+
+    /// The keys the console reads off an instance row, by name.
+    ///
+    /// Same argument as `the_embedded_record_answers_in_the_keys_the_console_reads`:
+    /// nothing type-checks a Rust struct against the TypeScript that reads it,
+    /// and every optional field degrades silently. A renamed key lands as "the
+    /// instance list is full of blank rows", not as an error.
+    #[test]
+    fn an_instance_row_answers_in_the_keys_the_console_reads() {
+        let wire = serde_json::to_value(LocalInstanceInfo {
+            id: "acme".into(),
+            label: "Acme".into(),
+            data_dir: "/data/instances/acme".into(),
+            running: true,
+            base_url: Some("http://127.0.0.1:1234".into()),
+            instance_id: Some("inst-1".into()),
+            operator_email: Some("operator@opencompany.local".into()),
+            companies: vec!["acme".into()],
+            error: None,
+        })
+        .expect("serialise");
+
+        // Sorted before comparing, because the set is what this asserts and the
+        // order is not. This crate inherits `serde_json`'s `preserve_order`
+        // through its path dependency on `opencompany` (root `Cargo.toml:86`),
+        // so a JSON object is backed by an `IndexMap` and emits **struct field
+        // order**, not alphabetical order. Pinning the order here asserted a
+        // property nothing needs — JSON object order means nothing to the
+        // TypeScript that reads these by name — and it would break again the
+        // next time a field is added in the middle of the struct.
+        let mut keys: Vec<&str> = wire
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "baseUrl",
+                "companies",
+                "dataDir",
+                "id",
+                "instanceId",
+                "label",
+                "operatorEmail",
+                "running",
+            ],
+            "the instance row answers in exactly these keys: {wire}"
+        );
+    }
+
+    /// A stopped row carries no address, so the console cannot render one that
+    /// would fail its probe forever.
+    #[test]
+    fn a_stopped_instance_carries_no_address() {
+        let wire = serde_json::to_value(LocalInstanceInfo {
+            id: "acme".into(),
+            label: "Acme".into(),
+            data_dir: "/data/instances/acme".into(),
+            running: false,
+            base_url: None,
+            instance_id: None,
+            operator_email: None,
+            companies: Vec::new(),
+            error: Some("the data root is in use".into()),
+        })
+        .expect("serialise");
+
+        let object = wire.as_object().expect("an object");
+        assert!(!object.contains_key("baseUrl"));
+        assert_eq!(object["error"], "the data root is in use");
+        assert_eq!(object["running"], false);
     }
 
     /// A one-shot host that answers every request with `head`, then closes.
@@ -462,10 +629,21 @@ mod test {
         })
         .expect("serialise");
 
-        let object = wire.as_object().expect("an object");
+        // Sorted, as above. `EmbeddedInfo`'s field order is simultaneously
+        // struct order and alphabetical, which is why this test passed either
+        // way and why it could never have established the precedent the
+        // instance-row test cited it for.
+        let mut keys: Vec<&str> = wire
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
         assert_eq!(
-            object.keys().map(String::as_str).collect::<Vec<_>>(),
-            vec!["baseUrl", "dataDir", "instanceId", "operatorEmail"],
+            keys,
+            ["baseUrl", "dataDir", "instanceId", "operatorEmail"],
+            "the embedded record answers in exactly these keys: {wire}"
         );
     }
 }

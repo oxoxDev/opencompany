@@ -19,6 +19,10 @@ lcov.info
 .idea/
 .vscode/
 
+# Node cache written when a tool runs from the repo root. `frontend/.gitignore`
+# already covers the real install in `frontend/node_modules/`.
+node_modules/
+
 # agent worktrees (isolation)
 .claude/worktrees/
 

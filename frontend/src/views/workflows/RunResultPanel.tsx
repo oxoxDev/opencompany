@@ -4,6 +4,7 @@
 //
 // Extracted verbatim from `WorkflowsView.tsx` (issue #303).
 
+import { SquareKanban } from "lucide-react";
 import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -11,6 +12,7 @@ import remarkGfm from "remark-gfm";
 import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
 import type {
   WorkflowGraph,
+  WorkflowRunBoardRow,
   WorkflowRunNode,
   WorkflowRunResult,
 } from "@/api/workflows";
@@ -19,6 +21,7 @@ import { Button } from "@/components/ui/button";
 import { ApprovalRow } from "@/views/chat/ApprovalRow";
 import type { DecidedApproval } from "@/views/chat/model";
 
+import { BlockedNodeApprovals } from "./BlockedNodeApprovals";
 import { DeliveryRows } from "./RunHistoryPanel";
 // Issue #596: the per-node parse is now shared with the durable run inspector
 // and the pre-publish approvals card, so it lives in `run-output.ts`.
@@ -134,6 +137,9 @@ export function RunResultPanel({
   // cannot disagree about whether this run stopped for a person.
   const blockedNodes = result.blockedNodes ?? [];
   const parkedCount = result.approvals?.length ?? 0;
+  // Issue #1014: the board writes this run performed — shipped on the wire
+  // since #661 but never rendered, so "this run opened card X" was invisible.
+  const board = result.board ?? [];
   // Issue #1002. Derived from the LIVE queue, never from `result.approvals` —
   // that is a receipt of what this run opened (#880) and nothing ever comes back
   // to flip a row on it, so a panel grounded there would go on calling a step
@@ -247,6 +253,17 @@ export function RunResultPanel({
               : "Nothing here can be approved; change the policy and run the workflow again."}
           </p>
         )}
+        {/* Issue #1014 (PR-B): the gated tool names per blocked node, and a link
+            per parked card to the Approvals queue. Kept consistent with the run
+            history drawer — the section below can also decide them inline when
+            this console can join the live queue (#1002), but the tool names and
+            a pointer to the page stand even when it cannot. */}
+        {blockedNodes.length > 0 && (
+          <BlockedNodeApprovals
+            blockedNodes={blockedNodes}
+            approvalRows={result.approvals}
+          />
+        )}
         {blockedNodes.length === 0 && result.pendingApprovals.length > 0 && (
           <p className="mb-2 text-xs text-muted-foreground">
             Waiting on: {result.pendingApprovals.join(", ")}
@@ -272,6 +289,11 @@ export function RunResultPanel({
         )}
 
         {deliveries.length > 0 && <DeliveryRows deliveries={deliveries} />}
+
+        {/* Issue #1014: the cards this run opened or re-owned. Shipped on the
+            wire since #661, but the drawer never rendered them — so a run that
+            opened a card in To-do read as if it touched nothing. */}
+        {board.length > 0 && <BoardRows board={board} />}
 
         {/* Issue #542: the per-node timeline, carried on every synchronous run's
             body. It is most load-bearing for a dry run, which journals nothing —
@@ -306,6 +328,93 @@ export function RunResultPanel({
           </pre>
         </details>
       </div>
+    </div>
+  );
+}
+
+/** The label and badge tone for one board action. The two `*Failed` arms get a
+ * failed hue — a write the node was told would happen and did not — while the
+ * two success arms stay neutral, since the card itself is the loud thing. */
+const BOARD_ACTION: Record<
+  WorkflowRunBoardRow["action"],
+  { label: string; tone: string; failed: boolean }
+> = {
+  spawned: { label: "Opened", tone: "border-border bg-muted/60", failed: false },
+  assigned: { label: "Assigned", tone: "border-border bg-muted/60", failed: false },
+  spawnFailed: {
+    label: "Open failed",
+    tone: "border-status-failed/40 bg-status-failed-soft",
+    failed: true,
+  },
+  assignFailed: {
+    label: "Assign failed",
+    tone: "border-status-failed/40 bg-status-failed-soft",
+    failed: true,
+  },
+};
+
+/**
+ * The board writes a run performed (issue #1014) — one row per card it opened
+ * or re-owned, shipped on the wire since #661 but never rendered until now.
+ *
+ * A row with a `taskId` links straight to its card through the same
+ * `#/tasks/:id` hash route the Approvals footer and the whole console use. A
+ * `spawnFailed` row has no card to point at — no write landed — so it renders
+ * the attempted title as plain text, which is the only thing that explains the
+ * failure.
+ */
+function BoardRows({ board }: { board: WorkflowRunBoardRow[] }) {
+  const failed = board.filter((r) => BOARD_ACTION[r.action].failed).length;
+  return (
+    <div
+      className="mb-3 space-y-1.5 rounded-lg border bg-background/40 p-2"
+      data-testid="workflow-run-board"
+    >
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-medium">Board</span>
+        {failed > 0 && (
+          <Badge
+            variant="outline"
+            className="h-4 px-1.5 text-3xs font-normal border-status-failed/40 bg-status-failed-soft"
+          >
+            {failed} not written
+          </Badge>
+        )}
+      </div>
+      {board.map((row, i) => {
+        const meta = BOARD_ACTION[row.action];
+        // The card link — every arm but `spawnFailed` names a card by id.
+        const label = row.title ?? "the card";
+        return (
+          <div
+            key={`${row.action}-${row.taskId ?? ""}-${i}`}
+            className="flex flex-wrap items-baseline gap-1.5"
+          >
+            <Badge
+              variant="outline"
+              className={`h-4 px-1.5 text-3xs font-normal ${meta.tone}`}
+            >
+              {meta.label}
+            </Badge>
+            {row.taskId ? (
+              <a
+                href={`#/tasks/${encodeURIComponent(row.taskId)}`}
+                className="flex w-fit items-center gap-1 text-2xs font-medium text-accent-foreground underline-offset-2 hover:underline"
+              >
+                <SquareKanban className="size-3 shrink-0" />
+                {label}
+              </a>
+            ) : (
+              <span className="text-2xs">{label}</span>
+            )}
+            {row.assignee && (
+              <span className="text-2xs text-muted-foreground">
+                → {row.assignee}
+              </span>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -470,29 +579,43 @@ function NodeTimeline({
     >
       <span className="text-xs font-medium">Steps</span>
       {nodes.map((n, i) => (
-        <div
-          key={`${n.nodeId}-${i}`}
-          className="flex flex-wrap items-baseline gap-1.5"
-        >
-          <Badge
-            variant="outline"
-            /* Issue #881: three tones. The default arm was "anything that is
-               not an error is green", which painted a blocked step — one that
-               produced nothing — exactly like a step that delivered. */
-            className={`h-4 px-1.5 text-3xs font-normal ${
-              n.status === "error"
-                ? "border-status-failed/40 bg-status-failed-soft"
-                : n.status === "blocked"
-                  ? "border-status-blocked/50 bg-status-blocked-soft"
-                  : "border-status-done/40 bg-status-done-soft"
-            }`}
-          >
-            {n.status}
-          </Badge>
-          <span className="text-2xs">{nameById.get(n.nodeId) ?? n.nodeId}</span>
-          <span className="text-2xs text-muted-foreground">
-            {n.elapsedMs} ms
-          </span>
+        <div key={`${n.nodeId}-${i}`} className="space-y-0.5">
+          <div className="flex flex-wrap items-baseline gap-1.5">
+            <Badge
+              variant="outline"
+              /* Issue #881: three tones. The default arm was "anything that is
+                 not an error is green", which painted a blocked step — one that
+                 produced nothing — exactly like a step that delivered. */
+              className={`h-4 px-1.5 text-3xs font-normal ${
+                n.status === "error"
+                  ? "border-status-failed/40 bg-status-failed-soft"
+                  : n.status === "blocked"
+                    ? "border-status-blocked/50 bg-status-blocked-soft"
+                    : "border-status-done/40 bg-status-done-soft"
+              }`}
+            >
+              {n.status}
+            </Badge>
+            <span className="text-2xs">
+              {nameById.get(n.nodeId) ?? n.nodeId}
+            </span>
+            <span className="text-2xs text-muted-foreground">
+              {n.elapsedMs} ms
+            </span>
+          </div>
+          {/* Issue #1014: the engine's own broken-wiring list for this node —
+              every config binding that resolved to null, by its config path.
+              Paths only (the host forwards no resolved value), so this points
+              the operator at *where* a step's wiring came up empty without
+              echoing what any node produced. */}
+          {n.diagnostics && n.diagnostics.length > 0 && (
+            <p
+              className="pl-1 text-3xs text-[var(--status-failed-text)]"
+              data-testid="workflow-run-node-diagnostics"
+            >
+              unresolved wiring: {n.diagnostics.join(", ")}
+            </p>
+          )}
         </div>
       ))}
     </div>

@@ -16,10 +16,11 @@
 // So: selection lives in `App`'s local state, never in the registry, and no
 // code path here mutates a connection.
 
-import { Plus, Building2 } from "lucide-react";
+import { Plus, Building2, Loader2, Play, Square } from "lucide-react";
 import { useState } from "react";
 
 import { isDesktopRuntime } from "@/api/transport";
+import type { LocalInstance } from "@/api/transport/desktop";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -31,6 +32,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { Connection, ConnectionId, ConnectionStatus } from "@/connections/types";
 
 interface Props {
@@ -38,6 +40,19 @@ interface Props {
   selected: ConnectionId | null;
   onSelect: (id: ConnectionId) => void;
   onAdd: (baseUrl: string) => void;
+  /**
+   * The hosts this machine runs, running or not.
+   *
+   * Empty in a browser, which runs none, and on a shell predating the roster —
+   * where the "on this computer" half simply does not draw. Passed in rather
+   * than read here for the same reason `hub` is: this component renders its
+   * props and stays drivable from a test with nothing global to arrange.
+   */
+  localInstances?: LocalInstance[];
+  /** Creates a host on this machine over a data root of its own, and starts it. */
+  onAddLocal?: (label: string) => Promise<void>;
+  onStartLocal?: (id: string) => Promise<void>;
+  onStopLocal?: (id: string) => Promise<void>;
   /**
    * Whether this is a hub deployment, which draws the rail at any count.
    *
@@ -102,9 +117,18 @@ export function connectionRailVisible(count: number, hub = false): boolean {
   return count >= 2 || hub || isDesktopRuntime();
 }
 
-export function ConnectionRail({ connections, selected, onSelect, onAdd, hub }: Props) {
+export function ConnectionRail({
+  connections,
+  selected,
+  onSelect,
+  onAdd,
+  hub,
+  localInstances,
+  onAddLocal,
+  onStartLocal,
+  onStopLocal,
+}: Props) {
   const [adding, setAdding] = useState(false);
-  const [url, setUrl] = useState("");
 
   if (!connectionRailVisible(connections.length, hub)) return null;
 
@@ -168,35 +192,220 @@ export function ConnectionRail({ connections, selected, onSelect, onAdd, hub }: 
           <DialogHeader>
             <DialogTitle>Add a host</DialogTitle>
             <DialogDescription>
-              The base URL of an OpenCompany host. It stays connected alongside the others.
+              A host is one OpenCompany server. Run another on this computer, or point at one
+              somewhere else. Either way it stays connected alongside the others.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-2">
-            <Label htmlFor="connection-url">Host URL</Label>
-            <Input
-              id="connection-url"
-              placeholder="https://acme.example.com"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-            />
-          </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setAdding(false)}>
-              Cancel
-            </Button>
-            <Button
-              disabled={!url.trim()}
-              onClick={() => {
-                onAdd(url.trim());
-                setUrl("");
+          {onAddLocal ? (
+            // The desktop leads with the local half, because starting a host is
+            // the thing it can do that a browser cannot — and because a person
+            // who has just installed the application has no URL to type.
+            <Tabs defaultValue="local">
+              <TabsList className="w-full">
+                <TabsTrigger value="local" data-testid="add-host-local">
+                  On this computer
+                </TabsTrigger>
+                <TabsTrigger value="remote" data-testid="add-host-remote">
+                  Somewhere else
+                </TabsTrigger>
+              </TabsList>
+              <TabsContent value="local">
+                <LocalInstances
+                  instances={localInstances ?? []}
+                  onAdd={onAddLocal}
+                  onStart={onStartLocal}
+                  onStop={onStopLocal}
+                />
+              </TabsContent>
+              <TabsContent value="remote">
+                <RemoteHost
+                  onAdd={(baseUrl) => {
+                    onAdd(baseUrl);
+                    setAdding(false);
+                  }}
+                  onCancel={() => setAdding(false)}
+                />
+              </TabsContent>
+            </Tabs>
+          ) : (
+            <RemoteHost
+              onAdd={(baseUrl) => {
+                onAdd(baseUrl);
                 setAdding(false);
               }}
-            >
-              Add
-            </Button>
-          </DialogFooter>
+              onCancel={() => setAdding(false)}
+            />
+          )}
         </DialogContent>
       </Dialog>
     </nav>
+  );
+}
+
+/** The address of a host running somewhere this application did not start it. */
+function RemoteHost({
+  onAdd,
+  onCancel,
+}: {
+  onAdd: (baseUrl: string) => void;
+  onCancel: () => void;
+}) {
+  const [url, setUrl] = useState("");
+  return (
+    <>
+      <div className="space-y-2">
+        <Label htmlFor="connection-url">Host URL</Label>
+        <Input
+          id="connection-url"
+          placeholder="https://acme.example.com"
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+        />
+      </div>
+      <DialogFooter>
+        <Button variant="ghost" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button disabled={!url.trim()} onClick={() => onAdd(url.trim())}>
+          Add
+        </Button>
+      </DialogFooter>
+    </>
+  );
+}
+
+/**
+ * The hosts this machine runs: what is listening, what is not, and a name field
+ * for one more.
+ *
+ * Stopped instances are listed rather than hidden, and this is the only place
+ * they appear. A stopped instance has no address, so it cannot be a row in the
+ * rail — the rail lists connections, and a connection with nothing listening at
+ * it is a permanent probe failure. Here it is a row with a Start button, which
+ * is what it actually is.
+ */
+function LocalInstances({
+  instances,
+  onAdd,
+  onStart,
+  onStop,
+}: {
+  instances: LocalInstance[];
+  onAdd: (label: string) => Promise<void>;
+  onStart?: (id: string) => Promise<void>;
+  onStop?: (id: string) => Promise<void>;
+}) {
+  const [label, setLabel] = useState("");
+  /** Which instance has a command in flight, or `"new"` for the create. */
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  /**
+   * Runs one command, keeping its failure on screen.
+   *
+   * Every one of these can fail for a reason the operator has to read — most
+   * often the data root being held by an `opencompany serve` in a terminal —
+   * and a rejected promise with no `catch` is a console that silently does
+   * nothing when the button is pressed.
+   */
+  async function run(key: string, action: () => Promise<void>): Promise<void> {
+    setBusy(key);
+    setError(null);
+    try {
+      await action();
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="space-y-4" data-testid="local-instances">
+      <ul className="space-y-1">
+        {instances.map((instance) => (
+          <li
+            key={instance.id}
+            data-testid={`local-instance-${instance.id}`}
+            data-running={instance.running}
+            className="flex items-center justify-between gap-2 rounded-md border px-3 py-2"
+          >
+            <div className="min-w-0">
+              <div className="truncate text-sm">{instance.label}</div>
+              <div className="truncate text-xs text-muted-foreground">
+                {instance.running
+                  ? instance.baseUrl
+                  : (instance.error ?? "Stopped")}
+              </div>
+            </div>
+            {instance.running ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={!onStop || busy !== null}
+                onClick={() => void run(instance.id, () => onStop!(instance.id))}
+              >
+                {busy === instance.id ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Square className="size-4" />
+                )}
+                Stop
+              </Button>
+            ) : (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={!onStart || busy !== null}
+                onClick={() => void run(instance.id, () => onStart!(instance.id))}
+              >
+                {busy === instance.id ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Play className="size-4" />
+                )}
+                Start
+              </Button>
+            )}
+          </li>
+        ))}
+      </ul>
+
+      <div className="space-y-2">
+        <Label htmlFor="local-instance-label">Name</Label>
+        <Input
+          id="local-instance-label"
+          placeholder="Acme"
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+        />
+        <p className="text-xs text-muted-foreground">
+          A new host on this computer, with its own data and its own companies. Nothing is
+          shared with the ones above.
+        </p>
+      </div>
+
+      {error ? (
+        <p data-testid="local-instance-error" className="text-xs text-destructive">
+          {error}
+        </p>
+      ) : null}
+
+      <DialogFooter>
+        <Button
+          data-testid="local-instance-add"
+          disabled={!label.trim() || busy !== null}
+          onClick={() =>
+            void run("new", async () => {
+              await onAdd(label.trim());
+              setLabel("");
+            })
+          }
+        >
+          {busy === "new" ? <Loader2 className="size-4 animate-spin" /> : null}
+          Run it here
+        </Button>
+      </DialogFooter>
+    </div>
   );
 }

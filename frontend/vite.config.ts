@@ -23,6 +23,13 @@ export default defineConfig({
       "/healthz": { target: API_TARGET, changeOrigin: true },
       "/spec": { target: API_TARGET, changeOrigin: true },
       "/tiny": { target: API_TARGET, changeOrigin: true },
+      // The pages SDK bundle (`@opencompany/site` + the bundled React the
+      // served page import map resolves "react"/"react-dom/client" to) isn't
+      // under `/api` — it's served straight off the console's static dir at
+      // `OPENCOMPANY_CONSOLE_DIR` (see `frontend/pages-sdk/`). `{scope}/pages`
+      // itself needs no separate entry here: `{scope}` is already an `/api`
+      // path, so it rides the `/api` proxy above.
+      "/pages-sdk": { target: API_TARGET, changeOrigin: true },
     },
   },
 });

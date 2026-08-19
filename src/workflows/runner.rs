@@ -162,6 +162,15 @@ enum NodeProgress {
         status: WorkflowNodeStatus,
         elapsed_ms: u64,
         output: Value,
+        /// Issue #1014: the config paths of this node's null-resolved
+        /// `=`-expressions — the engine's own broken-wiring list, lifted off
+        /// `ExecutionStep.diagnostics`. Paths only (each
+        /// `NullResolution.location`), never a resolved value: a null resolution
+        /// has no value, and the location is config the author wrote, so nothing
+        /// a node produced rides this channel. Carried onto the node row and the
+        /// `WorkflowNodeFinished` event; like the scalars beside it, never the
+        /// `output`.
+        diagnostics: Vec<String>,
     },
 }
 
@@ -206,6 +215,18 @@ impl tinyflows::observability::RunObserver for ProgressObserver {
             // `u128` millis is the engine's type; a node running longer than
             // 584 million years is not the failure mode worth a `Result`.
             elapsed_ms: u64::try_from(step.duration_ms).unwrap_or(u64::MAX),
+            // Issue #1014: the config path of every `=`-expression this node's
+            // execution resolved to `null` — the engine's own broken-wiring
+            // list. Only `NullResolution.location` (a dotted config path the
+            // author wrote, e.g. `args.to`) is taken; the `expression` and any
+            // resolved value are dropped here, so nothing but the wiring's
+            // address leaves the observer. Empty on error steps and for nodes
+            // with no expression config.
+            diagnostics: step
+                .diagnostics
+                .iter()
+                .map(|d| d.location.clone())
+                .collect(),
             // Issue #1008: the node's emitted items, carried so the collector can
             // accumulate a partial per-node output map for the failure/blocked
             // arms (which have no `outcome.output` to persist from). A success
@@ -450,6 +471,7 @@ async fn run_workflow_inner(
                         status,
                         elapsed_ms,
                         output,
+                        diagnostics,
                     } => {
                         if let Some(events) = journal_nodes.as_ref() {
                             let event = CompanyEvent::WorkflowNodeFinished {
@@ -458,6 +480,11 @@ async fn run_workflow_inner(
                                 node_id: node_id.clone(),
                                 status,
                                 elapsed_ms,
+                                // Issue #1014: the broken-wiring paths ride the
+                                // durable event too, so a re-read run (folded
+                                // from the journal) shows the same diagnostics
+                                // the synchronous response did.
+                                diagnostics: diagnostics.clone(),
                             };
                             if let Err(err) = events.append(&company, event).await {
                                 tracing::warn!(
@@ -490,6 +517,11 @@ async fn run_workflow_inner(
                             node_id,
                             status,
                             elapsed_ms,
+                            // Issue #1014: the node's null-resolved config paths,
+                            // carried on the run response's per-node timeline.
+                            // `diagnostics` moves in after its clone above went
+                            // to the event.
+                            diagnostics,
                         });
                     }
                 }
@@ -1901,6 +1933,95 @@ to = "done"
         assert!(output.contains("hello-marker"), "{output}");
     }
 
+    /// A GREET-shaped graph whose agent node carries a config `=`-expression
+    /// pointing at a trigger field that does not exist (issue #1014). The engine
+    /// resolves the expression to `null` and records a `NullResolution`, which
+    /// this test asserts reaches the run's per-node timeline.
+    const AGENT_NULL_BINDING: &str = r#"
+id = "greet"
+name = "Greet"
+
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+
+[[node]]
+id = "ceo"
+kind = "agent"
+name = "CEO"
+summary = "say hello-marker"
+agent = "ceo"
+
+[node.config]
+recipient = "=item.missing_field"
+
+[[node]]
+id = "done"
+kind = "output"
+name = "Report back"
+
+[[edge]]
+from = "start"
+to = "ceo"
+
+[[edge]]
+from = "ceo"
+to = "done"
+"#;
+
+    /// Issue #1014: a node whose config `=`-expression resolves to `null` yields
+    /// a [`WorkflowRunNodeRow`](crate::ports::WorkflowRunNodeRow) whose
+    /// `diagnostics` carries that config **path** — the engine's own broken-wiring
+    /// list, surfaced on the run response so an operator sees the unresolved
+    /// binding behind a bad step.
+    ///
+    /// The discriminating half is *paths only*: `diagnostics` carries the config
+    /// location (`recipient`) and never the expression text (`=item.missing_field`)
+    /// nor any resolved value — the no-payload stance the rest of the row takes.
+    #[tokio::test]
+    async fn a_null_resolved_config_expression_surfaces_as_a_node_diagnostic_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(HarnessPool::new());
+        let rec = record();
+        let deps = deps(dir.path());
+        pool.ensure(&rec, &deps).await.expect("roster builds");
+
+        let file = parse_workflow(AGENT_NULL_BINDING).expect("workflow parses");
+        let run = run_workflow(
+            pool,
+            deps,
+            &rec,
+            &file,
+            // No `missing_field` on the trigger payload, so `=item.missing_field`
+            // resolves to `null` and the engine records the miss.
+            serde_json::json!({ "brief": "launch" }),
+            &WorkflowRunContext::new(false),
+        )
+        .await
+        .expect("workflow runs");
+
+        let ceo = run
+            .nodes
+            .iter()
+            .find(|n| n.node_id == "ceo")
+            .expect("the agent node finished and produced a row");
+
+        // The config path of the null-resolved binding rode all the way to the
+        // run's per-node timeline.
+        assert!(
+            ceo.diagnostics.iter().any(|d| d.contains("recipient")),
+            "expected the `recipient` config path in diagnostics, got {:?}",
+            ceo.diagnostics
+        );
+        // Paths only: neither the expression text nor a resolved value leaks.
+        assert!(
+            !ceo.diagnostics.iter().any(|d| d.contains("=item")),
+            "diagnostics must carry config paths, not expression text: {:?}",
+            ceo.diagnostics
+        );
+    }
+
     // --- Durable per-node output persist-at-settle (issue #596) ---------------
 
     /// A completed run persists its per-node output to the durable store, so a
@@ -2110,6 +2231,7 @@ to = "done"
             node_id: "work".to_string(),
             status: WorkflowNodeStatus::Error,
             elapsed_ms: 10,
+            diagnostics: Vec::new(),
         }];
         assert!(only_blocked_nodes_errored(&nodes, &blocked));
     }
@@ -2129,11 +2251,13 @@ to = "done"
                 node_id: "work".to_string(),
                 status: WorkflowNodeStatus::Error,
                 elapsed_ms: 10,
+                diagnostics: Vec::new(),
             },
             crate::ports::WorkflowRunNodeRow {
                 node_id: "other".to_string(),
                 status: WorkflowNodeStatus::Error,
                 elapsed_ms: 5,
+                diagnostics: Vec::new(),
             },
         ];
         assert!(

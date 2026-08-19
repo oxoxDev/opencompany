@@ -85,6 +85,10 @@ const BUILTIN_DESCRIPTIONS: &[(&str, &str)] = &[
     ("docs", "Read and write documents."),
     ("files", "Read and write files in the agent's sandbox."),
     ("workspace", "Read the company's shared workspace."),
+    (
+        "pages",
+        "Define and edit the company's internal dashboard pages.",
+    ),
 ];
 
 /// Builds the company's tool catalog: built-ins, then MCP servers, then Composio

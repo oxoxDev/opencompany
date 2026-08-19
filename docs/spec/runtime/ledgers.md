@@ -327,6 +327,34 @@ Ledgers section, and that re-implementation silently lost all three of issue
 Nothing failed — there was no test on the new path — until the ported drag spec
 was actually run. The board is one component now so that cannot happen again.
 
+#### An empty column collapses to a rail
+
+Six columns are wider than an ordinary window, and the three that fit are the
+three a working company empties first. So an operator opened Tasks, read three
+confident zeros, and never learned that the hundred cards they came for were two
+columns off the right edge (issue #1101): the board that had moved the most work
+looked the most finished.
+
+A column holding nothing therefore renders as a ~40px rail — label set
+vertically, count beneath it — and the populated columns take the room back.
+Three rules keep that from breaking the gesture the board exists for, since the
+empty columns are precisely the ones a card is dragged *into*:
+
+* **A rail is a whole drop target.** The drop handlers sit on the column
+  wrapper, which is the element that shrinks.
+* **A rail opens under a drag.** The `over` state that draws the drop highlight
+  also suppresses the collapse, and the empty placeholder becomes a dashed
+  "Drop it here" while a card is in hand.
+* **Nothing collapses unless another column is populated.** Six rails and no
+  board would answer "show me the work" worse than the zeros this fixes.
+
+Clicking a rail pins it open — a real button, with the column and its count in
+its accessible name — and a pinned column stays open until the operator folds it
+back. A column that re-collapsed itself while somebody was reading it would be
+this bug's mirror image. A column whose `columnHeader` slot holds a control
+never collapses either: a rail has nowhere to put it, so folding one would hide
+an affordance rather than some whitespace.
+
 ### What the ledger drives, and what it does not
 
 **Drives**: the columns, their order, their labels, which one closes a card, and

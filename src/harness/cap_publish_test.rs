@@ -51,13 +51,14 @@ use crate::store::{FsCompanyStore, FsContextStore, FsOps};
 /// The agent every test here talks to.
 const AGENT: &str = "ceo";
 
-/// `build_agent` never calls `.config(...)`, so the agent falls back to
-/// openhuman's `AgentConfig::default()`, whose `max_tool_iterations` is 10 —
-/// the same constant [`cap_turn_test`](crate::harness::cap_turn_test) pins and
-/// checks the observed call count against, for the same reason: if a vendor
-/// bump moves it, this test must fail loudly rather than silently script the
-/// wrong turn shape and pass for it.
-const CAP: usize = 10;
+/// `build_agent` states this explicitly via `set_max_tool_iterations`
+/// (issue #988) — the same constant
+/// [`cap_turn_test`](crate::harness::cap_turn_test) binds to and checks the
+/// observed call count against, for the same reason: if a vendor bump or
+/// another `set_max_tool_iterations` call moves the effective cap without
+/// moving the constant, this test must fail loudly rather than silently
+/// script the wrong turn shape and pass for it.
+const CAP: usize = crate::harness::build::MAX_TOOL_ITERATIONS;
 
 /// The checkpoint the scripted model writes when asked to wrap up.
 const CHECKPOINT: &str = "Done so far: read the standards and drafted most of the outline. \

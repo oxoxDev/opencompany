@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  AppWindow,
   FolderClosed,
   LayoutDashboard,
   type LucideIcon,
@@ -102,6 +103,9 @@ const WorkspaceView = lazy(() =>
 const FinancesView = lazy(() =>
   import("@/views/FinancesView").then((m) => ({ default: m.FinancesView })),
 );
+// Hosts a sandboxed iframe and the postMessage bridge — load on demand, same
+// as the other heavier, less-visited surfaces.
+const PagesView = lazy(() => import("@/views/PagesView").then((m) => ({ default: m.PagesView })));
 
 export type View =
   | "overview"
@@ -116,6 +120,7 @@ export type View =
   | "memory"
   | "approvals"
   | "workflows"
+  | "pages"
   | "finances"
   | "settings"
   | "feedback";
@@ -148,6 +153,10 @@ const NAV: NavItem[] = [
   { view: "workspace", label: "Workspace", icon: FolderClosed },
   { view: "approvals", label: "Approvals", icon: ShieldCheck },
   { view: "workflows", label: "Workflows", icon: Workflow },
+  // Agent-authored internal dashboard pages, rendered in a sandboxed iframe
+  // (docs/spec/runtime/pages.md). Placed beside Workflows: both are the
+  // "something an agent built" surfaces, as opposed to the fixed views above.
+  { view: "pages", label: "Pages", icon: AppWindow },
   { view: "settings", label: "Settings", icon: Settings2 },
 ];
 
@@ -1491,6 +1500,17 @@ export function AppShell({
                   void decideApproval(approval, verdict, scope)
                 }
               />
+            </Suspense>
+          )}
+          {view === "pages" && (
+            <Suspense
+              fallback={
+                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+                  Loading pages…
+                </div>
+              }
+            >
+              <PagesView client={client} company={company} />
             </Suspense>
           )}
           {view === "finances" && (

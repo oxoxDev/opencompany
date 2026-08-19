@@ -1296,6 +1296,25 @@ pub enum CompanyEvent {
         status: WorkflowNodeStatus,
         /// Wall-clock duration of the node's execution, in milliseconds.
         elapsed_ms: u64,
+        /// The node's non-fatal data-binding diagnostics (issue #1014): the
+        /// config path of every `=`-expression that resolved to `null` during
+        /// this node's execution — the engine's own list of broken wiring (see
+        /// `crate::ports::WorkflowRunNodeRow::diagnostics`).
+        ///
+        /// **Config paths only, no node output.** A null resolution carries no
+        /// value, and only its config *location* rides here — the same scrubbing
+        /// stance the rest of this event takes, so the operator-SSE projection
+        /// and the inference sidecar see the broken wiring's address and never a
+        /// payload.
+        ///
+        /// `#[serde(default)]` + `skip_serializing_if` so a journal line written
+        /// before this field existed folds back with an empty list — the event
+        /// is replayed at boot, and a field without a default would make every
+        /// pre-existing line fail to parse (silent history loss rather than a
+        /// compile error) — and a node with no unresolved wiring serializes
+        /// byte-for-byte as it did before.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        diagnostics: Vec<String>,
     },
     /// One `output` node's report actually left the process (issue #529) — the
     /// durable record of a dispatch that the run's own
@@ -5568,6 +5587,7 @@ mod test {
                 node_id: "ceo".to_string(),
                 status,
                 elapsed_ms: 1234,
+                diagnostics: Vec::new(),
             };
             assert_eq!(round_trip(&event), event);
         }
@@ -5653,6 +5673,7 @@ mod test {
             node_id: "ceo".to_string(),
             status: WorkflowNodeStatus::Error,
             elapsed_ms: 7,
+            diagnostics: Vec::new(),
         })
         .expect("serialize");
         assert_eq!(

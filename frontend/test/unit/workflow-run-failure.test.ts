@@ -133,10 +133,25 @@ afterEach(async () => {
   container.remove();
 });
 
+/**
+ * Mount the view **on the workflow's detail page**.
+ *
+ * `sub` names the graph, which is what puts the canvas and its Run / History
+ * controls on screen (issue #1110). It used to be omitted: the view auto-selected
+ * the first — and only — row of the list, so a bare mount landed inside the
+ * workflow. It lands on the index now, where a per-workflow Run button
+ * deliberately does not exist, so the deep link is how these tests reach the
+ * surface they are about. Nothing else here changed, and none of these tests is
+ * about how the workflow got opened.
+ */
 async function mount(post: () => Promise<unknown>) {
   await act(async () => {
     root.render(
-      createElement(WorkflowsView, { client: fakeClient(post), company: "acme" }),
+      createElement(WorkflowsView, {
+        client: fakeClient(post),
+        company: "acme",
+        sub: GRAPH.id,
+      }),
     );
   });
 }

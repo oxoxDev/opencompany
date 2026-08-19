@@ -759,6 +759,20 @@ fn validate_draft_against_record(
                 }
             },
             "tool_call" => validate_tool_call_node(node, record)?,
+            // Issue #981: an `email` destination on a company that does not
+            // grant `email` is a graph every run denies. Checked here, beside
+            // the `tool_call` grant gate, because it is the same *kind* of fact
+            // — a record grant, not a live runtime one — and because this
+            // helper is the shared create/update gate, so the orchestrator's
+            // `create_workflow` tool is held to it too. Its sibling rule ("a
+            // `channel` target must be one this runtime can deliver to") cannot
+            // live here: the deliverable set is a property of the *running*
+            // company, not of its record, so that one stays on the write routes
+            // (`reject_undeliverable_channel_destinations`).
+            "output" => {
+                #[cfg(feature = "openhuman")]
+                validate_output_destination(node, record)?;
+            }
             // Per-kind required config (issue #661, extended #1016): reject a
             // `condition` with no `field`, an `http_request` missing `method` or a
             // real `url`, a `switch` with no discriminant, a `transform` with no
@@ -1038,6 +1052,59 @@ fn validate_tool_call_node(node: &RawNode, record: &CompanyRecord) -> Result<()>
     }
 
     Ok(())
+}
+
+/// Author-time `output` destination check: an `email` destination needs the
+/// company to grant the `email` namespace in `[tools].allow` (issue #981).
+///
+/// The mirror of delivery's FIRST email gate
+/// ([`deliver_outputs`](crate::workflows::delivery), which answers a missing
+/// grant with a `Denied` / [`EmailNotGranted`] row before it even looks at
+/// whether a mailbox is wired), surfaced at save so an author hears about it
+/// now instead of after a scheduled run nobody watched dropped its report. A
+/// missing grant is a deployment-wide fact, exactly like naming the operator
+/// channel: it denies *every* run of the graph, on every recipient, until
+/// somebody edits the manifest.
+///
+/// **Only the grant half.** Delivery's later gates — a wired mailbox, and an
+/// established inbound thread with the recipient (issue #170's reply-only
+/// rule) — are per-run, per-recipient conditions an author-time check cannot
+/// see, and refusing a save on them would refuse graphs that work. #1046 drew
+/// the same line for the arm-time check
+/// ([`destination_is_reachable`](crate::company::destination_is_reachable)),
+/// which stops at the mailbox lever for the same reason.
+///
+/// Like the `tool_call` grant gate this is an author-time convenience, not the
+/// enforcement point: a grant can be revoked after a graph is saved, and seed /
+/// legacy graphs never pass through this create path at all, so delivery's own
+/// refusal stays the backstop.
+///
+/// `cfg(feature = "openhuman")` because
+/// [`grants_cover`](crate::harness::build::grants_cover) — the namespace
+/// matcher delivery itself calls — lives behind that feature, as does the whole
+/// `workflows` module that would run the graph. The default build links no
+/// delivery path at all, so there is nothing there for this to guard.
+///
+/// [`EmailNotGranted`]: crate::ports::DeliveryReason::EmailNotGranted
+#[cfg(feature = "openhuman")]
+fn validate_output_destination(node: &RawNode, record: &CompanyRecord) -> Result<()> {
+    let Some(destination) = node.destination.as_ref() else {
+        return Ok(());
+    };
+    // Only `email`. A missing/unknown `kind`, and a `channel` with no target,
+    // are `parse_workflow`'s to report — it says something more specific about
+    // each, and reporting the wrong problem first is worse than second.
+    if destination.kind.trim() != "email" {
+        return Ok(());
+    }
+    if crate::harness::build::grants_cover(&record.manifest.tools.allow, "email") {
+        return Ok(());
+    }
+    Err(OpenCompanyError::InvalidRequest(format!(
+        "node `{}` delivers its report to an email address, which this company's `[tools].allow` \
+         does not grant — grant `email` in `[tools].allow`, or send the report to a wired channel.",
+        node.id
+    )))
 }
 
 /// Whether `[tools].allow` grants the namespace `info` belongs to — a catalogue
@@ -2926,17 +2993,8 @@ to = "done"
         dest_kind: &str,
         dest_target: Option<&str>,
     ) -> RawWorkflow {
-        let mut draft = valid_draft(id, name);
+        let mut draft = draft_with_destination(id, name, dest_kind, dest_target);
         draft.nodes[0].schedule = Some("0 9 * * *".to_string());
-        let output = draft
-            .nodes
-            .iter_mut()
-            .find(|node| node.kind == "output")
-            .expect("valid_draft carries an output node");
-        output.destination = Some(WorkflowDestinationDef {
-            kind: dest_kind.to_string(),
-            target: dest_target.map(str::to_string),
-        });
         draft
     }
 
@@ -4276,6 +4334,129 @@ to = "done"
             err.to_string().contains("not a wired workflow tool"),
             "{err}"
         );
+    }
+
+    // --- output destinations (issue #981) ------------------------------------
+
+    /// [`valid_draft`] with the `output` node routed to `kind` / `target`.
+    fn draft_with_destination(
+        id: &str,
+        name: &str,
+        kind: &str,
+        target: Option<&str>,
+    ) -> RawWorkflow {
+        let mut draft = valid_draft(id, name);
+        let output = draft
+            .nodes
+            .iter_mut()
+            .find(|node| node.kind == "output")
+            .expect("valid_draft has an output node");
+        output.destination = Some(WorkflowDestinationDef {
+            kind: kind.to_string(),
+            target: target.map(str::to_string),
+        });
+        draft
+    }
+
+    /// Issue #981: an `email` destination on a company whose `[tools].allow`
+    /// does not grant `email` is refused at SAVE, not silently accepted and then
+    /// denied on every run. Granting `email` lets the same graph through, which
+    /// is what proves the refusal is about the grant rather than about the kind.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_email_destination_needs_the_email_grant() {
+        let company = CompanyId::new("acme");
+        // `web.*` grants something, just not `email` — so a bare "no grants at
+        // all" is not what the refusal is keying off.
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["web.*"]),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            draft_with_destination("wf", "WF", "email", Some("ops@example.com")),
+        )
+        .await
+        .expect_err("email destination without the grant");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("does not grant"), "{err}");
+        assert!(err.to_string().contains("`done`"), "{err}");
+
+        // Positive control: grant `email` and the same graph saves.
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["email"]),
+        )));
+        create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            draft_with_destination("wf2", "WF2", "email", Some("ops@example.com")),
+        )
+        .await
+        .expect("email is granted");
+    }
+
+    /// The grant gate is scoped to `email`. An `owner` destination resolves
+    /// through the company's own directory and never sends to a named address,
+    /// so it must not be caught by the `email` rule — otherwise the fix for
+    /// #981 would refuse graphs that deliver perfectly well.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_owner_destination_is_not_gated_on_the_email_grant() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["web.*"]),
+        )));
+        create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            draft_with_destination("wf", "WF", "owner", None),
+        )
+        .await
+        .expect("owner delivery needs no `email` grant");
+    }
+
+    /// The shared helper gates BOTH surfaces: an update that introduces an
+    /// ungranted `email` destination is refused the same way a create is.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn update_gates_email_destinations_through_the_shared_helper() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["web.*"]),
+        )));
+        create_company_workflow(&company, None, &store, None, valid_draft("wf", "WF"))
+            .await
+            .expect("seed create");
+
+        let err = update_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            None,
+            draft_with_destination("wf", "WF", "email", Some("ops@example.com")),
+            None,
+        )
+        .await
+        .expect_err("update must gate email destinations too");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("does not grant"), "{err}");
     }
 
     /// A slug padded with leading/trailing whitespace is rejected outright rather

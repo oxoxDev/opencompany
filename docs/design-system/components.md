@@ -168,8 +168,10 @@ Never nest a modal inside a modal.
 
 ## ScrollArea, Separator, Skeleton, Avatar, Sonner, Chart
 
-- **ScrollArea** — styled scrollbars for panels. The page itself uses native
-  scrolling.
+- **ScrollArea** — a JS-driven scrollbar for panels that need one they can
+  position. Native scrolling is themed globally (see **Scrollbars** below), so
+  reach for this only when a panel needs the overlay behaviour, not merely to
+  make the bar look right.
 - **Separator** — a single `--border` hairline. Two adjacent separators, or a
   separator against a border, is one too many.
 - **Skeleton** — `bg-muted` blocks matching the shape of what is loading.
@@ -184,6 +186,41 @@ Never nest a modal inside a modal.
 - **Chart** — Recharts wrapper. Series use `--chart-1…5` in order. Axis labels,
   gridlines and legends use `--muted-foreground` and `--border`, never a series
   colour.
+
+---
+
+## Scrollbars
+
+Native scrollbars are themed once, globally, in `index.css` — nothing opts in
+and nothing per-view is needed.
+
+| State | Thumb |
+| --- | --- |
+| Rest | `--scrollbar-thumb-rest` — ~22% `--muted-foreground` (30% in dark) |
+| Scrolling | `--scrollbar-thumb-active` — 48% (58% in dark) |
+| Thumb hover / drag | `--scrollbar-thumb-grab` — 70% (80% in dark) |
+
+The track is transparent, so the thumb composites onto whatever surface it sits
+on; the lane is 10px with a 6px pill inset inside it, matching the rail
+`ScrollArea` draws.
+
+Three things to know before touching it:
+
+- **The bar never disappears.** It fades in weight, not out of existence — it
+  is the only affordance saying there is more content, and a panel whose action
+  is below the fold must keep it. Never replace this with `width: 0`.
+- **"Scrolling" is a JS signal.** `src/lib/scroll-activity.ts` marks the
+  scrolled element with `data-scrolling` from one capturing document listener
+  and clears it after an idle beat. It is not `:hover`, which matches every
+  ancestor of the pointer up to `html` and so lights every nested scroller at
+  once.
+- **The engines are mutually exclusive.** Chromium ignores `::-webkit-scrollbar`
+  as soon as `scrollbar-width`/`scrollbar-color` are set, so the standard
+  properties live behind `@supports not selector(::-webkit-scrollbar)` — the
+  Firefox arm — and the pseudo-element block serves Chromium and WebKit.
+
+Under `prefers-reduced-motion: reduce` the bar holds the active weight
+permanently: no transition and no state change to notice.
 
 ---
 

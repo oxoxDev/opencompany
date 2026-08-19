@@ -147,6 +147,31 @@ rides the create body and the read shape under the same key, and the model
 type is reused verbatim in both directions (`kind` / `target` are single words,
 so there is no camelCase mirror to drift from).
 
+### Destinations that can never deliver are refused at save (issue #981)
+
+Two of delivery's refusals are decided by facts that hold for *every* run of the
+graph, so a save that names one is a graph guaranteed to drop its report. Both
+are refused with a `400` when the workflow is written, not only when it runs:
+
+| Destination | Refused when | Checked in |
+| --- | --- | --- |
+| `channel` | the target is not one this **running company** can deliver to — `CompanyRuntime::deliverable_channel_ids()`, which is also what `GET …/workflows/wired-channels` serves the console's picker, and which never includes `operator` | `reject_undeliverable_channel_destinations`, on both write routes (the deliverable set is a runtime fact, not a record one) |
+| `email` | this company's `[tools].allow` does not grant `email`, which delivery answers with `Denied` / `EmailNotGranted` before it even looks for a mailbox | `validate_draft_against_record` in `src/company/workflow_create.rs`, beside the `tool_call` grant gate — so the orchestrator's `create_workflow` tool is held to it too |
+
+Both are guards, not guarantees. Desks come and go and grants can be revoked, so
+a graph valid at save can be invalid at run, and delivery's own refusal stays the
+backstop — as it must for seed and legacy graphs, which never pass through the
+create path at all. Neither check runs at TOML parse time: a seed template is
+parsed with no runtime in hand, and checking there would refuse to boot it on a
+company whose desks are not resolved yet.
+
+Deliberately **not** refused at save: a wired mailbox and an established inbound
+thread with an `email` recipient. Those are per-run, per-recipient conditions an
+author-time check cannot see, and refusing on them would refuse graphs that work.
+Arming a *schedule* does check the mailbox lever (issue #1046) — see
+`UNDELIVERABLE_SCHEDULE_REFUSAL` — because a scheduled run has no reader to
+notice the dropped report.
+
 Delivery itself is **not** a route concern. It runs host-side in the shared
 `WorkflowRunner` path (`src/workflows/delivery.rs`) once the engine returns,
 because the orchestrator's `run_workflow` tool and the trigger scheduler drive

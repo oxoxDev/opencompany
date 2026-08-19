@@ -147,6 +147,39 @@ use crate::runtime::tools::extends_on_boundary;
 pub(crate) const TOOL_RESULT_BUDGET_BYTES: usize =
     oh::agent::context::DEFAULT_TOOL_RESULT_BUDGET_BYTES;
 
+/// How many tool-calling iterations one OpenCompany turn may spend (issue #988).
+///
+/// Stated, not inherited. Omitting the [`Agent::set_max_tool_iterations`] call
+/// leaves every company agent on `AgentConfig::default()`'s **10**, which is a
+/// summariser's budget: a product manager asked for a feature spec reads the
+/// standards, reads the release checklist, reads the nearest prior spec, drafts,
+/// and publishes — and spends the ten before delivering anything. The turn then
+/// pauses at the cap and the operator gets a checkpoint digest instead of the
+/// work (issue #926).
+///
+/// Twenty-five is ~2.5x headroom over that observed multi-read/draft/publish
+/// shape, without the 5x of jumping to openhuman's `Extended` 50. Cost grows
+/// **faster** than the multiplier, because every iteration re-sends a transcript
+/// that is longer than the last one's — so the number is deliberately the
+/// smallest one that covers the shape rather than the largest one that is safe.
+/// Revisit it from cap-rate instrumentation across templates, not from one
+/// incident.
+///
+/// Applied **globally**, in [`build_agent`], rather than per template: it is the
+/// only shape that reaches all 22 shipped templates without editing each one.
+///
+/// The lever is `set_max_tool_iterations` and nothing else. openhuman's
+/// `IterationPolicy::Extended` and the `AgentDefinition` `max_iterations` field
+/// are read only by `build_session_agent_inner`, a construction path this crate
+/// never takes — setting either here would compile, read as a fix, and change
+/// nothing.
+///
+/// An in-turn spend brake ([`BudgetStopHook`](oh::agent::stop_hooks::BudgetStopHook))
+/// is installed on the turn itself, but only for a teammate who declares a
+/// `budget_usd_daily` cap — see [`CompanyAgent::turn_spend_cap_usd`]
+/// (crate::harness::CompanyAgent::turn_spend_cap_usd).
+pub const MAX_TOOL_ITERATIONS: usize = 25;
+
 /// Map a manifest cognition-tier hint to a hosted model/tier name.
 ///
 /// The manifest tier "never selects a model" (that is the TinyHumans backend's
@@ -158,6 +191,11 @@ pub fn model_for_tier(tier: Option<&str>) -> String {
         // use (query/delegate), so it maps to the capable agentic workload.
         Some("orchestrator") => "agentic-v1",
         Some("reasoning") => "reasoning-v1",
+        // A code-writing tier (the global `page_builder` agent): a capable,
+        // tool-using model, not the conversational default. `frontend` is a
+        // manifest-tier value (see `company::types::TIERS`), so it must be
+        // mapped here rather than relying on the `chat-v1` fallback.
+        Some("frontend") => "agentic-v1",
         Some("agentic") => "agentic-v1",
         Some("vision") => "vision-v1",
         _ => "chat-v1",
@@ -760,6 +798,23 @@ pub fn build_agent(
         tools.extend(workspace_tools);
     }
 
+    // Agent-authored internal dashboard pages (`Pages/<slug>/` in the same
+    // workspace store). Unlike workspace reads vs. writes above, there is no
+    // two-tier gate here: per the design, `pages` rides the default `"*"`
+    // grant whole, so a single `grants_cover` check on `pages` is enough —
+    // whoever gets any pages tool gets create/read/write/delete together.
+    // Unwired-store is fail-closed, same as the workspace block: with no
+    // `deps.workspace` no tool is built and the agent is unaffected.
+    if let Some(store) = &deps.workspace
+        && grants_cover(grants, "pages")
+    {
+        tools.extend(crate::harness::pages_tools::pages_tools(
+            store.clone(),
+            company.clone(),
+            manifest_agent.id.clone(),
+        ));
+    }
+
     // The company's own record. Ungated, and deliberately: an agent that can
     // read the task board but not what the company already decided is exactly
     // the split these ledgers exist to close, and every *write* here is
@@ -1043,7 +1098,7 @@ pub fn build_agent(
         Box::new(AttrTolerantXmlDispatcher::default())
     };
 
-    AgentBuilder::default()
+    let mut agent = AgentBuilder::default()
         // `HarnessModel` upcasts to the tinyagents `ChatModel<()>` the builder's
         // native injection seam takes (the old `Provider` adapter is gone).
         .chat_model(deps.provider.clone() as Arc<dyn tinyagents::harness::model::ChatModel<()>>)
@@ -1067,7 +1122,17 @@ pub fn build_agent(
         .agent_definition_name(manifest_agent.id.clone())
         .auto_save(false)
         .build()
-        .map_err(|e| OpenCompanyError::Harness(format!("build agent '{}': {e}", manifest_agent.id)))
+        .map_err(|e| {
+            OpenCompanyError::Harness(format!("build agent '{}': {e}", manifest_agent.id))
+        })?;
+
+    // Stated, not inherited (issue #988). The builder has no setter for this, so
+    // it is applied post-construction — the same seam openhuman's own task
+    // dispatcher and this crate's workflow copilot use. See
+    // [`MAX_TOOL_ITERATIONS`] for why 25, and why this is the only lever that
+    // works on this construction path.
+    agent.set_max_tool_iterations(MAX_TOOL_ITERATIONS);
+    Ok(agent)
 }
 
 /// The intrinsic `memory_store` / `memory_recall` tools — **withheld today**,
@@ -1508,6 +1573,7 @@ mod tests {
     fn model_for_tier_maps_hints_and_defaults() {
         assert_eq!(model_for_tier(Some("reasoning")), "reasoning-v1");
         assert_eq!(model_for_tier(Some("AGENTIC")), "agentic-v1");
+        assert_eq!(model_for_tier(Some("frontend")), "agentic-v1");
         assert_eq!(model_for_tier(None), "chat-v1");
         assert_eq!(model_for_tier(Some("mystery")), "chat-v1");
     }
@@ -2472,6 +2538,67 @@ mod tests {
             expected.sort();
         }
         assert_eq!(names, expected, "dispatched desk belt drifted: {names:?}");
+    }
+
+    /// Issue #988: the tool-iteration ceiling is **stated** on every agent this
+    /// crate builds, not inherited by omission.
+    ///
+    /// The distinction is the whole bug. `build_agent` never called
+    /// `set_max_tool_iterations`, so every company agent silently ran on
+    /// `AgentConfig::default()`'s ten — a number no OpenCompany source
+    /// mentioned, and one that a teammate doing real multi-step work spends
+    /// before it delivers anything (#926). Deleting the call again would put the
+    /// build back on the vendored default and fail here.
+    ///
+    /// The second assertion is what keeps this honest across a vendored bump: it
+    /// checks the stated number is genuinely *higher* than what omission would
+    /// have given, rather than comparing a constant to itself.
+    #[test]
+    fn every_built_agent_states_a_raised_tool_iteration_cap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let deps = pin_deps(dir.path().to_path_buf());
+        let manifest_agent = ManifestAgent {
+            global: false,
+            id: "ceo".to_string(),
+            role: "Chief Executive".to_string(),
+            description: None,
+            tier: None,
+            tools: Vec::new(),
+            delegates_to: Vec::new(),
+            context: None,
+            budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
+        };
+        let agent = build_agent(
+            &CompanyId::new("acme"),
+            "Acme",
+            &manifest_agent,
+            ApprovalPolicy::new(&Policy::default(), None),
+            &deps,
+            &[],
+            &[],
+            &[],
+            false,
+        )
+        .expect("agent builds");
+
+        assert_eq!(
+            agent.agent_config().max_tool_iterations,
+            MAX_TOOL_ITERATIONS,
+            "the built agent is not running on the cap this crate states"
+        );
+
+        let inherited = oh::config::AgentConfig::default().max_tool_iterations;
+        assert!(
+            MAX_TOOL_ITERATIONS > inherited,
+            "stating {MAX_TOOL_ITERATIONS} is only a fix while it exceeds the vendored \
+             default of {inherited}"
+        );
     }
 
     /// (b) The **default** depth cap (issues #178, #176): a dispatched desk

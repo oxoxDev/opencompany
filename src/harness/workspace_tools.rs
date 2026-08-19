@@ -749,7 +749,7 @@ fn echo_path(path: &str) -> String {
 /// quota. None of it is host state the caller did not already supply, and
 /// collapsing it to `invalid_request` would throw away the one sentence telling
 /// the agent what to do differently.
-fn store_reason(e: &crate::error::OpenCompanyError) -> String {
+pub(crate) fn store_reason(e: &crate::error::OpenCompanyError) -> String {
     use crate::error::OpenCompanyError as E;
 
     tracing::warn!(

@@ -1,0 +1,7 @@
+/* The console's own design tokens, unmodified — so an agent-authored page
+   renders with the identical palette, radii, shadows and type scale as the
+   console shell it lives inside, in both light and dark mode. Single source
+   of truth: this file adds nothing of its own, it only pulls the real one
+   in, and the Tailwind build below picks up the utility classes the exported
+   `@opencompany/site` components actually use. */
+@import "../src/index.css";

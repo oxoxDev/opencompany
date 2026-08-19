@@ -10,10 +10,12 @@ import {
 import "@xyflow/react/dist/style.css";
 import { useTheme } from "next-themes";
 import {
+  ArrowLeft,
   Bot,
   FlaskConical,
   History,
   LayoutGrid,
+  List as ListIcon,
   Loader2,
   Pause,
   Pencil,
@@ -171,6 +173,25 @@ function readWorkflowHash(): {
 const HISTORY_PAGE_SIZE = 50;
 
 /**
+ * Rewrite `#/workflows/<id>` back to `#/workflows`, in place (issue #1110).
+ *
+ * `replaceState`, never a push, and that is the whole reason this is a function
+ * rather than an assignment at each call site: every caller is the view
+ * *correcting* the URL — a workflow the operator deleted, one another session
+ * deleted, one a link named that this company does not have. Pushing any of
+ * those would offer Back as a route to a workflow that is gone.
+ *
+ * Silent when the hash does not name a workflow, so a call made while another
+ * view owns the hash (a company switch mid-navigation) cannot drag the operator
+ * back here.
+ */
+function clearWorkflowFromHash(): void {
+  const { onWorkflows, workflowId } = readWorkflowHash();
+  if (!onWorkflows || workflowId === null) return;
+  window.history.replaceState(null, "", "#/workflows");
+}
+
+/**
  * The live Workflows canvas. Reads the company's saved graphs from the host's
  * `…/workflows` routes, lets the operator pick one, renders its real nodes and
  * edges (auto-laid-out left→right by longest-path depth, since saved graphs
@@ -326,6 +347,18 @@ export function WorkflowsView({
   // state from `createOpen` rather than a mode flag, so the create path keeps
   // working exactly as it did and neither can be half-open.
   const [editOpen, setEditOpen] = useState(false);
+  // Issue #1006: the graph the OPEN edit dialog is bound to, pinned when it
+  // opens rather than read live off `graph`.
+  //
+  // `graph` moves for reasons that have nothing to do with the edit in
+  // progress: a Back press changes `selectedId`, and the refetch lands a
+  // DIFFERENT workflow's graph, which re-hydrated the dialog and destroyed
+  // whatever was typed; a refetch that FAILS lands `null`, which unmounted the
+  // dialog outright. Pinning makes both a no-op, while the effect that keeps it
+  // in step still lets a re-read of the SAME workflow through — which is what
+  // keeps the conflict banner's Reload and the History restore re-hydrating the
+  // dialog as they are documented to.
+  const [editGraph, setEditGraph] = useState<WorkflowGraph | null>(null);
   // Issue #840 (PR-3): a copilot-corrected graph to open the edit dialog on. When
   // set, the edit dialog hydrates from this correction (keeping `graph`'s version
   // token) instead of from the saved graph, so Save writes a new version.
@@ -457,14 +490,25 @@ export function WorkflowsView({
   // already over.
   const [cancelUnsupportedFor, setCancelUnsupportedFor] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
-  // Issue #303: the browse index (cards or list) is up instead of the canvas.
+  // Issue #1110: the index (cards or list) is no longer a panel that opens over
+  // the canvas — it is what `#/workflows` *is*. There is exactly one piece of
+  // state behind that, `selectedId`, and it is the URL's second segment: null
+  // means the index, an id means that workflow's detail view.
   //
-  // Closed by default, and that is deliberate rather than timid: the toolbar
-  // picker, the Run button and the Edit/Delete affordances are what this tab
-  // opens onto today, and moving the canvas behind a landing screen would
-  // change the first thing every operator sees for the sake of a browse
-  // surface most of them reach for occasionally.
-  const [indexOpen, setIndexOpen] = useState(false);
+  // Introduced as a name rather than inlined because a dozen places read it and
+  // "is a workflow open" is the question they are all asking. It is deliberately
+  // NOT separate state — a second flag could disagree with the selection, and
+  // the disagreement would be a canvas with no graph or an index with a
+  // per-workflow toolbar over it.
+  const detailOpen = selectedId !== null;
+  // Issue #1110: a deep link whose workflow this company does not have.
+  //
+  // Set only after the resolver's fresh re-read has confirmed the absence (see
+  // the follow effect), and rendered on the index rather than raised as a toast:
+  // the operator arrived from somebody else's link and the useful reading —
+  // "that link is dead, here is what this company does have" — has to still be
+  // on screen while they scan the list for the workflow that replaced it.
+  const [missingWorkflowId, setMissingWorkflowId] = useState<string | null>(null);
   // Which rendering the index uses, remembered across sessions — an operator
   // who prefers one has no reason to re-pick it every visit.
   const [indexMode, setIndexMode] = useState<IndexMode>(readIndexMode);
@@ -561,9 +605,20 @@ export function WorkflowsView({
   // Holds the id rather than a bare flag so a marker that outlives its render
   // cannot suppress an unrelated push later — it counts only when it names the
   // very selection the mirror is about to write.
-  const reconciledSelectionRef = useRef<string | null>(null);
+  //
+  // Issue #1110: BOXED, because the selection it names can now be `null` — the
+  // list effect no longer falls back to the first remaining row, it falls back
+  // to the index. A bare `string | null` cannot tell "reconciled to nothing"
+  // from "no marker set", and reading the second as the first would leave a
+  // deleted workflow's id in the address bar over an index.
+  const reconciledSelectionRef = useRef<{ id: string | null } | null>(null);
 
-  // Load the workflow list, and auto-select the first entry.
+  // Load the workflow list.
+  //
+  // Issue #1110: it does NOT select anything on the operator's behalf. A list
+  // that lands with nothing selected renders the index, which is the whole
+  // point of the tab — "what workflows do I have?" — and a workflow is opened
+  // only by a click or by a URL that names one.
   //
   // Re-runs on `listEventTick` (issue #384), i.e. whenever the host says a
   // workflow was created, edited or deleted anywhere — the orchestrator's
@@ -619,19 +674,26 @@ export function WorkflowsView({
           if (requestedWorkflowId && rows.some((r) => r.id === requestedWorkflowId)) {
             return requestedWorkflowId;
           }
-          // Nothing valid to keep: fall to the first remaining entry, exactly
-          // as the local Delete button does — so a workflow deleted from
-          // another session and one deleted from this button leave the view in
-          // the same place. A company whose last workflow just went away
-          // selects nothing, and the canvas empties.
+          // Issue #1110: nothing valid to keep, so the view goes back to the
+          // INDEX. It used to fall to `rows[0]`, which is the behaviour the
+          // issue is about seen from its other side — on first load that is the
+          // auto-select that drops the operator inside a workflow they did not
+          // choose, and after a delete elsewhere it is a neighbouring graph
+          // appearing on the canvas as though they had opened it.
+          //
+          // Exactly the same rule the local Delete button now follows, so a
+          // workflow deleted from another session and one deleted from this
+          // console leave the view in the same place.
           //
           // Marked as a reconciliation so the hash mirror replaces rather than
           // pushes: nobody navigated here, the workflow they were on stopped
-          // existing. Writing the same id twice (React re-invokes an updater in
-          // StrictMode) says the same thing twice.
-          const fallback = rows[0]?.id ?? null;
-          reconciledSelectionRef.current = fallback;
-          return fallback;
+          // existing. The marker is only worth setting when there was something
+          // to leave — a `prev` of null that stays null never re-renders, so a
+          // marker set there would sit unconsumed. (React re-invokes an updater
+          // in StrictMode; writing the same marker twice says the same thing
+          // twice.)
+          if (prev !== null) reconciledSelectionRef.current = { id: null };
+          return null;
         });
         setError(null);
       } catch (e) {
@@ -711,10 +773,24 @@ export function WorkflowsView({
           return;
         }
         // Still absent after a fresh read: the link genuinely names a workflow
-        // this company no longer has. Say so, once.
+        // this company no longer has.
+        //
+        // Issue #1110: land on the INDEX and say so there, rather than leaving
+        // a detail view addressed to nothing. Before this the view kept
+        // whatever was auto-selected and toasted "showing the current selection
+        // instead", which was the wrong offer twice over — the operator never
+        // chose that workflow, and four seconds later the only trace that the
+        // link was dead had gone.
+        //
+        // The toast stays as well, because the banner alone is silent for an
+        // operator who is already looking at the index when a second card's
+        // link is followed into it: nothing on screen would move.
+        setMissingWorkflowId(target);
+        setSelectedId(null);
+        clearWorkflowFromHash();
         toast.error(`This company has no workflow “${target}”.`, {
           description:
-            "It may have been renamed or deleted since the link was made. Showing the current selection instead.",
+            "It may have been renamed or deleted since the link was made. Showing every workflow this company has instead.",
         });
       } catch {
         // A failed re-read is not proof the workflow is missing. Leave the id
@@ -748,35 +824,80 @@ export function WorkflowsView({
   // to a different workflow the query is dropped, which is correct — that run
   // belongs to the graph being left behind.
   //
-  // Replace vs push is decided by whether the hash already names a workflow,
-  // and by whether the operator moved the selection at all.
+  // Replace vs push is decided by whether the view moved the selection on the
+  // operator's behalf.
   //
-  // Filling in a bare `#/workflows` is this view resolving its own default, not
-  // a place the operator has been — pushing it would put an entry in the
-  // history stack that looks identical to the one before it, so their first
-  // Back press out of the tab would appear to do nothing. Moving from one named
-  // workflow to another IS a navigation they took, and Back should undo it.
+  // Issue #1110 changed this rule, and the change is the whole of "Back must
+  // move index ↔ detail". Filling in a bare `#/workflows` used to be the view
+  // resolving its own default — nobody had navigated, so pushing it would have
+  // left a duplicate-looking history entry — and it was written with `replace`.
+  // There is no default to resolve any more: a bare `#/workflows` IS the index,
+  // and the only thing that fills it in is an operator opening a workflow from
+  // the index (or the picker, or a create). That is a navigation, it pushes,
+  // and Back returns to the list they came from.
   //
-  // A reconciliation is neither: the workflow they were on stopped existing and
-  // the list effect moved them off it (issue #384). Pushing that would offer
-  // Back as a route to a workflow that is gone — see `reconciledSelectionRef`
-  // for why the view does not even correct itself once it is there.
+  // A reconciliation is still not a navigation: the workflow they were on
+  // stopped existing and the list effect moved them off it (issue #384).
+  // Pushing that would offer Back as a route to a workflow that is gone — see
+  // `reconciledSelectionRef` for why the view does not even correct itself once
+  // it is there.
+  //
+  // A selection of `null` writes nothing HERE. It is also what an unresolved
+  // deep link looks like for the render or two before the list lands, and
+  // clearing the hash on sight would destroy the link before it could be
+  // followed. Everything that genuinely leaves a workflow behind calls
+  // {@link clearWorkflowFromHash} for itself, at the point where it knows.
   useEffect(() => {
     // Consumed on every run, whichever branch is taken below: a marker left
     // over from a reconciliation that did not end up writing the URL must not
     // decide a later, genuine navigation.
-    const reconciled = reconciledSelectionRef.current === selectedId;
+    const marker = reconciledSelectionRef.current;
     reconciledSelectionRef.current = null;
-    if (!selectedId) return;
+    const reconciled = marker !== null && marker.id === selectedId;
+    if (!selectedId) {
+      // A reconciliation onto the index (issue #1110): the list came back
+      // without the workflow on screen. Take its id out of the address bar so
+      // the URL names the index the operator is now looking at.
+      if (reconciled) clearWorkflowFromHash();
+      return;
+    }
     const { onWorkflows, workflowId } = readWorkflowHash();
     // Another view owns the hash (a company switch mid-navigation, a stale
     // effect): rewriting it would drag the operator back here.
     if (!onWorkflows) return;
     if (workflowId === selectedId) return;
     const next = `#/workflows/${encodeURIComponent(selectedId)}`;
-    if (workflowId === null || reconciled) window.history.replaceState(null, "", next);
+    if (reconciled) window.history.replaceState(null, "", next);
     else window.location.hash = next.slice(1);
   }, [selectedId]);
+
+  // Issue #1110: what leaving a workflow — by any route — settles.
+  //
+  // The dead-link explanation belongs to the arrival that raised it and to
+  // nothing after, so opening any workflow answers it. (A company switch does
+  // too, below: it makes the banner a statement about a company nobody is
+  // looking at.)
+  //
+  // The two body-level drawers are per-workflow surfaces, and going back to the
+  // index is the one selection change that must close them. A workflow-to-
+  // workflow switch deliberately does NOT: an operator comparing two histories
+  // opened that panel and still wants it. But left open across a return to the
+  // index — from the back button, from a delete here, from a delete somewhere
+  // else — the NEXT workflow opened comes up wearing a drawer nobody asked it
+  // for, showing that workflow's runs. One rule here rather than one per route,
+  // because the routes to the index that are not the back button are exactly
+  // the ones nobody remembers to update.
+  useEffect(() => {
+    if (selectedId !== null) {
+      setMissingWorkflowId(null);
+      return;
+    }
+    setHistoryOpen(false);
+    setCopilotOpen(false);
+  }, [selectedId]);
+  useEffect(() => {
+    setMissingWorkflowId(null);
+  }, [company]);
 
   // Fetch the selected workflow's full graph.
   useEffect(() => {
@@ -810,6 +931,21 @@ export function WorkflowsView({
       live = false;
     };
   }, [client, company, selectedId, graphTick]);
+
+  // Issue #1006: keep the open edit dialog bound to the workflow it was opened
+  // against. Pin on open; afterwards adopt `graph` only while it is still the
+  // SAME workflow — a re-read of it (the conflict banner's Reload, a History
+  // restore) must reach the dialog, a different one must not, and a failed read
+  // must not blank it. Cleared on close so the next Edit pins afresh.
+  useEffect(() => {
+    if (!editOpen) {
+      setEditGraph(null);
+      return;
+    }
+    setEditGraph((pinned) =>
+      pinned === null || pinned.id === graph?.id ? graph : pinned,
+    );
+  }, [editOpen, graph]);
 
   // Load the SELECTED workflow's run history. Re-runs when the selection or
   // company changes, after a manual run, and on every `workflow_run_finished`
@@ -896,18 +1032,22 @@ export function WorkflowsView({
 
   // Issue #303: the run page the index's health readings are folded from.
   //
-  // Fetched only while the index is open — every card reads from one request,
-  // and a company that never opens the browse panel should not pay for it. It
-  // refreshes on `runEventTick` so a run finishing with the index up updates
+  // Fetched only while the index is on screen — every card reads from one
+  // request, and a workflow's own detail view reads the scoped history instead.
+  // It refreshes on `runEventTick` so a run finishing with the index up updates
   // the card that owns it, and on `runsTick` so a run started from here shows
   // as running.
+  //
+  // Issue #1110: the gate used to be "the Browse panel is open" and is now "no
+  // workflow is open", which is the same question asked of the one piece of
+  // state that decides what the tab renders.
   //
   // UNSCOPED, unlike the selected workflow's history above: `?workflow=` covers
   // exactly one graph, and the index needs every graph. The cost of that is a
   // page cut by `limit` across all workflows, which is precisely why the cards
   // are worded "No recent runs" — see `WorkflowIndex`'s `HealthLine`.
   useEffect(() => {
-    if (!indexOpen) return;
+    if (detailOpen) return;
     let live = true;
     (async () => {
       try {
@@ -929,7 +1069,7 @@ export function WorkflowsView({
     return () => {
       live = false;
     };
-  }, [client, company, indexOpen, runsTick, runEventTick]);
+  }, [client, company, detailOpen, runsTick, runEventTick]);
 
   // A company switch invalidates the whole page — another company's runs must
   // never be folded onto this one's cards, and `indexRunsLoaded` has to go back
@@ -1200,7 +1340,19 @@ export function WorkflowsView({
       localWriteRef.current += 1;
       const remaining = workflows.filter((w) => w.id !== selectedId);
       setWorkflows(remaining);
-      setSelectedId(remaining[0]?.id ?? null);
+      // Issue #1110: back to the INDEX, never to a neighbour. Selecting
+      // `remaining[0]` put a workflow the operator had not asked for onto the
+      // canvas under a toolbar addressed to it — the same wrong answer the tab
+      // used to give on arrival, arriving a second way.
+      //
+      // The id is marked applied and taken out of the address bar here rather
+      // than through the hash mirror: the mirror only ever hears about the
+      // selection, and this is the one path that also has to stop the URL-follow
+      // effect treating the id still sitting in the router's `sub` as a fresh
+      // request to re-open the graph that was just deleted.
+      appliedWorkflowRef.current = selectedId;
+      setSelectedId(null);
+      clearWorkflowFromHash();
       setGraph(null);
       setResult(null);
       setSelectedNodeId(null);
@@ -1310,8 +1462,29 @@ export function WorkflowsView({
         },
       ].sort((a, b) => a.name.localeCompare(b.name));
     });
+    // Issue #1110: a create lands on the new workflow's DETAIL view, not back
+    // on the index. Nobody authors a workflow in order to look at a list of
+    // workflows — the next thing they want is its canvas, to run it or to keep
+    // editing it. The hash mirror pushes that as a navigation, so Back returns
+    // to the index they created it from.
     setSelectedId(created.id);
     toast.success("Workflow created.");
+  }, []);
+
+  // Issue #1110: leave the workflow on screen and go back to the index.
+  //
+  // A push, unlike every other route to the index in this file: those are the
+  // view correcting itself off a workflow that stopped existing, this is a
+  // place the operator chose to go. Pushing keeps browser Back and this button
+  // exact inverses of each other, which is what makes the pair learnable.
+  //
+  // Closing the per-workflow drawers is NOT done here — the effect that watches
+  // the selection does it, so that every route back to the index closes them and
+  // not just this one.
+  const backToIndex = useCallback(() => {
+    setSelectedId(null);
+    const { onWorkflows, workflowId } = readWorkflowHash();
+    if (onWorkflows && workflowId !== null) window.location.hash = "/workflows";
   }, []);
 
   // Issue #840 (PR-3): correct a failed run's workflow with the copilot. The
@@ -1797,26 +1970,59 @@ export function WorkflowsView({
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-3">
+        {/* Issue #1110: the heading says where you are. On the index that is
+            the tab — "Workflows", and how many there are. In a workflow it is
+            that workflow's name, behind the control that goes back to the list,
+            which is the ordinary shape of a list → detail pair and is what
+            makes the two states tell themselves apart at a glance. */}
         <div className="flex min-w-0 items-center gap-2">
-          <h2 className="text-sm font-semibold">Workflows</h2>
-          <Badge variant="secondary">{workflows.length}</Badge>
-          {/* Issue #228: the last run's outcome at a glance — including for a
-              scheduled run nobody watched, which is the case the issue is
-              about. Absent until this workflow has run at least once. */}
-          {lastRun && <LastRunChip run={lastRun} />}
-          {/* Issue #276: state an operator must not have to hover to learn. A
-              paused workflow looks exactly like a live one otherwise, and the
-              case that matters most — a schedule the disarm rule switched off on
-              create — has never run, so there is no LastRunChip to hint at it. */}
-          {paused && (
-            <Badge variant="outline" data-testid="workflow-paused-badge">
-              Schedule paused
-            </Badge>
-          )}
-          {selected?.description && (
-            <p className="hidden truncate text-xs text-muted-foreground sm:block">
-              {selected.description}
-            </p>
+          {detailOpen ? (
+            <>
+              {/* Issue #1110: what "Browse" became. It used to toggle a panel
+                  over the canvas; the panel is the tab's front door now, so the
+                  button that pointed at it is the way back out. Named for the
+                  destination rather than the gesture — "Back" alone would be
+                  ambiguous next to the browser's own Back, which lands in the
+                  same place from here on purpose. */}
+              <Button
+                size="sm"
+                variant="ghost"
+                className="-ml-2 h-8 shrink-0 px-2 text-muted-foreground hover:text-foreground"
+                onClick={backToIndex}
+                data-testid="workflow-back-to-index"
+                title="Back to every workflow in this company."
+              >
+                <ArrowLeft className="mr-1.5 size-4" />
+                All workflows
+              </Button>
+              <h2 className="min-w-0 truncate text-sm font-semibold" data-testid="workflow-detail-name">
+                {selected?.name ?? graph?.name ?? selectedId}
+              </h2>
+              {/* Issue #228: the last run's outcome at a glance — including for
+                  a scheduled run nobody watched, which is the case the issue is
+                  about. Absent until this workflow has run at least once. */}
+              {lastRun && <LastRunChip run={lastRun} />}
+              {/* Issue #276: state an operator must not have to hover to learn.
+                  A paused workflow looks exactly like a live one otherwise, and
+                  the case that matters most — a schedule the disarm rule
+                  switched off on create — has never run, so there is no
+                  LastRunChip to hint at it. */}
+              {paused && (
+                <Badge variant="outline" data-testid="workflow-paused-badge">
+                  Schedule paused
+                </Badge>
+              )}
+              {selected?.description && (
+                <p className="hidden truncate text-xs text-muted-foreground sm:block">
+                  {selected.description}
+                </p>
+              )}
+            </>
+          ) : (
+            <>
+              <h2 className="text-sm font-semibold">Workflows</h2>
+              <Badge variant="secondary">{workflows.length}</Badge>
+            </>
           )}
         </div>
         {/* Issue #824. `flex-wrap` on the ACTION ROW, not just on the header
@@ -1833,6 +2039,17 @@ export function WorkflowsView({
             budget. `justify-end` keeps the wrapped line aligned to the right
             edge it belongs to instead of drifting left under the title. */}
         <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+          {/* Issue #1110: every control from here to `New workflow` acts on ONE
+              workflow, so none of them is on screen until one is open. That is
+              the issue in a line: an index with a Run button has no subject to
+              run, and a toolbar that keeps its subject by picking one for you is
+              how the tab came to open inside a workflow nobody chose.
+
+              `New workflow` stays outside this branch and is rendered in both
+              states, exactly as issue #341 requires of the control that answers
+              to that name. */}
+          {detailOpen && (
+            <>
           <Select
             // Issue #406, half one. NOT `selectedId ?? undefined`: Base UI
             // decides controlled-vs-uncontrolled ONCE, on the first render,
@@ -1926,21 +2143,12 @@ export function WorkflowsView({
               Stop
             </Button>
           )}
-          {/* Issue #303. Deliberately placed AFTER the picker and Run: this
-              toggles what fills the body, and grouping it with the other
-              body-level toggle (History) reads better than sitting beside the
-              selection controls it does not change. */}
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setIndexOpen((open) => !open)}
-            aria-pressed={indexOpen}
-            data-testid="workflow-browse-toggle"
-            title="Browse every workflow as cards or as a list."
-          >
-            <LayoutGrid className="mr-1.5 size-4" />
-            Browse
-          </Button>
+          {/* Issue #1110: the Browse toggle that used to sit here is gone. It
+              opened the index over the canvas, and the index is what the tab
+              opens on now — a button that toggles the surface you arrived
+              through is one control for two states with one name. Its job as a
+              way back is done by "All workflows" at the head of this bar, where
+              a back affordance belongs. */}
           {/* Issue #303. Needs a loaded graph, not just a selection: the
               copilot's whole grounding IS the graph, and opening it against a
               workflow that failed to load would give it nothing to answer
@@ -2074,6 +2282,45 @@ export function WorkflowsView({
               </AlertDialogContent>
             </AlertDialog>
           </span>
+            </>
+          )}
+          {/* Issue #1110: the index's Cards/List toggle, in the tab's one
+              toolbar. It used to sit in a header the index drew for itself,
+              which was fine while the index was a panel over the canvas and
+              wrong the moment it became the page — "Workflows 7" and "All
+              workflows 7" one above the other, with the toggle stranded under
+              the duplicate.
+
+              Segmented rather than two loose buttons, because the pair is one
+              question with two answers and reads as a switch. Shown only on the
+              index: it decides how the list is drawn, and there is no list to
+              draw inside a workflow. */}
+          {!detailOpen && workflows.length > 0 && (
+            <div className="flex items-center gap-1 rounded-lg border p-0.5">
+              {(
+                [
+                  { value: "cards", label: "Cards", Icon: LayoutGrid },
+                  { value: "list", label: "List", Icon: ListIcon },
+                ] as const
+              ).map(({ value, label, Icon }) => (
+                <Button
+                  key={value}
+                  size="sm"
+                  variant={indexMode === value ? "secondary" : "ghost"}
+                  className="h-7 px-2"
+                  onClick={() => {
+                    setIndexMode(value);
+                    writeIndexMode(value);
+                  }}
+                  aria-pressed={indexMode === value}
+                  data-testid={`workflow-index-${value}`}
+                >
+                  <Icon className="mr-1.5 size-3.5" />
+                  {label}
+                </Button>
+              ))}
+            </div>
+          )}
           {/* Issue #341: THE control named "New workflow". It is in the
               toolbar in every state, so it is the one an operator — or a
               screen reader, or a spec — should find under that name. The
@@ -2095,7 +2342,7 @@ export function WorkflowsView({
       {/* Issue #259: a write refused because the graph moved under us. Distinct
           from `error` on purpose — this one is recoverable, and the recovery is
           right here, so it must not be mistaken for a generic load failure. */}
-      {conflict && (
+      {detailOpen && conflict && (
         <div className="px-4 pt-3">
           <Alert variant="destructive" data-testid="workflow-conflict">
             <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
@@ -2118,7 +2365,7 @@ export function WorkflowsView({
           can clear from Settings. Persistent (not a toast) and mirroring the
           conflict banner's layout, with the fix one click away. Keyed on the
           structured `code`, never the prose. */}
-      {runRefusal && (
+      {detailOpen && runRefusal && (
         <div className="px-4 pt-3">
           <Alert variant="destructive" data-testid="workflow-run-inference-alert">
             <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
@@ -2150,10 +2397,40 @@ export function WorkflowsView({
         </div>
       )}
 
+      {/* Issue #1110: a link named a workflow this company does not have.
+          Rendered on the index, over the list of what it does have, because
+          that list is the answer to the question a dead link raises. Not a
+          detail shell addressed to nothing, and not only a toast — the operator
+          arrived here from somebody else's link and may take a while to work
+          out which workflow replaced it.
+
+          Dismissible rather than timed: it is a statement about how they got
+          here, and it stops being true the moment they open something. */}
+      {missingWorkflowId && !detailOpen && (
+        <div className="px-4 pt-3">
+          <Alert data-testid="workflow-missing-link">
+            <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs">
+                This company has no workflow “{missingWorkflowId}”. It may have been renamed
+                or deleted since that link was made. Everything it does have is below.
+              </span>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setMissingWorkflowId(null)}
+                data-testid="workflow-missing-link-dismiss"
+              >
+                Dismiss
+              </Button>
+            </AlertDescription>
+          </Alert>
+        </div>
+      )}
+
       {/* Issue #371: the canvas is showing a PAST run, not the live one. Said
           plainly, with the way out attached — an unexplained ring on a node
           would otherwise read as the current state of the workflow. */}
-      {overlayRun && (
+      {detailOpen && overlayRun && (
         <div className="px-4 pt-3">
           <Alert data-testid="workflow-overlay-banner">
             <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
@@ -2176,70 +2453,74 @@ export function WorkflowsView({
       )}
 
       <div className="relative flex-1">
-        {/* Issue #303: browsing REPLACES the canvas rather than squeezing in
-            above it. A card grid needs the width, and the canvas is meaningless
-            while the operator is deciding which workflow they want. Picking one
-            drops straight back to that workflow's canvas. */}
-        {indexOpen ? (
-          <WorkflowIndex
-            workflows={workflows}
-            runsByWorkflow={runsByWorkflow}
-            selectedId={selectedId}
-            onSelect={(id) => {
-              setSelectedId(id);
-              setIndexOpen(false);
-            }}
-            mode={indexMode}
-            onModeChange={(mode) => {
-              setIndexMode(mode);
-              writeIndexMode(mode);
-            }}
-            loading={loadingList}
-            runsLoaded={indexRunsLoaded}
-          />
+        {/* Issue #1110: ONE branch, on the one piece of state that says where
+            the operator is. No workflow open ⇒ the index fills the body; a
+            workflow open ⇒ its canvas does.
+
+            The index REPLACES the canvas rather than squeezing in above it
+            (issue #303's reasoning, unchanged): a card grid needs the width,
+            and a canvas is meaningless while the operator is still deciding
+            which workflow they want. */}
+        {!detailOpen ? (
+          !loadingList && workflows.length === 0 ? (
+            // Issue #813's on-ramp, which used to live behind the canvas's
+            // empty selection. An empty company now lands here instead, so this
+            // is where it has to be — and it is shown INSTEAD of the index
+            // rather than inside it, because a Cards/List toggle over nothing
+            // is chrome for a decision there is nothing to make.
+            <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center text-sm text-muted-foreground">
+              <p>This company has no saved workflows yet.</p>
+              {/* Issue #813: a first-time author has no on-ramp otherwise. One
+                  compact prose block — what a workflow is, a worked example
+                  (mirroring the copilot placeholder), and the create-time
+                  copilot as the easiest path. Deliberately no template
+                  gallery. */}
+              <div className="max-w-md space-y-2 text-2xs leading-relaxed">
+                <p>
+                  A workflow runs a sequence of steps on a schedule or on demand: a{" "}
+                  <span className="font-medium text-foreground">trigger</span> starts it,{" "}
+                  <span className="font-medium text-foreground">agents</span> and{" "}
+                  <span className="font-medium text-foreground">tools</span> do the work,
+                  and an <span className="font-medium text-foreground">output</span> step
+                  reports the result somewhere.
+                </p>
+                <p className="italic">
+                  e.g. “Every Monday morning, have the writer draft the weekly digest
+                  and email it to the team.”
+                </p>
+                <p>
+                  Describe it in plain words when you create one — the copilot drafts
+                  the graph for you to review and edit.
+                </p>
+              </div>
+              {/* Issue #341: opens the same dialog as the toolbar button, and
+                  therefore must NOT carry the same name. "Create a workflow"
+                  rather than "Create the first workflow" because this state is
+                  also where deleting the last workflow lands, and by then there
+                  is nothing first about it. */}
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setCreateOpen(true)}
+                data-testid="workflow-create-empty"
+              >
+                <Plus className="mr-1.5 size-4" />
+                Create a workflow
+              </Button>
+            </div>
+          ) : (
+            <WorkflowIndex
+              workflows={workflows}
+              runsByWorkflow={runsByWorkflow}
+              onSelect={(id) => setSelectedId(id)}
+              mode={indexMode}
+              loading={loadingList}
+              runsLoaded={indexRunsLoaded}
+            />
+          )
         ) : loadingList || loadingGraph ? (
           <div className="absolute inset-0 p-4">
             <Skeleton className="h-full w-full rounded-xl" />
-          </div>
-        ) : !selectedId ? (
-          <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center text-sm text-muted-foreground">
-            <p>This company has no saved workflows yet.</p>
-            {/* Issue #813: a first-time author has no on-ramp otherwise. One
-                compact prose block — what a workflow is, a worked example
-                (mirroring the copilot placeholder), and the create-time copilot
-                as the easiest path. Deliberately no template gallery. */}
-            <div className="max-w-md space-y-2 text-2xs leading-relaxed">
-              <p>
-                A workflow runs a sequence of steps on a schedule or on demand: a{" "}
-                <span className="font-medium text-foreground">trigger</span> starts it,{" "}
-                <span className="font-medium text-foreground">agents</span> and{" "}
-                <span className="font-medium text-foreground">tools</span> do the work,
-                and an <span className="font-medium text-foreground">output</span> step
-                reports the result somewhere.
-              </p>
-              <p className="italic">
-                e.g. “Every Monday morning, have the writer draft the weekly digest
-                and email it to the team.”
-              </p>
-              <p>
-                Describe it in plain words when you create one — the copilot drafts
-                the graph for you to review and edit.
-              </p>
-            </div>
-            {/* Issue #341: opens the same dialog as the toolbar button, and
-                therefore must NOT carry the same name. "Create a workflow"
-                rather than "Create the first workflow" because this state is
-                also where deleting the last workflow lands, and by then there
-                is nothing first about it. */}
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setCreateOpen(true)}
-              data-testid="workflow-create-empty"
-            >
-              <Plus className="mr-1.5 size-4" />
-              Create a workflow
-            </Button>
           </div>
         ) : (
           <>
@@ -2301,7 +2582,11 @@ export function WorkflowsView({
         )}
       </div>
 
-      {result && (
+      {/* Issue #1110: the three drawers below belong to ONE workflow, so
+          none of them may outlive leaving it. Their state is cleared on every
+          selection change, but a drawer is the wrong thing to be wrong about —
+          `detailOpen` makes it structural rather than a promise about ordering. */}
+      {detailOpen && result && (
         <RunResultPanel
           result={result}
           graph={graph}
@@ -2324,14 +2609,14 @@ export function WorkflowsView({
           The two are mutually exclusive by construction — `run()` clears both on
           dispatch and only one of its arms sets one — so they are rendered as
           siblings rather than as a branch. */}
-      {runFailure && (
+      {detailOpen && runFailure && (
         <RunFailurePanel
           failure={runFailure}
           onClose={() => setRunFailure(null)}
         />
       )}
 
-      {historyOpen && historySupported && (
+      {detailOpen && historyOpen && historySupported && (
         <RunHistoryPanel
           runs={historyRows}
           graph={graph}
@@ -2360,19 +2645,22 @@ export function WorkflowsView({
         onCreated={handleCreated}
       />
 
-      {/* Issue #259: the same dialog in edit mode. `graph` carries the version
+      {/* Issue #259: the same dialog in edit mode. The graph carries the version
           token the save is conditional on, so it is passed as loaded rather
           than copied — and a 409 lands in the banner above, which outlives the
           dialog and holds the way out.
 
-          `open` is gated on `graph` too: without it, a selection that goes away
-          under an open dialog (a company switch, a failed re-read) would leave
-          `workflow` null, which IS create mode — the operator would be looking
-          at a blank New workflow form wearing the Edit title. */}
+          It is `editGraph`, the graph pinned when the dialog opened, not the
+          live `graph` (issue #1006): the selection can move out from under an
+          open dialog, and neither a different workflow's graph nor a failed
+          read may reach an edit in progress. `open` is gated on it for the
+          original reason too — a null `workflow` IS create mode, so the
+          operator would be looking at a blank New workflow form wearing the
+          Edit title. */}
       <WorkflowCreateDialog
         client={client}
         company={company}
-        open={editOpen && graph !== null}
+        open={editOpen && editGraph !== null}
         onOpenChange={(o) => {
           setEditOpen(o);
           // Issue #840 (PR-3): a copilot correction is single-use — dropping it on
@@ -2380,7 +2668,7 @@ export function WorkflowsView({
           // stale correction.
           if (!o) setPrefilledDraft(null);
         }}
-        workflow={graph}
+        workflow={editGraph}
         onSaved={handleSaved}
         onConflict={setConflict}
         prefilledDraft={prefilledDraft}

@@ -540,6 +540,21 @@ const DECLARED: &[Declared] = &[
     // makes each removal its own card naming its own path.
     d("workspace_delete", EffectGroup::Other, Reach::Consequence),
     d("workspace_rename", EffectGroup::Other, Reach::Consequence),
+    // ---- Agent-authored internal dashboard pages ---------------------------
+    // Same re-derivation as `workspace_*` immediately above, not a copy: reads
+    // are free, and a write or delete reaches past this turn because it lands
+    // in the same shared `WorkspaceStore` tree every operator and teammate
+    // reads (`Pages/<slug>/`), and — once the operator opens the page — is
+    // rendered live in the console. `pages_write` additionally compiles and
+    // publishes a *runnable* artifact, which is strictly more externally
+    // visible than overwriting a note, so it cannot be priced any lower than
+    // `workspace_write`. `PerCall`, not `Grantable`, for the identical reason:
+    // a standing grant on either would let one bad turn silently replace or
+    // remove a page the operator has already put in front of the company.
+    d("pages_list", EffectGroup::Other, Reach::Nothing),
+    d("pages_read", EffectGroup::Other, Reach::Nothing),
+    d("pages_write", EffectGroup::Other, Reach::Consequence),
+    d("pages_delete", EffectGroup::Other, Reach::Consequence),
     // ---- Publishing --------------------------------------------------------
     // Externally visible and not reversible by the company alone.
     // `Reach::Consequence` because a publish does change state, and a
@@ -946,7 +961,36 @@ fn composio_execute_consequence(args: &serde_json::Value) -> Consequence {
             return send;
         }
     };
-    if composio_action_is_read(slug) {
+    let lookup = composio_catalog_lookup(slug);
+    // Issue #754: a catalogue miss is recorded, not silent. It changes no
+    // verdict — everything below still parks exactly as it did — but a drifted
+    // read and a correct refusal are the same `send` at the approval card, so
+    // without this nobody learns the curated names and Composio's live names
+    // have moved apart. The slug and toolkit are the dataset any future alias
+    // mapping would be designed from.
+    //
+    // Deliberately NOT emitted for a curated write: that is the gate working,
+    // and logging it would bury the real signal under every `GMAIL_SEND_EMAIL`.
+    match &lookup {
+        CatalogLookup::UncuratedAction { toolkit } => tracing::warn!(
+            composio_slug = %slug,
+            composio_toolkit = %toolkit,
+            catalogue_miss = true,
+            "[policy] '{slug}' is not in the '{toolkit}' curated catalogue; classifying it as a \
+             send. That is the cautious answer, and it is the right one for an action nobody has \
+             classified — but it is also what a catalogued read looks like once its live slug has \
+             drifted from the curated one (issue #754)."
+        ),
+        CatalogLookup::UnknownToolkit { toolkit } => tracing::warn!(
+            composio_slug = %slug,
+            composio_toolkit = toolkit.as_deref().unwrap_or("<unrecognised>"),
+            catalogue_miss = true,
+            "[policy] no curated catalogue to classify '{slug}' against; classifying it as a send \
+             (issue #754)."
+        ),
+        CatalogLookup::Curated { .. } => {}
+    }
+    if lookup.is_read() {
         // A read reaches a third-party account, so `readonly` denies it — but
         // it changes nothing and is billed for nothing, so `supervised` lets it
         // through (issue #559).
@@ -980,6 +1024,57 @@ fn composio_execute_consequence(args: &serde_json::Value) -> Consequence {
         }
     } else {
         send
+    }
+}
+
+/// What the curated catalogue knows about one action slug (issue #754).
+///
+/// The classification is unchanged by this type — everything that is not a
+/// curated read is still a send. It exists so a **catalogue miss** stops being
+/// silent: today a drifted read and a genuine send are the same `false`, so a
+/// stale catalogue is indistinguishable from a correct refusal and nobody ever
+/// learns the names have moved.
+///
+/// The distinction that matters is [`Curated`](Self::Curated) `{ read: false }`
+/// versus [`UncuratedAction`](Self::UncuratedAction). A curated write is the
+/// gate working; an uncurated slug is the gate guessing. Logging both would
+/// bury the second in the first — every `GMAIL_SEND_EMAIL` would look like
+/// drift.
+///
+/// Both miss arms are constructed only by the `openhuman` build of
+/// [`composio_catalog_lookup`]; without that feature the curated catalogue is
+/// not linked in, so the only reachable answer is [`UnknownToolkit`](Self::UnknownToolkit)
+/// and the other two are dead there. The type stays whole across both builds
+/// on purpose — the call site matches one shape, and `is_read` keeps one
+/// definition, so the feature cannot change what classifies as a read. The
+/// expectation is `expect` rather than `allow` and is scoped to the build that
+/// earns it: if a non-`openhuman` build ever does construct these, the
+/// unfulfilled expectation says so instead of staying quietly stale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(feature = "openhuman"),
+    expect(
+        dead_code,
+        reason = "without the harness feature there is no catalogue to hit, so only \
+                  UnknownToolkit is constructible; see the note above"
+    )
+)]
+pub(crate) enum CatalogLookup {
+    /// The slug is in its toolkit's catalogue, with a hand-assigned scope.
+    Curated { read: bool },
+    /// The toolkit has a catalogue and this slug is not in it — the drift case
+    /// #754 is about, and the one worth recording.
+    UncuratedAction { toolkit: String },
+    /// No catalogue to consult: the slug named no toolkit this build knows, or
+    /// the toolkit has no curated surface at all. `None` also covers the
+    /// non-`openhuman` build, where the catalogue is not linked in.
+    UnknownToolkit { toolkit: Option<String> },
+}
+
+impl CatalogLookup {
+    /// The verdict this feeds — byte-identical to the boolean it replaced.
+    fn is_read(&self) -> bool {
+        matches!(self, Self::Curated { read: true })
     }
 }
 
@@ -1613,7 +1708,7 @@ fn composio_toolkit_of(slug: &str) -> Option<String> {
 }
 
 /// Without the harness feature the curated catalogue is not linked in — the same
-/// seam `composio_action_is_read` straddles, answered the same cautious way.
+/// seam `composio_catalog_lookup` straddles, answered the same cautious way.
 #[cfg(not(feature = "openhuman"))]
 fn composio_toolkit_of(_slug: &str) -> Option<String> {
     None
@@ -1622,28 +1717,31 @@ fn composio_toolkit_of(_slug: &str) -> Option<String> {
 /// Is this Composio action slug a read, according to the provider's own
 /// curated catalogue? Unknown is **not** a read.
 #[cfg(feature = "openhuman")]
-fn composio_action_is_read(slug: &str) -> bool {
+fn composio_catalog_lookup(slug: &str) -> CatalogLookup {
     use openhuman_core::openhuman::memory::sync::composio::providers::{
         ToolScope, catalog_for_toolkit, find_curated, toolkit_from_slug,
     };
     let Some(toolkit) = toolkit_from_slug(slug) else {
-        return false;
+        return CatalogLookup::UnknownToolkit { toolkit: None };
     };
     let Some(catalog) = catalog_for_toolkit(&toolkit) else {
-        return false;
+        return CatalogLookup::UnknownToolkit {
+            toolkit: Some(toolkit),
+        };
     };
-    matches!(
-        find_curated(catalog, slug).map(|entry| entry.scope),
-        Some(ToolScope::Read)
-    )
+    match find_curated(catalog, slug).map(|entry| entry.scope) {
+        Some(ToolScope::Read) => CatalogLookup::Curated { read: true },
+        Some(_) => CatalogLookup::Curated { read: false },
+        None => CatalogLookup::UncuratedAction { toolkit },
+    }
 }
 
 /// Without the harness feature the curated catalogue is not linked in, and no
 /// `composio_execute` call can be made either — only replayed from a journal
 /// line an openhuman build wrote. Cautious is the only honest answer.
 #[cfg(not(feature = "openhuman"))]
-fn composio_action_is_read(_slug: &str) -> bool {
-    false
+fn composio_catalog_lookup(_slug: &str) -> CatalogLookup {
+    CatalogLookup::UnknownToolkit { toolkit: None }
 }
 
 /// A tool with no declaration.
@@ -2459,7 +2557,72 @@ mod tests {
             "upstream's fallback still defaults to read; if this changes the \
              comment above is stale, not the behaviour"
         );
-        assert!(!composio_action_is_read("GITHUB_INVENT_A_NEW_VERB"));
+        assert!(!composio_catalog_lookup("GITHUB_INVENT_A_NEW_VERB").is_read());
+    }
+
+    /// **Issue #754.** The catalogue miss the whole issue is about, pinned from
+    /// both sides of the pair it was reported with.
+    ///
+    /// `GITHUB_ISSUES_LIST_FOR_REPO` and `GITHUB_LIST_REPOSITORY_ISSUES` are the
+    /// same GitHub operation under two naming conventions — Composio's live
+    /// `operationId`-derived slug and the curated descriptive one. The second is
+    /// classified as a read and runs; the first misses the catalogue and parks.
+    ///
+    /// The verdict for the drifted slug is deliberately UNCHANGED by this
+    /// commit — it still parks, because a slug nobody has classified should.
+    /// What changes is that the miss is now *distinguishable* from a correct
+    /// refusal, which is the thing that was silent.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn a_drifted_read_is_a_miss_and_its_curated_twin_is_not() {
+        assert_eq!(
+            composio_catalog_lookup("GITHUB_LIST_REPOSITORY_ISSUES"),
+            CatalogLookup::Curated { read: true },
+            "the curated spelling is a read"
+        );
+        assert_eq!(
+            composio_catalog_lookup("GITHUB_ISSUES_LIST_FOR_REPO"),
+            CatalogLookup::UncuratedAction {
+                toolkit: "github".to_string()
+            },
+            "the live spelling of the same operation is a catalogue MISS, and \
+             naming it as such is the whole of #754"
+        );
+        // …and the verdict is untouched: still a send, still per-call.
+        let verdict = consequence_of(
+            COMPOSIO_EXECUTE,
+            &json!({ "tool": "GITHUB_ISSUES_LIST_FOR_REPO" }),
+        );
+        assert_eq!(verdict.group, EffectGroup::Send);
+        assert_eq!(verdict.standing, Standing::PerCall);
+    }
+
+    /// A curated **write** is not a miss, and telling them apart is what keeps
+    /// the signal readable (issue #754).
+    ///
+    /// Both classify as a send, so a boolean cannot separate them — which is
+    /// exactly why the drift was invisible. If every send were reported as a
+    /// catalogue miss, `GMAIL_SEND_EMAIL` would drown the handful of slugs that
+    /// have actually drifted.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn a_curated_write_is_not_reported_as_drift() {
+        assert_eq!(
+            composio_catalog_lookup("GMAIL_SEND_EMAIL"),
+            CatalogLookup::Curated { read: false },
+            "a curated send is the gate working, not the catalogue rotting"
+        );
+    }
+
+    /// A slug whose toolkit has no curated surface is a *different* miss from a
+    /// slug its toolkit has never heard of, and the record says which.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn an_unrecognised_toolkit_is_its_own_kind_of_miss() {
+        assert!(matches!(
+            composio_catalog_lookup("NOTAREALTOOLKIT_LIST_THINGS"),
+            CatalogLookup::UnknownToolkit { .. }
+        ));
     }
 
     /// Issue #443: the agent persona instructs every agent to call these rather
