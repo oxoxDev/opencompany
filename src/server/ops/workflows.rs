@@ -5445,7 +5445,7 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 3, "body: {body}");
 
             // The more serious fact first: a run that broke mid-graph AND did
@@ -5504,7 +5504,7 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 1, "body: {body}");
             assert_eq!(rows[0]["running"], true, "{body}");
             assert_eq!(rows[0]["verdict"], "running", "{body}");
@@ -6064,7 +6064,7 @@ mod tests {
                 .unwrap();
             let body = json_body(response).await;
             assert_eq!(
-                body[0]["blockedNodes"][0]["stranded"], 1,
+                body["runs"][0]["blockedNodes"][0]["stranded"], 1,
                 "an approval id the journal no longer holds must read as stranded, \
                  or the drawer goes on linking to an empty queue: {body}"
             );
@@ -6149,7 +6149,7 @@ mod tests {
                 .unwrap();
             let body = json_body(response).await;
             assert!(
-                body[0]["blockedNodes"][0].get("stranded").is_none(),
+                body["runs"][0]["blockedNodes"][0].get("stranded").is_none(),
                 "a parked approval is still decidable, so nothing may be marked \
                  stranded: {body}"
             );
