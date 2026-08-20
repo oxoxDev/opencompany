@@ -42,6 +42,7 @@ import {
   runWorkflow,
   setWorkflowEnabled,
   type PrefilledDraft,
+  type RunsPage,
   type WorkflowGraph,
   type WorkflowRunOutcome,
   type WorkflowRunOutputRecord,
@@ -183,6 +184,20 @@ function readWorkflowHash(): {
  * exactly this many more.
  */
 const HISTORY_PAGE_SIZE = 50;
+
+/**
+ * Both halves of a `RunsPage`'s next-page cursor together, or `null` when
+ * either is missing — which per {@link RunsPage} is exactly when `hasMore` is
+ * false, but also degrades safely if a future host ever sends one without the
+ * other (PR #1090 review: a `seq`-only cursor is well-defined on its own, just
+ * occasionally wrong across a clock regression — this keeps that same
+ * degrade path rather than crashing on a partial cursor).
+ */
+function cursorFromPage(page: RunsPage): { seq: number; atMillis: number } | null {
+  return page.nextBeforeSeq != null && page.nextBeforeAtMillis != null
+    ? { seq: page.nextBeforeSeq, atMillis: page.nextBeforeAtMillis }
+    : null;
+}
 
 /**
  * Rewrite `#/workflows/<id>` back to `#/workflows`, in place (issue #1110).
@@ -429,14 +444,34 @@ export function WorkflowsView({
   // `selectedIdRef` uses for the copilot-fix race.
   const runsForRef = useRef<string | null>(null);
   runsForRef.current = runsFor;
+  // Bumped every time the first-page effect below runs (selection change,
+  // company switch, or a same-workflow refresh from a finished run). Guards a
+  // in-flight "Load older" against BOTH cross-company workflow-id collisions
+  // (`runsForRef`/`companyRef` alone cannot tell company A's workflow `foo`
+  // apart from company B's workflow `foo` — ids are only unique per company,
+  // see `create_company_workflow`) and a same-company, same-workflow refresh
+  // that moved the page boundary out from under a stale cursor. See PR #1090
+  // review.
+  const historyGenRef = useRef(0);
   // Issue #1012: run history is paginated. `historyHasMore` says older runs
-  // remain past the loaded page, `historyCursor` is the `beforeSeq` to fetch
-  // them with, and `loadingOlder` guards the "Load older" fetch. All three are
-  // scoped to `runsFor` and reset to the first page whenever the scoped read
-  // re-runs (a selection change, or a run finishing), so an appended older page
-  // never lingers across a refresh.
+  // remain past the loaded page, `historyCursor` is the `beforeSeq`/
+  // `beforeAtMillis` pair to fetch them with, and `loadingOlder` guards the
+  // "Load older" fetch. All three are scoped to `runsFor` and reset to the
+  // first page whenever the scoped read re-runs (a selection change, or a run
+  // finishing), so an appended older page never lingers across a refresh.
+  //
+  // Both halves of the cursor (PR #1090 review): `seq` alone is monotonic, but
+  // the sort it walks orders by `(atMillis, seq)`, and `atMillis` is
+  // wall-clock time with no such guarantee — a clock regression between two
+  // finishes can leave a later-`seq` run with an earlier `atMillis` than the
+  // page's tail, and a `seq`-only cursor then disagrees with the sort at that
+  // boundary. Sending both lets the host apply the SAME comparison the sort
+  // used (`src/server/ops/workflows.rs`'s `list_runs`).
   const [historyHasMore, setHistoryHasMore] = useState(false);
-  const [historyCursor, setHistoryCursor] = useState<number | null>(null);
+  const [historyCursor, setHistoryCursor] = useState<{
+    seq: number;
+    atMillis: number;
+  } | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   // A host predating the runs route answers 404. That is not an error worth
@@ -1004,6 +1039,11 @@ export function WorkflowsView({
   // while the run sits journaled on the host — which is issue #228's own
   // symptom, reappearing in the console.
   useEffect(() => {
+    // Every run of this effect is a new "page one" — a selection change, a
+    // company switch, or a refresh tick for the same workflow. Any
+    // `loadOlder` in flight against the PREVIOUS generation is now stale, even
+    // if the workflow id and company it captured still happen to match.
+    historyGenRef.current += 1;
     // No selection yet (first render, or a company with no workflows): there is
     // no history to ask for, and asking unfiltered is the bug described above.
     // `historySupported` is deliberately left alone — nothing was learned about
@@ -1032,7 +1072,7 @@ export function WorkflowsView({
         // Any older page a previous "Load older" appended is dropped here — the
         // fresh first page is newest-first and authoritative.
         setHistoryHasMore(page.hasMore);
-        setHistoryCursor(page.nextBeforeSeq ?? null);
+        setHistoryCursor(cursorFromPage(page));
         // Issue #371, the no-live-stream fallback. If the run we just POSTed is
         // in this page and nothing was ever *reported* live (only the frontier
         // we derived ourselves), overlay the journaled row so the operator
@@ -1144,22 +1184,48 @@ export function WorkflowsView({
     // Guard: only when a cursor is loaded, nothing else is paging, and we know
     // which workflow the loaded page belongs to.
     const workflow = runsForRef.current;
+    // Capture company + generation alongside the workflow id (issue #1090
+    // review): workflow ids are only unique WITHIN a company
+    // (`create_company_workflow` checks id-uniqueness against this company's
+    // own seed/overlay/manifest ids, never across companies), so two
+    // companies can genuinely share an id — most commonly a seed workflow
+    // shipped identically to every company. `runsForRef` alone cannot tell
+    // company A's `foo` apart from company B's `foo`, and neither ref alone
+    // catches a same-company, same-workflow refresh that moved the page
+    // boundary while this request was in flight.
+    const scopeCompany = companyRef.current;
+    const generation = historyGenRef.current;
     if (historyCursor == null || loadingOlder || !workflow) return;
+    // Captured once, alongside the other scope guards above — `historyCursor`
+    // is state and could theoretically change under a fast enough double
+    // click before this closure runs, though `loadingOlder` already prevents
+    // that in practice.
+    const cursor = historyCursor;
     setLoadingOlder(true);
     try {
-      const page = await listWorkflowRuns(client, company, {
+      const page = await listWorkflowRuns(client, scopeCompany, {
         workflow,
         limit: HISTORY_PAGE_SIZE,
-        beforeSeq: historyCursor,
+        // Both cursor halves (PR #1090 review) — see `cursorFromPage` and
+        // `RunsPage.nextBeforeAtMillis`.
+        beforeSeq: cursor.seq,
+        beforeAtMillis: cursor.atMillis,
       });
-      // A selection or company switch (or a scoped refresh) may have moved
-      // `runs` onto a different workflow while this was in flight — appending
-      // the previous workflow's older runs onto the new one would corrupt the
-      // list. Drop the result unless the scope still matches.
-      if (runsForRef.current !== workflow) return;
+      // A selection change, company switch, or a scoped refresh (which bumps
+      // `historyGenRef`) may have moved `runs` onto a different scope while
+      // this was in flight — appending the stale page onto the new one would
+      // corrupt the list. Drop the result unless every part of the scope
+      // still matches.
+      if (
+        runsForRef.current !== workflow ||
+        companyRef.current !== scopeCompany ||
+        historyGenRef.current !== generation
+      ) {
+        return;
+      }
       setRuns((prev) => [...prev, ...page.runs]);
       setHistoryHasMore(page.hasMore);
-      setHistoryCursor(page.nextBeforeSeq ?? null);
+      setHistoryCursor(cursorFromPage(page));
     } catch (e) {
       // Degrade quietly — the loaded page still stands, the button just did
       // nothing. A host that served page one but 404s a cursor is the only way

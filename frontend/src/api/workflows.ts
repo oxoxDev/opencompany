@@ -808,11 +808,26 @@ export interface RunsPage {
   /** Whether at least one older run exists past this page's tail. */
   hasMore: boolean;
   /**
-   * The `beforeSeq` cursor for the next (older) page — the `seq` of this page's
-   * last row. Absent exactly when {@link hasMore} is false, so a caller stops
-   * paging as soon as it is missing.
+   * The `beforeSeq` half of the cursor for the next (older) page — the `seq`
+   * of this page's last row. Absent exactly when {@link hasMore} is false, so
+   * a caller stops paging as soon as it is missing.
    */
   nextBeforeSeq?: number;
+  /**
+   * The `beforeAtMillis` half of the cursor — this page's last row's
+   * `atMillis`, paired with {@link nextBeforeSeq} (PR #1090 review).
+   *
+   * `seq` alone is monotonic, but the host's newest-first sort orders by
+   * `(atMillis, seq)`, and `atMillis` is wall-clock time with no such
+   * guarantee — a clock regression between two finishes can leave a
+   * later-`seq` run with an earlier `atMillis` than this page's tail. A
+   * `seq`-only cursor then disagrees with the sort at that boundary and can
+   * skip or repeat a row. Always send both halves back to
+   * {@link listWorkflowRuns}'s `beforeSeq`/`beforeAtMillis` together — the
+   * host degrades to the (occasionally wrong) `seq`-only comparison when
+   * `beforeAtMillis` is missing, for callers that have not adopted it.
+   */
+  nextBeforeAtMillis?: number;
 }
 
 /**
@@ -820,16 +835,26 @@ export interface RunsPage {
  * #228; paginated in #1012).
  *
  * `workflow` narrows to one graph's runs; `limit` caps the page (the host
- * defaults to a short recent list and clamps a large ask); `beforeSeq` asks for
- * the runs strictly older than a previous page's {@link RunsPage.nextBeforeSeq},
- * which is how "Load older" walks back through a long history. A host predating
- * this route answers 404 — callers should treat that as "no history yet" rather
- * than an error, since the console still works without it.
+ * defaults to a short recent list and clamps a large ask); `beforeSeq` +
+ * `beforeAtMillis` ask for the runs strictly older than a previous page's
+ * {@link RunsPage.nextBeforeSeq} / {@link RunsPage.nextBeforeAtMillis} pair,
+ * which is how "Load older" walks back through a long history. A host
+ * predating this route answers 404 — callers should treat that as "no history
+ * yet" rather than an error, since the console still works without it.
+ *
+ * Always pass `beforeAtMillis` alongside `beforeSeq` when both are available
+ * (PR #1090 review) — `seq` alone can disagree with the host's `(atMillis,
+ * seq)` sort across a clock regression. See {@link RunsPage.nextBeforeAtMillis}.
  */
 export function listWorkflowRuns(
   client: OpenCompanyClient,
   company: string | null,
-  options?: { workflow?: string; limit?: number; beforeSeq?: number },
+  options?: {
+    workflow?: string;
+    limit?: number;
+    beforeSeq?: number;
+    beforeAtMillis?: number;
+  },
 ): Promise<RunsPage> {
   const params = new URLSearchParams();
   if (options?.workflow) params.set("workflow", options.workflow);
@@ -839,6 +864,11 @@ export function listWorkflowRuns(
   // from being silently dropped if the host's seq numbering ever starts there.
   if (options?.beforeSeq != null)
     params.set("before_seq", String(options.beforeSeq));
+  // Same belt-and-braces reasoning for the millis half — epoch millis is
+  // never actually 0 in practice, but `!= null` costs nothing and stays
+  // correct if that ever changes.
+  if (options?.beforeAtMillis != null)
+    params.set("before_at_millis", String(options.beforeAtMillis));
   const query = params.toString();
   return client.get<RunsPage>(
     `${client.scopeFor(company)}/workflows/runs${query ? `?${query}` : ""}`,
