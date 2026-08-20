@@ -57,7 +57,7 @@ test("a legacy cancelled-handshake query lands in the console, not on a dead pag
 
   // The console renders — the operator is not stranded on raw JSON.
   await dismissWelcome(page);
-  await expect(page.getByRole("heading", { name: "Connections", level: 2 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Connections", level: 1 })).toBeVisible();
 
   // The param is stripped, so a refresh doesn't re-fire the toast.
   await expect
@@ -88,7 +88,7 @@ test("an unknown failure code still produces a usable message", async ({ page })
   await page.goto("/connections?connect_error=something_new_2099");
   await expect(page.getByText(/couldn't connect/i)).toBeVisible();
   await dismissWelcome(page);
-  await expect(page.getByRole("heading", { name: "Connections", level: 2 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Connections", level: 1 })).toBeVisible();
 });
 
 test("the tour resumes on the Connections stop after a redirect", async ({ page }) => {

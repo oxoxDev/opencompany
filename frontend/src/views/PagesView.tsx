@@ -170,6 +170,7 @@ export function PagesView({ client, company }: Props) {
   if (load === "loading") {
     return (
       <div className="flex flex-1 gap-2 p-4">
+        <h1 className="sr-only">Pages</h1>
         <div className="w-64 shrink-0 space-y-2">
           {Array.from({ length: 4 }).map((_, i) => (
             <Skeleton key={i} className="h-9 rounded-lg" />
@@ -183,6 +184,7 @@ export function PagesView({ client, company }: Props) {
   if (load === "error") {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center text-muted-foreground">
+        <h1 className="sr-only">Pages</h1>
         <AppWindow className="size-8" />
         <div className="space-y-1">
           <p className="font-medium text-foreground">Pages unavailable</p>
@@ -198,6 +200,7 @@ export function PagesView({ client, company }: Props) {
   if (visible.length === 0) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center text-muted-foreground">
+        <h1 className="sr-only">Pages</h1>
         <AppWindow className="size-8" />
         <div className="space-y-1">
           <p className="font-medium text-foreground">No pages yet</p>
@@ -212,6 +215,10 @@ export function PagesView({ client, company }: Props) {
 
   return (
     <div className="flex flex-1 overflow-hidden">
+      {/* Each page's own title lives inside its sandboxed iframe, a separate
+          document this console doesn't control — this names the console-side
+          page for a screen reader (issue #1221). */}
+      <h1 className="sr-only">Pages</h1>
       <section className="hidden w-64 shrink-0 flex-col overflow-y-auto border-r py-2 md:flex" data-testid="pages-list">
         {visible.map((page) => (
           <button

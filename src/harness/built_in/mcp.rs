@@ -31,7 +31,7 @@ use oh::security::{SecurityPolicy, ToolOperation};
 use oh::tools::traits::{PermissionLevel, Tool, ToolCallOptions, ToolResult};
 
 use crate::company::Agent as ManifestAgent;
-use crate::company::mcp::{AuthMaterial, McpServerDecl};
+use crate::company::mcp::{AuthMaterial, McpServerDecl, stdio_install_refusal};
 use crate::error::OpenCompanyError;
 use crate::harness::mcp_probe::{
     McpFailure, McpFailureQueue, classify_mcp_error, operator_message, scrub, strip_endpoint,
@@ -522,6 +522,21 @@ fn required_string_arg(args: &Value, key: &str) -> anyhow::Result<String> {
 // Company-scoped MCP lifecycle (McpRuntime)
 // ---------------------------------------------------------------------------
 
+/// The transport filter every directory search is pinned to — upstream's
+/// vocabulary for "has a hosted HTTP endpoint" (`registry::apply_transport`
+/// keeps `is_deployed` rows for `"hosted"`, drops them for `"stdio"`).
+///
+/// **Hardcoded, not a parameter the console may set.** A stdio entry launches a
+/// local subprocess through `npx` / `uvx`, and the tenant image is
+/// `debian:bookworm-slim` plus `ca-certificates`, `curl`, `libssl3` and X11 —
+/// no Node, no Python, no package manager (issue #1270). So there is no caller
+/// for whom `"stdio"` or `"all"` would produce an installable row, and offering
+/// the knob would only let the console show an operator servers that fail at
+/// install time. Widening it is one edit here, on the day a sidecar that can
+/// actually run stdio servers exists; until then the honest surface is the one
+/// that cannot express the broken request.
+const HOSTED_TRANSPORT: &str = "hosted";
+
 /// Company-home-scoped persistence and access to OpenHuman's live MCP registry.
 pub struct McpRuntime {
     config: oh::config::Config,
@@ -535,6 +550,102 @@ impl McpRuntime {
             ..Default::default()
         };
         Self { config }
+    }
+
+    /// Search the upstream MCP directories — Smithery.ai and the official
+    /// `modelcontextprotocol/registry` — merged, paged, and SQLite-cached
+    /// upstream (issue #1270).
+    ///
+    /// The console's only way to answer "what could I add?". The static server
+    /// list cannot: an operator has to arrive already knowing an endpoint, so
+    /// that surface is empty until somebody pastes a URL into it.
+    ///
+    /// The transport filter is fixed at [`HOSTED_TRANSPORT`] rather than exposed
+    /// as a parameter — see that constant for why.
+    pub async fn search(
+        &self,
+        query: Option<String>,
+        page: Option<u32>,
+        page_size: Option<u32>,
+    ) -> crate::Result<serde_json::Value> {
+        oh::mcp::registry::ops::mcp_clients_registry_search(
+            &self.config,
+            query,
+            Some(HOSTED_TRANSPORT.to_string()),
+            page,
+            page_size,
+        )
+        .await
+        .map(|outcome| outcome.value)
+        .map_err(|e| OpenCompanyError::Harness(format!("mcp registry search failed: {e}")))
+    }
+
+    /// One directory entry in full, routed back to the registry it came from.
+    pub async fn registry_get(&self, qualified_name: String) -> crate::Result<serde_json::Value> {
+        oh::mcp::registry::ops::mcp_clients_registry_get(&self.config, qualified_name)
+            .await
+            .map(|outcome| outcome.value)
+            .map_err(|e| OpenCompanyError::Harness(format!("mcp registry lookup failed: {e}")))
+    }
+
+    /// Installs a directory entry by qualified name and returns the resulting
+    /// record. Idempotent upstream: re-installing a server already present
+    /// refreshes its env/config onto the existing row rather than writing a
+    /// second one.
+    ///
+    /// **Refuses a stdio install.** Upstream's picker already prefers a hosted
+    /// HTTP connection over a local subprocess, so this only fires for an entry
+    /// that offers *nothing but* stdio — which this deployment cannot launch
+    /// (see [`stdio_install_refusal`]). The search filter above keeps such
+    /// entries off the operator's screen in the first place; this is the belt to
+    /// that braces, because a caller can POST a qualified name the search never
+    /// offered. A refused install that we ourselves created is rolled back; one
+    /// that was already on disk is left alone, since it is not ours to remove.
+    pub async fn install_from_directory(
+        &self,
+        qualified_name: String,
+        env: HashMap<String, String>,
+    ) -> crate::Result<InstalledServer> {
+        let outcome = oh::mcp::registry::ops::mcp_clients_install(
+            &self.config,
+            qualified_name.clone(),
+            env,
+            None,
+        )
+        .await
+        .map_err(|e| OpenCompanyError::Harness(format!("mcp install failed: {e}")))?;
+        let already_installed = outcome
+            .value
+            .get("already_installed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let record = outcome.value.get("server").cloned().ok_or_else(|| {
+            OpenCompanyError::Harness("mcp install returned no server record".to_string())
+        })?;
+        let server: InstalledServer = serde_json::from_value(record).map_err(|e| {
+            OpenCompanyError::Harness(format!("mcp install record is unreadable: {e}"))
+        })?;
+        if server.transport.deployment_url().is_none() {
+            if !already_installed {
+                let _ = self.uninstall(&server.server_id).await;
+            }
+            return Err(OpenCompanyError::InvalidRequest(stdio_install_refusal(
+                &qualified_name,
+            )));
+        }
+        Ok(server)
+    }
+
+    /// Rotate an install's environment values (write-only, never read back).
+    pub async fn update_env(
+        &self,
+        server_id: String,
+        env: HashMap<String, String>,
+    ) -> crate::Result<()> {
+        oh::mcp::registry::ops::mcp_clients_update_env(&self.config, server_id, env)
+            .await
+            .map(|_| ())
+            .map_err(|e| OpenCompanyError::Harness(format!("mcp env update failed: {e}")))
     }
 
     /// Reconnects enabled installed servers. Failures are logged by OpenHuman

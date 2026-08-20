@@ -78,11 +78,21 @@ uses, on `updated_at_millis`).
 The direction is inverted exactly as in [Planning](planning.md): the **host**
 gathers the roster (which teammates an `agent` node may name), the node-kind
 vocabulary (the builder emits within `BUILDER_NODE_KINDS`, a subset of the
-authoring set — see [workflow-vocabulary.md](workflow-vocabulary.md)), and the
-names of the workflows that already exist, and hands the
-model a complete picture. The model runs with **no tools** and only synthesizes
+authoring set — see [workflow-vocabulary.md](workflow-vocabulary.md)), the
+channel ids an `output` node's `channel` destination may name
+(`deliverable_channel_ids()` — the same set the console's destination picker is
+served from, issue #1191), and the names of the workflows that already exist,
+and hands the model a complete picture. The model runs with **no tools** and only synthesizes
 — so collisions and unknown-agent references are rare by construction, and a
 builder pass can no more act on the world than a planning pass can.
+
+The channel section is the newest of these and was added for a reason worth
+recording: the pack had a roster section and a tools section and **no** channel
+section, and the graph contract named the concept without listing ids. Asked to
+"post a summary to the engineering desk", the model wrote `engineering-desk` —
+the desk's display name with `-desk` appended — for a runtime whose channels are
+`engineering`, `product_design`, `go_to_market`. Grounding is the fix; courtesy
+validation (below) is the guard behind it.
 
 The card's own plan (`TaskPlan`) is the strongest input when it has one: its
 steps become candidate nodes, its prerequisites are grounding a node cannot
@@ -110,8 +120,8 @@ machinery), the same legal move `abandon_run` uses.
 ## Review before creation — the graph does not exist yet
 
 The builder pass **never creates a workflow** (decision D2b). It generates a
-graph, courtesy-validates that it *could* be created — the same shape, render and
-roster checks `create_company_workflow` runs, minus persistence
+graph, courtesy-validates that it *could* be created — the same shape, render,
+roster and destination checks `create_company_workflow` runs, minus persistence
 (`courtesy_validate_draft`) — and stamps it on the card as a proposal. A proposal
 that could never apply never reaches In Review.
 
@@ -125,14 +135,20 @@ The one path a proposal becomes a real workflow, and the host is its authority:
 1. rebuild a `RawWorkflow` from the **stored** `ops` graph — never a
    client-supplied body — via `raw_workflow_from_spec`;
 2. run `create_company_workflow`, which takes the company write lock,
-   re-validates shape + roster + id/name uniqueness, and (issue #276) lands any
-   schedule-carrying graph **switched off** until a person arms it;
+   re-validates shape + roster + destinations + id/name uniqueness, and (issue
+   #276) lands any schedule-carrying graph **switched off** until a person arms
+   it. "The same validation an editor save runs" was not literally true until
+   issue #1191: the channel-destination rule lived on the two write routes, so
+   this path — the one path the operator did not author the graph — persisted a
+   graph `PUT …/workflows` then refused, and marked the card Done for it;
 3. stamp the card's `TaskOutput` linking the created workflow to the build
    attempt, and move the card to **Done**; clear the proposal.
 
 If the create is refused — the roster drifted since the proposal was generated, a
-name has since been taken — the reason is appended to the card's note, the card
-**stays In Review** with its proposal intact, and the refusal is a 400.
+name has since been taken, a destination names a channel nobody wired — the
+reason is appended to the card's note, the card **stays In Review** with its
+proposal intact, and the refusal is a 400 carrying the `workflow_invalid`
+envelope, so the console names the node rather than only the sentence.
 
 ### `POST …/tasks/{id}/workflow-proposal/reject`
 

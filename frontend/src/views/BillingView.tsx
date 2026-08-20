@@ -243,9 +243,13 @@ export function BillingView({ client, company }: Props) {
     );
   }
 
-  const connected = status.apiKeyConfigured && !!status.site;
+  const connected =
+    status.inBuild && status.granted && status.apiKeyConfigured && !!status.site;
   const paypalConnected =
-    !!paypal?.clientIdConfigured && !!paypal?.clientSecretConfigured;
+    !!paypal?.inBuild &&
+    !!paypal?.granted &&
+    !!paypal?.clientIdConfigured &&
+    !!paypal?.clientSecretConfigured;
 
   return (
     // `flex-1 overflow-y-auto` is load-bearing, not cosmetic: without it this
@@ -254,9 +258,9 @@ export function BillingView({ client, company }: Props) {
     <div className="flex-1 overflow-y-auto" data-testid="billing-view">
       <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
         <div>
-          <h2 className="flex items-center gap-2 text-lg font-medium">
+          <h1 className="flex items-center gap-2 text-lg font-medium">
             <CreditCard className="size-5" /> Billing
-          </h2>
+          </h1>
           <p className="text-sm text-muted-foreground">
             Connect Chargebee so your teammates can raise invoices and answer
             questions about who has paid, and PayPal so they can report the

@@ -12,7 +12,10 @@
 //   the created workflow, and returns it moved to Done — where #339's existing
 //   output link opens the new workflow. A refused create (a name taken since, a
 //   teammate off the roster) comes back rejected and the card stays In Review
-//   with its proposal intact; the host's own message is shown verbatim.
+//   with its proposal intact; the host's own message is shown verbatim, with the
+//   per-node breakdown beneath it when the refusal carries one (issue #1191 —
+//   the destination rules answer with `workflow_invalid` + `problems` now, so a
+//   refused Apply names the node instead of only the sentence).
 // * **Reject** clears the proposal and returns the card to To-do (decision D2c),
 //   keeping its `workflow` deliverable so dragging it back builds again.
 //
@@ -28,7 +31,12 @@ import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { applyWorkflowProposal, rejectWorkflowProposal, type Task } from "@/api/tasks";
-import { ApiError } from "@/api/types";
+import {
+  ApiError,
+  type WorkflowProblem,
+  workflowProblemLocator,
+  workflowRefusalProblems,
+} from "@/api/types";
 import type { GraphDiff } from "@/api/workflow-proposal";
 import { taskProposalDiff } from "@/lib/task-workflow-proposal";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -66,12 +74,22 @@ export function TaskWorkflowProposalPanel({
   // reason must persist until the operator acts rather than blinking out on the
   // next re-render.
   const [error, setError] = useState<string | null>(null);
+  // The per-node breakdown behind {@link error}, when the host sent one (issue
+  // #1191). Rendered under the sentence rather than instead of it — the same
+  // treatment `ProposalCard` gives a refused copilot edit, so an operator meets
+  // one shape of refusal wherever the graph came from.
+  //
+  // A refused apply now carries this for the destination rules too: the check
+  // moved into the shared authoring core, so it answers with `workflow_invalid`
+  // + `problems` instead of a flat `invalid_request`.
+  const [problems, setProblems] = useState<WorkflowProblem[] | null>(null);
 
   const refused = "reason" in result;
 
   async function apply() {
     setBusy("apply");
     setError(null);
+    setProblems(null);
     try {
       const saved = await applyWorkflowProposal(client, company, task.id);
       onSaved(saved);
@@ -88,6 +106,7 @@ export function TaskWorkflowProposalPanel({
             ? e.message
             : "The workflow could not be created.",
       );
+      setProblems(workflowRefusalProblems(e));
     } finally {
       setBusy(null);
     }
@@ -96,6 +115,7 @@ export function TaskWorkflowProposalPanel({
   async function reject() {
     setBusy("reject");
     setError(null);
+    setProblems(null);
     try {
       const saved = await rejectWorkflowProposal(client, company, task.id);
       onSaved(saved);
@@ -144,7 +164,27 @@ export function TaskWorkflowProposalPanel({
       {error && (
         <Alert variant="destructive" className="mt-3 py-1.5" data-testid="task-workflow-proposal-error">
           <AlertTriangle className="size-3.5" />
-          <AlertDescription className="text-2xs leading-snug">{error}</AlertDescription>
+          <AlertDescription className="text-2xs leading-snug">
+            {error}
+            {/* Keyed by index because a problem carries no id of its own and one
+                node can legitimately raise two — the list is render-only and
+                never reordered, so index is stable here. Mirrors
+                `ProposalCard`'s block deliberately: same locator helper, same
+                markup, so the two refusal surfaces cannot drift. */}
+            {problems && problems.length > 0 && (
+              <ul className="mt-1 space-y-0.5" data-testid="task-workflow-proposal-problems">
+                {problems.map((problem, i) => {
+                  const locator = workflowProblemLocator(problem);
+                  return (
+                    <li key={i}>
+                      {locator && <span className="font-medium">{locator} — </span>}
+                      {problem.message}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </AlertDescription>
         </Alert>
       )}
 

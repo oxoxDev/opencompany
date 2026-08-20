@@ -90,7 +90,7 @@ use crate::company::{
 };
 use crate::error::OpenCompanyError;
 use crate::ports::types::{
-    CompanyEvent, CompanyRecord, EventSeq, OverlayWorkflow, WorkflowNodeStatus,
+    CompanyEvent, CompanyRecord, EventSeq, OverlayWorkflow, StoredEvent, WorkflowNodeStatus,
 };
 use crate::ports::workflow_verdict::{RunVerdictFacts, WorkflowRunVerdict};
 use crate::runtime::cron::{CivilTime, CronExpr};
@@ -683,54 +683,6 @@ impl TryFrom<CreateWorkflowBody> for RawWorkflow {
     }
 }
 
-/// Rejects a draft whose `output` node routes its report to a channel this
-/// runtime cannot deliver to (issue #981).
-///
-/// The delivery layer already refuses such a target at run time with a
-/// `ChannelNotWired` row, and that row stays — desks come and go, so a graph
-/// valid at save can be invalid at run, and this is a guard rather than a
-/// guarantee. What it removes is the case the QA pass found: a workflow saved
-/// against `operator`, which delivery refuses **by name** on every runtime and
-/// so can never succeed, discovered only after a scheduled run nobody watched
-/// silently dropped its report.
-///
-/// Both write routes run it, from the same set the destination picker is served
-/// from and with the same sentence the failed delivery would have carried, so
-/// an author who trips it is told what a run would have told them.
-///
-/// Deliberately narrow. A missing target, a `destination` on a non-`output`
-/// node and an unknown `kind` are [`parse_workflow`](crate::company::parse_workflow)'s
-/// to report — it says something more specific about each, and reporting the
-/// wrong problem first is worse than reporting it second. This is also NOT run
-/// at TOML parse time: seed templates are parsed with no runtime in hand, and
-/// checking there would refuse to boot a template on a company whose desks are
-/// not resolved yet.
-fn reject_undeliverable_channel_destinations(
-    company: &ScopedCompany,
-    draft: &RawWorkflow,
-) -> Result<(), ApiError> {
-    let deliverable = company.runtime.deliverable_channel_ids();
-    for node in &draft.nodes {
-        let Some(destination) = &node.destination else {
-            continue;
-        };
-        if destination.kind.trim() != "channel" || node.kind.trim() != "output" {
-            continue;
-        }
-        let target = destination.target.as_deref().map(str::trim).unwrap_or("");
-        if target.is_empty() || deliverable.iter().any(|id| id == target) {
-            continue;
-        }
-        let live: Vec<&str> = deliverable.iter().map(String::as_str).collect();
-        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
-            "node `{}`: {}",
-            node.id,
-            crate::runtime::undeliverable_channel_message(target, &live)
-        ))));
-    }
-    Ok(())
-}
-
 /// `POST …/workflows` — authors a new workflow graph (issues #69, #112, #168):
 /// the console's form creator, or any direct API caller, posts the graph shape
 /// and it is persisted on the company record.
@@ -750,13 +702,13 @@ async fn create_workflow(
     Json(body): Json<CreateWorkflowBody>,
 ) -> Result<Json<WorkflowGraph>, ApiError> {
     let draft = RawWorkflow::try_from(body)?;
-    reject_undeliverable_channel_destinations(&company, &draft)?;
     let file = create_company_workflow(
         company.id(),
         company.runtime.source_dir(),
         company.runtime.store(),
         Some(company.runtime.events()),
         draft,
+        Some(&company.runtime.deliverable_channel_ids()),
     )
     .await
     .map_err(ApiError)?;
@@ -866,7 +818,6 @@ async fn update_workflow(
         )));
     };
     let draft = RawWorkflow::try_from(body.graph)?;
-    reject_undeliverable_channel_destinations(&company, &draft)?;
     let file = update_company_workflow(
         company.id(),
         company.runtime.source_dir(),
@@ -875,6 +826,7 @@ async fn update_workflow(
         Some(company.runtime.events()),
         draft,
         Some(expected.as_str()),
+        Some(&company.runtime.deliverable_channel_ids()),
     )
     .await
     .map_err(ApiError)?;
@@ -1523,6 +1475,13 @@ async fn run_workflow(
                 blocked_nodes: run.blocked_nodes.len(),
                 deliveries: &run.deliveries,
                 pending_approvals: run.pending_approvals.len(),
+                // Issue #1189: deliberately not reconciled here, and a literal
+                // rather than a lookup. This body is written microseconds after
+                // `park_pending_gates` minted the cards, so joining against the
+                // queue would be a guaranteed-zero query on the hot path — the
+                // reconciliation is a fact about a run somebody comes back to,
+                // which is what the history route is for.
+                stranded_approvals: 0,
             });
             Ok(RunWorkflowOk::Settled(Box::new(RunWorkflowResponse {
                 output: run.output,
@@ -2369,7 +2328,8 @@ async fn workflow_wired_channels(company: ScopedCompany) -> Json<WiredChannelsRe
 const DEFAULT_RUN_LIMIT: usize = 20;
 const MAX_RUN_LIMIT: usize = 200;
 
-/// The `?workflow=` / `?limit=` selectors on the run-history read.
+/// The `?workflow=` / `?limit=` / `?before_seq=` selectors on the run-history
+/// read.
 #[derive(Debug, Deserialize)]
 struct RunsQuery {
     /// Return only runs of this workflow id. Absent = every workflow.
@@ -2404,31 +2364,12 @@ struct RunsQuery {
     before_at_millis: Option<u64>,
 }
 
-/// One page of run history (issue #1012): the rows, plus whether older runs
-/// remain and the cursor to ask for them with.
-///
-/// Replaces the bare `Vec<WorkflowRunOutcome>` the route used to return so a
-/// truncated history is no longer *silent* — before this a company with more
-/// than `limit` runs simply lost the older ones off the end of the page with
-/// nothing to say they existed. `has_more` says they do, and `next_before_seq`
-/// is the `?before_seq=` to pass to walk back into them.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RunsPage {
-    /// This page's runs, newest-finish first.
-    runs: Vec<WorkflowRunOutcome>,
-    /// Whether at least one older run exists past this page's tail.
-    has_more: bool,
-    /// The `?before_seq=` cursor for the next (older) page — the `seq` of this
-    /// page's last row. `None` exactly when `has_more` is false, so a caller can
-    /// stop as soon as it is absent.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    next_before_seq: Option<u64>,
-    /// The `?before_at_millis=` half of the cursor — this page's last row's
-    /// `at_millis`, to send back alongside `next_before_seq` (PR #1090
-    /// review). `None` under the same condition as `next_before_seq`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    next_before_at_millis: Option<u64>,
+/// `skip_serializing_if` predicate for a count that is almost always zero —
+/// the same one `crate::ports::workflow_runner` uses for the per-node
+/// `unparkable` / `stranded` pair, so the two counts are omitted on identical
+/// terms.
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// One finished run as the console's history panel renders it (camelCase).
@@ -2544,6 +2485,24 @@ struct WorkflowRunOutcome {
     /// count becomes a fresh lie the moment somebody approves one.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     approvals: Vec<crate::ports::WorkflowRunApprovalRow>,
+    /// How many of [`pending_approvals`](Self::pending_approvals) have **no
+    /// live card left in the queue** (issue #1189).
+    ///
+    /// The gate-shaped sibling of `blockedNodes[].stranded`, and the number the
+    /// console needs to stop telling an operator to go and decide something
+    /// that is not there. #1143's per-node count is keyed on approval ids, and
+    /// a gate parked by `park_pending_gates` records none — no approval-row
+    /// receipt and no blocked-node row, only its node id here — so that count
+    /// structurally cannot describe this shape. On the marketing tenant it is
+    /// the shape of 34 of 60 runs.
+    ///
+    /// **Computed on the read, never journaled**, on exactly the terms
+    /// `WorkflowBlockedNode::stranded` is: the journal records what happened and
+    /// is not edited to reflect what is true now, and a stored "still waiting"
+    /// count is a fresh lie the moment the queue moves. Skipped when zero, which
+    /// is every healthy run, so an unaffected row's wire shape is unchanged.
+    #[serde(skip_serializing_if = "is_zero")]
+    stranded_approvals: usize,
     /// What this run adds up to, in one word (issue #981).
     ///
     /// **Always serialized**, and **derived in a single pass** once the fold
@@ -2574,6 +2533,9 @@ impl WorkflowRunOutcome {
             blocked_nodes: self.blocked_nodes.len(),
             deliveries: &self.deliveries,
             pending_approvals: self.pending_approvals.len(),
+            // Issue #1189: filled in by the join below, which is why the verdict
+            // pass now runs AFTER it. See `list_runs`.
+            stranded_approvals: self.stranded_approvals,
         })
     }
 }
@@ -2618,64 +2580,60 @@ impl From<crate::ports::WorkflowRunNodeRow> for WorkflowRunNode {
     }
 }
 
-/// `GET …/workflows/runs?workflow=&limit=` — the company's finished workflow
-/// runs, **newest first** (issue #228).
+/// Folds a chronologically-ordered slice of journal rows into per-run outcomes
+/// (issue #371's group-by-run fold). Extracted out of [`list_runs`] so the fold
+/// itself stays independently testable; the caller still passes it the
+/// company's whole event log rather than a backward-paged window (`read_from(0,
+/// MAX)`, the same thing [`chat_history`](crate::server::chat_history) already
+/// does on every history GET). A `?before_seq=` walk keyed on raw journal
+/// position cannot be reconciled with the composite `(at_millis, seq)` cursor
+/// PR #1090's review requires — `at_millis` is wall-clock time with no
+/// nondecreasing guarantee (see `RunsQuery::before_at_millis`), so a run whose
+/// clock regressed can have a *higher* raw `seq` than a page's cursor while
+/// still sorting *before* it in display order, which a `read_before(cursor)`
+/// walk can never reach again once that cursor has passed. Reading the whole
+/// log every time keeps every run reachable regardless of where the display
+/// sort places it; if the journal scan ever becomes the bottleneck, paging
+/// needs a cursor that survives a clock regression before it can come back.
 ///
-/// This is the durable half of the issue: a manual run's delivery rows used to
-/// live only in the console drawer until it was dismissed, and a scheduled run's
-/// only on host stdout. Folding
-/// [`CompanyEvent::WorkflowRunFinished`](crate::ports::types::CompanyEvent) out
-/// of the journal makes both survive a console reload, which is the whole point.
+/// Issue #371 turned this from a filter into a **group-by-run fold**: a run
+/// now contributes up to N+2 rows (a start, one per node, a finish) instead of
+/// one, and they have to come back as a single history entry.
 ///
-/// The fold reads the company's whole event log
-/// (`read_from(0, MAX)`) — the same thing
-/// [`chat_history`](crate::server::chat_history) already does on every history
-/// GET. Following that precedent keeps this route from inventing an index the
-/// rest of the read plane doesn't have; if the journal scan ever becomes the
-/// bottleneck it should be fixed for both surfaces at once, not just here.
-async fn list_runs(
-    company: ScopedCompany,
-    Query(query): Query<RunsQuery>,
-) -> Result<Json<RunsPage>, ApiError> {
-    let limit = match query.limit {
-        Some(0) | None => DEFAULT_RUN_LIMIT,
-        Some(n) => n.min(MAX_RUN_LIMIT),
-    };
-
-    let stored = company
-        .runtime
-        .events()
-        .read_from(company.id(), EventSeq::new(0), usize::MAX)
-        .await
-        .map_err(ApiError)?;
-
-    // Issue #371 turned this from a filter into a **group-by-run fold**: a run
-    // now contributes up to N+2 rows (a start, one per node, a finish) instead
-    // of one, and they have to come back as a single history entry.
-    //
-    // The invariant that keeps it simple: the journal is append-only and
-    // single-writer, so a run's rows are ordered `Started < Node… < Finished` —
-    // the runner drains and joins its progress collector before returning, which
-    // is what makes the last part true rather than a race. Rows of *different*
-    // runs may interleave (two workflows can run at once), so the grouping is
-    // keyed on run id rather than on adjacency.
-    //
-    // A pre-#371 finished row has no run id and no start, so it simply folds to
-    // itself — one row in, one entry out, exactly as before.
+/// The invariant that keeps it simple: the journal is append-only and
+/// single-writer, so a run's rows are ordered `Started < Node… < Finished` —
+/// the runner drains and joins its progress collector before returning, which
+/// is what makes the last part true rather than a race. Rows of *different*
+/// runs may interleave (two workflows can run at once), so the grouping is
+/// keyed on run id rather than on adjacency. **`rows` must be chronologically
+/// ordered (ascending `seq`)** for this invariant to hold — a caller reading
+/// backward via [`EventLog::read_before`](crate::ports::EventLog::read_before)
+/// (which comes back newest-first) must reverse each page before it is folded
+/// in.
+///
+/// A pre-#371 finished row has no run id and no start, so it simply folds to
+/// itself — one row in, one entry out, exactly as before. The same shape
+/// results for a post-#371 row whose start fell outside `rows` — whether
+/// because the caller's window does not reach that far back yet, or because a
+/// retention pass pruned the `WorkflowRunStarted` row while keeping its
+/// `WorkflowRunFinished` (the two are independently prunable; see
+/// `CompanyEvent::retention_class`). Both are "legitimate" in the sense the
+/// original comment on this fold already drew: nothing here tells them apart,
+/// and nothing needs to — a caller paging backward for more history is exactly
+/// how the first case resolves itself into the second, or into a real match.
+///
+/// Returns the folded runs, in fold/push order (not sorted or truncated — the
+/// caller does that), and the highest `seq` seen among EVERY row, matched or
+/// not — the `read_through` high-water mark [`list_runs`]'s #1009 cross-check
+/// resumes reading from.
+fn fold_run_events(rows: Vec<StoredEvent>, wanted: Option<&str>) -> (Vec<WorkflowRunOutcome>, u64) {
     let mut runs: Vec<WorkflowRunOutcome> = Vec::new();
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    // The `?workflow=` filter is applied per event rather than after the `limit`
-    // cut, so asking for one workflow returns that workflow's most recent N —
-    // not "whichever of the last N happen to match".
-    let wanted = query.workflow.as_deref();
     let matches = |workflow_id: &str| wanted.is_none_or(|w| w == workflow_id);
-    // The high-water mark of the snapshot above, kept over EVERY row rather than
-    // only the matched ones. It is where the settle below resumes reading, which
-    // is what tells a run that died apart from one that merely finished while
-    // this request was folding.
+    // The high-water mark over EVERY row rather than only the matched ones.
     let mut read_through = 0u64;
 
-    for stored in stored {
+    for stored in rows {
         let seq = stored.seq.value();
         let at_millis = stored.at_millis;
         read_through = read_through.max(seq);
@@ -2728,6 +2686,10 @@ async fn list_runs(
                     // True of a row that has only a start — and re-derived
                     // anyway by the single pass below, which is what makes it
                     // right for a row the finish or the settle changes.
+                    // Issue #1189: filled by the join in the tail, on the rows
+                    // actually being returned. Zero here is the honest default —
+                    // this row has not been reconciled against the queue yet.
+                    stranded_approvals: 0,
                     verdict: WorkflowRunVerdict::Running,
                 });
             }
@@ -2859,6 +2821,10 @@ async fn list_runs(
                     blocked_nodes,
                     approvals,
                     // Re-derived by the single pass below, like the start arm's.
+                    // Issue #1189: filled by the join in the tail, on the rows
+                    // actually being returned. Zero here is the honest default —
+                    // this row has not been reconciled against the queue yet.
+                    stranded_approvals: 0,
                     verdict: WorkflowRunVerdict::Running,
                 });
             }
@@ -2866,232 +2832,272 @@ async fn list_runs(
         }
     }
 
-    // Issue #1009: cross-check the still-`running` rows against the live run set
-    // and settle the ones nobody is running.
-    //
-    // The fold above marks a start with no finish `running: true`, which is only
-    // ever settled by the boot sweep ([`sweep_interrupted_runs`]). Three ways a
-    // finish never lands — a task that panicked, an append that failed, a host
-    // that died — therefore all read as an eternal spinner *until the next host
-    // restart*, with a Stop button that cannot help and a 2s console poll that
-    // never stops. This closes the gap between restarts: any run the fold thinks
-    // is in flight whose id is **absent** from the supervisor's live set has no
-    // task behind it here and now, so it is journaled a synthetic finish (the
-    // same `INTERRUPTED_BY_RESTART` the boot sweep uses) and flipped in the
-    // in-memory row, so this very response is already self-consistent.
-    //
-    // Keyed strictly on `live()` membership. A run the current process is
-    // genuinely running is registered there and is left untouched — the watchdog
-    // (issue #1009, path A) is what guarantees a *panicking* run never reaches
-    // this predicate, because it journals its own finish before its guard drops.
-    //
-    // The one accepted false positive: a run that survived a live
-    // `rebuild_company` swap is registered on the *old* supervisor and so is
-    // absent from the successor's `live()`, so this could settle a run that is
-    // still walking its graph. Accepted because (i) the watchdog keeps panics out
-    // of this path entirely, (ii) that run's real finish lands later in journal
-    // order and wins the read's last-writer-wins display, and (iii) it is the
-    // same class the boot sweep already accepts — which is why that sweep gates
-    // on the handover being absent (see the runtime builder call site). It never
-    // corrupts the journal: that run's second, truthful finish lands *after* the
-    // synthetic one and so supersedes it.
-    //
-    // That last argument turns on ORDER, and it does not carry to a run which
-    // settles inside this request — there the truthful finish lands first and
-    // loses. See the window handled below; it is closed rather than accepted.
-    let live_ids: HashSet<String> = company
+    (runs, read_through)
+}
+
+/// `GET …/workflows/runs?workflow=&limit=&before_seq=&before_at_millis=` — the
+/// company's finished workflow runs, **newest first** (issue #228), a page at
+/// a time (issue #1012).
+///
+/// This is the durable half of the issue: a manual run's delivery rows used to
+/// live only in the console drawer until it was dismissed, and a scheduled run's
+/// only on host stdout. Folding
+/// [`CompanyEvent::WorkflowRunFinished`](crate::ports::types::CompanyEvent) out
+/// of the journal makes both survive a console reload, which is the whole point.
+///
+/// The fold reads the company's whole event log (`read_from(0, MAX)`) — the
+/// same thing [`chat_history`](crate::server::chat_history) already does on
+/// every history GET — rather than a bounded backward-paged window. See
+/// [`fold_run_events`]'s doc for why: the composite `(at_millis, seq)` cursor
+/// PR #1090's review requires cannot be answered by a `?before_seq=`-keyed
+/// walk over raw journal position. If the journal scan ever becomes the
+/// bottleneck it should be fixed for both surfaces at once, not just here.
+///
+/// A run is a *group* of events (`Started`, N × node events, `Finished`), not
+/// one — so this reads every row before it can know it has every run.
+async fn list_runs(
+    company: ScopedCompany,
+    Query(query): Query<RunsQuery>,
+) -> Result<Json<WorkflowRunsResponse>, ApiError> {
+    let limit = match query.limit {
+        Some(0) | None => DEFAULT_RUN_LIMIT,
+        Some(n) => n.min(MAX_RUN_LIMIT),
+    };
+    // The `?workflow=` filter is applied per event rather than after the `limit`
+    // cut, so asking for one workflow returns that workflow's most recent N —
+    // not "whichever of the last N happen to match".
+    let wanted = query.workflow.as_deref();
+
+    let stored = company
         .runtime
-        .run_supervisor()
-        .live()
-        .into_iter()
-        .map(|(run_id, _workflow_id)| run_id)
-        .collect();
-    let mut dead: Vec<usize> = Vec::new();
-    for (index, entry) in runs.iter().enumerate() {
-        if !entry.running {
-            continue;
-        }
-        let Some(run_id) = entry.run_id.as_ref() else {
-            continue;
-        };
-        if live_ids.contains(run_id) {
-            continue;
-        }
-        dead.push(index);
-    }
+        .events()
+        .read_from(company.id(), EventSeq::new(0), usize::MAX)
+        .await
+        .map_err(ApiError)?;
+    let (mut runs, read_through) = fold_run_events(stored, wanted);
 
-    // ── The window between the snapshot and `live()` ────────────────────────
-    //
-    // `live()` is consulted AFTER the journal snapshot was taken, and a run can
-    // settle in between: it appends its finish (too late for the snapshot) and
-    // then drops its guard (in time to be missing from `live()`). Such a run is
-    // indistinguishable, on the two facts above, from one that died — but it is
-    // the opposite, and settling it is worse than the hang this repairs.
-    //
-    // The ordering is what makes it worse rather than merely wrong. The rebuild
-    // false positive this block already accepts is self-correcting because the
-    // run's real finish lands *after* the synthetic one, and the fold settles an
-    // entry from the last finish it sees. Here the real finish lands *first*, so
-    // the synthetic one wins for good: a successful run reads
-    // `INTERRUPTED_BY_RESTART` permanently, and because the fold overwrites
-    // `deliveries` from whichever finish settles last, the record of what it
-    // sent is replaced by an empty list.
-    //
-    // So before writing anything, read the journal on from where the snapshot
-    // stopped and drop any candidate whose finish turns up there. That is
-    // exact rather than a heuristic: a run whose start was in the snapshot was
-    // registered before it (`begin` precedes both the spawn and the runner's
-    // `WorkflowRunStarted`), so a candidate missing from `live()` has already
-    // been deregistered — and a deregistered run journaled its finish first, if
-    // it was ever going to. Anything appended before that point is at a higher
-    // sequence than the whole snapshot, so this second read cannot miss it.
-    //
-    // Cheap where it matters: it runs only when there are candidates at all,
-    // which after the first settle is nothing, and it reads only the tail.
-    if !dead.is_empty() {
-        match company
+    // Issue #1012: this cross-check only makes sense against "now" — an
+    // older page (a `before_seq` cursor was given) is not the newest state,
+    // so a `running: true` row on it is out of scope here: either it was
+    // already resolved by an earlier newest-page read (whose synthetic
+    // finish will surface naturally once an older page's window reaches
+    // that seq), or it is a genuinely long-lived run outside what
+    // pagination is meant to answer.
+    if query.before_seq.is_none() {
+        // Issue #1009: cross-check the still-`running` rows against the live run set
+        // and settle the ones nobody is running.
+        //
+        // The fold above marks a start with no finish `running: true`, which is only
+        // ever settled by the boot sweep ([`sweep_interrupted_runs`]). Three ways a
+        // finish never lands — a task that panicked, an append that failed, a host
+        // that died — therefore all read as an eternal spinner *until the next host
+        // restart*, with a Stop button that cannot help and a 2s console poll that
+        // never stops. This closes the gap between restarts: any run the fold thinks
+        // is in flight whose id is **absent** from the supervisor's live set has no
+        // task behind it here and now, so it is journaled a synthetic finish (the
+        // same `INTERRUPTED_BY_RESTART` the boot sweep uses) and flipped in the
+        // in-memory row, so this very response is already self-consistent.
+        //
+        // Keyed strictly on `live()` membership. A run the current process is
+        // genuinely running is registered there and is left untouched — the watchdog
+        // (issue #1009, path A) is what guarantees a *panicking* run never reaches
+        // this predicate, because it journals its own finish before its guard drops.
+        //
+        // The one accepted false positive: a run that survived a live
+        // `rebuild_company` swap is registered on the *old* supervisor and so is
+        // absent from the successor's `live()`, so this could settle a run that is
+        // still walking its graph. Accepted because (i) the watchdog keeps panics out
+        // of this path entirely, (ii) that run's real finish lands later in journal
+        // order and wins the read's last-writer-wins display, and (iii) it is the
+        // same class the boot sweep already accepts — which is why that sweep gates
+        // on the handover being absent (see the runtime builder call site). It never
+        // corrupts the journal: that run's second, truthful finish lands *after* the
+        // synthetic one and so supersedes it.
+        //
+        // That last argument turns on ORDER, and it does not carry to a run which
+        // settles inside this request — there the truthful finish lands first and
+        // loses. See the window handled below; it is closed rather than accepted.
+        let live_ids: HashSet<String> = company
             .runtime
-            .events()
-            .read_from(
-                company.id(),
-                EventSeq::new(read_through.saturating_add(1)),
-                usize::MAX,
-            )
-            .await
-        {
-            Ok(tail) => {
-                let settled_since: HashSet<String> = tail
-                    .into_iter()
-                    .filter_map(|stored| match stored.event {
-                        CompanyEvent::WorkflowRunFinished {
-                            run_id: Some(run_id),
-                            ..
-                        } => Some(run_id),
-                        _ => None,
-                    })
-                    .collect();
-                dead.retain(|index| {
-                    runs[*index]
-                        .run_id
-                        .as_ref()
-                        .is_none_or(|run_id| !settled_since.contains(run_id))
-                });
+            .run_supervisor()
+            .live()
+            .into_iter()
+            .map(|(run_id, _workflow_id)| run_id)
+            .collect();
+        let mut dead: Vec<usize> = Vec::new();
+        for (index, entry) in runs.iter().enumerate() {
+            if !entry.running {
+                continue;
             }
-            Err(err) => {
-                // Unprovable, so nothing is settled. The row keeps reporting
-                // `running` and a later poll retries — strictly better than
-                // stamping "interrupted" on a run that may well be finishing.
-                tracing::warn!(
-                    company = %company.id(),
-                    %err,
-                    "could not re-read the journal to confirm a workflow run is dead; \
-                     leaving it as running"
-                );
-                dead.clear();
+            let Some(run_id) = entry.run_id.as_ref() else {
+                continue;
+            };
+            if live_ids.contains(run_id) {
+                continue;
             }
+            dead.push(index);
         }
-    }
 
-    for index in &dead {
-        let entry = &mut runs[*index];
-        let Some(run_id) = entry.run_id.clone() else {
-            continue;
-        };
-        // Durable half: append the finish so it survives this response, folds
-        // settled on the next `GET …/workflows/runs`, and stops the boot sweep
-        // from having to. Best-effort by construction — a failed append leaves
-        // the row as the in-memory flip below still makes it, and the next read
-        // simply retries.
-        crate::runtime::record_run_finished(
-            company.runtime.events(),
-            company.id(),
-            &entry.workflow_id,
-            entry.scheduled,
-            &run_id,
-            Err(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART.into()),
-        )
-        .await;
-        // In-memory half: flip the row this response returns, so the console does
-        // not have to wait for the next poll to stop the spinner.
-        entry.running = false;
-        entry.error = Some(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART.to_string());
-    }
-
-    // ── Serve the row the NEXT read will fold, identically ──────────────────
-    //
-    // The fold keys a settled entry on its **finish**, taking `seq` and
-    // `at_millis` from that row. So flipping `running` while leaving the
-    // start's values in place means this response and the one 2s later carry
-    // *different* `seq` for the same run — and the console keys its history
-    // rows on exactly that field (`RunHistoryPanel`: `key={run.seq}`, with
-    // `selectedRunSeq` / `fixingRunSeq` / `fixReason.seq` compared against it).
-    // The row remounts and any selection on it is dropped, in the one window
-    // where an operator is most likely to be looking: the 2s recovery poll runs
-    // precisely because someone is watching this run.
-    //
-    // So the appended rows are read back and their real `seq` / `at_millis`
-    // stamped on. Read back rather than returned from `record_run_finished`,
-    // which reports only whether the append happened — the values served are
-    // then the durable ones rather than a second construction of them.
-    if !dead.is_empty() {
-        match company
-            .runtime
-            .events()
-            .read_from(
-                company.id(),
-                EventSeq::new(read_through.saturating_add(1)),
-                usize::MAX,
-            )
-            .await
-        {
-            Ok(appended) => {
-                let stamped: std::collections::HashMap<String, (u64, u64)> = appended
-                    .into_iter()
-                    .filter_map(|stored| match stored.event {
-                        CompanyEvent::WorkflowRunFinished {
-                            run_id: Some(run_id),
-                            ..
-                        } => Some((run_id, (stored.seq.value(), stored.at_millis))),
-                        _ => None,
-                    })
-                    .collect();
-                for index in &dead {
-                    let entry = &mut runs[*index];
-                    let Some((seq, at_millis)) =
-                        entry.run_id.as_ref().and_then(|id| stamped.get(id))
-                    else {
-                        continue;
-                    };
-                    entry.seq = *seq;
-                    entry.at_millis = *at_millis;
+        // ── The window between the snapshot and `live()` ────────────────────────
+        //
+        // `live()` is consulted AFTER the journal snapshot was taken, and a run can
+        // settle in between: it appends its finish (too late for the snapshot) and
+        // then drops its guard (in time to be missing from `live()`). Such a run is
+        // indistinguishable, on the two facts above, from one that died — but it is
+        // the opposite, and settling it is worse than the hang this repairs.
+        //
+        // The ordering is what makes it worse rather than merely wrong. The rebuild
+        // false positive this block already accepts is self-correcting because the
+        // run's real finish lands *after* the synthetic one, and the fold settles an
+        // entry from the last finish it sees. Here the real finish lands *first*, so
+        // the synthetic one wins for good: a successful run reads
+        // `INTERRUPTED_BY_RESTART` permanently, and because the fold overwrites
+        // `deliveries` from whichever finish settles last, the record of what it
+        // sent is replaced by an empty list.
+        //
+        // So before writing anything, read the journal on from where the snapshot
+        // stopped and drop any candidate whose finish turns up there. That is
+        // exact rather than a heuristic: a run whose start was in the snapshot was
+        // registered before it (`begin` precedes both the spawn and the runner's
+        // `WorkflowRunStarted`), so a candidate missing from `live()` has already
+        // been deregistered — and a deregistered run journaled its finish first, if
+        // it was ever going to. Anything appended before that point is at a higher
+        // sequence than the whole snapshot, so this second read cannot miss it.
+        //
+        // Cheap where it matters: it runs only when there are candidates at all,
+        // which after the first settle is nothing, and it reads only the tail.
+        if !dead.is_empty() {
+            match company
+                .runtime
+                .events()
+                .read_from(
+                    company.id(),
+                    EventSeq::new(read_through.saturating_add(1)),
+                    usize::MAX,
+                )
+                .await
+            {
+                Ok(tail) => {
+                    let settled_since: HashSet<String> = tail
+                        .into_iter()
+                        .filter_map(|stored| match stored.event {
+                            CompanyEvent::WorkflowRunFinished {
+                                run_id: Some(run_id),
+                                ..
+                            } => Some(run_id),
+                            _ => None,
+                        })
+                        .collect();
+                    dead.retain(|index| {
+                        runs[*index]
+                            .run_id
+                            .as_ref()
+                            .is_none_or(|run_id| !settled_since.contains(run_id))
+                    });
+                }
+                Err(err) => {
+                    // Unprovable, so nothing is settled. The row keeps reporting
+                    // `running` and a later poll retries — strictly better than
+                    // stamping "interrupted" on a run that may well be finishing.
+                    tracing::warn!(
+                        company = %company.id(),
+                        %err,
+                        "could not re-read the journal to confirm a workflow run is dead; \
+                         leaving it as running"
+                    );
+                    dead.clear();
                 }
             }
-            Err(err) => {
-                // The settle itself stands — it is already durable. Only the
-                // row's identity is left at the start's, which the next read
-                // corrects.
-                tracing::warn!(
-                    company = %company.id(),
-                    %err,
-                    "settled a dead workflow run but could not read back its finish row; \
-                     this response carries the start's seq and time"
-                );
+        }
+
+        for index in &dead {
+            let entry = &mut runs[*index];
+            let Some(run_id) = entry.run_id.clone() else {
+                continue;
+            };
+            // Durable half: append the finish so it survives this response, folds
+            // settled on the next `GET …/workflows/runs`, and stops the boot sweep
+            // from having to. Best-effort by construction — a failed append leaves
+            // the row as the in-memory flip below still makes it, and the next read
+            // simply retries.
+            crate::runtime::record_run_finished(
+                company.runtime.events(),
+                company.id(),
+                &entry.workflow_id,
+                entry.scheduled,
+                &run_id,
+                Err(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART.into()),
+            )
+            .await;
+            // In-memory half: flip the row this response returns, so the console does
+            // not have to wait for the next poll to stop the spinner.
+            entry.running = false;
+            entry.error =
+                Some(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART.to_string());
+        }
+
+        // ── Serve the row the NEXT read will fold, identically ──────────────────
+        //
+        // The fold keys a settled entry on its **finish**, taking `seq` and
+        // `at_millis` from that row. So flipping `running` while leaving the
+        // start's values in place means this response and the one 2s later carry
+        // *different* `seq` for the same run — and the console keys its history
+        // rows on exactly that field (`RunHistoryPanel`: `key={run.seq}`, with
+        // `selectedRunSeq` / `fixingRunSeq` / `fixReason.seq` compared against it).
+        // The row remounts and any selection on it is dropped, in the one window
+        // where an operator is most likely to be looking: the 2s recovery poll runs
+        // precisely because someone is watching this run.
+        //
+        // So the appended rows are read back and their real `seq` / `at_millis`
+        // stamped on. Read back rather than returned from `record_run_finished`,
+        // which reports only whether the append happened — the values served are
+        // then the durable ones rather than a second construction of them.
+        if !dead.is_empty() {
+            match company
+                .runtime
+                .events()
+                .read_from(
+                    company.id(),
+                    EventSeq::new(read_through.saturating_add(1)),
+                    usize::MAX,
+                )
+                .await
+            {
+                Ok(appended) => {
+                    let stamped: std::collections::HashMap<String, (u64, u64)> = appended
+                        .into_iter()
+                        .filter_map(|stored| match stored.event {
+                            CompanyEvent::WorkflowRunFinished {
+                                run_id: Some(run_id),
+                                ..
+                            } => Some((run_id, (stored.seq.value(), stored.at_millis))),
+                            _ => None,
+                        })
+                        .collect();
+                    for index in &dead {
+                        let entry = &mut runs[*index];
+                        let Some((seq, at_millis)) =
+                            entry.run_id.as_ref().and_then(|id| stamped.get(id))
+                        else {
+                            continue;
+                        };
+                        entry.seq = *seq;
+                        entry.at_millis = *at_millis;
+                    }
+                }
+                Err(err) => {
+                    // The settle itself stands — it is already durable. Only the
+                    // row's identity is left at the start's, which the next read
+                    // corrects.
+                    tracing::warn!(
+                        company = %company.id(),
+                        %err,
+                        "settled a dead workflow run but could not read back its finish row; \
+                         this response carries the start's seq and time"
+                    );
+                }
             }
         }
-    }
-
-    // Issue #981: the run verdicts, read in ONE pass, here — after the fold has
-    // settled every open row and after the #1009 cross-check has flipped the
-    // dead ones to `error: INTERRUPTED_BY_RESTART`.
-    //
-    // Position is the correctness argument. Every input the verdict reads is
-    // written by the settle arm *after* its row was pushed (`running`, `error`,
-    // `cancelled`, `deliveries`, `pendingApprovals`, `blockedNodes`), and two of
-    // them are written again by the cross-check above. Deriving at construction
-    // would score the row the fold had at the time and never revisit it — the
-    // exact staleness a *stored* verdict would have, reintroduced by placement.
-    for run in &mut runs {
-        run.verdict = run.derive_verdict();
     }
 
     // Newest first: a history panel leads with the run that just happened —
@@ -3104,6 +3110,12 @@ async fn list_runs(
     // share a millisecond) and is itself unique and monotonic, so the order is
     // total and stable. The `limit` cut then keeps the most recently finished
     // runs, which is the number the caller was asking about all along.
+    //
+    // Issue #1189: this stays ABOVE the verdict pass (moved to the very end,
+    // below the reconciliation join). Neither the sort nor `truncate` touches
+    // a single field of a row — they reorder and drop whole rows — so the
+    // invariant the verdict pass is placed on ("derive after everything that
+    // can still change its inputs") is not weakened by running them first.
     runs.sort_by(|a, b| b.at_millis.cmp(&a.at_millis).then(b.seq.cmp(&a.seq)));
 
     // Cursor (issue #1012, composite as of PR #1090 review): drop everything at
@@ -3142,50 +3154,103 @@ async fn list_runs(
     let next_before_at_millis = has_more.then(|| runs[limit - 1].at_millis);
     runs.truncate(limit);
 
-    // Issue #1143. A blocked node's `approval_ids` is a receipt of what the run
-    // parked, and a receipt cannot go stale — but the *question* it points at
-    // can. `ApprovalParked` is journaled at `Durability::Process` on the stated
-    // reasoning that losing it is harmless because "the agent parks it again on
-    // its next attempt". That holds for a chat turn, which retries; it is false
-    // for a workflow run, which halted at the blocked node and never re-enters
-    // the gate. So a run that outlived its own approvals goes on reporting that
-    // it waits on cards the queue does not have, and the drawer's "decide in
-    // Approvals" links land on an empty page. #1145 carries the durability
-    // decision; this reconciliation deliberately does not pre-empt it.
+    // Issues #1143 + #1189. A run's record of what it stopped for is a receipt
+    // and cannot go stale — but the *question* it points at can. `ApprovalParked`
+    // is journaled at `Durability::Process` on the stated reasoning that losing
+    // it is harmless because "the agent parks it again on its next attempt".
+    // That holds for a chat turn, which retries; it is false for a workflow run,
+    // which halted at the gate and never re-enters it. So a run that outlived
+    // its own approvals goes on reporting that it waits on cards the queue does
+    // not have. #1145 carries the durability decision; this reconciliation
+    // deliberately does not pre-empt it.
+    //
+    // TWO joins, because a run has two ways to stop for a person and they leave
+    // different traces:
+    //
+    // * `blockedNodes[].approvalIds` — the ids an agent node's gated calls
+    //   parked. Those cards are tool-call effects and carry no node id, so the
+    //   only key is the id (issue #1143).
+    // * `pendingApprovals` — the gate nodes the engine paused at. Their cards
+    //   are `workflow.approve` effects that record no receipt and no
+    //   blocked-node row at all, so #1143's id-keyed join structurally could not
+    //   reach them; they are joined on `(run_id, node_id)` instead (issue
+    //   #1189). This is the bigger half: 34 of the marketing tenant's 60 runs.
     //
     // Done HERE, on the read, for the same reason `relabel_blocked` above
     // relabels rather than rewriting the durable node rows: the journal records
     // what happened and is not edited to reflect what is true now. After the
     // truncate, so the join costs one journal snapshot and covers only the rows
     // actually being returned — and skipped entirely when no returned run
-    // parked anything, which is nearly every read.
-    if runs
-        .iter()
-        .any(|r| r.blocked_nodes.iter().any(|b| !b.approval_ids.is_empty()))
-    {
-        let live: std::collections::HashSet<String> = company
-            .runtime
-            .pending_approvals()
-            .into_iter()
-            .map(|a| a.id.as_ref().to_string())
-            .collect();
+    // stopped for anybody, which is nearly every read.
+    if runs.iter().any(|r| {
+        !r.pending_approvals.is_empty()
+            || r.blocked_nodes.iter().any(|b| !b.approval_ids.is_empty())
+    }) {
+        let live = company.runtime.live_approvals();
         for run in &mut runs {
             for blocked in &mut run.blocked_nodes {
                 blocked.stranded = blocked
                     .approval_ids
                     .iter()
-                    .filter(|id| !live.contains(id.as_str()))
+                    .filter(|id| !live.holds_id(id))
                     .count();
             }
+            run.stranded_approvals = crate::ports::workflow_verdict::stranded_approvals(
+                run.run_id.as_deref(),
+                &run.pending_approvals,
+                &run.blocked_nodes,
+                &live,
+            );
         }
     }
 
-    Ok(Json(RunsPage {
+    // Issue #981: the run verdicts, read in ONE pass, here — after the fold has
+    // settled every open row, after the #1009 cross-check has flipped the dead
+    // ones to `error: INTERRUPTED_BY_RESTART`, and (issue #1189) after the
+    // reconciliation above.
+    //
+    // Position is the correctness argument. Every input the verdict reads is
+    // written by the settle arm *after* its row was pushed (`running`, `error`,
+    // `cancelled`, `deliveries`, `pendingApprovals`, `blockedNodes`), two of
+    // them are written again by the cross-check, and `strandedApprovals` is
+    // written by the join. Deriving at construction — or, as it was until
+    // #1189, before the join — scores the row against inputs that have since
+    // moved underneath it: the exact staleness a *stored* verdict would have,
+    // reintroduced by placement.
+    for run in &mut runs {
+        run.verdict = run.derive_verdict();
+    }
+
+    Ok(Json(WorkflowRunsResponse {
         runs,
         has_more,
         next_before_seq,
         next_before_at_millis,
     }))
+}
+
+/// The `GET …/workflows/runs` response body (issue #1012).
+///
+/// Wrapped rather than a bare array — as this route answered before — because
+/// `hasMore` has nowhere else to ride: the console's history drawer cannot
+/// otherwise tell "this is the whole history" from "this page was truncated at
+/// `limit`", which is exactly the silent-truncation half of the issue.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowRunsResponse {
+    runs: Vec<WorkflowRunOutcome>,
+    /// Whether a further, older page exists behind the cursor below.
+    has_more: bool,
+    /// The `?before_seq=` cursor for the next (older) page — the `seq` of this
+    /// page's last row. `None` exactly when `has_more` is false, so a caller can
+    /// stop as soon as it is absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_before_seq: Option<u64>,
+    /// The `?before_at_millis=` half of the cursor — this page's last row's
+    /// `at_millis`, to send back alongside `next_before_seq` (PR #1090
+    /// review). `None` under the same condition as `next_before_seq`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_before_at_millis: Option<u64>,
 }
 
 /// Relabels a run's node rows for the nodes it blocked on a human (issue #881).
@@ -4430,6 +4495,64 @@ mod tests {
                 "{message}"
             );
             assert!(message.contains("engineering"), "{message}");
+        }
+
+        /// Issue #1191: the refusal is the SAME envelope every sibling node-config
+        /// rule answers with — `workflow_invalid` plus a `problems` array whose
+        /// entry names the node and the field.
+        ///
+        /// It used to be `invalid_request` with no array at all, because the rule
+        /// sat outside the `problems` accumulator on the write route. So the
+        /// console, which reads `problems` to highlight the offending node
+        /// (#1123), got a flat banner for exactly the class of error #836 was
+        /// filed about. Asserting the envelope rather than the sentence is the
+        /// point: the sentence never changed.
+        #[tokio::test]
+        async fn an_undeliverable_channel_answers_with_a_located_problem() {
+            let home_dir = home();
+            let state = desk_state(home_dir.path()).await;
+
+            let response = post_create(
+                state,
+                body_with_destination("channel", Some("engineering-desk")),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = json_body(response).await;
+            assert_eq!(body["code"], "workflow_invalid", "{body}");
+            assert_eq!(body["problems"][0]["node_id"], "done", "{body}");
+            assert_eq!(body["problems"][0]["field"], "destination.target", "{body}");
+            assert!(
+                body["problems"][0]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("is not a workflow delivery channel"),
+                "{body}"
+            );
+        }
+
+        /// The sibling rule on the same field: a `channel` destination with no
+        /// `target` is located too (issue #1191). It was always a
+        /// `workflow_invalid`, but the entry carried `node_id: null` and
+        /// `field: null` because the load path mints it as a flat string.
+        #[tokio::test]
+        async fn a_channel_destination_with_no_target_is_located_too() {
+            let home_dir = home();
+            let state = desk_state(home_dir.path()).await;
+
+            let response = post_create(state, body_with_destination("channel", None)).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = json_body(response).await;
+            assert_eq!(body["code"], "workflow_invalid", "{body}");
+            assert_eq!(body["problems"][0]["node_id"], "done", "{body}");
+            assert_eq!(body["problems"][0]["field"], "destination.target", "{body}");
+            assert!(
+                body["problems"][0]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("name the channel to post the report to"),
+                "{body}"
+            );
         }
 
         /// The guard refuses what delivery would refuse and nothing more: a real
@@ -6111,6 +6234,15 @@ mod tests {
                 "an approval id the journal no longer holds must read as stranded, \
                  or the drawer goes on linking to an empty queue: {body}"
             );
+            // Issue #1189, and the assertion that pins the reordering: the
+            // verdict pass now runs AFTER this join, so it can see what the join
+            // wrote. With the old ordering the row read `blocked` here — the
+            // blocked-node list said "cannot be continued" and the run's own
+            // one-word reading said "go and decide it", on the same row.
+            assert_eq!(
+                body["runs"][0]["verdict"], "stranded",
+                "the verdict must be derived after the reconciliation, not before it: {body}"
+            );
         }
 
         /// The other direction, and the reason the test above proves anything.
@@ -6195,6 +6327,200 @@ mod tests {
                 body["runs"][0]["blockedNodes"][0].get("stranded").is_none(),
                 "a parked approval is still decidable, so nothing may be marked \
                  stranded: {body}"
+            );
+            assert_eq!(
+                body["runs"][0]["verdict"], "blocked",
+                "a run with a live card is still blocked, not stranded: {body}"
+            );
+        }
+
+        /// Issue #1189, THE regression test for the bigger half of the defect.
+        ///
+        /// The marketing tenant's shape, verbatim: gate nodes on
+        /// `pendingApprovals`, `blockedNodes` empty, `approvals` empty, and an
+        /// empty queue. #1143's join is keyed on approval ids this shape never
+        /// records, so it could not touch these rows — 34 of the tenant's 60
+        /// runs went on scoring `awaiting-approval` about a person with nothing
+        /// to answer.
+        #[tokio::test]
+        async fn run_history_scores_a_gate_run_with_no_live_card_as_stranded() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_start(&state, &id, "sports_blog", "run-g", true).await;
+            let runtime = state.registry().get(&id).expect("registered");
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: "sports_blog".to_string(),
+                        scheduled: true,
+                        run_id: Some("run-g".to_string()),
+                        deliveries: Vec::new(),
+                        pending_approvals: vec!["fetch_bbc".to_string(), "fetch_espn".to_string()],
+                        error: None,
+                        cancelled: false,
+                        notices: Vec::new(),
+                        board: Vec::new(),
+                        // The whole point of this shape: a paused gate writes
+                        // NEITHER of the two things #1143 reads.
+                        blocked_nodes: Vec::new(),
+                        approvals: Vec::new(),
+                    },
+                )
+                .await
+                .expect("append");
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert_eq!(
+                body["runs"][0]["strandedApprovals"], 2,
+                "both gates lost their card, and nothing else on this row says so: {body}"
+            );
+            assert_eq!(
+                body["runs"][0]["verdict"], "stranded",
+                "nothing in the queue is waiting on this run: {body}"
+            );
+        }
+
+        /// The negative twin, and the reason the test above proves anything.
+        ///
+        /// A join that marked every gate run stranded would satisfy it and be
+        /// far worse than no join: it would retire runs an operator can still
+        /// act on. Here the gate's card is genuinely parked — a real
+        /// `workflow.approve` effect carrying this run's id and this node's id,
+        /// which is the pair the join keys on — so the run stays awaiting and
+        /// `strandedApprovals` is skipped off the wire entirely.
+        #[tokio::test]
+        async fn run_history_leaves_a_gate_run_with_a_live_card_awaiting() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+
+            // Built by the same `gate_effect` the runner parks with, so the
+            // shape the join reads is the shape the park writes.
+            let effect = crate::runtime::workflow_resume::gate_effect(
+                "sports_blog",
+                "fetch_bbc",
+                &serde_json::json!({}),
+                "run-live-gate",
+                &[],
+                &[],
+                None,
+            );
+            let approval_id = runtime
+                .approvals
+                .park(runtime.id(), effect.clone())
+                .await
+                .expect("park");
+            runtime
+                .journal()
+                .record_parked(
+                    &approval_id,
+                    &effect,
+                    crate::ports::now_millis(),
+                    crate::runtime::journal::TaskLink::Unlinked,
+                    crate::runtime::journal::ApprovalConversation {
+                        thread: None,
+                        parent: None,
+                    },
+                    None,
+                )
+                .await
+                .expect("record");
+
+            journal_start(&state, &id, "sports_blog", "run-live-gate", true).await;
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: "sports_blog".to_string(),
+                        scheduled: true,
+                        run_id: Some("run-live-gate".to_string()),
+                        deliveries: Vec::new(),
+                        pending_approvals: vec!["fetch_bbc".to_string()],
+                        error: None,
+                        cancelled: false,
+                        notices: Vec::new(),
+                        board: Vec::new(),
+                        blocked_nodes: Vec::new(),
+                        approvals: Vec::new(),
+                    },
+                )
+                .await
+                .expect("append");
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert!(
+                body["runs"][0].get("strandedApprovals").is_none(),
+                "the gate's card is on the queue, so nothing may be marked stranded: {body}"
+            );
+            assert_eq!(
+                body["runs"][0]["verdict"], "awaiting-approval",
+                "a decidable gate is still awaiting a person: {body}"
+            );
+        }
+
+        /// A row journaled before issue #371 carries no `run_id`, so the
+        /// `(run, node)` join has no key at all.
+        ///
+        /// It must therefore be left exactly as it read before #1189. Calling
+        /// its gates stranded on the strength of a *missing field* would retire
+        /// live work — the failure mode that is strictly worse than the one this
+        /// issue closes, because an operator cannot argue with a run the console
+        /// says is over.
+        #[tokio::test]
+        async fn run_history_leaves_a_pre_371_row_unreconciled() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: "sports_blog".to_string(),
+                        scheduled: true,
+                        // The pre-#371 shape: no correlation id, and so no start
+                        // row to pair with either.
+                        run_id: None,
+                        deliveries: Vec::new(),
+                        pending_approvals: vec!["fetch_bbc".to_string()],
+                        error: None,
+                        cancelled: false,
+                        notices: Vec::new(),
+                        board: Vec::new(),
+                        blocked_nodes: Vec::new(),
+                        approvals: Vec::new(),
+                    },
+                )
+                .await
+                .expect("append");
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert!(
+                body["runs"][0].get("strandedApprovals").is_none(),
+                "a row with no run id cannot be joined, so it must report nothing: {body}"
+            );
+            assert_eq!(
+                body["runs"][0]["verdict"], "awaiting-approval",
+                "an unjoinable row keeps the reading it had before #1189: {body}"
             );
         }
 
@@ -6560,38 +6886,42 @@ mod tests {
             assert_eq!(by_id("run-b")["nodes"].as_array().unwrap().len(), 1);
         }
 
-        /// **Issue #1012.** Run history is ordered by when each run *finished*,
-        /// not when it started. Two runs that start `a`-then-`b` but finish
-        /// `b`-then-`a` must come back newest-finish first — `run-a` leading —
-        /// because that is the order the run whose outcome an operator most
-        /// recently learned belongs in. Before the fix the fold returned start
-        /// order reversed (`runs.reverse()`), so the run that finished FIRST led
-        /// the list and `runs[0]` was the wrong "last run".
+        /// Issue #1012. Two interleaved runs — `run-a` starts first but
+        /// `run-b` finishes last — must come back ordered by **finish**, the
+        /// field every row displays, not by the order they started. The old
+        /// `runs.reverse()` only flipped the fold's push order (start order),
+        /// so this exact fixture used to list `run-a` first despite `run-b`
+        /// carrying the newer `seq`/`atMillis`.
         #[tokio::test]
         async fn run_history_orders_by_finish_not_start() {
             let home_dir = home();
             let home = home_dir.path().to_path_buf();
             let (state, _store, id) = hosted_state(&home).await;
 
-            // Start a, start b, finish b, finish a: `run-a` is the most recently
-            // FINISHED, though it started first.
-            journal_start(&state, &id, "digest", "run-a", false).await;
-            journal_start(&state, &id, "digest", "run-b", false).await;
-            journal_finish(&state, &id, "digest", "run-b", false, None).await;
-            journal_finish(&state, &id, "digest", "run-a", false, None).await;
+            // Start order: a, then b. Finish order: a, then b — so b is both
+            // the last to start AND the last to finish, which alone would not
+            // distinguish "ordered by start" from "ordered by finish". Insert
+            // a THIRD run, `c`, that starts before `b` but finishes before `a`
+            // too, so the two orderings genuinely disagree on where it lands.
+            journal_start(&state, &id, "wf", "run-a", false).await;
+            journal_start(&state, &id, "wf", "run-c", false).await;
+            journal_finish(&state, &id, "wf", "run-c", false, None).await;
+            journal_start(&state, &id, "wf", "run-b", false).await;
+            journal_finish(&state, &id, "wf", "run-a", false, None).await;
+            journal_finish(&state, &id, "wf", "run-b", false, None).await;
 
+            // Start order: a, c, b. Finish order: c, a, b.
+            // By-start reversal would read: b, c, a (wrong).
+            // By-finish descending must read: b, a, c.
             let response = router(state)
                 .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
                 .await
                 .unwrap();
             let body = json_body(response).await;
             let rows = body["runs"].as_array().expect("array");
-            assert_eq!(rows.len(), 2, "{body}");
-            // Newest finish leads: `run-a` settled last. Start-order-reversed —
-            // the pre-#1012 behaviour — led with `run-b`, the run that finished
-            // first, which is the bug.
-            assert_eq!(rows[0]["runId"], "run-a", "newest finish leads: {body}");
-            assert_eq!(rows[1]["runId"], "run-b", "{body}");
+            assert_eq!(rows.len(), 3, "{body}");
+            let ids: Vec<&str> = rows.iter().map(|r| r["runId"].as_str().unwrap()).collect();
+            assert_eq!(ids, vec!["run-b", "run-a", "run-c"], "{body}");
         }
 
         /// **Issue #1012.** The `limit` cut keeps the most recently *finished*
@@ -7686,13 +8016,10 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
-            let rows = json_body(response).await;
-            assert_eq!(
-                rows["runs"].as_array().unwrap().len(),
-                1,
-                "past runs must outlive the workflow: {rows}"
-            );
-            assert_eq!(rows["runs"][0]["workflowId"], "greeter");
+            let body = json_body(response).await;
+            let rows = body["runs"].as_array().unwrap();
+            assert_eq!(rows.len(), 1, "past runs must outlive the workflow: {body}");
+            assert_eq!(rows[0]["workflowId"], "greeter");
         }
 
         #[tokio::test]

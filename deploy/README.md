@@ -22,6 +22,13 @@ Switch companies by editing `OPENCOMPANY_COMPANY` in `.env` and re-running
 `docker compose up`. Compile optional features into the host with
 `OPENCOMPANY_FEATURES="medulla tinyplace sqlite"`.
 
+For a selectable memory engine, add `tinymemory` (hosted engines —
+Supermemory, Mem0, Cognee — plus the `null` driver) and `tinymemory-embedded`
+(the durable in-pod `namespace` store) to `OPENCOMPANY_FEATURES`, then select
+one with the `OPENCOMPANY_MEMORY*` variables (`.env.example` has the block;
+`docs/spec/runtime/memory-engine.md` has the full guide and the
+engine-switch runbook).
+
 The console upstream is configurable via `OC_UPSTREAM` (default
 `opencompany:8080`), so the console image is portable across every target here.
 

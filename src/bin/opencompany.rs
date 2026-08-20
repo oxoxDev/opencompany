@@ -1486,7 +1486,16 @@ async fn async_main() -> Result<()> {
             // memory + context ports onto a dedicated engine on top of the base
             // backend. A selected-but-unavailable engine aborts boot, same as
             // the storage backend.
-            if let Some(overlay) = opencompany::store::open_memory_overlay(&storage_settings)? {
+            if let Some(mut overlay) = opencompany::store::open_memory_overlay(&storage_settings)? {
+                // One bounded reachability probe, so a dead endpoint or a
+                // revoked key shows on `/spec` at boot instead of surfacing as
+                // a mid-cycle failure days later. Advisory: it warns and
+                // records, never refuses — config errors already refused
+                // above, and a transient vendor outage must not crash-loop
+                // the tenant.
+                overlay
+                    .refresh_health(std::time::Duration::from_secs(5))
+                    .await;
                 state = state.with_memory_overlay(overlay);
                 // `as_str`, not `{:?}`: the enum's Debug name is `Tinycortex`
                 // while `/spec` and the docs call that engine `embedded`. An

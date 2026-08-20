@@ -726,7 +726,7 @@ function DetailHeader({
   return (
     <div className="rounded-xl border bg-card p-4">
       <div className="flex items-start justify-between gap-3">
-        <h2 className="text-lg font-semibold leading-snug">{task.title}</h2>
+        <h1 className="text-lg font-semibold leading-snug">{task.title}</h1>
         <Badge
           variant="outline"
           className={cn("shrink-0 capitalize", priorityStyle(task.priority))}

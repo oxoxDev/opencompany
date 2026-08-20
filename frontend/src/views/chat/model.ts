@@ -2,7 +2,7 @@
 // rules the timeline reads. Everything here is pure — the view owns the state.
 
 import type { ApprovalSummary, DeskDto, Verdict } from "@/api/types";
-import type { ChatMessage, Reaction } from "@/lib/chat";
+import { clearTaskCard, type ChatMessage, type Reaction } from "@/lib/chat";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { initials as nameInitials, type TeamMember } from "@/lib/team";
 
@@ -381,21 +381,27 @@ function sentence(s: string): string {
 }
 
 /**
- * The face a DM wears — the `Avatar` seed for the teammate on the other end —
- * or `null` for anything that has no face: a channel, and a DM with no roster
- * entry behind it (both of those wear a glyph instead).
+ * The face a DM wears — the `TeammateAvatar` seed for the teammate on the
+ * other end — or `null` for anything that has no face: a channel, and a DM
+ * with no roster entry behind it (both of those wear a glyph instead).
  *
- * One function rather than the same two props written out at each call site,
- * because the rail row and the header sit on screen together and `Avatar`
- * derives its mascot from the `name` it is handed. A call site that seeded on
- * anything else — the teammate's id, its role — would draw a *different* face
- * for the same person a few pixels away, which is worse than the generic glyph
- * the header used to show (issue #1170). Deriving both from here is what makes
- * that drift impossible rather than merely unlikely.
+ * One function rather than the same props written out at each call site,
+ * because the rail row and the header sit on screen together, and a call site
+ * that seeded its mascot differently from another would draw a *different*
+ * face for the same person a few pixels away — worse than the generic glyph
+ * the header used to show (issue #1170). Deriving both from here is what
+ * makes that drift impossible rather than merely unlikely.
+ *
+ * `avatar` is `channel.member.avatar` — the id-seeded mascot key `fromDto`
+ * already computed onto the roster entry (issue #1185) — rather than
+ * `channel.name`: a teammate's face must survive a rename, and `TeamMember`
+ * already carries the seed that does that. `tone` needs no such rerouting;
+ * `buildChannels` already sets it from `member.tone`, which was id-seeded from
+ * the start.
  */
-export function dmFace(channel: Channel): { name: string; tone?: string } | null {
+export function dmFace(channel: Channel): { name: string; tone?: string; avatar?: string } | null {
   if (channel.kind !== "dm" || !channel.member) return null;
-  return { name: channel.name, tone: channel.tone };
+  return { name: channel.name, tone: channel.tone, avatar: channel.member.avatar };
 }
 
 /**
@@ -437,6 +443,14 @@ export interface Sender {
   name: string;
   kind: SenderKind;
   tone?: string;
+  /**
+   * The id-seeded mascot key (`TeamMember.avatar`), when the sender resolves
+   * to a roster teammate. Undefined for "you"/"system", and for an agent
+   * voice `senderOf` could not match against the roster — `TeammateAvatar`
+   * falls back to seeding on `name` in both of those cases, same as before
+   * issue #1185.
+   */
+  avatar?: string;
 }
 
 /** Channel names the host uses for its own voice rather than a named agent. */
@@ -448,23 +462,40 @@ const COMPANY_VOICE = new Set(["operator", "console", "chat", "owner", ""]);
  * The company side wears the channel's identity unless the reply names a
  * distinct originating channel — then it reads as that agent, which is how a
  * single endpoint produces a multi-voice transcript.
+ *
+ * `members` is the roster, so a named agent's face can be looked up rather
+ * than left to fall back on its title-cased channel slug (issue #1185). The
+ * host's own convention for that slug (`api/types.ts`'s note on `thread`) is
+ * a desk id for a channel reply and a roster agent id for a direct message —
+ * only the latter matches a `TeamMember.id`, so a miss here is expected for a
+ * desk-originated cross-post and simply keeps today's name-seeded fallback,
+ * never a wrong face.
  */
-export function senderOf(m: ChatMessage, channel: Channel): Sender {
+export function senderOf(m: ChatMessage, channel: Channel, members: TeamMember[]): Sender {
   if (m.from === "you") return { key: "you", name: "You", kind: "you" };
   if (m.from === "system") return { key: "system", name: "System", kind: "system" };
 
   const named = m.channel?.trim().toLowerCase() ?? "";
   if (named && !COMPANY_VOICE.has(named)) {
-    return { key: `agent:${named}`, name: titleize(m.channel ?? ""), kind: "agent", tone: named };
+    const agent = members.find((mem) => mem.id === named);
+    return {
+      key: `agent:${named}`,
+      name: titleize(m.channel ?? ""),
+      kind: "agent",
+      tone: named,
+      avatar: agent?.avatar,
+    };
   }
 
   // A desk speaks as itself and wears its own tone; only the main line — the
-  // one channel with no tone of its own — speaks as the company.
+  // one channel with no tone of its own — speaks as the company. A DM's
+  // "channel" is the teammate on the other end, so its avatar is theirs.
   return {
     key: `channel:${channel.id}`,
     name: channel.voice ?? channel.name,
     kind: channel.kind === "dm" || channel.tone ? "agent" : "company",
     tone: channel.tone,
+    avatar: channel.member?.avatar,
   };
 }
 
@@ -497,7 +528,11 @@ export interface TimelineEntry {
  * carries its own replies and renders a summary row, matching how a threaded
  * chat keeps the main channel readable.
  */
-export function buildTimeline(messages: ChatMessage[], channel: Channel): TimelineEntry[] {
+export function buildTimeline(
+  messages: ChatMessage[],
+  channel: Channel,
+  members: TeamMember[],
+): TimelineEntry[] {
   const replies = new Map<string, ChatMessage[]>();
   for (const m of messages) {
     if (!m.parentId) continue;
@@ -511,7 +546,7 @@ export function buildTimeline(messages: ChatMessage[], channel: Channel): Timeli
 
   for (const m of messages) {
     if (m.parentId) continue;
-    const sender = senderOf(m, channel);
+    const sender = senderOf(m, channel, members);
     const newDay = !prev || !sameDay(prev.message.at, m.at);
     const continuation =
       !newDay &&
@@ -766,4 +801,28 @@ export function reactionChips(reactions: Reaction[] | undefined): ReactionChip[]
     chip.by.push(row.by);
   }
   return chips;
+}
+
+/**
+ * Drop a dismissed card from **every** channel's transcript (issue #984).
+ *
+ * The channel-level counterpart of {@link clearTaskCard}, and it exists for the
+ * same reason one level up. That helper keys on the card rather than the clicked
+ * row because one card can be named by several lines; this one keys on the card
+ * rather than the active channel because those lines can sit in several
+ * *channels* — a dispatch marker lands in the origin thread's channel, not
+ * necessarily the one the operator is looking at. Clearing only the active
+ * channel leaves the rest linking to a card the host no longer has.
+ *
+ * Returns the same object when nothing changed, so React sees no new state.
+ */
+export function clearTaskCardEverywhere(transcripts: Transcripts, taskId: string): Transcripts {
+  let changed = false;
+  const next: Transcripts = {};
+  for (const [channelId, messages] of Object.entries(transcripts)) {
+    const cleared = clearTaskCard(messages, taskId);
+    if (cleared !== messages) changed = true;
+    next[channelId] = cleared;
+  }
+  return changed ? next : transcripts;
 }

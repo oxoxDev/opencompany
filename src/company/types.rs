@@ -1170,6 +1170,17 @@ pub struct AcpHarness {
     /// Which registered runner holds this scope. `runner` transport only.
     #[serde(default)]
     pub runner: Option<String>,
+    /// A model hint forwarded to the agent's own startup lever, when this
+    /// build knows one for `agent` (issue #1245).
+    ///
+    /// Not a credential — the ACP agent already holds its own, which is the
+    /// whole point of this harness kind — so this does not join
+    /// `[harness.inference]`'s prohibition on `acp` harnesses. `local`
+    /// transport only for now: the `runner` wire protocol does not carry it
+    /// yet, so validation rejects it there rather than accepting and silently
+    /// dropping it.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// `[inference]` — per-tenant Bring-Your-Own-Key inference routing (issue #56).

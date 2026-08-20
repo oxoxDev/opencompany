@@ -536,6 +536,19 @@ chargebee = ["dep:reqwest"]
 # above — backend service code, per-company credentials, only `reqwest` gated.
 paypal = ["dep:reqwest"]
 
+# WS4 one level further: `tinycortex-api` (since tinycortex@8401346,
+# tinymemory#18 §A1) re-exports the TinyMemory contract and therefore depends
+# on `tinymemory-api` by git URL. A git source is not redirected by
+# `[patch.crates-io]`, so without this section that git checkout joins the
+# graph BESIDE the vendored path copy declared above — and every shared
+# contract type (`MemoryTaint`, `MemoryEntry`, ...) becomes two distinct
+# types, which stops `tinymemory-core` compiling. openhuman carries exactly
+# this entry for itself (`[patch."https://github.com/tinyhumansai/tinymemory"]`
+# in its Cargo.toml); replicated here with the path rebased onto the vendored
+# checkout, same as the WS4 entries below.
+[patch."https://github.com/tinyhumansai/tinymemory"]
+tinymemory-api = { path = "vendor/openhuman/vendor/tinymemory/api" }
+
 [patch.crates-io]
 # Reuse OpenHuman's own TinyAgents pin (2.1.0). This satisfies OpenHuman's
 # `^2.1` requirement while keeping a single checkout and crate identity.
@@ -565,6 +578,15 @@ whisper-rs-sys = { git = "https://github.com/tinyhumansai/whisper-rs-sys.git", b
 
 [dev-dependencies]
 tempfile = "3"
+
+# The upstream driver-conformance suite (`assert_provider`, `retains_writes`),
+# run in `src/store/memory/upstream_conformance_test.rs` against the providers
+# `open_driver` constructs. Unconditional on purpose — dev-dependencies cannot
+# be optional — and cheap on purpose: the crate is contract-only
+# (tinymemory-api + async-trait + serde_json + anyhow), deliberately barred
+# from reaching any engine, so it adds no engine weight to any lane's graph.
+# Same byte-identical-path rule as the `tinymemory*` entries above.
+tinymemory-conformance = { path = "vendor/openhuman/vendor/tinymemory/conformance" }
 # `test-util` only — for `#[tokio::test(start_paused = true)]`, which the git
 # deadline test needs to fire a timeout deterministically instead of racing a
 # real child process. Dev-only: under resolver v2 this feature is not unified

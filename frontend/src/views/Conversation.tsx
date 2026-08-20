@@ -22,17 +22,29 @@ import type { OpenCompanyClient } from "@/api/client";
 import { ApiError, type TurnStep, type TurnStepKind } from "@/api/types";
 import {
   createTask,
+  deleteTask,
   listInflight,
   steerTask,
   type InflightRun,
   type SteerAction,
 } from "@/api/tasks";
 import { Markdown } from "@/components/markdown";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { type ChatMessage, makeMessage, titleFromMessage } from "@/lib/chat";
+import { clearTaskCard, type ChatMessage, makeMessage, titleFromMessage } from "@/lib/chat";
 import { WorkingIndicator } from "@/views/chat/WorkingIndicator";
 import type { Thread, ThreadContact } from "@/lib/threads";
 
@@ -182,6 +194,12 @@ function ChatPane({
   const [sending, setSending] = useState(false);
   /** The message whose "Add to board" create is in flight (issue #246). */
   const [addingId, setAddingId] = useState<string | null>(null);
+  /**
+   * The **card** whose delete is in flight — a task id, unlike its sibling
+   * `addingId` above, which is a message id. Named for the namespace it holds
+   * so the two cannot be read as the same kind of thing.
+   */
+  const [dismissingCardId, setDismissingCardId] = useState<string | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
 
   const messages = thread.messages;
@@ -268,6 +286,53 @@ function ChatPane({
     [addingId, client, company, setMessages, thread.id],
   );
 
+  /**
+   * Delete the board card a chat line opened, and stop drawing its chip
+   * (issue #984).
+   *
+   * #442 allowed a turn to open a card from an ordinary message on the grounds
+   * that *"a spurious card can be dismissed in one click"*. That click did not
+   * exist on this surface: the chip was a bare link to the card's detail
+   * screen, so dismissing a mis-fired card meant leaving chat, finding the
+   * card, and deleting it there. This is that click.
+   *
+   * Deletes on the host FIRST and clears the chip only on success, which is
+   * the opposite of the optimistic reaction toggle nearby and deliberately so:
+   * a reaction that rolls back costs nothing, whereas a chip that vanishes
+   * while the card survives tells the operator the board is clean when it is
+   * not. A refusal leaves the chip exactly where it was and says why.
+   *
+   * Clears by CARD id rather than by the message clicked - see
+   * {@link clearTaskCard}. Once the card is gone, every chip naming it is a
+   * link to a 404, not just the one under the pointer.
+   */
+  const dismissCard = useCallback(
+    async (taskId: string) => {
+      if (dismissingCardId) return;
+      setDismissingCardId(taskId);
+      try {
+        await deleteTask(client, company, taskId);
+        setMessages(thread.id, (all) => clearTaskCard(all, taskId));
+        toast.success("Card dismissed.");
+      } catch (e) {
+        // A 404 means the card is already gone — deleted from the board, most
+        // likely, which tells this surface nothing. The chip would otherwise be
+        // a permanent link to a 404 that clicking can never clear. Treat it as
+        // the success it is for the operator. Copy matches `ChatView`: the same
+        // action on two surfaces should not report itself two ways.
+        if (e instanceof ApiError && e.status === 404) {
+          setMessages(thread.id, (all) => clearTaskCard(all, taskId));
+          toast.success("That card was already gone — chip cleared.");
+        } else {
+          toast.error(e instanceof Error && e.message ? e.message : "Couldn't dismiss that card.");
+        }
+      } finally {
+        setDismissingCardId(null);
+      }
+    },
+    [client, company, dismissingCardId, setMessages, thread.id],
+  );
+
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -314,6 +379,8 @@ function ChatPane({
               prev={groups[i - 1]}
               onAddToBoard={addToBoard}
               addingId={addingId}
+              onDismissCard={dismissCard}
+              dismissingCardId={dismissingCardId}
             />
           ))}
           {sending && (
@@ -591,6 +658,8 @@ function MessageGroup({
   prev,
   onAddToBoard,
   addingId,
+  onDismissCard,
+  dismissingCardId,
 }: {
   group: Group;
   prev?: Group;
@@ -598,6 +667,10 @@ function MessageGroup({
   onAddToBoard: (message: ChatMessage) => void;
   /** The message whose create is in flight, if any. */
   addingId: string | null;
+  /** Deletes the card a line opened and drops its chip (issue #984). */
+  onDismissCard: (taskId: string) => void;
+  /** The card whose delete is in flight, if any. */
+  dismissingCardId: string | null;
 }) {
   const showDay = !prev || !sameDay(prev.at, group.at);
 
@@ -643,7 +716,13 @@ function MessageGroup({
                   mine ? "flex-row-reverse" : "flex-row",
                 )}
               >
-                <Bubble message={m} mine={mine} last={i === group.messages.length - 1} />
+                <Bubble
+                  message={m}
+                  mine={mine}
+                  last={i === group.messages.length - 1}
+                  onDismissCard={onDismissCard}
+                  dismissingCardId={dismissingCardId}
+                />
                 <AddToBoardAction
                   message={m}
                   busy={addingId === m.id}
@@ -659,7 +738,19 @@ function MessageGroup({
   );
 }
 
-function Bubble({ message, mine, last }: { message: ChatMessage; mine: boolean; last: boolean }) {
+function Bubble({
+  message,
+  mine,
+  last,
+  onDismissCard,
+  dismissingCardId,
+}: {
+  message: ChatMessage;
+  mine: boolean;
+  last: boolean;
+  onDismissCard: (taskId: string) => void;
+  dismissingCardId: string | null;
+}) {
   return (
     <div
       className={cn(
@@ -686,7 +777,15 @@ function Bubble({ message, mine, last }: { message: ChatMessage; mine: boolean; 
         // block margins so a reply stays flush inside the tight bubble padding.
         <Markdown className="[&>:first-child]:mt-0 [&>:last-child]:mb-0">{message.text}</Markdown>
       )}
-      {message.taskId && <CardChip taskId={message.taskId} mine={mine} />}
+      {message.taskId && (
+        <CardChip
+          taskId={message.taskId}
+          mine={mine}
+          busy={dismissingCardId === message.taskId}
+          disabled={dismissingCardId !== null && dismissingCardId !== message.taskId}
+          onDismiss={onDismissCard}
+        />
+      )}
     </div>
   );
 }
@@ -704,20 +803,74 @@ function Bubble({ message, mine, last }: { message: ChatMessage; mine: boolean; 
  * `clear-both` because the bubble floats its timestamp right; without it the
  * chip tucks under the time instead of starting a fresh line.
  */
-function CardChip({ taskId, mine }: { taskId: string; mine: boolean }) {
+function CardChip({
+  taskId,
+  mine,
+  busy,
+  disabled,
+  onDismiss,
+}: {
+  taskId: string;
+  mine: boolean;
+  busy: boolean;
+  disabled: boolean;
+  onDismiss: (taskId: string) => void;
+}) {
+  const tone = mine
+    ? "bg-primary-foreground/15 text-primary-foreground"
+    : "bg-accent text-accent-foreground";
   return (
-    <a
-      href={`#/tasks/${encodeURIComponent(taskId)}`}
-      className={cn(
-        "mt-1.5 flex w-fit clear-both items-center gap-1 rounded-full px-2 py-0.5 text-2xs font-medium transition-opacity hover:opacity-80",
-        mine
-          ? "bg-primary-foreground/15 text-primary-foreground"
-          : "bg-accent text-accent-foreground",
-      )}
-    >
-      <SquareKanban className="size-3 shrink-0" />
-      {mine ? "Added to the board" : "Card opened"}
-    </a>
+    <span className={cn("mt-1.5 flex w-fit clear-both items-center rounded-full", tone)}>
+      <a
+        href={`#/tasks/${encodeURIComponent(taskId)}`}
+        className="flex items-center gap-1 py-0.5 pl-2 pr-1 text-2xs font-medium transition-opacity hover:opacity-80"
+      >
+        <SquareKanban className="size-3 shrink-0" />
+        {mine ? "Added to the board" : "Card opened"}
+      </a>
+      <AlertDialog>
+        <AlertDialogTrigger
+          render={
+            <button
+              type="button"
+              // Always in the DOM and focusable rather than revealed on hover:
+              // the chip is the only place this card can be dismissed from
+              // chat, and a hover-only control is unreachable by keyboard and
+              // on touch. `AddToBoardAction` above can afford hover because
+              // its absence costs nothing.
+              className="flex items-center rounded-full py-0.5 pl-0.5 pr-1.5 transition-opacity hover:opacity-80 disabled:opacity-50"
+              disabled={busy || disabled}
+              title="Dismiss this card"
+              aria-label="Dismiss this card"
+            >
+              {busy ? (
+                <Loader2 className="size-3 shrink-0 animate-spin" />
+              ) : (
+                <X className="size-3 shrink-0" />
+              )}
+            </button>
+          }
+        />
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Dismiss this card?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This deletes the card from the board and can’t be undone. The message
+              stays in the conversation.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep card</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => onDismiss(taskId)}
+              className="bg-destructive text-white hover:bg-destructive/90"
+            >
+              Dismiss card
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </span>
   );
 }
 

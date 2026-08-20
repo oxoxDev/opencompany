@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { Check, CircleDot, Copy, Hash, Lock, PanelLeft, Users } from "lucide-react";
 
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { Avatar } from "./Avatar";
 import { channelSubtitle, channelTitle, dmFace, type Channel } from "./model";
 
 interface Props {
@@ -117,7 +117,7 @@ export function ChatHeader({
  * disagree about who you are talking to.
  *
  * `size-6` — 24px — rather than the rail's 20px: this header has the room, and
- * 24px is the floor `Avatar`'s `markOnly` draws for a mascot being legible
+ * 24px is the floor `TeammateAvatar`'s `markOnly` draws for a mascot being legible
  * rather than a smudge, so the drawing is worth rendering at all here.
  */
 function KindIcon({ channel }: { channel: Channel }) {
@@ -126,7 +126,7 @@ function KindIcon({ channel }: { channel: Channel }) {
     const face = dmFace(channel);
     // A DM with no roster entry behind it has nobody to draw — the rail falls
     // back to the same glyph rather than inventing a face for a stranger.
-    return face ? <Avatar {...face} className="size-6" /> : <CircleDot className={cls} aria-hidden />;
+    return face ? <TeammateAvatar {...face} className="size-6" /> : <CircleDot className={cls} aria-hidden />;
   }
   if (channel.private) return <Lock className={cls} aria-hidden />;
   return <Hash className={cls} aria-hidden />;

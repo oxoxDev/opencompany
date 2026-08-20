@@ -62,6 +62,20 @@ enum FailureKind {
     ServerError,
     /// A tool call was rejected by the server (JSON-RPC error in call context).
     ToolCallRejected,
+    /// The server requires OAuth, but console OAuth cannot drive it: it
+    /// advertises no RFC 7591 dynamic client registration, so there is no
+    /// client to mint and no sign-in to complete (issue #1260).
+    ///
+    /// Distinct from [`FailureKind::OauthRequired`] because the operator's next
+    /// action is the opposite one — paste a static token, rather than press a
+    /// Sign in button that cannot succeed.
+    ///
+    /// Only ever constructed by `refine_oauth_capability`, which is itself
+    /// gated on `feature = "mcp"` (no `mcp` feature means no `oauth/start`
+    /// route, so there is nothing to downgrade) — so this variant is
+    /// legitimately unconstructed in builds without that feature.
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
+    StaticTokenRequired,
     /// Anything not otherwise recognised.
     Unknown,
 }
@@ -86,6 +100,7 @@ impl FailureKind {
         match self {
             FailureKind::CredentialRequired => "credential_required",
             FailureKind::OauthRequired => "oauth_required",
+            FailureKind::StaticTokenRequired => "static_token_required",
             FailureKind::TokenRejected => "token_rejected",
             FailureKind::Timeout => "timeout",
             FailureKind::Unreachable => "unreachable",
@@ -103,6 +118,7 @@ impl FailureKind {
         match self {
             FailureKind::CredentialRequired
             | FailureKind::OauthRequired
+            | FailureKind::StaticTokenRequired
             | FailureKind::TokenRejected => McpStatus::NeedsConfig,
             _ => McpStatus::Error,
         }
@@ -113,6 +129,7 @@ impl FailureKind {
         match self {
             FailureKind::CredentialRequired => Some("credential_required".to_string()),
             FailureKind::OauthRequired => Some("oauth_required".to_string()),
+            FailureKind::StaticTokenRequired => Some("static_token_required".to_string()),
             FailureKind::TokenRejected => Some("token_rejected".to_string()),
             _ => None,
         }
@@ -299,10 +316,13 @@ fn looks_like_tls(err: &anyhow::Error) -> bool {
 pub fn operator_message(server: &str, class: &ProbeClass, err: &anyhow::Error) -> String {
     match class.kind {
         FailureKind::CredentialRequired => format!(
-            "MCP server '{server}' needs a credential. Add its API token (or query-parameter key) in Connections, then Test again."
+            "MCP server '{server}' needs a credential. Add its API token (or query-parameter key) in its Token field, then Test again."
         ),
         FailureKind::OauthRequired => format!(
-            "MCP server '{server}' needs OAuth sign-in — click Sign in on the server in Connections to authorize it."
+            "MCP server '{server}' needs OAuth sign-in — click Sign in on this server to authorize it."
+        ),
+        FailureKind::StaticTokenRequired => format!(
+            "MCP server '{server}' requires OAuth, but it doesn't offer the automatic client registration this console signs in with. Paste a static API token in its Token field, then Test again."
         ),
         FailureKind::TokenRejected => format!(
             "MCP server '{server}' rejected the credential — it's wrong or expired. Update it and Test again."
@@ -360,6 +380,12 @@ pub async fn probe_server(decl: &McpServerDecl) -> McpHealth {
         }
         Err(err) => {
             let class = classify_mcp_error(&err, auth_configured, false);
+            // Issue #1260: "wants OAuth" and "we can sign in" are two different
+            // questions, and only the second decides whether the console should
+            // offer a Sign in button. Asked here rather than in
+            // `classify_mcp_error`, which is pure and synchronous by design —
+            // this needs a live discovery call.
+            let class = refine_oauth_capability(&decl.endpoint, class).await;
             let message = scrub(&operator_message(&decl.name, &class, &err), &secrets);
             McpHealth {
                 status: class.status,
@@ -370,6 +396,32 @@ pub async fn probe_server(decl: &McpServerDecl) -> McpHealth {
             }
         }
     }
+}
+
+/// Downgrade an `oauth_required` verdict to `static_token_required` when console
+/// OAuth provably cannot drive this server (issue #1260).
+///
+/// Only ever consulted for [`FailureKind::OauthRequired`], so a healthy server
+/// pays nothing: this runs on a server that already answered `401`.
+#[cfg(feature = "mcp")]
+async fn refine_oauth_capability(endpoint: &str, class: ProbeClass) -> ProbeClass {
+    if class.kind != FailureKind::OauthRequired
+        || crate::company::mcp_oauth::supports_console_oauth(endpoint).await
+    {
+        return class;
+    }
+    ProbeClass {
+        status: FailureKind::StaticTokenRequired.status(),
+        auth_hint: FailureKind::StaticTokenRequired.auth_hint(),
+        kind: FailureKind::StaticTokenRequired,
+    }
+}
+
+/// Without the `mcp` feature there is no `oauth/start` route for the console to
+/// call, so there is no Sign in button to withdraw and nothing to refine.
+#[cfg(not(feature = "mcp"))]
+async fn refine_oauth_capability(_endpoint: &str, class: ProbeClass) -> ProbeClass {
+    class
 }
 
 /// Scrub a message so it can be safely persisted, returned, or shown to an agent.
@@ -689,6 +741,104 @@ mod tests {
         let class = classify_mcp_error(&err, false, false);
         assert_eq!(class.auth_hint.as_deref(), Some("oauth_required"));
         assert_eq!(class.status, McpStatus::NeedsConfig);
+    }
+
+    /// Issue #1260: the two OAuth states are distinguishable on the wire, and
+    /// they carry the two different actions an operator has to take.
+    #[test]
+    fn the_two_oauth_states_do_not_share_a_hint() {
+        assert_eq!(
+            FailureKind::OauthRequired.auth_hint().as_deref(),
+            Some("oauth_required")
+        );
+        assert_eq!(
+            FailureKind::StaticTokenRequired.auth_hint().as_deref(),
+            Some("static_token_required")
+        );
+        assert_ne!(
+            FailureKind::OauthRequired.auth_hint(),
+            FailureKind::StaticTokenRequired.auth_hint(),
+            "the console renders a Sign in button off this code; collapsing the two \
+             is what put an unusable button on a Slack row"
+        );
+        // Both are a resting state the operator can fix, not a failure.
+        assert_eq!(
+            FailureKind::StaticTokenRequired.status(),
+            McpStatus::NeedsConfig
+        );
+        assert_eq!(
+            FailureKind::StaticTokenRequired.code(),
+            "static_token_required"
+        );
+    }
+
+    /// The message names the field the operator can actually use.
+    ///
+    /// The previous text sent them to Connections, which carries no MCP server
+    /// row at all — a instruction that cannot be followed reads as a broken
+    /// feature rather than a missing token.
+    #[test]
+    fn the_credential_messages_name_a_field_that_exists() {
+        for kind in [
+            FailureKind::StaticTokenRequired,
+            FailureKind::CredentialRequired,
+        ] {
+            let class = ProbeClass {
+                status: kind.status(),
+                auth_hint: kind.auth_hint(),
+                kind,
+            };
+            let msg = operator_message("slack", &class, &anyhow_str("x"));
+            assert!(
+                msg.contains("Token field"),
+                "{kind:?} must name the Token field: {msg}"
+            );
+            assert!(
+                !msg.contains("in Connections"),
+                "{kind:?} still points at Connections, which has no MCP row: {msg}"
+            );
+        }
+    }
+
+    /// A refinement only ever fires on the one kind it is about, and every
+    /// uncertain answer leaves the classification alone.
+    #[tokio::test]
+    async fn refinement_leaves_every_other_kind_untouched() {
+        for kind in [
+            FailureKind::CredentialRequired,
+            FailureKind::TokenRejected,
+            FailureKind::Timeout,
+            FailureKind::Unreachable,
+        ] {
+            let class = ProbeClass {
+                status: kind.status(),
+                auth_hint: kind.auth_hint(),
+                kind,
+            };
+            // An endpoint that cannot resolve: discovery fails, and a failed
+            // discovery must never rewrite a verdict.
+            let refined = refine_oauth_capability("https://127.0.0.1:1/mcp", class.clone()).await;
+            assert_eq!(refined, class, "{kind:?} was rewritten by the refinement");
+        }
+    }
+
+    /// Discovery that fails keeps `oauth_required` rather than downgrading.
+    ///
+    /// The safe direction is the one that does not regress a server whose sign-in
+    /// works: a timeout or a transient must not replace a working Sign in button
+    /// with "paste a token".
+    #[tokio::test]
+    async fn an_unreachable_discovery_keeps_sign_in() {
+        let class = ProbeClass {
+            status: FailureKind::OauthRequired.status(),
+            auth_hint: FailureKind::OauthRequired.auth_hint(),
+            kind: FailureKind::OauthRequired,
+        };
+        let refined = refine_oauth_capability("https://127.0.0.1:1/mcp", class.clone()).await;
+        assert_eq!(
+            refined, class,
+            "an unreachable discovery must leave the verdict as it was"
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@ import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
-import type { MessageIntent } from "@/api/tasks";
+import { deleteTask, type MessageIntent } from "@/api/tasks";
 import { setInboxEnabled } from "@/api/inbox";
 import {
   ApiError,
@@ -62,6 +62,7 @@ import {
   firstChannel,
   historyReady,
   HISTORY_UNTRACKED,
+  clearTaskCardEverywhere,
   offersDeliverableChoice,
   resolveDmChannelId,
   toggleReaction,
@@ -207,6 +208,7 @@ export function ChatView({
   const [desksError, setDesksError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
+  const [dismissingCardId, setDismissingCardId] = useState<string | null>(null);
   const [membersOpen, setMembersOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<"rail" | "chat">("chat");
@@ -472,8 +474,8 @@ export function ChatView({
     ? loadingTeam || !historyReady(hydration, channel.id)
     : false;
   const entries = useMemo(
-    () => (channel ? buildTimeline(messages, channel) : []),
-    [messages, channel],
+    () => (channel ? buildTimeline(messages, channel, members) : []),
+    [messages, channel, members],
   );
 
   /**
@@ -712,6 +714,59 @@ export function ChatView({
   }
 
   /**
+   * Delete the board card a line opened, and stop drawing its chip
+   * (issue #984).
+   *
+   * #442 allowed a turn to open a card from an ordinary message on the
+   * grounds that *"a spurious card can be dismissed in one click"*. That click
+   * did not exist here: the chip was a bare link to the card's detail screen,
+   * so clearing a mis-fired card meant leaving the channel, finding the card
+   * on the board, and deleting it there — which is how the board filled up.
+   *
+   * NOT optimistic, unlike `react` directly above, and the asymmetry is the
+   * point. A reaction that rolls back costs nothing; a chip that vanishes
+   * while the card survives tells the operator the board is clean when it is
+   * not, which is the very confusion this issue is about. So: delete on the
+   * host first, clear the chip only on success, and leave it exactly where it
+   * was on a refusal.
+   *
+   * Clears by CARD id, not by the row clicked, and across every channel rather
+   * than the active one — see {@link clearTaskCardEverywhere}. Once the card is
+   * gone every chip naming it is a link to a 404, and they can sit on different
+   * lines and in different channels.
+   */
+  async function dismissCard(taskId: string) {
+    if (dismissingCardId) return;
+    setDismissingCardId(taskId);
+    try {
+      await deleteTask(client, company, taskId);
+      clearCardEverywhere(taskId);
+      toast.success("Card dismissed.");
+    } catch (error) {
+      // A 404 is positive proof the card is gone — most likely deleted from the
+      // board itself, where nothing tells the open chat surface about it. The
+      // chip is then a permanent link to a 404 that no amount of clicking can
+      // remove, so this is a success for the operator's purpose: clear it and
+      // say so. Only a refusal we cannot interpret leaves the chip in place.
+      if (error instanceof ApiError && error.status === 404) {
+        clearCardEverywhere(taskId);
+        toast.success("That card was already gone — chip cleared.");
+      } else {
+        toast.error(
+          error instanceof Error && error.message ? error.message : "Couldn't dismiss that card.",
+        );
+      }
+    } finally {
+      setDismissingCardId(null);
+    }
+  }
+
+  /** Drop the card from every channel — see {@link clearTaskCardEverywhere}. */
+  function clearCardEverywhere(taskId: string) {
+    setTranscripts((t) => clearTaskCardEverywhere(t, taskId));
+  }
+
+  /**
    * Give a teammate an inbox, or take it away, on the host — keyed by the
    * roster **agent id**, which is the `InboxStore` key the Inbox page reads and
    * the ingest webhook files mail under. Nothing is persisted client-side: if
@@ -882,6 +937,8 @@ export function ChatView({
               liveSteps={openThreadId ? undefined : liveSteps}
               onOpenThread={setOpenThreadId}
               onReact={react}
+              onDismissCard={(taskId) => void dismissCard(taskId)}
+              dismissingCardId={dismissingCardId}
               onAddPeople={() => setMembersOpen(true)}
               now={now}
               askerNames={askerNames}
@@ -918,6 +975,7 @@ export function ChatView({
           {parent && (
             <ThreadPanel
               channel={channel}
+              members={members}
               parent={parent}
               replies={threadReplies}
               sending={sending}

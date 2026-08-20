@@ -8,6 +8,7 @@ import type {
   TransportRequest,
   TransportResponse,
 } from "@/api/transport";
+import { ApiError, workflowRefusalProblems } from "@/api/types";
 import { computeTaskPatch } from "@/lib/task-edit";
 import { taskProposalDiff } from "@/lib/task-workflow-proposal";
 
@@ -21,6 +22,13 @@ import { taskProposalDiff } from "@/lib/task-workflow-proposal";
  *    to a pre-#580 one;
  * 3. the edit-dialog diff's deliverable arm — an untouched control emits no
  *    patch, a flip emits exactly `{ deliverable }`.
+ *
+ * Issue #1191 adds a fourth: the decision behind the panel's per-node breakdown
+ * of a refused Apply. The markup that renders it is NOT covered — this runner is
+ * for pure functions and the console has no component-test harness (no
+ * testing-library, and `include` collects only `*.test.ts`). What is covered is
+ * the branch that decides whether a breakdown exists at all, which is where the
+ * mistakes live; the JSX beneath it mirrors `ProposalCard`'s block line for line.
  */
 
 // ---------------------------------------------------------------------------
@@ -238,5 +246,42 @@ describe("computeTaskPatch deliverable", () => {
     const current = task({ deliverable: "workflow" });
     const draft = { ...seededDraft(current), deliverable: "once" as const };
     expect(computeTaskPatch(draft, current)).toEqual({ deliverable: "once" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4. the refused-Apply breakdown — which refusals carry one (issue #1191)
+// ---------------------------------------------------------------------------
+
+describe("workflowRefusalProblems", () => {
+  const problem = {
+    node_id: "post_summary",
+    field: "destination.target",
+    message: "`engineering-desk` is not a workflow delivery channel",
+  };
+
+  it("returns the host's breakdown when the refusal carries one", () => {
+    const e = new ApiError(400, "workflow_invalid", "…", true);
+    e.problems = [problem];
+    expect(workflowRefusalProblems(e)).toEqual([problem]);
+  });
+
+  it("returns null for a refusal the host sent no breakdown for", () => {
+    // Every refusal that is not a workflow refusal: a 409 name clash, a 404.
+    const e = new ApiError(409, "conflict", "A workflow named `x` already exists.", true);
+    expect(workflowRefusalProblems(e)).toBeNull();
+  });
+
+  it("treats an empty array as no breakdown", () => {
+    // An empty list would render as an empty bullet list under the sentence,
+    // which reads as a rendering bug rather than as "nothing more to say".
+    const e = new ApiError(400, "workflow_invalid", "…", true);
+    e.problems = [];
+    expect(workflowRefusalProblems(e)).toBeNull();
+  });
+
+  it("returns null when the failure never reached the host", () => {
+    expect(workflowRefusalProblems(new Error("Failed to fetch"))).toBeNull();
+    expect(workflowRefusalProblems(null)).toBeNull();
   });
 });

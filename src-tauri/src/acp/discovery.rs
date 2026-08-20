@@ -75,7 +75,13 @@ pub const HARNESSES: &[Harness] = &[
     Harness {
         id: "claude",
         label: "Claude Code",
-        command: "claude-code-acp",
+        // Confirmed live (issue #1245): `npm install -g
+        // @agentclientprotocol/claude-agent-acp` installs a binary named
+        // `claude-agent-acp`, not `claude-code-acp` (the package's former
+        // name, before it moved under the `@agentclientprotocol` scope). A
+        // stale `claude-code-acp` here silently fails every "not found" probe
+        // and every spawn on a current install.
+        command: "claude-agent-acp",
         args: &[],
         credential: Some(".claude/.credentials.json"),
     },
@@ -251,7 +257,7 @@ mod test {
         // THE distinction this module exists for. Both are "unavailable", and
         // the fixes are completely different — install it, versus sign in — so
         // collapsing them tells the operator to do the wrong thing.
-        let probe = Fake::new().with_installed("claude-code-acp");
+        let probe = Fake::new().with_installed("claude-agent-acp");
         assert_eq!(readiness_of(&probe, "claude"), Readiness::NotSignedIn);
         assert_ne!(readiness_of(&probe, "claude"), Readiness::NotInstalled);
     }
@@ -259,7 +265,7 @@ mod test {
     #[test]
     fn a_signed_in_harness_is_ready() {
         let probe = Fake::new()
-            .with_installed("claude-code-acp")
+            .with_installed("claude-agent-acp")
             .with_file("/home/ada/.claude/.credentials.json");
         assert_eq!(readiness_of(&probe, "claude"), Readiness::Ready);
         assert!(readiness_of(&probe, "claude").is_ready());
@@ -269,7 +275,7 @@ mod test {
     fn each_harness_is_probed_at_its_own_paths() {
         // One harness being signed in must not make another look signed in.
         let probe = Fake::new()
-            .with_installed("claude-code-acp")
+            .with_installed("claude-agent-acp")
             .with_installed("codex-acp")
             .with_file("/home/ada/.claude/.credentials.json");
         assert_eq!(readiness_of(&probe, "claude"), Readiness::Ready);
@@ -280,7 +286,9 @@ mod test {
     fn no_home_directory_reads_as_signed_out_rather_than_ready() {
         // The safe direction of the two wrong answers: claiming ready would
         // fail at first use, far from the cause.
-        let probe = Fake::new().with_installed("claude-code-acp").without_home();
+        let probe = Fake::new()
+            .with_installed("claude-agent-acp")
+            .without_home();
         assert_eq!(readiness_of(&probe, "claude"), Readiness::NotSignedIn);
     }
 

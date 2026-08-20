@@ -1,10 +1,10 @@
 import { MessageSquareReply } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/markdown";
+import { TeammateAvatar } from "@/components/teammate-avatar";
+import { Button } from "@/components/ui/button";
 import { isHostMessageId, type ChatMessage } from "@/lib/chat";
 import { cn } from "@/lib/utils";
-import { Avatar } from "./Avatar";
 import {
   formatTime,
   hasReacted,
@@ -22,6 +22,10 @@ interface Props {
   threadOpen: boolean;
   onOpenThread: (messageId: string) => void;
   onReact: (messageId: string, emoji: string) => void;
+  /** Deletes the board card this line opened, and drops its chip (issue #984). */
+  onDismissCard: (taskId: string) => void;
+  /** The card whose delete is in flight, if any. */
+  dismissingCardId: string | null;
 }
 
 /**
@@ -54,7 +58,14 @@ function actionsUnavailableFor(message: ChatMessage): string | undefined {
  * and reveals its timestamp there on hover instead. The action bar floats over
  * the top-right corner rather than taking layout space.
  */
-export function MessageRow({ entry, threadOpen, onOpenThread, onReact }: Props) {
+export function MessageRow({
+  entry,
+  threadOpen,
+  onOpenThread,
+  onReact,
+  onDismissCard,
+  dismissingCardId,
+}: Props) {
   const { message, sender, continuation, replies } = entry;
   const chips = reactionChips(message.reactions);
   const actionsUnavailable = actionsUnavailableFor(message);
@@ -76,7 +87,13 @@ export function MessageRow({ entry, threadOpen, onOpenThread, onReact }: Props) 
             {formatTime(message.at)}
           </span>
         ) : (
-          <Avatar name={sender.name} tone={sender.tone} company={sender.kind === "company"} className="size-9" />
+          <TeammateAvatar
+            name={sender.name}
+            tone={sender.tone}
+            avatar={sender.avatar}
+            company={sender.kind === "company"}
+            className="size-9"
+          />
         )}
       </div>
 
@@ -85,7 +102,14 @@ export function MessageRow({ entry, threadOpen, onOpenThread, onReact }: Props) 
         <Markdown className="text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1">{message.text}</Markdown>
 
         {message.steps && message.steps.length > 0 && <StepTimeline steps={message.steps} />}
-        {message.taskId && <CardChip taskId={message.taskId} />}
+        {message.taskId && (
+          <CardChip
+            taskId={message.taskId}
+            busy={dismissingCardId === message.taskId}
+            disabled={dismissingCardId !== null && dismissingCardId !== message.taskId}
+            onDismiss={onDismissCard}
+          />
+        )}
 
         {chips.length > 0 && (
           <Reactions
@@ -265,7 +289,7 @@ function ReplyFacepile({ replies }: { replies: ChatMessage[] }) {
   return (
     <span className="flex -space-x-1.5" aria-hidden>
       {shown.map((r) => (
-        <Avatar
+        <TeammateAvatar
           key={r.id}
           name={r.from === "you" ? "You" : (r.channel ?? "Company")}
           tone={r.channel}

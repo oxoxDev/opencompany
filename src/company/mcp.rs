@@ -72,6 +72,35 @@ pub enum McpSource {
     /// flavour of [`Self::Manifest`] — nobody wrote it into *this* company, and
     /// the console must not label it as operator-added.
     Default,
+    /// Installed from an upstream MCP directory — Smithery.ai or the official
+    /// `modelcontextprotocol/registry` — through the console's browse surface
+    /// (issue #1270).
+    ///
+    /// Distinct from [`Self::Runtime`] because the two are keyed differently and
+    /// deleted differently: a runtime server is addressed by `name` and lives in
+    /// this company's runtime index, while a registry install is addressed by a
+    /// stable `server_id` and lives in OpenHuman's own store, so removing one
+    /// means uninstalling it there rather than dropping an index row.
+    Registry,
+}
+
+/// The operator-facing refusal for a directory entry that can only run as a
+/// local stdio subprocess (issue #1270).
+///
+/// Says *why* rather than "unsupported": the blocker is not the read-only root
+/// filesystem (tenants mount a writable `/data` and an emptyDir `/tmp`) but that
+/// the tenant image carries no Node, Python or package manager to launch one
+/// with — a stdio install would fail on `npx: not found`. One function so the
+/// two places that can refuse an install — the catalogue pre-check at the route
+/// and the post-install belt in
+/// [`McpRuntime`](crate::harness::mcp::McpRuntime) — say the same sentence, and
+/// so the day a sidecar makes stdio runnable there is one message to retire.
+pub fn stdio_install_refusal(qualified_name: &str) -> String {
+    format!(
+        "`{qualified_name}` offers no hosted HTTP endpoint — it can only run as a local \
+         subprocess, and this deployment ships no Node, Python or package manager to launch \
+         one. Pick a server with a hosted endpoint, or add it by URL if you host it yourself."
+    )
 }
 
 /// Resolved outbound auth material for one MCP server.

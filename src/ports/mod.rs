@@ -8,6 +8,7 @@
 
 mod ids;
 
+pub mod acp;
 pub mod approvals;
 pub mod artifacts;
 pub mod brain;
@@ -40,6 +41,7 @@ pub mod workflow_runner;
 pub mod workflow_verdict;
 pub mod workspace;
 
+pub use acp::{AcpAgent, AcpAgentFactory, AcpTurn, AcpUpdate};
 pub use approvals::ApprovalGate;
 pub use artifacts::{
     ArtifactAuthor, ArtifactDiff, ArtifactKind, ArtifactRecord, ArtifactStore, ArtifactVersion,

@@ -392,3 +392,54 @@ export function reconcileIds(
   });
   return changed ? next : messages;
 }
+
+/**
+ * Forget the board card `taskId` on every line that carries it (issue #984).
+ *
+ * The dismissal half of "Add to board": #442 justified opening cards from chat
+ * on the grounds that *"a spurious card can be dismissed in one click"*, and
+ * the chat surfaces offered no such click — the chip was a bare link to the
+ * card's detail screen. Deleting the card on the host is only half of it; this
+ * is what stops the console still drawing a chip for a card that is gone.
+ *
+ * Keyed on the **card**, not on the message the operator clicked, and that is
+ * the reason this is a named function rather than two lines inside a
+ * `setState`. One card can be named by more than one line — a turn journals the
+ * id onto its reply, and "Add to board" writes it onto the operator's own
+ * message — so clearing only the clicked bubble would leave the other chips
+ * pointing at a card the host no longer has, i.e. a link to a 404. A dismissal
+ * that leaves a stale chip on screen reads as the delete having failed.
+ *
+ * Pure and total: an unknown id passes through, and a list with nothing to
+ * change is returned as-is so React sees no new array.
+ *
+ * # This is the client half only
+ *
+ * It clears the chip from state that is never serialised, so on its own it
+ * survives a thread switch and **not** a reload: the console rehydrates from
+ * `GET …/chat/history` (see {@link fromHistory}) and merges by message id, so an
+ * empty transcript takes every row back. The host is what stops the chip
+ * returning — its history projection blanks `task_id` for a card the board no
+ * longer has, whoever deleted it (`server::chat_history::drop_dead_cards`,
+ * issue #984). Neither half is sufficient alone.
+ */
+export function clearTaskCard(messages: ChatMessage[], taskId: string): ChatMessage[] {
+  let changed = false;
+  const next = messages.map((m) => {
+    if (m.taskId !== taskId) return m;
+    changed = true;
+    // Drop the key rather than setting it to `undefined`: `taskId` is an
+    // optional field and every render site tests it for truthiness, but the two
+    // are not interchangeable to `Object.keys`, a spread, or a deep-equality
+    // assertion, and an absent key is what "this line has no card" means
+    // everywhere else in this module.
+    //
+    // NOT because these rows are persisted — they are not. `transcripts` is
+    // React state and is never serialised. The rows that persist are the
+    // host's, and they are why this helper is only half the dismissal: see the
+    // note on the function above.
+    const { taskId: _dropped, ...rest } = m;
+    return rest;
+  });
+  return changed ? next : messages;
+}

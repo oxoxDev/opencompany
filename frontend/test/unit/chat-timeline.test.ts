@@ -37,6 +37,7 @@ describe("buildTimeline", () => {
         message({ id: "b", text: "yes", parentId: "a" }),
       ],
       CHANNEL,
+      [],
     );
 
     // One row, not two: the reply is folded, not laid out inline.
@@ -53,6 +54,7 @@ describe("buildTimeline", () => {
         message({ id: "c", parentId: "a", at: T0 + 2 }),
       ],
       CHANNEL,
+      [],
     );
     expect(entries[0].replies.map((r) => r.id)).toEqual(["b", "c"]);
   });
@@ -79,6 +81,7 @@ describe("buildTimeline", () => {
         message({ id: "c", text: "when?", parentId: "b", at: T0 + 2 }),
       ],
       CHANNEL,
+      [],
     );
 
     // The root is the only row, and it holds only its direct reply.
@@ -94,7 +97,7 @@ describe("buildTimeline", () => {
     // A reply pointing at an id this transcript does not hold must not fall
     // back to the channel — that is precisely the "the console lost my thread"
     // symptom reconcileIds exists to prevent.
-    const entries = buildTimeline([message({ id: "b", parentId: "missing" })], CHANNEL);
+    const entries = buildTimeline([message({ id: "b", parentId: "missing" })], CHANNEL, []);
     expect(entries).toHaveLength(0);
   });
 
@@ -105,6 +108,7 @@ describe("buildTimeline", () => {
         message({ id: "b", from: "you", at: T0 + MINUTE }),
       ],
       CHANNEL,
+      [],
     );
     expect(entries[0].continuation).toBe(false);
     expect(entries[1].continuation).toBe(true);
@@ -117,6 +121,7 @@ describe("buildTimeline", () => {
         message({ id: "b", from: "you", at: T0 + 6 * MINUTE }),
       ],
       CHANNEL,
+      [],
     );
     expect(entries[1].continuation).toBe(false);
   });
@@ -131,6 +136,7 @@ describe("buildTimeline", () => {
         message({ id: "b", from: "you", at: T0 + MINUTE }),
       ],
       CHANNEL,
+      [],
     );
     expect(entries[0].replies).toHaveLength(1);
     expect(entries[1].continuation).toBe(false);
@@ -144,6 +150,7 @@ describe("buildTimeline", () => {
         message({ id: "b", from: "you", at: nextDay }),
       ],
       CHANNEL,
+      [],
     );
     expect(entries[0].dayLabel).toBeDefined();
     expect(entries[1].dayLabel).toBeDefined();

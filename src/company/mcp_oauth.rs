@@ -325,6 +325,51 @@ fn build_authorize_url(
 }
 
 /// Begin the browser-OAuth flow for `server_name` at `endpoint`: discover →
+/// How long [`supports_console_oauth`] will wait on OAuth discovery.
+///
+/// Short on purpose: this is a refinement of an answer the probe already has,
+/// not the answer itself, so it must not dominate the probe's own budget.
+const CONSOLE_OAUTH_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether console OAuth can actually drive this server (issue #1260).
+///
+/// [`begin`] answers this already, but only by attempting the flow and failing —
+/// which is too late for the health probe, whose answer decides whether the
+/// console offers a **Sign in** button or a credential field. A server can
+/// require OAuth and still be undrivable from here: Slack's MCP endpoint
+/// answers `401` with a proper resource-metadata challenge and advertises no
+/// `registration_endpoint`, so there is no client for us to mint and no sign-in
+/// we can complete.
+///
+/// Reuses [`select_auth_server`] rather than re-deriving the rule, so the
+/// question the probe asks and the one `begin` enforces cannot drift apart.
+///
+/// **Every failure answers `true`.** Discovery is a live outbound call and can
+/// fail for reasons that say nothing about the server's capabilities — a
+/// timeout, a transient 5xx, a network blip. Answering `false` on one of those
+/// would replace a working Sign in button with "paste a token" on a server that
+/// supports sign-in perfectly well, which is a worse outcome than today's
+/// behaviour. Unsure therefore means "leave it as it was".
+pub(crate) async fn supports_console_oauth(endpoint: &str) -> bool {
+    // Bounded explicitly: this sits on the health-probe path, and a metadata
+    // endpoint that accepts a connection and then hangs would otherwise stall
+    // the probe for whatever the HTTP client's own default happens to be.
+    // Timing out answers `true` for the same reason every other failure does.
+    let Ok(discovered) =
+        tokio::time::timeout(CONSOLE_OAUTH_DISCOVERY_TIMEOUT, discover(endpoint)).await
+    else {
+        return true;
+    };
+    match discovered {
+        // No authorization context at all: the server did not ask for OAuth on
+        // this probe. Nothing to downgrade — the caller's classification stands.
+        Ok(None) => true,
+        Ok(Some(ctx)) => select_auth_server(ctx).is_some(),
+        Err(_) => true,
+    }
+}
+
+/// Discover the server's OAuth metadata, register a client via RFC 7591
 /// dynamic client registration → PKCE, and return the live `/authorize` URL plus
 /// the [`PendingOAuth`] the caller parks (keyed by the returned `state`).
 ///

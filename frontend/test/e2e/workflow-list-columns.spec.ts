@@ -101,7 +101,11 @@ async function openList(page: Page) {
     (url) => isRunPage(url),
     async (route: Route) => {
       if (route.request().method() !== "GET") return route.fallback();
-      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(RUNS) });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ runs: RUNS, hasMore: false }),
+      });
     },
   );
   await page.addInitScript(() => {

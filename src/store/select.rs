@@ -231,6 +231,70 @@ pub struct MemoryOverlay {
     pub scratch: Option<Arc<dyn ContextStore>>,
     /// What is bound, for status output.
     pub descriptor: MemoryDescriptor,
+    /// The bound provider, kept solely so [`Self::refresh_health`] can probe
+    /// it once at boot. `None` on the engine-overlay path, which drives the
+    /// in-pod engine directly and has no provider to ask.
+    ///
+    /// Private on purpose: `MemoryCore` is a supertrait of `MemoryProvider`,
+    /// so a public handle here would let anything holding an `AppState` call
+    /// `store("<any namespace>", …)` directly — re-opening exactly the
+    /// raw-namespace door `store::memory`'s module docs promise is closed by
+    /// construction. The ports above are the only data path.
+    #[cfg(feature = "tinymemory")]
+    probe: Option<Arc<dyn tinymemory_api::provider::MemoryProvider>>,
+}
+
+impl MemoryOverlay {
+    /// Probes the bound engine once and records the answer on the descriptor,
+    /// so `/spec` can tell an operator "bound but unreachable" before the
+    /// first cycle finds out — until this ran, a hosted engine with a dead
+    /// endpoint or a revoked key bound cleanly and failed days later, on a
+    /// path nobody was watching.
+    ///
+    /// Boot-time only, bounded by `timeout`, and advisory by design: a probe
+    /// failure logs loudly and records `healthy: Some(false)`, it never
+    /// refuses the boot. Configuration errors already refuse at open; a
+    /// transient vendor outage must not crash-loop a tenant that could serve
+    /// everything else. `healthy: None` means "not probed" — the engine
+    /// overlay path, or a build without the provider seam.
+    #[cfg(feature = "tinymemory")]
+    pub async fn refresh_health(&mut self, timeout: std::time::Duration) {
+        let Some(probe) = &self.probe else {
+            return;
+        };
+        let answer = tokio::time::timeout(timeout, probe.health()).await.ok();
+        let healthy = probe_answer_is_healthy(&answer);
+        if !healthy {
+            tracing::warn!(
+                driver_id = %self.descriptor.driver_id,
+                status = ?answer,
+                timeout_secs = timeout.as_secs(),
+                "memory engine bound but its health probe did not answer Ready or Degraded; \
+                 cycles that need memory will fail until the endpoint or credential is fixed"
+            );
+        }
+        self.descriptor.healthy = Some(healthy);
+    }
+
+    /// Without the provider seam there is nothing to probe; `healthy` stays
+    /// `None` ("not probed"), which is the truth.
+    #[cfg(not(feature = "tinymemory"))]
+    pub async fn refresh_health(&mut self, _timeout: std::time::Duration) {}
+}
+
+/// Maps a probe outcome (`None` = timed out) onto the `healthy` bit.
+///
+/// `Ready` AND `Degraded` are healthy: a degraded engine is still serving —
+/// reduced, not absent — and reporting it as down would tell an operator to
+/// fix an endpoint that is answering. Only `Down` and a timeout mean the
+/// first cycle that needs memory will fail.
+#[cfg(feature = "tinymemory")]
+fn probe_answer_is_healthy(answer: &Option<tinymemory_api::health::MemoryHealth>) -> bool {
+    use tinymemory_api::health::MemoryHealth;
+    matches!(
+        answer,
+        Some(MemoryHealth::Ready) | Some(MemoryHealth::Degraded { .. })
+    )
 }
 
 impl std::fmt::Debug for MemoryOverlay {
@@ -256,6 +320,15 @@ pub struct MemoryDescriptor {
     /// The capability families the bound driver negotiated, so an operator can
     /// see what the engine does *not* support before a cycle finds out.
     pub capabilities: Vec<String>,
+    /// Whether the boot-time reachability probe found the engine usable:
+    /// `Ready`, or `Degraded` — reachable and serving, possibly reduced.
+    /// Only `Down` maps to `Some(false)`.
+    ///
+    /// `None` means the engine was never probed — the engine-overlay path,
+    /// which has no provider seam to ask, or a boot path that skipped
+    /// [`MemoryOverlay::refresh_health`]. `Some(false)` is a bound engine
+    /// whose probe failed: still bound, loudly warned, visible on `/spec`.
+    pub healthy: Option<bool>,
 }
 
 /// Durable company → tenant ownership, for shared-database platform mode.
@@ -577,6 +650,10 @@ fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
         }
         return Ok(None);
     };
+    // Kept aside for the boot-time health probe; `bind` consumes its argument
+    // and deliberately exposes no provider accessor (the ports are the only
+    // data path). Clone is an `Arc` bump.
+    let probe = provider.clone();
     let bound = BoundMemory::bind(provider, class)?;
     // Announce the bind: which engine, and — the part an operator cannot infer —
     // the class the *host* assigned it, since that is what decides whether the
@@ -612,7 +689,11 @@ fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
+            // Not probed yet: binding is offline by design, and the probe is
+            // the caller's boot-time step (`refresh_health`).
+            healthy: None,
         },
+        probe: Some(probe),
     }))
 }
 
@@ -736,7 +817,11 @@ fn open_tinycortex(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> 
             // empty list says "not negotiated", which is the truth; claiming the
             // mandatory three here would be reporting a bind that did not happen.
             capabilities: Vec::new(),
+            // And nothing to probe, for the same reason: `None` = not probed.
+            healthy: None,
         },
+        #[cfg(feature = "tinymemory")]
+        probe: None,
     }))
 }
 
@@ -1070,6 +1155,63 @@ mod test {
             .expect("remote yields an overlay");
         assert_eq!(overlay.descriptor.backend, MemoryBackend::Remote);
         assert_eq!(overlay.descriptor.driver_id, "supermemory");
+        // Binding is offline: nothing has probed yet, and claiming health
+        // before a probe would be the same lie in the other direction.
+        assert_eq!(
+            overlay.descriptor.healthy, None,
+            "bind must not pre-claim health"
+        );
+        assert!(
+            overlay.probe.is_some(),
+            "the provider-seam overlay must carry a probe handle for the boot health check"
+        );
+    }
+
+    #[cfg(feature = "tinymemory")]
+    #[tokio::test]
+    async fn refresh_health_records_the_probe_answer() {
+        // `null` is the one driver whose health is deterministic offline —
+        // its `health()` is `Ready` by contract — so it proves the probe
+        // path end-to-end with no network: probe handle → `refresh_health`
+        // → `descriptor.healthy`, the value `/spec` serves.
+        let settings = StorageSettings {
+            memory_backend: MemoryBackend::Null,
+            ..StorageSettings::default()
+        };
+        let mut overlay = open_memory_overlay(&settings)
+            .expect("null binds")
+            .expect("null yields an overlay");
+        assert_eq!(overlay.descriptor.healthy, None);
+        overlay
+            .refresh_health(std::time::Duration::from_secs(5))
+            .await;
+        assert_eq!(
+            overlay.descriptor.healthy,
+            Some(true),
+            "the probe's answer must land on the descriptor"
+        );
+    }
+
+    /// The whole health vocabulary, pinned per outcome: `Degraded` is still
+    /// serving — reduced, not absent — so it must read healthy; only `Down`
+    /// and a timeout mean the next memory-needing cycle fails.
+    #[cfg(feature = "tinymemory")]
+    #[test]
+    fn probe_mapping_counts_degraded_as_healthy_and_down_or_timeout_as_not() {
+        use tinymemory_api::health::MemoryHealth;
+        assert!(super::probe_answer_is_healthy(&Some(MemoryHealth::Ready)));
+        assert!(super::probe_answer_is_healthy(&Some(
+            MemoryHealth::Degraded {
+                reason: "index rebuilding".into()
+            }
+        )));
+        assert!(!super::probe_answer_is_healthy(&Some(MemoryHealth::Down {
+            reason: "connection refused".into()
+        })));
+        assert!(
+            !super::probe_answer_is_healthy(&None),
+            "a timed-out probe must read unhealthy, not unknown"
+        );
     }
 
     #[cfg(feature = "tinymemory")]

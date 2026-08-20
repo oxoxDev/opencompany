@@ -242,6 +242,38 @@ describe("a blocked run whose approvals the queue no longer holds", () => {
     expect(container.textContent).not.toContain("decide in Approvals");
   });
 
+  /**
+   * Issue #1189: the paragraph above the list and the list itself must say the
+   * SAME thing, not merely avoid saying opposite things.
+   *
+   * This is the contradiction the issue opens on, verbatim from the product
+   * tenant: the list said "none of its approvals are in the queue any more, so
+   * this run cannot be continued" while the paragraph directly above it said
+   * "Approve them in Approvals and this run continues on its own". Both were
+   * rendered, in that order, on one row. Pinning them in one test is what stops
+   * a future change fixing one and leaving the other.
+   */
+  it("agrees with the paragraph above it when every card is gone", async () => {
+    await renderHistory(
+      blockedOutcome({
+        strandedApprovals: 1,
+        verdict: "stranded",
+        blockedNodes: [
+          {
+            nodeId: "spec",
+            tools: ["publish_artifact", "web_search"],
+            approvalIds: ["appr-1", "appr-2"],
+            stranded: 2,
+          },
+        ],
+      }),
+    );
+    const text = container.textContent ?? "";
+    expect(text).toContain("cannot be continued");
+    expect(text).not.toContain("continues on its own");
+    expect(text).not.toContain("Approve them in Approvals");
+  });
+
   it("keeps linking the cards that survive, and counts the ones that did not", async () => {
     await renderHistory(
       blockedOutcome({

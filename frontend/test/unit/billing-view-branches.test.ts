@@ -132,6 +132,9 @@ describe("BillingView status surfaces", () => {
     await show(clientWith({ chargebee: { ...CHARGEBEE_OK, granted: false } }));
     expect(at("billing-not-granted")?.textContent).toContain("[tools].allow");
     expect(at("billing-not-in-build")).toBeNull();
+    // Both credentials are configured (CHARGEBEE_OK) and the badge must still
+    // not agree with a page that just said this integration does nothing.
+    expect(at("billing-connected")).toBeNull();
   });
 
   it("says the host lacks the feature, and says only that", async () => {
@@ -145,6 +148,36 @@ describe("BillingView status surfaces", () => {
     );
     expect(at("billing-not-in-build")).not.toBeNull();
     expect(at("billing-not-granted")).toBeNull();
+    expect(at("billing-connected")).toBeNull();
+  });
+
+  it("withholds the connected badges when the host lacks the feature, even with credentials configured", async () => {
+    // The regression this pins: a green badge next to a banner saying the
+    // feature is inert on this build is exactly the disagreement the file's
+    // own doc comment says must not happen.
+    await show(
+      clientWith({
+        chargebee: { ...CHARGEBEE_OK, inBuild: false, granted: false },
+        paypal: { ...PAYPAL_OK, inBuild: false, granted: false },
+      }),
+    );
+    expect(at("billing-not-in-build")).not.toBeNull();
+    expect(at("paypal-not-in-build")).not.toBeNull();
+    expect(at("billing-connected")).toBeNull();
+    expect(at("paypal-connected")).toBeNull();
+  });
+
+  it("withholds the connected badges when the manifest does not grant the tool, even with credentials configured", async () => {
+    await show(
+      clientWith({
+        chargebee: { ...CHARGEBEE_OK, granted: false },
+        paypal: { ...PAYPAL_OK, granted: false },
+      }),
+    );
+    expect(at("billing-not-granted")).not.toBeNull();
+    expect(at("paypal-not-granted")).not.toBeNull();
+    expect(at("billing-connected")).toBeNull();
+    expect(at("paypal-connected")).toBeNull();
   });
 
   it("withholds the connected badge until BOTH the key and the site are stored", async () => {
@@ -197,12 +230,14 @@ describe("BillingView status surfaces", () => {
   it("reports the PayPal grant and build gaps on their own terms", async () => {
     await show(clientWith({ paypal: { ...PAYPAL_OK, granted: false } }));
     expect(at("paypal-not-granted")?.textContent).toContain("[tools].allow");
+    expect(at("paypal-connected")).toBeNull();
 
     await show(
       clientWith({ paypal: { ...PAYPAL_OK, granted: false, inBuild: false } }),
     );
     expect(at("paypal-not-in-build")).not.toBeNull();
     expect(at("paypal-not-granted")).toBeNull();
+    expect(at("paypal-connected")).toBeNull();
   });
 
   it("seeds the site box from what is stored and the environment from PayPal", async () => {

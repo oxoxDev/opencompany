@@ -179,7 +179,7 @@ export function SkillsView({ client, company }: Props) {
       <div className="mx-auto w-full max-w-5xl space-y-5 px-4 py-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-1">
-            <h2 className="text-2xl font-semibold tracking-tight">Skills</h2>
+            <h1 className="text-2xl font-semibold tracking-tight">Skills</h1>
             <p className="text-sm text-muted-foreground">
               Playbooks your teammates read. Enable, install from the registry, or add your own.
             </p>

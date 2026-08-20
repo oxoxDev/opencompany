@@ -118,6 +118,23 @@ impl CompanyManifest {
             .and_then(|h| h.inference)
     }
 
+    /// The full default `Harness`, resolved by [`default_harness_id`](Self::default_harness_id).
+    ///
+    /// Total, like `default_harness_id` — falls back to the implicit `built_in`
+    /// harness so this never panics on a manifest reached before validation.
+    /// Exists so callers that need more than the id (chiefly `kind`, to decide
+    /// whether the default lane is even runnable — see
+    /// [`lanes::build`](crate::harness::lanes::build)) do not each re-derive
+    /// the same "find by default id" lookup [`default_harness_inference`](Self::default_harness_inference)
+    /// already does.
+    pub fn default_harness(&self) -> Harness {
+        let default_id = self.default_harness_id();
+        self.effective_harnesses()
+            .into_iter()
+            .find(|h| h.id == default_id)
+            .unwrap_or_else(Harness::implicit)
+    }
+
     /// The harness `agent_id` runs on, resolving an unset binding to the
     /// default. `None` only when the named harness does not exist — which
     /// [`validate`](Self::validate) rejects, so a validated manifest always
@@ -800,8 +817,22 @@ impl CompanyManifest {
                          A runner advertises the harnesses it can drive — this host does not choose one for it."
                     ));
                 }
+                if acp.model.is_some() {
+                    problems.push(format!(
+                        "`[[harness]]` `{id}` uses `transport = \"runner\"` but names a `model`. \
+                         Model overrides aren't supported for a runner yet — the runner wire \
+                         protocol doesn't carry them."
+                    ));
+                }
             }
             _ => unreachable!("transport was checked against ACP_TRANSPORTS above"),
+        }
+
+        if acp.model.as_deref().is_some_and(|m| m.trim().is_empty()) {
+            problems.push(format!(
+                "`[[harness]]` `{id}`'s `[harness.acp].model` is set but empty. Drop the key \
+                 to use the agent's own default, rather than naming an empty one."
+            ));
         }
 
         problems
@@ -2000,6 +2031,26 @@ mod harness_tests {
         assert!(harness_problems(&manifest).is_empty());
     }
 
+    /// `default_harness` resolves the same entry `default_harness_id` names,
+    /// full struct and all — for both the implicit `built_in` case and a
+    /// declared `acp` default. Pinned separately from `default_harness_id`
+    /// because `lanes::build` (issue #1244) reads `.kind` off this to decide
+    /// whether the default lane is even runnable; a lookup that silently
+    /// resolved to the wrong harness would reintroduce the bug that fixed.
+    #[test]
+    fn default_harness_resolves_the_full_declared_entry() {
+        let implicit = parse(BASE);
+        assert_eq!(implicit.default_harness().id, IMPLICIT_HARNESS_ID);
+        assert_eq!(implicit.default_harness().kind, "built_in");
+
+        let acp_default = parse(&format!(
+            "{BASE}\n[[harness]]\nid = \"laptop\"\nkind = \"acp\"\ndefault = true\n\n\
+             [harness.acp]\ntransport = \"local\"\nagent = \"claude\"\n"
+        ));
+        assert_eq!(acp_default.default_harness().id, "laptop");
+        assert_eq!(acp_default.default_harness().kind, "acp");
+    }
+
     /// Naming a harness when none is declared is an error rather than a silent
     /// fallback to the implicit one: the operator wrote down an intent, and
     /// quietly ignoring it is how "my agent is on the wrong model" happens.
@@ -2212,6 +2263,43 @@ provider = "openrouter"
                 "`{acp}` should be valid: {:?}",
                 harness_problems(&manifest)
             );
+        }
+    }
+
+    /// Issue #1245: `model` is a hint forwarded to the agent's own startup
+    /// lever, not a credential — so unlike `[harness.inference]` it is
+    /// perfectly valid on a `local` acp harness. It is rejected on `runner`
+    /// (no wire protocol yet) and when set to an empty string (nothing to
+    /// forward, and silently accepting it invites "my model setting does
+    /// nothing").
+    #[test]
+    fn model_is_valid_on_local_rejected_on_runner_and_must_not_be_empty() {
+        let cases: &[(&str, Option<&str>)] = &[
+            (
+                "transport = \"local\"\nagent = \"claude\"\nmodel = \"claude-opus-4-5\"\n",
+                None,
+            ),
+            (
+                "transport = \"runner\"\nrunner = \"laptop\"\nmodel = \"claude-opus-4-5\"\n",
+                Some("but names a `model`"),
+            ),
+            (
+                "transport = \"local\"\nagent = \"claude\"\nmodel = \"   \"\n",
+                Some("is set but empty"),
+            ),
+        ];
+        for (acp, expected) in cases {
+            let manifest = parse(&format!(
+                "{BASE}\n[[harness]]\nid = \"a\"\nkind = \"acp\"\ndefault = true\n\n[harness.acp]\n{acp}"
+            ));
+            let problems = harness_problems(&manifest);
+            match expected {
+                None => assert!(problems.is_empty(), "`{acp}` should be valid: {problems:?}"),
+                Some(msg) => assert!(
+                    problems.iter().any(|p| p.contains(msg)),
+                    "`{acp}` should report {msg:?}, got {problems:?}"
+                ),
+            }
         }
     }
 

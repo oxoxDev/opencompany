@@ -5,18 +5,20 @@ import type { TeamMember } from "@/lib/team";
 import { buildChannels, dmFace, type Channel } from "@/views/chat/model";
 
 /**
- * The seed a DM's avatar is drawn from (issue #1170).
+ * The seed a DM's avatar is drawn from (issues #1170, #1185).
  *
  * The failure this guards is silent and only visible side by side: the rail row
  * and the chat header both draw the teammate on the other end of a DM, and
- * `Avatar` hashes its mascot out of the `name` it is handed. Seed the two from
- * different fields — the name in one place, the id or the role in the other —
- * and one person wears two faces on one screen, which is worse than the generic
- * glyph the header used to draw. Nothing throws, nothing fails to render, and
- * no type objects.
+ * `TeammateAvatar` hashes its mascot out of whatever seed it is handed. Seed
+ * the two from different fields and one person wears two faces on one screen,
+ * which is worse than the generic glyph the header used to draw. Nothing
+ * throws, nothing fails to render, and no type objects.
  *
  * So this pins the seed itself rather than a rendered tile: both call sites go
- * through `dmFace`, and `dmFace` promises the teammate's own name.
+ * through `dmFace`, and `dmFace` now promises the teammate's id-seeded
+ * `avatar` — the field `fromDto` already computes onto every roster entry so a
+ * rename can never change a teammate's face — rather than a name that would
+ * have to be hashed again at render.
  */
 
 function member(over: Partial<TeamMember> & Pick<TeamMember, "id" | "name">): TeamMember {
@@ -24,7 +26,9 @@ function member(over: Partial<TeamMember> & Pick<TeamMember, "id" | "name">): Te
     role: "Engineer",
     description: "",
     tone: "sky",
-    avatar: "green",
+    // Id-seeded by default, matching what `fromDto` computes — a caller
+    // testing a specific mismatch overrides it explicitly.
+    avatar: avatarFor(over.id),
     inboxEnabled: false,
     effectiveTools: [],
     desks: [],
@@ -39,9 +43,9 @@ function dmFor(m: TeamMember): Channel {
 }
 
 describe("dmFace", () => {
-  it("hands back the teammate's own name and tone, so every caller seeds alike", () => {
+  it("hands back the teammate's own name, tone, and id-seeded avatar, so every caller seeds alike", () => {
     const ada = member({ id: "agent_ada", name: "Ada", tone: "violet" });
-    expect(dmFace(dmFor(ada))).toEqual({ name: "Ada", tone: "violet" });
+    expect(dmFace(dmFor(ada))).toEqual({ name: "Ada", tone: "violet", avatar: avatarFor("agent_ada") });
   });
 
   it("resolves to one mascot for one teammate", () => {
@@ -50,15 +54,16 @@ describe("dmFace", () => {
     // point of routing both through it.
     const face = dmFace(dmFor(member({ id: "agent_backend", name: "Backend Engineer" })));
     expect(face).not.toBeNull();
-    expect(avatarFor(face!.name)).toBe(avatarFor("Backend Engineer"));
+    expect(face!.avatar).toBe(avatarFor("agent_backend"));
   });
 
-  it("does not seed on the id, which would give the rail and the roster row different faces", () => {
-    // A guard against the plausible-looking "fix" of seeding on the stable id:
-    // it is stable, but it is not what `Avatar` hashes when a caller passes only
-    // a name, and these two ids hash to different mascots than the name does.
-    const face = dmFace(dmFor(member({ id: "agent_ada", name: "Ada" })));
-    expect(face!.name).not.toBe("agent_ada");
+  it("seeds on the id, not the name — a rename must not change the face", () => {
+    // Two roster rows sharing an id but not a name — the rename case this
+    // exists to protect — resolve to the *same* avatar, and it's the id's.
+    const renamed = dmFace(dmFor(member({ id: "agent_ada", name: "Adam" })));
+    const original = dmFace(dmFor(member({ id: "agent_ada", name: "Ada" })));
+    expect(renamed!.avatar).toBe(original!.avatar);
+    expect(renamed!.avatar).toBe(avatarFor("agent_ada"));
   });
 
   it("has no face for a channel — a desk line has no one person behind it", () => {

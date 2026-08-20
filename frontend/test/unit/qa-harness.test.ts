@@ -129,6 +129,7 @@ const TONE_TO_VERDICT: Record<string, string> = {
   running: "running",
   failed: "failed",
   stopped: "stopped",
+  stranded: "stranded",
   blocked: "blocked",
   "not delivered": "undelivered",
   "awaiting approval": "awaiting-approval",
@@ -335,6 +336,37 @@ describe("runVerdict agrees with the console's runTone", () => {
       name: "blocked is judged before the delivery rows",
       run: run({ blockedNodes: [blocked("approve")], deliveries: [delivery("failed")] }),
       label: "blocked",
+    },
+    {
+      // #1189: the shape that scored `awaiting-approval` forever. Every gate
+      // has lost its card, so both readings below it — "blocked" and "awaiting
+      // approval" — tell the operator to go and decide something that is not
+      // there.
+      name: "every gate has lost its card",
+      run: run({
+        pendingApprovals: ["fetch_bbc", "fetch_espn"],
+        strandedApprovals: 2,
+      } as Partial<WorkflowRunOutcome>),
+      label: "stranded",
+    },
+    {
+      name: "stranded outranks blocked",
+      run: run({
+        blockedNodes: [blocked("approve")],
+        pendingApprovals: ["approve"],
+        strandedApprovals: 1,
+      } as Partial<WorkflowRunOutcome>),
+      label: "stranded",
+    },
+    {
+      // The negative: one gate is still decidable, so the run is still awaiting
+      // and the per-node count carries the loss.
+      name: "a partly stranded run is still awaiting",
+      run: run({
+        pendingApprovals: ["fetch_bbc", "fetch_espn"],
+        strandedApprovals: 1,
+      } as Partial<WorkflowRunOutcome>),
+      label: "awaiting approval",
     },
     {
       name: "every node ok but the report was dropped (#981)",

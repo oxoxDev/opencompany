@@ -5,12 +5,14 @@ import {
   ChevronDown,
   ChevronRight,
   Info,
+  KeyRound,
   Loader2,
   LogIn,
   Plug,
   Plus,
   Server,
   Trash2,
+  Unplug,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -25,8 +27,29 @@ import {
   testMcpServer,
   updateMcpServer,
 } from "@/api/mcp";
-import { ApiError, type McpHealth, type McpServer, type McpToolInfo } from "@/api/types";
+import {
+  connectMcpRegistryServer,
+  disconnectMcpRegistryServer,
+  getMcpRegistryEntry,
+  uninstallMcpRegistryServer,
+  updateMcpRegistryEnv,
+} from "@/api/mcp-registry";
+import {
+  ApiError,
+  type McpHealth,
+  type McpServer,
+  type McpSource,
+  type McpStatus,
+  type McpToolInfo,
+} from "@/api/types";
 import { type McpBridgeState, mcpAddedMessage, mcpBridgeState } from "@/lib/mcp-bridge";
+import {
+  missingEnvKeys,
+  mcpRowControls,
+  mcpSourceBadge,
+  REGISTRY_UNWIRED_NOTICE,
+  registryOutage,
+} from "@/lib/mcp-registry";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -35,9 +58,70 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
+import { McpRegistryBrowser } from "@/views/connections/McpRegistryBrowser";
 import { ProviderDetail } from "@/views/connections/ProviderDetail";
 
+/**
+ * What a server's health entitles its row to offer (issues #1260, #1270).
+ *
+ * A rule rather than inline conditions, because the two OAuth states differ by
+ * exactly one thing an operator cannot see: whether the server advertises
+ * dynamic client registration. `oauth_required` means the server asked for
+ * OAuth; only the host knows whether this console can complete one, and it says
+ * so by sending `static_token_required` instead. Reading them as the same state
+ * is what put a Sign in button on a Slack row that could never sign in.
+ *
+ * Issue #1270 added a third control and a reason the hint alone cannot decide
+ * between them. A **directory install** keeps its credentials as named env
+ * values in the host's registry store, and its row's `name` is a display slug
+ * addressing no List A declaration — so both List A controls are wrong for it
+ * twice over: `POST …/oauth/start` and `PUT …/mcp/servers/{name}` answer *no
+ * MCP server named …*, and the value they collect would be written to a store
+ * this server is not dialled from. Such a row gets `rotate_env`, which is
+ * `PUT …/mcp/registry/{serverId}/env`.
+ *
+ * `row.status` is consulted only for that case, and it has to be: the host's
+ * registry projection emits a stable `authHint` only when the upstream
+ * connection reported one, so a directory install refused for want of a
+ * credential can arrive as `needs_config` with no hint at all. List A's
+ * mapping below is untouched — it is still a function of the hint and nothing
+ * else.
+ */
+export function credentialAffordance(
+  authHint: string | undefined,
+  row?: { source: McpSource; status?: McpStatus },
+): "sign_in" | "add_token" | "rotate_env" | "none" {
+  if (row?.source === "registry") {
+    return row.status === "needs_config" ? "rotate_env" : "none";
+  }
+  switch (authHint) {
+    case "oauth_required":
+      return "sign_in";
+    case "static_token_required":
+    // A plain credential prompt wants the same field; it simply never had a
+    // sign-in button to withdraw.
+    case "credential_required":
+      return "add_token";
+    default:
+      return "none";
+  }
+}
+
 type McpLoad = "loading" | "ready" | "unavailable" | "error";
+/**
+ * The fields a directory install's credential rotation is asking for.
+ *
+ * They come from the *directory*, not from the row: `GET …/mcp/servers` reports
+ * only whether a credential is stored (`authConfigured`), never which keys hold
+ * it, so the names have to be re-read from the catalogue entry the install came
+ * from. That is also why this can fail while the rotation route itself is
+ * perfectly healthy — a directory outage costs the field names, so the form
+ * says so instead of guessing at them.
+ */
+type EnvFields =
+  | { kind: "loading" }
+  | { kind: "failed"; message: string }
+  | { kind: "ready"; keys: string[] };
 type ToolsState =
   | { kind: "idle" }
   | { kind: "loading" }
@@ -65,10 +149,19 @@ interface Props {
 }
 
 /**
- * Manage the company's MCP tool servers (issue #50). Lists the effective set
- * (manifest + runtime), adds runtime servers with a **write-only** token field,
- * toggles/removes them, and live-discovers each server's tools. A manifest
- * server can be disabled but not deleted.
+ * Manage the company's MCP tool servers (issue #50). Lists the effective set,
+ * adds runtime servers with a **write-only** token field, toggles/removes them,
+ * and live-discovers each server's tools. A manifest server can be disabled but
+ * not deleted.
+ *
+ * Since issue #1270 the effective set is four provenances, not two: manifest
+ * and default declarations, operator-typed runtime entries, and installs from
+ * the upstream MCP directories that [`McpRegistryBrowser`](./McpRegistryBrowser.tsx)
+ * below the form adds. They are **one list** with a provenance badge, not two
+ * sections — but a row's provenance decides more than its badge, because a
+ * directory install has no List A declaration behind its name and so cannot use
+ * List A's routes at all. That dispatch is
+ * [`mcpRowControls`](@/lib/mcp-registry)'s.
  *
  * This is the console's **only** MCP surface, reached from two places: the
  * Connections page renders it `inline`, Settings, MCP Servers renders it
@@ -96,6 +189,33 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
   // A name rather than the row itself, so an open panel re-derives from
   // `servers` after a refresh instead of showing the row as it was when clicked.
   const [opened, setOpened] = useState<string | null>(null);
+  /**
+   * The server whose inline credential field is open, and its draft value
+   * (issue #1260).
+   *
+   * Per-row rather than a shared field: the add form's Token creates a *new*
+   * server, so pointing an operator at it to fix an existing one would have
+   * them add a second copy. The host has accepted a credential rotation on
+   * `PUT …/mcp/servers/{name}` all along — this is the control that was missing.
+   */
+  const [credentialFor, setCredentialFor] = useState<string | null>(null);
+  const [credentialDraft, setCredentialDraft] = useState("");
+  /**
+   * The registry row whose credential-rotation form is open, and the fields it
+   * is showing (issue #1270).
+   *
+   * Separate state from `credentialFor` because the two collect different
+   * things for different stores: List A's is one bearer token written to this
+   * company's secret store, a directory install's is a set of *named* env
+   * values written to the host's registry store. Which of the two a row offers
+   * is `credentialAffordance`'s decision and nothing else's.
+   *
+   * The field names are not on the row — see `openEnvRotation`.
+   */
+  const [envFor, setEnvFor] = useState<string | null>(null);
+  const [envFields, setEnvFields] = useState<EnvFields>({ kind: "loading" });
+  const [envDraft, setEnvDraft] = useState<Record<string, string>>({});
+  const [envError, setEnvError] = useState<string | null>(null);
   // Set by the unmount cleanup below. A sign-in poll that is mid-`await` when
   // this component goes away has already removed its own timer entry, so the
   // cleanup has nothing left to cancel — it checks this instead of re-arming.
@@ -210,7 +330,12 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
       // Exception: an OAuth-required result is not an error to shout about — the
       // amber "needs config" badge carries a Sign in button, so a red alert here
       // would be redundant and misleading.
-      if (res.test && res.test.status !== "ok" && res.test.authHint !== "oauth_required") {
+      if (
+        res.test &&
+        res.test.status !== "ok" &&
+        res.test.authHint !== "oauth_required" &&
+        res.test.authHint !== "static_token_required"
+      ) {
         setAddError(res.test.message);
       } else if (res.warning) {
         setAddError(res.warning);
@@ -253,6 +378,32 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
   // Browser OAuth sign-in (issue #90): open the authorization URL in a new tab,
   // then poll the server's health until it flips to `ok` (the host stores the
   // token on its callback route) so the amber badge turns green on its own.
+  /**
+   * Rotate one server's credential from its own row (issue #1260).
+   *
+   * Re-tests on success rather than trusting the write: the whole point of the
+   * flow is that the operator does not know whether the token is the right one
+   * until the server answers, and a silent save would leave the amber badge
+   * sitting there with no way to tell "wrong token" from "not saved".
+   */
+  async function saveCredential(server: McpServer) {
+    if (busy) return;
+    const token = credentialDraft.trim();
+    if (!token) return;
+    setBusy(server.name);
+    try {
+      await updateMcpServer(client, company, server.name, { token, authKind: "bearer" });
+      setCredentialFor(null);
+      setCredentialDraft("");
+      await refresh();
+      await test(server);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Couldn't save the token.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function signIn(server: McpServer) {
     // Guard both the shared `busy` flag and a per-server poll already in flight:
     // the poll outlives `busy`, so without the second check a repeat click would
@@ -320,15 +471,148 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
     }
   }
 
+  /**
+   * Remove a server through whichever route owns it (issue #1270).
+   *
+   * The dispatch is [`mcpRowControls`](@/lib/mcp-registry)'s, not a condition
+   * here, because the two routes key on different things and neither accepts
+   * the other's key: List A deletes by `name`, a directory install by its
+   * `serverId`. A registry row's `name` is a slug the host mints for the merged
+   * view — sending it to `DELETE …/mcp/servers/{name}` addresses a declaration
+   * that does not exist, and on an unlucky slug collision would address someone
+   * else's.
+   *
+   * The `index` arm covers a *reconciled* runtime row on purpose: the host
+   * removes the index row and uninstalls the directory half in the same call,
+   * so one delete is the whole removal.
+   */
   async function remove(server: McpServer) {
     if (busy) return;
+    const removal = mcpRowControls(server, tested[server.name] ?? server.health).removal;
+    if (removal.kind === "none") return;
     setBusy(server.name);
     try {
-      await removeMcpServer(client, company, server.name);
+      if (removal.kind === "install") {
+        await uninstallMcpRegistryServer(client, company, removal.serverId);
+      } else {
+        await removeMcpServer(client, company, removal.name);
+      }
       toast.success(`Removed ${server.name}.`);
       await refresh();
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Couldn't remove the server.");
+      if (err instanceof ApiError && err.code === "not_wired") {
+        toast.message(REGISTRY_UNWIRED_NOTICE);
+      } else {
+        toast.error(err instanceof ApiError ? err.message : "Couldn't remove the server.");
+      }
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /**
+   * Dial or drop a directory install's session (issue #1270).
+   *
+   * The registry's answer to the Switch. A disconnect keeps the install and its
+   * stored credentials — it closes the session, it does not uninstall — so the
+   * two are separate controls rather than one destructive toggle.
+   *
+   * The response carries the connection state right after the change, which is
+   * recorded as this row's live health so the badge moves without a second
+   * round trip. A refused connection is **not** an error: the host says so, and
+   * a server that answers "needs a credential" has told the operator exactly
+   * what to do next.
+   */
+  async function lifecycle(server: McpServer, direction: "connect" | "disconnect") {
+    if (busy || !server.serverId) return;
+    setBusy(server.name);
+    try {
+      const res =
+        direction === "connect"
+          ? await connectMcpRegistryServer(client, company, server.serverId)
+          : await disconnectMcpRegistryServer(client, company, server.serverId);
+      const after = res.test;
+      if (after) setTested((t) => ({ ...t, [server.name]: after }));
+      // No state came back: drop any stale override so the row falls back to
+      // the health the refresh below is about to bring.
+      else setTested(({ [server.name]: _dropped, ...rest }) => rest);
+      await refresh();
+    } catch (err) {
+      if (err instanceof ApiError && err.code === "not_wired") {
+        toast.message(REGISTRY_UNWIRED_NOTICE);
+      } else {
+        toast.error(
+          err instanceof ApiError
+            ? err.message
+            : `Couldn't ${direction} ${server.name}.`,
+        );
+      }
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /**
+   * Open a directory install's credential rotation, reading its field names
+   * from the catalogue entry it was installed from.
+   *
+   * The row cannot supply them: the merged read reports only that *a*
+   * credential is stored. See {@link EnvFields}.
+   */
+  async function openEnvRotation(server: McpServer) {
+    setEnvDraft({});
+    setEnvError(null);
+    setEnvFor(server.name);
+    if (!server.qualifiedName) {
+      setEnvFields({
+        kind: "failed",
+        message: "This install doesn't name a directory entry, so its credential fields are unknown.",
+      });
+      return;
+    }
+    setEnvFields({ kind: "loading" });
+    try {
+      const detail = await getMcpRegistryEntry(client, company, server.qualifiedName);
+      setEnvFields({ kind: "ready", keys: detail.requiredEnvKeys });
+    } catch (err) {
+      const outage = registryOutage(err);
+      setEnvFields({
+        kind: "failed",
+        message:
+          outage.kind === "unwired"
+            ? REGISTRY_UNWIRED_NOTICE
+            : `${outage.message} Its credential fields are named in the directory, so they can't be read right now.`,
+      });
+    }
+  }
+
+  /**
+   * Rotate a directory install's credentials.
+   *
+   * Write-only in both directions, exactly like List A's token: the values go
+   * to `PUT …/mcp/registry/{serverId}/env` and come back only as the row's
+   * `authConfigured` flag. The host merges the supplied keys over the stored
+   * ones and reconnects, so the post-write connection state is the answer to
+   * "was that the right credential" and is recorded as this row's live health.
+   */
+  async function saveEnvRotation(server: McpServer, keys: string[]) {
+    if (busy || !server.serverId) return;
+    const missing = missingEnvKeys(keys, envDraft);
+    if (missing.length > 0) {
+      setEnvError(`Fill in ${missing.join(", ")} before saving.`);
+      return;
+    }
+    setBusy(server.name);
+    setEnvError(null);
+    try {
+      const res = await updateMcpRegistryEnv(client, company, server.serverId, envDraft);
+      const after = res.test;
+      if (after) setTested((t) => ({ ...t, [server.name]: after }));
+      setEnvFor(null);
+      setEnvDraft({});
+      await refresh();
+    } catch (err) {
+      setEnvError(err instanceof ApiError ? err.message : "Couldn't save those credentials.");
     } finally {
       setBusy(null);
     }
@@ -434,6 +718,22 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
               <ul className="divide-y divide-border">
                 {servers.map((server) => {
                   const health = tested[server.name] ?? server.health;
+                  // Which half of the API this row may talk to at all — not
+                  // merely which badge it prints (issue #1270). A directory
+                  // install has no List A declaration behind its name, so the
+                  // Switch, Test and Tools that every row used to carry answer
+                  // `no MCP server named …` on it, and the registry's own
+                  // connect/disconnect stand in their place.
+                  const controls = mcpRowControls(server, health);
+                  // Hoisted out of the JSX so the direction stays narrowed:
+                  // there is one place that decides connect-or-disconnect, and
+                  // the button below reads it rather than re-testing it.
+                  const dial = controls.lifecycle === "none" ? null : controls.lifecycle;
+                  const badge = mcpSourceBadge(server.source);
+                  const credential = credentialAffordance(health?.authHint, {
+                    source: server.source,
+                    status: health?.status,
+                  });
                   return (
                     <li
                       key={server.name}
@@ -463,18 +763,45 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                           {server.name}
                           <ChevronRight className="size-3.5 text-muted-foreground" />
                         </button>
-                        <Badge variant={server.source === "manifest" ? "secondary" : "outline"}>
-                          {server.source}
+                        <Badge variant={badge.variant} data-testid="mcp-source-badge">
+                          {badge.label}
                         </Badge>
                         <McpHealthBadge health={health} authConfigured={server.authConfigured} />
                         <span className="ml-auto flex items-center gap-2">
-                          <Switch
-                            checked={server.enabled}
-                            disabled={busy === server.name || !canManage}
-                            onCheckedChange={(v) => void toggle(server, v)}
-                            aria-label={`Enable ${server.name}`}
-                          />
-                          {health?.authHint === "oauth_required" && canManage && (
+                          {controls.toggle && (
+                            <Switch
+                              checked={server.enabled}
+                              disabled={busy === server.name || !canManage}
+                              onCheckedChange={(v) => void toggle(server, v)}
+                              aria-label={`Enable ${server.name}`}
+                            />
+                          )}
+                          {/* Issue #1260: `oauth_required` means the server asked for
+                              OAuth; it does NOT mean this console can complete one. A
+                              server advertising no dynamic client registration — Slack's
+                              MCP endpoint, for one — has no client for us to mint, so
+                              Sign in cannot succeed and the host says so with a distinct
+                              hint. Offering the button anyway spends a click to reach an
+                              error naming something the operator cannot act on, which is
+                              the same trade `hub_providers` already refuses to make for
+                              the Google and GitHub buttons. */}
+                          {credential === "add_token" &&
+                            canManage &&
+                            credentialFor !== server.name && (
+                              <Button
+                                variant="default"
+                                size="sm"
+                                data-testid="mcp-add-token"
+                                disabled={busy === server.name}
+                                onClick={() => {
+                                  setCredentialDraft("");
+                                  setCredentialFor(server.name);
+                                }}
+                              >
+                                <KeyRound className="size-4" /> Add token
+                              </Button>
+                            )}
+                          {credential === "sign_in" && canManage && (
                             <Button
                               variant="default"
                               size="sm"
@@ -489,28 +816,73 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                               Sign in
                             </Button>
                           )}
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            disabled={busy === server.name}
-                            onClick={() => void test(server)}
-                          >
-                            {busy === server.name ? (
-                              <Loader2 className="size-4 animate-spin" />
-                            ) : (
-                              <Plug className="size-4" />
-                            )}{" "}
-                            Test
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            disabled={busy === server.name}
-                            onClick={() => void discover(server)}
-                          >
-                            <ChevronDown className="size-4" /> Tools
-                          </Button>
-                          {server.source === "runtime" && canManage && (
+                          {/* Issue #1270: a directory install's credentials are
+                              named env values in the host's registry store, so
+                              the control it gets is a rotation of those, not
+                              List A's single bearer-token field. */}
+                          {credential === "rotate_env" &&
+                            canManage &&
+                            envFor !== server.name && (
+                              <Button
+                                variant="default"
+                                size="sm"
+                                data-testid="mcp-rotate-env"
+                                disabled={busy === server.name}
+                                onClick={() => void openEnvRotation(server)}
+                              >
+                                <KeyRound className="size-4" /> Credentials
+                              </Button>
+                            )}
+                          {dial !== null && canManage && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              data-testid="mcp-lifecycle"
+                              disabled={busy === server.name}
+                              onClick={() => void lifecycle(server, dial)}
+                            >
+                              {busy === server.name ? (
+                                <Loader2 className="size-4 animate-spin" />
+                              ) : dial === "connect" ? (
+                                <Plug className="size-4" />
+                              ) : (
+                                <Unplug className="size-4" />
+                              )}{" "}
+                              {dial === "connect" ? "Connect" : "Disconnect"}
+                            </Button>
+                          )}
+                          {/* Test and Tools resolve the row's `name` against
+                              List A's declarations, which a directory install
+                              has none of — offering them there would spend a
+                              click to reach `no MCP server named …`. Connect
+                              above is that row's equivalent: its answer carries
+                              the connection state and the tool count. */}
+                          {controls.probe && (
+                            <>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled={busy === server.name}
+                                onClick={() => void test(server)}
+                              >
+                                {busy === server.name ? (
+                                  <Loader2 className="size-4 animate-spin" />
+                                ) : (
+                                  <Plug className="size-4" />
+                                )}{" "}
+                                Test
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled={busy === server.name}
+                                onClick={() => void discover(server)}
+                              >
+                                <ChevronDown className="size-4" /> Tools
+                              </Button>
+                            </>
+                          )}
+                          {controls.removal.kind !== "none" && canManage && (
                             <Button
                               variant="ghost"
                               size="sm"
@@ -557,6 +929,113 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                         ))}
                       {health && health.status !== "ok" && health.message && (
                         <p className="text-xs text-muted-foreground">{health.message}</p>
+                      )}
+                      {credentialFor === server.name && canManage && (
+                        <div className="flex items-end gap-2" data-testid="mcp-token-inline">
+                          <div className="flex-1 space-y-1">
+                            <Label htmlFor={`mcp-token-${server.name}`} className="text-xs">
+                              API token for {server.name}
+                            </Label>
+                            <Input
+                              id={`mcp-token-${server.name}`}
+                              type="password"
+                              autoComplete="new-password"
+                              placeholder="write-only"
+                              value={credentialDraft}
+                              onChange={(e) => setCredentialDraft(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") void saveCredential(server);
+                                if (e.key === "Escape") setCredentialFor(null);
+                              }}
+                            />
+                          </div>
+                          <Button
+                            size="sm"
+                            data-testid="mcp-token-save"
+                            disabled={busy === server.name || !credentialDraft.trim()}
+                            onClick={() => void saveCredential(server)}
+                          >
+                            {busy === server.name ? (
+                              <Loader2 className="size-4 animate-spin" />
+                            ) : (
+                              "Save"
+                            )}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={busy === server.name}
+                            onClick={() => setCredentialFor(null)}
+                          >
+                            Cancel
+                          </Button>
+                        </div>
+                      )}
+                      {envFor === server.name && canManage && (
+                        <div className="space-y-2 rounded-md bg-muted/40 p-2" data-testid="mcp-env-inline">
+                          {envFields.kind === "loading" ? (
+                            <p className="flex items-center gap-1 text-xs text-muted-foreground">
+                              <Loader2 className="size-3 animate-spin" /> Reading this
+                              server&apos;s credential fields…
+                            </p>
+                          ) : envFields.kind === "failed" ? (
+                            <p className="text-xs text-destructive" data-testid="mcp-env-unavailable">
+                              {envFields.message}
+                            </p>
+                          ) : envFields.keys.length === 0 ? (
+                            <p className="text-xs text-muted-foreground">
+                              This server asks for no credentials.
+                            </p>
+                          ) : (
+                            envFields.keys.map((key) => (
+                              <div key={key} className="space-y-1">
+                                <Label
+                                  htmlFor={`mcp-env-${server.name}-${key}`}
+                                  className="font-mono text-xs"
+                                >
+                                  {key}
+                                </Label>
+                                <Input
+                                  id={`mcp-env-${server.name}-${key}`}
+                                  type="password"
+                                  autoComplete="new-password"
+                                  placeholder="write-only"
+                                  value={envDraft[key] ?? ""}
+                                  onChange={(e) =>
+                                    setEnvDraft({ ...envDraft, [key]: e.target.value })
+                                  }
+                                />
+                              </div>
+                            ))
+                          )}
+                          {envError && <p className="text-xs text-destructive">{envError}</p>}
+                          <div className="flex items-center gap-2">
+                            {envFields.kind === "ready" && envFields.keys.length > 0 && (
+                              <Button
+                                size="sm"
+                                data-testid="mcp-env-save"
+                                disabled={busy === server.name}
+                                onClick={() => void saveEnvRotation(server, envFields.keys)}
+                              >
+                                {busy === server.name ? (
+                                  <Loader2 className="size-4 animate-spin" />
+                                ) : (
+                                  "Save"
+                                )}
+                              </Button>
+                            )}
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={busy === server.name}
+                              onClick={() => setEnvFor(null)}
+                            >
+                              {envFields.kind === "ready" && envFields.keys.length > 0
+                                ? "Cancel"
+                                : "Close"}
+                            </Button>
+                          </div>
+                        </div>
                       )}
                       <McpToolsList state={tools[server.name] ?? { kind: "idle" }} />
                     </li>
@@ -665,6 +1144,25 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                   </Button>
                 </div>
               </div>
+            )}
+
+            {/* Issue #1270: the tab could not discover anything — an operator
+                had to arrive already knowing a URL to paste. The directory
+                browser sits inside the same card, under the same manage gate as
+                the form above it (an install hands every teammate a new set of
+                tools), and what it installs lands in the list above with a
+                `registry` badge rather than in a section of its own.
+
+                Its failures are its own: it renders a notice inside itself and
+                never touches `load`, so a directory that is down — or a host
+                built without the MCP feature, which 404s these routes — costs
+                the catalogue and not the company's server list. */}
+            {canManage && (
+              <McpRegistryBrowser
+                client={client}
+                company={company}
+                onInstalled={() => void refresh()}
+              />
             )}
           </CardContent>
         </Card>

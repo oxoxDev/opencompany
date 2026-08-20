@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   // AppWindow,  // re-add with the Pages nav entry below
+  Brain,
   FolderClosed,
   LayoutDashboard,
   type LucideIcon,
@@ -149,6 +150,11 @@ const NAV: NavItem[] = [
   // operator who met their work twice had to learn which of the two was the
   // real one. There is one.
   { view: "ledgers", label: "Ledgers", icon: BookText },
+  // What the company remembers, and — now that an operator can select a
+  // memory engine — WHERE it remembers: the engine panel shows which driver
+  // is bound, what it negotiated, and whether the boot probe reached it.
+  // Re-listed (issue #302 parked it; the memory-engine work un-parks it).
+  { view: "memory", label: "Brain", icon: Brain },
   { view: "workspace", label: "Workspace", icon: FolderClosed },
   { view: "approvals", label: "Approvals", icon: ShieldCheck },
   { view: "workflows", label: "Workflows", icon: Workflow },
@@ -157,8 +163,8 @@ const NAV: NavItem[] = [
   // "something an agent built" surfaces, as opposed to the fixed views above.
   // Pages is deliberately not offered in the nav. The view and its `#/pages`
   // route stay live, so an address or an existing link still resolves — this
-  // is the same treatment `feedback`, `inbox`, `memory`, `finances`,
-  // `conversation` and `team` already get. Do not "fix" the omission by
+  // is the same treatment `feedback`, `inbox`, `finances`, `conversation`
+  // and `team` already get. Do not "fix" the omission by
   // adding it back.
   // { view: "pages", label: "Pages", icon: AppWindow },
   { view: "settings", label: "Settings", icon: Settings2 },
@@ -168,7 +174,8 @@ const NAV: NavItem[] = [
  * Routable without a nav entry — reachable by URL, absent from the sidebar.
  *
  * Feedback is linked from the sidebar footer instead. The rest are parked
- * rather than retired (issue #302 for Inbox, Brain and Finances; the chat
+ * rather than retired (issue #302 for Inbox and Finances — Brain was parked
+ * there too and is re-listed above with the memory-engine work; the chat
  * rebuild for Conversation and Team): their host routes, stores and e2e specs
  * are untouched, and re-listing one in `NAV` above is all it takes to bring it
  * back. Conversation and Team are the surfaces the Chat workspace replaces —
@@ -198,7 +205,6 @@ const NAV: NavItem[] = [
 const HIDDEN_VIEWS: View[] = [
   "feedback",
   "inbox",
-  "memory",
   "finances",
   "conversation",
   "team",
@@ -559,6 +565,16 @@ export function AppShell({
   // itself gated off in `run_inner`). See PR #125 review.
   const activeTurnThreadRef = useRef<string | null>(null);
   const pendingPostThreadsRef = useRef<Set<string>>(new Set());
+  // Approval ids THIS console is deciding right now, or just decided a moment
+  // ago (issue #1211) — so the generic SSE echo of `approval_resolved` can be
+  // suppressed for exactly the decision this tab made, the same way
+  // `pendingPostThreadsRef` suppresses the `agent_reply` echo of a chat send
+  // this tab POSTed. Added the instant a decide path starts (before the
+  // network call — the SSE frame can race ahead of the awaited response),
+  // consumed (checked-and-cleared) the moment the matching frame arrives, in
+  // `isOwnDecision` below. A single small `Set` — bounded by however many
+  // decisions are in flight or freshly settled, which is never many.
+  const ownApprovalDecisionsRef = useRef<Set<string>>(new Set());
   const feed = useCompany(client, company, initialStatus);
   // Issue #379: the inline approval cards' console-local state, owned here
   // rather than in `ChatView` for the same reason `transcripts` is — the shell
@@ -1202,6 +1218,7 @@ export function AppShell({
     scope: GrantScope = { kind: "once" },
   ) => {
     if (decidingApprovals.has(approval.id)) return;
+    ownApprovalDecisionsRef.current.add(approval.id);
     markDeciding(approval.id, verdict);
     // A retry starts clean: the previous attempt's error must not sit under a
     // live one, or the operator cannot tell which attempt it belongs to.
@@ -1324,6 +1341,15 @@ export function AppShell({
       }
       void feed.refresh();
     },
+    // Issue #1211: pop the id this console just decided so `use-events.ts` can
+    // suppress the generic echo toast for exactly this decision — and only
+    // this one, since a second frame for the same id must not read as "still
+    // mine".
+    isOwnDecision: (approvalId: string) => {
+      const mine = ownApprovalDecisionsRef.current.has(approvalId);
+      ownApprovalDecisionsRef.current.delete(approvalId);
+      return mine;
+    },
     onResync: resyncDurableState,
     onRecoveryError: useCallback(() => {
       toast.error("Live updates couldn't be recovered", {
@@ -1334,15 +1360,6 @@ export function AppShell({
 
   return (
     <SidebarProvider className="h-svh overflow-hidden">
-      {/* Mobile turns the sidebar into a sheet, so its own collapse control is
-          not mounted while it is closed. Keep the way back fixed to the
-          viewport and below the page controls rather than competing with a
-          view's toolbar. Desktop keeps its own collapse button in the
-          sidebar's header. */}
-      <SidebarTrigger
-        aria-label="Toggle sidebar"
-        className="fixed bottom-4 left-4 z-50 md:hidden"
-      />
       <Sidebar collapsible="icon">
         <SidebarHeader>
           {/* The header is the column talking about itself: which host this
@@ -1430,9 +1447,13 @@ export function AppShell({
           strip held the "Done" column, which is why a card could not be dragged
           into it (issue #334); every view was losing the same strip. */}
       <SidebarInset className="min-h-0 min-w-0">
-        <main className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        {/* A `div`, not `main`: `SidebarInset` above is already the console's
+            one `<main>` landmark. This is only a flex/scroll container — a
+            second nested `<main>` here gave every page two identical
+            "skip to content" destinations (issue #1221). */}
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {view === "overview" && (
-            <Overview client={client} company={company} />
+            <Overview client={client} company={company} companyName={feed.status.name} />
           )}
           {view === "company" && (
             <CompanyView
@@ -1628,6 +1649,10 @@ export function AppShell({
               sub={sub}
               onResolved={noteSystem}
               onGoToConversation={() => setView("chat")}
+              // Issue #1211: mark this id as "mine" before the resolve POST
+              // goes out, so the SSE echo for it — which can arrive before the
+              // POST settles — is not toasted a second time.
+              onDecideStart={(approvalId) => ownApprovalDecisionsRef.current.add(approvalId)}
             />
           )}
           {view === "workflows" && (
@@ -1709,7 +1734,19 @@ export function AppShell({
             />
           )}
           {view === "feedback" && <FeedbackView client={client} company={company} />}
-        </main>
+        </div>
+
+        {/* Mobile only: dedicated chrome for the way back to navigation, not an
+            overlay on top of it. A `fixed` trigger here used to float over
+            whatever content happened to scroll into the bottom-left corner and
+            win every hit-test in that region (issue #1265) — this bar reserves
+            its own row in SidebarInset's flex column instead, so the content
+            wrapper's flex-1 height (and every view's own overflow-y-auto
+            within it) already stops short of it. No view needs to know this
+            control exists. */}
+        <div className="flex shrink-0 items-center border-t bg-background p-2 md:hidden">
+          <SidebarTrigger aria-label="Toggle sidebar" />
+        </div>
       </SidebarInset>
 
       <FeedbackDialog

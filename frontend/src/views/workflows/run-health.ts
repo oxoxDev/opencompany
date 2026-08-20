@@ -113,7 +113,40 @@ export function pendingCount(deliveries: DeliveryReport[]): number {
  * whether somebody is being waited on.
  */
 export function awaitingCount(run: WorkflowRunOutcome): number {
-  return (run.pendingApprovals?.length ?? 0) + pendingCount(run.deliveries);
+  return liveApprovalCount(run) + pendingCount(run.deliveries);
+}
+
+/**
+ * The gate nodes this run stopped at that STILL have a card in the queue
+ * (issue #1189).
+ *
+ * `pendingApprovals` is a receipt of where the run stopped and cannot go stale
+ * — but the question each entry points at can, and on one staging tenant 34 of
+ * 60 runs were pointing at nothing. The host reconciles the two and reports the
+ * difference as `strandedApprovals`; this is the subtraction, done once, so the
+ * header chip, the drawer and the summary line cannot disagree about whether
+ * anybody is being waited on.
+ *
+ * Clamped at 0. The two numbers come from the same host read, so the count can
+ * never legitimately exceed the list — but a negative here would render as
+ * "-1 awaiting approval", which is a worse failure than the one being fixed.
+ */
+export function liveApprovalCount(run: WorkflowRunOutcome): number {
+  const pending = run.pendingApprovals?.length ?? 0;
+  return Math.max(0, pending - strandedApprovalCount(run));
+}
+
+/**
+ * The gate nodes this run stopped at with **no live card left** (issue #1189).
+ *
+ * Host-derived, never guessed: only the host can join a gate to the queue, and
+ * a host predating #1189 sends no key at all — which reads as 0, i.e. "not
+ * reconciled". That is the safe direction. Inventing a dead end would retire a
+ * run an operator can still act on, which is strictly worse than the defect
+ * this closes: an operator cannot argue with a run the console says is over.
+ */
+export function strandedApprovalCount(run: WorkflowRunOutcome): number {
+  return run.strandedApprovals ?? 0;
 }
 
 /**
@@ -149,6 +182,35 @@ export function decidableApprovalCount(run: WorkflowRunOutcome): number {
 }
 
 /**
+ * The approvals this run parked that are STILL on the Approvals page (issue
+ * #1189).
+ *
+ * {@link decidableApprovalCount} is live-blind: it reads the run's receipt, and
+ * a receipt records that a card was opened, never that it is still open. That
+ * was right for #900's question ("did the park land?") and is wrong for any
+ * copy that tells the operator to go and decide something — which is how the
+ * drawer came to say "Approve them in Approvals and this run continues on its
+ * own" one line above "none of its approvals are in the queue any more".
+ *
+ * Subtracts the per-node `stranded` counts the host already computes (#1143).
+ * Both numbers are in the same units — approval **ids** — because `stranded` is
+ * a filter over `blockedNodes[].approvalIds` and the receipt rows are keyed by
+ * the same ids.
+ *
+ * Clamped at 0 for the same reason {@link liveApprovalCount} is, plus one of
+ * its own: the receipt deliberately excludes parks that never landed while
+ * `stranded` counts only ids that did, so the two lists are not identical and
+ * arithmetic across them must not be trusted to stay ordered.
+ */
+export function liveParkedApprovalCount(run: WorkflowRunOutcome): number {
+  const stranded = (run.blockedNodes ?? []).reduce(
+    (n, b) => n + (b.stranded ?? 0),
+    0,
+  );
+  return Math.max(0, decidableApprovalCount(run) - stranded);
+}
+
+/**
  * Whether this run stopped short because a step is waiting on a person (issue
  * #881).
  *
@@ -160,6 +222,30 @@ export function decidableApprovalCount(run: WorkflowRunOutcome): number {
  */
 export function isBlocked(run: WorkflowRunOutcome): boolean {
   return (run.blockedNodes?.length ?? 0) > 0;
+}
+
+/**
+ * Whether nothing in the queue is waiting on this run any more, so no decision
+ * can move it (issue #1189).
+ *
+ * The host's word first, exactly as {@link verdictOf} takes it: the host is the
+ * only reader that can join a gate against the live queue. The local fold is
+ * the fallback for a host predating #1189 that nevertheless sent the per-node
+ * `stranded` counts #1143 added — the `feature_pipeline` case — and it mirrors
+ * the host's rule rather than inventing a second one: it stopped for somebody,
+ * EVERY gate lost its card, and no report is parked either.
+ *
+ * A partly stranded run is deliberately NOT stranded. Something there really is
+ * still decidable, and the per-node count is what carries the loss.
+ */
+export function isStranded(run: WorkflowRunOutcome): boolean {
+  if (run.verdict) return run.verdict === "stranded";
+  const pending = run.pendingApprovals?.length ?? 0;
+  return (
+    pending > 0 &&
+    strandedApprovalCount(run) >= pending &&
+    pendingCount(run.deliveries) === 0
+  );
 }
 
 /** A compact "N minutes ago" for a run timestamp — enough to tell last night's
@@ -203,6 +289,23 @@ const VERDICT_TONE: Record<WorkflowRunVerdict, { dot: string; label: string }> =
     // Issue #383: a stop somebody asked for is not a fault. Idle is the state
     // for "nothing is happening and nothing went wrong".
     stopped: { dot: "bg-status-idle", label: "stopped" },
+    // Issue #1189: idle, NOT the amber it shares a shape with.
+    //
+    // The status vocabulary is a closed set of five (docs/design-system/color.md),
+    // so this picks from them rather than adding a sixth. Amber is the console's
+    // "needs your attention, nothing is broken" state — it is what `blocked` and
+    // `awaiting approval` wear, and both of them mean "go and decide this". A
+    // stranded run is the one state in which that is false: there is nothing to
+    // decide and nothing is owed. Painting it amber would reprint, in colour,
+    // the exact claim this issue was filed to remove.
+    //
+    // Idle is `stopped`'s token for "nothing is happening and nothing went
+    // wrong", and this run is inert in the same way. It is deliberately not
+    // `failed` either: the graph did not break, and — since approving a gate
+    // spawns a NEW run with no link back — a run whose gates were all approved
+    // is indistinguishable from one whose cards were lost. Red would be a claim
+    // about which, and the console cannot tell.
+    stranded: { dot: "bg-status-idle", label: "stranded" },
     // Issue #881: deliberately not red. A blocked run stopped short of its work
     // but nothing about it failed. The label says what happened to the run, not
     // what is owed; the count of what it parked belongs on the row beneath.
@@ -221,7 +324,8 @@ const VERDICT_TONE: Record<WorkflowRunVerdict, { dot: string; label: string }> =
 /**
  * A run's verdict — **the host's when it sends one** (issue #981).
  *
- * The seven words and their precedence order are unchanged; what changed is who
+ * The words and their precedence order are unchanged (bar #1189's
+ * `stranded`); what changed is who
  * owns them. They lived only here, in this console's TypeScript, so every other
  * reader of the same run had to re-derive them — and the obvious derivation,
  * folding `nodes[].status`, is wrong for the one case that matters: delivery
@@ -247,6 +351,8 @@ export function verdictOf(run: WorkflowRunOutcome): WorkflowRunVerdict {
   if (isRunning(run)) return "running";
   if (run.error) return "failed";
   if (run.cancelled) return "stopped";
+  // Issue #1189, above both readings that say "go and decide it".
+  if (isStranded(run)) return "stranded";
   if (isBlocked(run)) return "blocked";
   if (undeliveredCount(run.deliveries) > 0) return "undelivered";
   if (awaitingCount(run) > 0) return "awaiting-approval";

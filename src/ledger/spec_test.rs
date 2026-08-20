@@ -34,6 +34,28 @@ fn a_minimal_declaration_parses() {
     assert!(spec.written_by.contains("record_entry"));
 }
 
+/// **`StatusSpec` itself stays snake_case both ways** (issue #1266's
+/// near-miss): it is also what a declared ledger round-trips through in
+/// every store backend, so `needs_reason` in must equal `needs_reason` out
+/// or a save-then-reload silently drops the flag back to `false`. The
+/// console-facing camelCase key lives on a wire-only DTO instead
+/// (`server::ops::ledgers::LedgerStatusDto`), covered by
+/// `ledgers_test.rs`'s `a_status_that_needs_a_reason_carries_camel_case_on_the_wire`.
+#[test]
+fn status_spec_round_trips_needs_reason_through_its_own_serde_unchanged() {
+    let spec = parse(&minimal(), false).expect("declaration still parses with needs_reason");
+    let status = spec.status("closed").expect("the closed status");
+    assert!(status.needs_reason);
+
+    let wire = serde_json::to_value(status).unwrap();
+    assert_eq!(wire["needs_reason"], true);
+    let restored: StatusSpec = serde_json::from_value(wire).unwrap();
+    assert!(
+        restored.needs_reason,
+        "a store round-trip through this type's own serde must not lose the flag"
+    );
+}
+
 #[test]
 fn a_ledger_needs_exactly_one_id_field() {
     let mut document = minimal();

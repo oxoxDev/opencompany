@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { ChevronRight, CircleDot, Hash, Lock, SquarePen } from "lucide-react";
 
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { Avatar } from "./Avatar";
 import { channelSubtitle, dmFace, type Channel, type ChannelSection } from "./model";
 
 /**
@@ -185,7 +185,7 @@ function ChannelIcon({ channel }: { channel: Channel }) {
   if (channel.kind === "dm") {
     const face = dmFace(channel);
     return face ? (
-      <Avatar {...face} className="size-5 text-3xs" />
+      <TeammateAvatar {...face} className="size-5 text-3xs" />
     ) : (
       <CircleDot className="size-4 shrink-0" aria-hidden />
     );

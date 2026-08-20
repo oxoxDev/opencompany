@@ -95,3 +95,42 @@ describe("what the console says when an approval resolves", () => {
     expect(onApprovalEvent).toHaveBeenCalledTimes(2);
   });
 });
+
+/**
+ * Issue #1211: deciding a card raised two toasts for one click — the click's
+ * own, specific one, and this generic echo of the operator's own decision
+ * arriving back over SSE a moment later. `isOwnDecision` lets the console that
+ * made the decision suppress the echo, while a decision made on the Approvals
+ * page, in another tab, or by someone else still gets said out loud.
+ */
+describe("suppressing the echo of this console's own decision", () => {
+  it("skips the generic toast when this console made the decision", () => {
+    handleEvent(resolved({ verdict: "approve" }), { isOwnDecision: () => true });
+    expect(toasts.base).not.toHaveBeenCalled();
+  });
+
+  it("still refreshes the queue when the toast is suppressed", () => {
+    const onApprovalEvent = vi.fn();
+    handleEvent(resolved(), { isOwnDecision: () => true, onApprovalEvent });
+    expect(onApprovalEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it("still toasts a decision made on another tab / by someone else", () => {
+    handleEvent(resolved({ verdict: "approve" }), { isOwnDecision: () => false });
+    expect(toasts.base).toHaveBeenCalledTimes(1);
+    const [title] = toasts.base.mock.calls[0] as [string];
+    expect(title).toBe("Approval granted");
+  });
+
+  it("toasts as before when isOwnDecision is absent", () => {
+    handleEvent(resolved(), {});
+    expect(toasts.base).toHaveBeenCalledTimes(1);
+  });
+
+  it("toasts an expiry even if isOwnDecision would say true — nobody here decided it", () => {
+    handleEvent(resolved({ automatic: true }), { isOwnDecision: () => true });
+    expect(toasts.base).toHaveBeenCalledTimes(1);
+    const [title] = toasts.base.mock.calls[0] as [string];
+    expect(title).toBe("Approval expired");
+  });
+});

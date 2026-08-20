@@ -22,6 +22,7 @@ import {
   probedOn,
 } from "@/lib/connection-detail";
 import { toolkitSlug } from "@/lib/connections";
+import { mcpProvenanceNote, mcpRemovalNote } from "@/lib/mcp-registry";
 import { accountSummary, tallyAccounts } from "@/lib/provider-grid";
 import type { GridProvider } from "@/lib/provider-grid";
 
@@ -451,10 +452,12 @@ function McpBody({
                 to open the panel rather than a detail to hide again. */}
             <p className="font-mono text-xs break-all">{server.endpoint}</p>
           </div>
-          <p className="text-xs text-muted-foreground">
-            {server.source === "manifest"
-              ? "Declared in this company's company.toml, so it comes back on every boot — it can be turned off here but not deleted."
-              : "Added from the console, so it lives in this company's runtime store rather than in company.toml."}
+          {/* One sentence per provenance (issue #1270). This read `manifest`
+              against everything-else, which told an operator that a directory
+              install "was added from the console and lives in this company's
+              runtime store" — true of neither half of it. */}
+          <p className="text-xs text-muted-foreground" data-testid="mcp-detail-provenance">
+            {mcpProvenanceNote(server.source)}
           </p>
           <p className="text-xs text-muted-foreground" data-testid="mcp-detail-probe">
             {standing.probe}
@@ -470,7 +473,10 @@ function McpBody({
             {/* The same answer the native path gets, for the same reason: there
                 is no connect to record. Said rather than left blank, which
                 reads as "never". */}
-            {connectedOn(undefined)} — MCP has no connect step to record one.
+            {connectedOn(undefined)} —{" "}
+            {server.source === "registry"
+              ? "this host does connect a directory install, but records no date for it."
+              : "MCP has no connect step to record one."}
           </p>
         </section>
 
@@ -533,9 +539,7 @@ function McpBody({
             What a disconnect reaches
           </h4>
           <p className="text-xs text-muted-foreground" data-testid="mcp-detail-disconnect-scope">
-            {server.source === "manifest"
-              ? "This server is declared in company.toml, so it cannot be removed from the console — turning it off drops it from every teammate's tool belt on the next turn, and it returns on the next boot unless the manifest changes."
-              : "Removing it drops it from every teammate's tool belt on the next turn and deletes the credential stored here for it."}{" "}
+            {mcpRemovalNote(server.source)}{" "}
             Nothing is revoked at the server&apos;s own end: no token it issued is invalidated and no
             session there is closed. Revoke those where they were issued.
           </p>

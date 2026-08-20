@@ -59,6 +59,9 @@ env:
   ECR_REPOSITORY: tinyhumansai/opencompany-tenant
   K8S_NAMESPACE: opencompany-system
   MANAGER_DEPLOY: opencompany-manager
+  # Holds the fleet-default tenant image outside the manager's pod template, so
+  # publishing it does not roll the manager (opencompany-microservice#38).
+  TENANT_IMAGE_CM: opencompany-tenant-image
   # The feature set the hosted tenant ships with. Changing it changes what
   # every tenant can do, so treat edits here as a product change, not a CI
   # tweak. Full belt: adds mcp/media/composio (the credential/real-money tool
@@ -66,7 +69,16 @@ env:
   # medulla (hosted brain transport), tinycortex (local memory backend), and
   # sidecar. `sqlite` is intentionally omitted — its bundled rusqlite needs a C
   # compiler the slim build image lacks, and it is redundant on a mongodb tenant.
-  TENANT_FEATURES: mongodb,openhuman,openhuman-rpc,tinyplace,github,smtp,dns,tinyhumans,webhooks,platform-jwt,export,mcp,media,composio,imap,telegram,medulla,tinycortex,sidecar,chargebee,paypal
+  #
+  # `tinymemory` is the hosted-memory contract: `OPENCOMPANY_MEMORY=remote` +
+  # `OPENCOMPANY_MEMORY_DRIVER=supermemory|mem0|cognee` (plus `null`), inert
+  # until an operator sets those. `tinymemory-embedded` is deliberately NOT
+  # here for the same two reasons `sqlite` isn't: tinymemory-core links a
+  # bundled rusqlite (the C compiler the slim image lacks), and its `namespace`
+  # store on a mongodb tenant is refused by the ephemeral-/data guard anyway.
+  # Self-hosters wanting the embedded contract driver compile it via
+  # OPENCOMPANY_FEATURES (deploy/README.md).
+  TENANT_FEATURES: mongodb,openhuman,openhuman-rpc,tinyplace,github,smtp,dns,tinyhumans,webhooks,platform-jwt,export,mcp,media,composio,imap,telegram,medulla,tinycortex,sidecar,chargebee,paypal,tinymemory
 
 jobs:
   deploy:
@@ -131,7 +143,7 @@ jobs:
           REFRESH_ALL: ${{ inputs.refresh_all_tenants }}
         run: |
           ssh root@${SSH_HOST} \
-            "IMAGE='${IMAGE}' K8S_NAMESPACE='${{ env.K8S_NAMESPACE }}' MANAGER_DEPLOY='${{ env.MANAGER_DEPLOY }}' REFRESH_ALL='${REFRESH_ALL:-false}' bash -s" << 'EOF'
+            "IMAGE='${IMAGE}' K8S_NAMESPACE='${{ env.K8S_NAMESPACE }}' MANAGER_DEPLOY='${{ env.MANAGER_DEPLOY }}' TENANT_IMAGE_CM='${{ env.TENANT_IMAGE_CM }}' REFRESH_ALL='${REFRESH_ALL:-false}' bash -s" << 'EOF'
           set -euo pipefail
           export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
@@ -194,17 +206,88 @@ jobs:
           # re-pulled. The manager must be pointed at the immutable
           # staging-<sha> tag, which a tag not already present locally always
           # fetches. Never "deploy" by re-pushing :staging.
-          echo "Setting OCM_TENANT_IMAGE=${IMAGE}"
-          kubectl -n "${K8S_NAMESPACE}" set env "deploy/${MANAGER_DEPLOY}" "OCM_TENANT_IMAGE=${IMAGE}"
+          #
+          # Publish it through a ConfigMap rather than an env var on the manager
+          # Deployment. An env var is part of the pod template, so `set env`
+          # created a new ReplicaSet on EVERY tenant build — and the manager's
+          # strategy is Recreate (SQLite: never two writers), so the old pod
+          # stopped completely before the new one started. The manager proxies
+          # every hosted tenant, so each of those gaps took the whole fleet
+          # offline. On 2026-08-20 that happened nine times from this workflow
+          # alone (opencompany-microservice#38).
+          #
+          # Updating a ConfigMap does not touch the Deployment, so nothing rolls.
+          # Resolved once and reused by the closing report, so the two can never
+          # disagree about which source is actually governing provisioning.
+          MOUNT_PATH=$(kubectl -n "${K8S_NAMESPACE}" get deploy "${MANAGER_DEPLOY}" \
+            -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="OCM_TENANT_IMAGE_FILE")].value}')
+          if [ -n "${MOUNT_PATH}" ]; then
+            echo "Publishing OCM_TENANT_IMAGE=${IMAGE} via ConfigMap (no manager restart)"
 
-          if ! kubectl -n "${K8S_NAMESPACE}" rollout status "deploy/${MANAGER_DEPLOY}" --timeout=300s; then
-            echo "ERROR: manager did not roll out; events and logs follow" >&2
-            kubectl -n "${K8S_NAMESPACE}" describe "deploy/${MANAGER_DEPLOY}" | tail -30 >&2
-            kubectl -n "${K8S_NAMESPACE}" logs "deploy/${MANAGER_DEPLOY}" --tail=100 >&2 || true
-            echo "Rolling back..." >&2
-            kubectl -n "${K8S_NAMESPACE}" rollout undo "deploy/${MANAGER_DEPLOY}"
-            kubectl -n "${K8S_NAMESPACE}" rollout status "deploy/${MANAGER_DEPLOY}" --timeout=180s >&2 || true
-            exit 1
+            # Captured BEFORE the write so a failed verification can put the
+            # cluster back as it was. `HAD_CM` distinguishes "no ConfigMap yet"
+            # from "ConfigMap with an empty value", which need different undos.
+            HAD_CM=no
+            PRIOR_IMAGE=
+            if kubectl -n "${K8S_NAMESPACE}" get configmap "${TENANT_IMAGE_CM}" >/dev/null 2>&1; then
+              HAD_CM=yes
+              PRIOR_IMAGE=$(kubectl -n "${K8S_NAMESPACE}" get configmap "${TENANT_IMAGE_CM}" \
+                -o jsonpath='{.data.image}' 2>/dev/null || true)
+            fi
+
+            kubectl -n "${K8S_NAMESPACE}" create configmap "${TENANT_IMAGE_CM}" \
+              --from-literal=image="${IMAGE}" --dry-run=client -o yaml \
+            | kubectl apply -f -
+
+            # The kubelet refreshes a ConfigMap mount lazily, typically within a
+            # minute. Confirm the manager actually SEES the new value rather than
+            # assuming the write reached it — a silent miss here would provision
+            # new tenants on the previous image with nothing to indicate it.
+            seen=no
+            for _ in $(seq 1 40); do
+              current=$(kubectl -n "${K8S_NAMESPACE}" exec "deploy/${MANAGER_DEPLOY}" \
+                -- cat "${MOUNT_PATH}" 2>/dev/null | tr -d '[:space:]' || true)
+              if [ "${current}" = "${IMAGE}" ]; then seen=yes; break; fi
+              sleep 5
+            done
+            if [ "${seen}" != yes ]; then
+              echo "ERROR: manager still does not see ${IMAGE} at ${MOUNT_PATH} after 200s" >&2
+              echo "       it currently reads: ${current:-<empty>}" >&2
+              # Put the ConfigMap back. Leaving the new value in place would mean
+              # a FAILED deploy still eventually governs provisioning, once the
+              # kubelet gets round to refreshing the mount -- new tenants coming
+              # up on an image this deploy explicitly could not verify. That is
+              # the silent miss the verification exists to prevent, arriving late
+              # instead of never.
+              if [ "${HAD_CM}" = yes ]; then
+                echo "       restoring previous value: ${PRIOR_IMAGE:-<empty>}" >&2
+                kubectl -n "${K8S_NAMESPACE}" create configmap "${TENANT_IMAGE_CM}" \
+                  --from-literal=image="${PRIOR_IMAGE}" --dry-run=client -o yaml \
+                | kubectl apply -f - >&2
+              else
+                echo "       removing the ConfigMap this deploy created" >&2
+                kubectl -n "${K8S_NAMESPACE}" delete configmap "${TENANT_IMAGE_CM}" --ignore-not-found >&2
+              fi
+              exit 1
+            fi
+            echo "Manager sees ${IMAGE}"
+          else
+            # A manager predating OCM_TENANT_IMAGE_FILE ignores the ConfigMap
+            # entirely, so falling through to the ConfigMap alone would silently
+            # leave new tenants on the old image. Keep the old path for it,
+            # restart and all, rather than failing the deploy.
+            echo "Manager has no OCM_TENANT_IMAGE_FILE; falling back to set env (this restarts it)"
+            kubectl -n "${K8S_NAMESPACE}" set env "deploy/${MANAGER_DEPLOY}" "OCM_TENANT_IMAGE=${IMAGE}"
+
+            if ! kubectl -n "${K8S_NAMESPACE}" rollout status "deploy/${MANAGER_DEPLOY}" --timeout=300s; then
+              echo "ERROR: manager did not roll out; events and logs follow" >&2
+              kubectl -n "${K8S_NAMESPACE}" describe "deploy/${MANAGER_DEPLOY}" | tail -30 >&2
+              kubectl -n "${K8S_NAMESPACE}" logs "deploy/${MANAGER_DEPLOY}" --tail=100 >&2 || true
+              echo "Rolling back..." >&2
+              kubectl -n "${K8S_NAMESPACE}" rollout undo "deploy/${MANAGER_DEPLOY}"
+              kubectl -n "${K8S_NAMESPACE}" rollout status "deploy/${MANAGER_DEPLOY}" --timeout=180s >&2 || true
+              exit 1
+            fi
           fi
 
           # OCM_TENANT_IMAGE only reaches a tenant when the manager PROVISIONS
@@ -323,6 +406,15 @@ jobs:
             exit 1
           }
 
-          kubectl -n "${K8S_NAMESPACE}" get deploy "${MANAGER_DEPLOY}" \
-            -o jsonpath='{range .spec.template.spec.containers[0].env[?(@.name=="OCM_TENANT_IMAGE")]}OCM_TENANT_IMAGE={.value}{"\n"}{end}'
+          # Exactly one source, chosen by the same capability check that decided
+          # where the value was written. Keying this on ConfigMap EXISTENCE
+          # instead would print a stale ConfigMap left by an earlier deploy
+          # alongside the env var, with nothing to say which one a tenant would
+          # actually get.
+          if [ -n "${MOUNT_PATH}" ]; then
+            echo "fleet tenant image (ConfigMap, authoritative): $(kubectl -n "${K8S_NAMESPACE}" get configmap "${TENANT_IMAGE_CM}" -o jsonpath='{.data.image}' 2>/dev/null)"
+          else
+            kubectl -n "${K8S_NAMESPACE}" get deploy "${MANAGER_DEPLOY}" \
+              -o jsonpath='{range .spec.template.spec.containers[0].env[?(@.name=="OCM_TENANT_IMAGE")]}fleet tenant image (env, authoritative)={.value}{"\n"}{end}'
+          fi
           EOF

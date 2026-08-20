@@ -154,7 +154,12 @@ pub async fn start_with(
         admin_email: Some(opencompany::desktop::DESKTOP_OPERATOR_EMAIL.to_string()),
         ..AppConfig::default()
     };
-    let state = AppState::new(config).with_home(instance.home().to_path_buf());
+    let state = AppState::new(config)
+        .with_home(instance.home().to_path_buf())
+        // Issue #1245: the desktop is the one place with an
+        // `AcpAgentFactory` implementation to give — a `local` acp harness
+        // only has an engine because this line exists.
+        .with_acp_agents(std::sync::Arc::new(crate::acp::LocalAcpAgentFactory));
     // Read before `state` moves into `bind`. Minting here rather than on the
     // first `/spec` also means the console can be told who this host is without
     // waiting to contact it — which is the whole point, since the address it

@@ -72,6 +72,14 @@ fn encode<T: Serialize>(record: &T) -> Result<String> {
 /// written by a version we do not understand. A single unreadable row must not
 /// fail a whole `list`: on a shared hosted engine the store may legitimately
 /// hold rows this build did not write.
+///
+/// A row *inside* our namespace that fails to parse is different: nothing else
+/// writes there, so it is a record this host stored and can no longer read — a
+/// corrupted write, not foreign data. It is still skipped (one bad row must not
+/// fail the list), but loudly: #1201 was exactly this shape — the embedded
+/// driver's PII scrubber redacted digits out of the JSON envelope, and the
+/// silent `None` here made a corrupted record indistinguishable from one that
+/// was never written.
 fn decode<T: DeserializeOwned>(entry: &MemoryEntry, namespace: &Namespace) -> Option<T> {
     let reported = entry.namespace.as_deref().unwrap_or_default();
     if !namespace.contains(reported) {
@@ -82,8 +90,44 @@ fn decode<T: DeserializeOwned>(entry: &MemoryEntry, namespace: &Namespace) -> Op
         );
         return None;
     }
-    let envelope: Envelope<T> = serde_json::from_str(&entry.content).ok()?;
-    (envelope.v == ENVELOPE_VERSION).then_some(envelope.record)
+    // Two-stage parse, version before record: a row written by an envelope
+    // version this build does not know may carry a record shape `T` cannot
+    // deserialize, and collapsing both steps into one `Envelope<T>` parse
+    // would misreport that legitimate skip as corruption. Only a row whose
+    // envelope is unreadable, or whose version matches and record still does
+    // not parse, is a record we wrote and can no longer read.
+    let corrupt = |error: &dyn std::fmt::Display| {
+        tracing::warn!(
+            namespace = namespace.as_str(),
+            key = %entry.key,
+            %error,
+            "memory entry in our namespace failed to decode; dropping it \
+             (a record we wrote and can no longer read — see #1201)"
+        );
+    };
+    let envelope: Envelope<serde_json::Value> = match serde_json::from_str(&entry.content) {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            corrupt(&error);
+            return None;
+        }
+    };
+    if envelope.v != ENVELOPE_VERSION {
+        tracing::debug!(
+            namespace = namespace.as_str(),
+            key = %entry.key,
+            version = envelope.v,
+            "memory entry has an envelope version this build does not understand; skipping it"
+        );
+        return None;
+    }
+    match serde_json::from_value(envelope.record) {
+        Ok(record) => Some(record),
+        Err(error) => {
+            corrupt(&error);
+            None
+        }
+    }
 }
 
 /// Maps a provider error onto the crate error type.
@@ -740,5 +784,44 @@ mod test {
         let cut = snippet(&body);
         assert!(body.starts_with(&cut));
         assert!(cut.len() >= 200);
+    }
+
+    /// The decode classification #1248 review asked to pin: an entry from an
+    /// envelope version this build does not know is a legitimate skip even
+    /// when its record shape does not fit today's `T` — it must not be read
+    /// as corruption — while a matching version with an unreadable record,
+    /// or no envelope at all, is the #1201 corruption path. All three return
+    /// `None` rather than failing the list.
+    #[test]
+    fn decode_classifies_unknown_versions_and_corruption_separately() {
+        let namespace = Namespace::company_root(&CompanyId::new("acme"));
+        let entry = |content: &str| MemoryEntry {
+            id: "id".into(),
+            key: "key".into(),
+            content: content.into(),
+            namespace: Some(namespace.as_str().to_string()),
+            category: tinymemory_api::types::MemoryCategory::Custom("oc:trace".into()),
+            timestamp: String::new(),
+            session_id: None,
+            score: None,
+            taint: MemoryTaint::Internal,
+        };
+
+        // Round-trip control: a current-version envelope decodes.
+        let good = encode(&42u32).unwrap();
+        assert_eq!(decode::<u32>(&entry(&good), &namespace), Some(42));
+
+        // Unknown version, record shape incompatible with `T`: skipped, and
+        // reachable only through the version gate — the record is never
+        // parsed as `T`, so this cannot trip the corruption path.
+        let future = r#"{"v":9,"record":{"shape":"unknown"}}"#;
+        assert_eq!(decode::<u32>(&entry(future), &namespace), None);
+
+        // Matching version, unreadable record: the corruption path.
+        let mangled = r#"{"v":1,"record":{"at_millis":[REDACTED_PII_CREDIT_CARD]}}"#;
+        assert_eq!(decode::<u32>(&entry(mangled), &namespace), None);
+
+        // No envelope at all: also the corruption path.
+        assert_eq!(decode::<u32>(&entry("not json"), &namespace), None);
     }
 }

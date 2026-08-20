@@ -39,8 +39,144 @@ const ROW_GAP = 150;
  * summary line); these are the middle of that, which is all a 200px-wide
  * overview needs.
  */
-const NODE_W = 190;
-const NODE_H = 64;
+export const NODE_W = 190;
+export const NODE_H = 64;
+
+/** Default minimap container size — React Flow's own defaults, kept as the
+ * ceiling so a graph with real vertical spread renders exactly as before. */
+const MINIMAP_WIDTH = 200;
+const MINIMAP_MAX_HEIGHT = 150;
+/** Floor so the minimap never shrinks to an unusable, unclickable strip. */
+const MINIMAP_MIN_HEIGHT = 32;
+/**
+ * The minimum fraction of the minimap's own rendered height that a laid-out
+ * node's real height should occupy (issue #1259).
+ *
+ * React Flow's built-in `<MiniMap>` "contain"-fits a bounding box into
+ * whatever width/height it is given — `viewScale = Math.max(scaledWidth,
+ * scaledHeight)`, not overridable via any prop (verified against the vendored
+ * `@xyflow/react` source). A graph whose nodes sit at zero vertical spread
+ * (every shipped company workflow template: one node per depth layer, `layout`
+ * below never gives two nodes the same x) has a content box tens of pixels
+ * tall and thousands of pixels wide. Fit into the default 200x150 container,
+ * that padded the viewBox's height ~30-40x past the real content, squashing
+ * every node rect into an imperceptible sliver — #1230 made the rects exist,
+ * but they were still invisible in practice.
+ *
+ * Shrinking the container alone turned out not to be enough: the built-in
+ * `<MiniMap>`'s bounding box is the union of the node bounds AND the current
+ * pan/zoom viewport rect (`getBoundsOfRects(nodesBounds, viewBB)` in the
+ * vendored source), and for a wide, short graph the on-screen canvas itself —
+ * zoomed out to fit that width, within React Flow's default `minZoom` floor —
+ * ends up with a viewport rect far taller than any node. That viewport
+ * height, not the node height, dominated the built-in bounding box no matter
+ * what container size the minimap was given, so shrinking the container just
+ * moved which axis inflated. `WorkflowMiniMap` (in `WorkflowMiniMap.tsx`)
+ * replaces the built-in component so the minimap's own scale comes from
+ * `contentBounds` below — node positions only, never the live viewport —
+ * and `minimapDimensions` here picks a container height low enough that a
+ * node's real height fills at least this fraction of it, floored so the
+ * minimap never becomes an unusable sliver itself, and capped at the
+ * previous default so a graph with real vertical spread (siblings sharing a
+ * layer) renders exactly as it did before this existed.
+ */
+const NODE_MIN_VISIBLE_FRACTION = 0.25;
+
+/** The pure content bounding box of a laid-out node array: position plus the
+ * same nominal size hint the minimap itself reads (`initialWidth`/
+ * `initialHeight`, falling back to NODE_W/NODE_H — see #1230). Deliberately
+ * independent of React Flow's own internal bounding-box calculation, which
+ * unions in the live pan/zoom viewport (see NODE_MIN_VISIBLE_FRACTION above)
+ * — this is node geometry only, so both `minimapDimensions` and
+ * `WorkflowMiniMap`'s own render math can share one source of truth. */
+export function contentBounds(nodes: Node<WorkflowNodeData>[]): {
+  minX: number;
+  minY: number;
+  width: number;
+  height: number;
+} {
+  if (nodes.length === 0) {
+    return { minX: 0, minY: 0, width: 0, height: 0 };
+  }
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const n of nodes) {
+    const w = n.initialWidth ?? NODE_W;
+    const h = n.initialHeight ?? NODE_H;
+    minX = Math.min(minX, n.position.x);
+    minY = Math.min(minY, n.position.y);
+    maxX = Math.max(maxX, n.position.x + w);
+    maxY = Math.max(maxY, n.position.y + h);
+  }
+  return { minX, minY, width: maxX - minX, height: maxY - minY };
+}
+
+/**
+ * The minimap's own container size for a laid-out node array (issue #1259).
+ *
+ * Derived from `contentBounds` above, not React Flow's post-mount DOM
+ * measurement, so it is available synchronously off the same array `layout()`
+ * just produced.
+ */
+export function minimapDimensions(
+  nodes: Node<WorkflowNodeData>[],
+): { width: number; height: number } {
+  const bounds = contentBounds(nodes);
+  if (bounds.width <= 0 || bounds.height <= 0) {
+    return { width: MINIMAP_WIDTH, height: MINIMAP_MAX_HEIGHT };
+  }
+  const idealHeight =
+    (bounds.height * MINIMAP_WIDTH) / (bounds.width * NODE_MIN_VISIBLE_FRACTION);
+  const height = Math.min(
+    MINIMAP_MAX_HEIGHT,
+    Math.max(MINIMAP_MIN_HEIGHT, idealHeight),
+  );
+  return { width: MINIMAP_WIDTH, height };
+}
+
+/** Matches the built-in `<MiniMap>`'s default — padding around the content so
+ * nodes at the very edge aren't drawn flush against the minimap's border. */
+const MINIMAP_OFFSET_SCALE = 5;
+
+/**
+ * The minimap SVG's `viewBox`, for a laid-out node array (issue #1259).
+ *
+ * The same "contain" fit React Flow's built-in `<MiniMap>` itself uses —
+ * `viewScale = Math.max(scaledWidth, scaledHeight)`, scaled up to
+ * `minimapDimensions`'s container size, padded by `MINIMAP_OFFSET_SCALE` —
+ * but computed from `contentBounds` alone. `WorkflowMiniMap.tsx` draws node
+ * rects directly at their real `position`, so this is the only piece of
+ * scaling math the minimap needs, and it's plain arithmetic on `nodes` —
+ * worth its own pure, tested function rather than living inline in a
+ * component.
+ */
+export function minimapViewBox(nodes: Node<WorkflowNodeData>[]): {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+} {
+  const bounds = contentBounds(nodes);
+  const { width: containerWidth, height: containerHeight } =
+    minimapDimensions(nodes);
+  if (bounds.width <= 0 || bounds.height <= 0) {
+    return { x: 0, y: 0, width: containerWidth, height: containerHeight };
+  }
+  const scaledWidth = bounds.width / containerWidth;
+  const scaledHeight = bounds.height / containerHeight;
+  const viewScale = Math.max(scaledWidth, scaledHeight);
+  const offset = MINIMAP_OFFSET_SCALE * viewScale;
+  const viewWidth = viewScale * containerWidth;
+  const viewHeight = viewScale * containerHeight;
+  return {
+    x: bounds.minX - (viewWidth - bounds.width) / 2 - offset,
+    y: bounds.minY - (viewHeight - bounds.height) / 2 - offset,
+    width: viewWidth + offset * 2,
+    height: viewHeight + offset * 2,
+  };
+}
 
 /** The result of folding the SSE frame window down to one run's canvas state. */
 export interface LiveRun {

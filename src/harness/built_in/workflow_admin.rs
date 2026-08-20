@@ -696,6 +696,13 @@ impl Tool for UpdateWorkflowTool {
         }
 
         tracing::debug!(company = %self.admin.company, workflow = %wid, "update_workflow: replacing");
+        // `wired_channels: None` (issue #1191) — same reason as the
+        // orchestrator's `create_workflow` tool: the admin surface holds a store
+        // and a revision store, not a `CompanyRuntime`, so it cannot read the
+        // deliverable channel set. `None` skips the channel-destination rule
+        // rather than guessing at it, leaving delivery's own refusal as the
+        // backstop. Status quo, and greppable: the two agent tool surfaces are
+        // the only `None` callers that are not tests or a rollback.
         match update_company_workflow(
             &self.admin.company,
             self.admin.source_dir.as_deref(),
@@ -704,6 +711,7 @@ impl Tool for UpdateWorkflowTool {
             self.admin.events.as_ref(),
             draft,
             Some(&expected_version),
+            None,
         )
         .await
         {

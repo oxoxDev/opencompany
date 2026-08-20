@@ -20,10 +20,14 @@
 //! ## Why a port rather than an ACP client in here
 //!
 //! The transport differs per caller — a subprocess over stdio for the desktop,
-//! a WebSocket for a runner — and neither belongs in the host crate. So this
-//! defines [`AcpAgent`] as a port and folds whatever it reports; the desktop
-//! shell supplies the stdio implementation, and the runner lane will supply the
-//! socket one. The same inversion the storage ports use.
+//! a WebSocket for a runner — and neither belongs in the host crate. The port
+//! itself ([`AcpAgent`], [`AcpAgentFactory`], `AcpTurn`, `AcpUpdate`) lives at
+//! [`crate::ports::acp`], ungated, because the desktop shell that supplies the
+//! stdio implementation deliberately does not enable the `openhuman` feature
+//! this module lives behind — see that module's own docs for why. What
+//! belongs here is [`AcpRunTurn`]: the adapter that folds whatever an
+//! `AcpAgent` reports into this crate's own [`TurnStep`] shape, a genuine
+//! `openhuman` dependency the port itself has none of.
 //!
 //! ## The mapping, and where it is lossy
 //!
@@ -50,64 +54,9 @@ use async_trait::async_trait;
 use crate::Result;
 use crate::error::OpenCompanyError;
 use crate::harness::TurnOutcome;
+pub use crate::ports::acp::{AcpAgent, AcpAgentFactory, AcpTurn, AcpUpdate};
 use crate::ports::types::{CompanyId, TurnStep, TurnStepKind, TurnStepStatus};
 use crate::runtime::delegation::RunTurn;
-
-/// One `session/update` payload, already parsed into what this layer needs.
-///
-/// A narrow enum rather than raw JSON, so the wire-format knowledge stays in
-/// the transport and the folding below stays testable without one.
-#[derive(Clone, Debug, PartialEq)]
-pub enum AcpUpdate {
-    /// Assistant text. Concatenated, in arrival order, into the reply.
-    MessageChunk(String),
-    /// Reasoning. Coalesced into a single step — the console shows "Thinking",
-    /// never the content, matching what the OpenHuman path surfaces.
-    ThoughtChunk,
-    /// A tool call started.
-    ToolCall { id: String, title: String },
-    /// A tool call progressed or finished.
-    ToolCallUpdate {
-        id: String,
-        /// ACP's `pending` / `in_progress` / `completed` / `failed`.
-        status: String,
-        /// A short summary of what came back, already bounded by the transport.
-        result: Option<String>,
-    },
-}
-
-/// What an ACP agent reports for one turn.
-#[derive(Clone, Debug, Default)]
-pub struct AcpTurn {
-    pub updates: Vec<AcpUpdate>,
-    /// ACP's `stopReason`.
-    pub stop_reason: String,
-}
-
-/// An ACP agent this host can run a turn on.
-///
-/// Implemented by the desktop (a subprocess over stdio) and, later, by the
-/// runner lane (a socket). Deliberately says nothing about transport.
-#[async_trait]
-pub trait AcpAgent: Send + Sync {
-    /// Runs one turn and returns everything it produced.
-    ///
-    /// `session_key` is stable for a (company, agent) pair so the agent can
-    /// keep a conversation rather than starting fresh each turn.
-    async fn prompt(
-        &self,
-        company: &CompanyId,
-        session_key: &str,
-        message: &str,
-    ) -> Result<AcpTurn>;
-
-    /// Asks the agent to stop the turn in flight.
-    ///
-    /// Advisory, and the caller must treat it that way: ACP's `session/cancel`
-    /// is a notification, and a harness inside a long tool call notices only
-    /// when that call returns.
-    async fn cancel(&self, company: &CompanyId, session_key: &str) -> Result<()>;
-}
 
 /// [`RunTurn`] over an [`AcpAgent`].
 pub struct AcpRunTurn {

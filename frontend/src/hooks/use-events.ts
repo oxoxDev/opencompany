@@ -516,6 +516,23 @@ interface Options {
    * buttons for a decision that is already made.
    */
   onApprovalEvent?: (event: CompanyStreamEvent) => void;
+  /**
+   * Asked once per non-`automatic` `approval_resolved` frame (issue #1211):
+   * "did THIS console just decide this?" A true answer suppresses the generic
+   * echo toast below — the click that made the decision already raised its own,
+   * specific toast (`ApprovalsView.decide()`, the inline card's `decideApproval`
+   * in `AppShell`), and stacking a second, vaguer one on top of it is the defect
+   * this callback exists to remove.
+   *
+   * **Consuming, not peeking.** An approval id is decided exactly once, so once
+   * this returns true for an id, the caller is expected to have cleared its own
+   * record of it — a second frame for the same id (a replayed reconnect, a
+   * test) is not this tab's decision to swallow silently.
+   *
+   * Absent, or false, means "not mine" — including every decision made from the
+   * Approvals page or another tab, which is the case this toast exists for.
+   */
+  isOwnDecision?: (approvalId: string) => boolean;
 }
 
 /**
@@ -552,6 +569,7 @@ export function useEvents(
     onWorkflowRunEvent,
     onWorkflowChanged,
     onApprovalEvent,
+    isOwnDecision,
     onResync,
     onRecoveryError,
   }: Options,
@@ -593,6 +611,10 @@ export function useEvents(
   useEffect(() => {
     onApprovalEventRef.current = onApprovalEvent;
   }, [onApprovalEvent]);
+  const isOwnDecisionRef = useRef(isOwnDecision);
+  useEffect(() => {
+    isOwnDecisionRef.current = isOwnDecision;
+  }, [isOwnDecision]);
   const onResyncRef = useRef(onResync);
   useEffect(() => {
     onResyncRef.current = onResync;
@@ -683,6 +705,7 @@ export function useEvents(
             onWorkflowRunEvent: onWorkflowRunEventRef.current,
             onWorkflowChanged: onWorkflowChangedRef.current,
             onApprovalEvent: onApprovalEventRef.current,
+            isOwnDecision: isOwnDecisionRef.current,
             onResync: recover,
           });
         },
@@ -734,6 +757,7 @@ export function handleEvent(
     onWorkflowRunEvent,
     onWorkflowChanged,
     onApprovalEvent,
+    isOwnDecision,
     onResync,
   } = subscribers;
   switch (event.type) {
@@ -851,7 +875,18 @@ export function handleEvent(
           description:
             "It passed its deadline with no decision, so it was declined.",
         });
-      } else {
+      } else if (!isOwnDecision?.(event.approvalId)) {
+        // #1211: skip the generic echo when THIS console is the one that just
+        // decided it — the click already raised its own, specific toast
+        // (verdict, tool name, and for an approve the honest "picking it up
+        // now" wording from #243). Same guard `approval_parked` above already
+        // needed for #379, one case over: without it, a decision made here
+        // toasted twice — once informative, once generic and taller, burying
+        // the first for the length of the stack animation.
+        //
+        // Still fires for a decision made on the Approvals page while this
+        // card sits in Chat, or from another tab, or by another operator —
+        // exactly the case this toast exists for.
         toast(
           event.verdict === "approve" ? "Approval granted" : "Approval denied",
           {

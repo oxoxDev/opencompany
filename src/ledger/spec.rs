@@ -136,6 +136,15 @@ pub struct StatusSpec {
     #[serde(default)]
     pub closed: bool,
     /// Whether closing into this status demands a `reason`.
+    ///
+    /// Plain snake_case on purpose (issue #1266's near-miss): this type is
+    /// also what a declared ledger round-trips through in every store
+    /// backend (`store/fs_ops.rs`, `sqlite.rs`, `mongodb.rs` all persist
+    /// `LedgerSpec` via this same `Serialize`/`Deserialize`), so a rename
+    /// here would make Serialize write one key and Deserialize expect
+    /// another — silently dropping `needs_reason` back to `false` on the
+    /// very next reload. The console-facing camelCase key belongs on a
+    /// wire-only DTO instead — see `server::ops::ledgers::LedgerStatusDto`.
     #[serde(default)]
     pub needs_reason: bool,
 }

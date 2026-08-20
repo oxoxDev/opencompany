@@ -4601,12 +4601,22 @@ impl Tool for CreateWorkflowTool {
         // company record, which is the only writable surface a hosted tenant has
         // (issue #168).
         tracing::debug!(company = %self.company, workflow = %draft.id, "create_workflow: authoring");
+        // `wired_channels: None` (issue #1191) — this tool holds a store and an
+        // event log, not a `CompanyRuntime`, and the deliverable channel set can
+        // only be read off a running runtime. `None` means "cannot see the
+        // wiring", so the channel-destination rule is skipped rather than
+        // guessed at; delivery's own `ChannelNotWired` refusal stays the
+        // backstop for a graph authored this way. Deliberately unchanged by
+        // #1191, which moved the rule into this core so the paths that CAN see
+        // the wiring all run it; giving the agent tools a runtime handle is a
+        // separate change.
         match create_company_workflow(
             &self.company,
             self.source_dir.as_deref(),
             &self.store,
             self.events.as_ref(),
             draft,
+            None,
         )
         .await
         {

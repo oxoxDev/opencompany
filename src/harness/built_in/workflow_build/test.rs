@@ -740,6 +740,53 @@ fn a_spec_rebuilds_the_expected_raw_workflow() {
 // Pass tier
 // ---------------------------------------------------------------------------
 
+/// [`MANIFEST`] plus one desk, so the runtime's deliverable channel set is
+/// exactly `["engineering"]` (issue #1191). The default fixture declares no
+/// desk, which makes the set empty — enough to prove the "nowhere to deliver"
+/// fallback, useless for telling an accepted channel target from a refused one.
+const DESK_MANIFEST: &str = r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "maya"
+role = "Writer"
+tools = ["docs", "web"]
+
+[[group_chat]]
+id = "engineering"
+name = "Engineering"
+members = ["maya"]
+
+[policy]
+mode = "full"
+
+[tools]
+allow = ["docs", "web"]
+"#;
+
+/// [`runtime_with`], on a company that has a desk to deliver to.
+async fn runtime_with_desk(model: Arc<ScriptedModel>) -> (tempfile::TempDir, Arc<CompanyRuntime>) {
+    let home = tempfile::Builder::new()
+        .prefix("opencompany-builder-desk-")
+        .tempdir()
+        .expect("tempdir");
+    let desk_manifest: CompanyManifest =
+        toml::from_str(DESK_MANIFEST).expect("the desk fixture manifest parses");
+    let mut runtime = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), desk_manifest)
+        .with_id(CompanyId::new("acme"))
+        .build()
+        .await
+        .expect("runtime");
+    assert_eq!(
+        runtime.deliverable_channel_ids(),
+        vec!["engineering".to_string()],
+        "the fixture must have exactly one delivery channel, or these tests prove nothing"
+    );
+    runtime.set_builder(Arc::new(WorkflowBuilder::new(model, "chat-v1")));
+    (home, Arc::new(runtime))
+}
+
 async fn runtime_with(model: Arc<ScriptedModel>) -> (tempfile::TempDir, Arc<CompanyRuntime>) {
     let home = tempfile::Builder::new()
         .prefix("opencompany-builder-")
@@ -1246,6 +1293,107 @@ async fn an_out_of_vocabulary_kind_settles_to_todo() {
     assert_eq!(run_status(&runtime, &run_id).await, RunStatus::Failed);
 }
 
+/// **The #1191 regression, at the builder.** The model routes the report to a
+/// channel this runtime cannot deliver to — the shape the QA pass found, where
+/// the builder appended `-desk` to a desk's display name.
+///
+/// Courtesy validation now runs the channel rule (it could not before: the rule
+/// lived on the write routes and the builder does not go through them), so the
+/// card settles back to To-do with the reason instead of reaching In Review
+/// carrying a proposal that Apply would persist and the editor would then
+/// refuse. The reason names the channels that WOULD work, so the next pass — and
+/// the operator reading the card — can see the fix without a second lookup.
+#[tokio::test]
+async fn a_proposal_naming_an_unwired_channel_settles_to_todo() {
+    let reply = r#"{"automatable":true,"summary":"post the digest","workflow":{"name":"Weekly digest",
+        "nodes":[{"id":"start","kind":"trigger","name":"Start","schedule":"0 17 * * 5"},
+                 {"id":"draft","kind":"agent","name":"Draft","agent":"maya"},
+                 {"id":"post_summary","kind":"output","name":"Post to engineering desk",
+                  "destination":{"kind":"channel","target":"engineering-desk"}}],
+        "edges":[{"from":"start","to":"draft"},{"from":"draft","to":"post_summary"}]}}"#;
+    let (_home, runtime) = runtime_with_desk(ScriptedModel::replying(reply)).await;
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-1191", None))
+        .await
+        .unwrap();
+    let run_id = open_run(&runtime, "t-1191").await;
+
+    run_workflow_build_pass(
+        Arc::clone(&runtime),
+        "t-1191".to_string(),
+        Some(run_id.clone()),
+    )
+    .await;
+
+    let after = read(&runtime, "t-1191").await;
+    assert_eq!(after.column, COLUMN_TODO);
+    assert!(
+        after.workflow_proposal.is_none(),
+        "a graph the editor would refuse must not reach In Review"
+    );
+    let note = after.note.unwrap_or_default();
+    assert!(
+        note.contains("is not a workflow delivery channel"),
+        "the destination problem is named on the card: {note}"
+    );
+    assert!(
+        note.contains("engineering"),
+        "the wired ids ride along so the fix is legible: {note}"
+    );
+    assert_eq!(run_status(&runtime, &run_id).await, RunStatus::Failed);
+}
+
+/// The other half of #1191: the model is *told* the channel ids, so it has
+/// something to copy instead of inventing one from a desk's display name.
+///
+/// The evidence pack had a roster section and a tools section and no channel
+/// section at all; `graph_contract` names the concept without listing ids.
+#[tokio::test]
+async fn the_card_prompt_grounds_the_wired_channels() {
+    let (_home, runtime) = runtime_with_desk(ScriptedModel::replying(VALID_GRAPH)).await;
+    let evidence = gather_evidence(&runtime, &card("t-ground", None))
+        .await
+        .expect("evidence");
+    assert_eq!(evidence.wired_channels, vec!["engineering".to_string()]);
+
+    let prompt = evidence_prompt(&evidence);
+    assert!(prompt.contains("## Channels"), "{prompt}");
+    assert!(prompt.contains("`engineering`"), "{prompt}");
+    assert!(
+        prompt.contains("copied exactly"),
+        "the section must say the id is copied, not paraphrased: {prompt}"
+    );
+}
+
+/// The create-time copilot's prompt grounds the same set through the shared
+/// `render_grounding_sections`, so a graph drafted from an operator's sentence
+/// and one built from a card name channels from one list.
+#[tokio::test]
+async fn the_description_prompt_grounds_the_wired_channels() {
+    let (_home, runtime) = runtime_with_desk(ScriptedModel::replying(DESC_GRAPH)).await;
+    let evidence = gather_company_evidence(&runtime).await.expect("evidence");
+    let prompt = description_evidence_prompt(&evidence, &[], &[], "post the weekly digest");
+    assert!(prompt.contains("## Channels"), "{prompt}");
+    assert!(prompt.contains("`engineering`"), "{prompt}");
+}
+
+/// A company with no desk and no provider channel says so in its own words,
+/// matching how the roster and tool sections state an empty set — a silent
+/// section would read as "anything goes".
+#[tokio::test]
+async fn an_empty_channel_set_renders_the_honest_fallback() {
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(VALID_GRAPH)).await;
+    let evidence = gather_evidence(&runtime, &card("t-empty", None))
+        .await
+        .expect("evidence");
+    assert!(evidence.wired_channels.is_empty());
+
+    let prompt = evidence_prompt(&evidence);
+    assert!(prompt.contains("## Channels"), "{prompt}");
+    assert!(prompt.contains("no channels are wired"), "{prompt}");
+}
+
 /// The model does not get a vote on approval gating: whatever `requires_approval`
 /// it emits — `true` on one node, `false` on another — the host strips before the
 /// proposal is stored, so a builder-authored node inherits the platform default
@@ -1346,6 +1494,7 @@ async fn seed_workflow(runtime: &Arc<CompanyRuntime>, id: &str, name: &str) {
         runtime.store(),
         Some(runtime.events()),
         raw,
+        None,
     )
     .await
     .expect("seed workflow");

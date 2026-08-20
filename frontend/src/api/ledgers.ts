@@ -343,6 +343,38 @@ export function filteredEmptyNotice(
   return `No rows with status ${statusFilterLabel(ledger, statusFilter)}.`;
 }
 
+/**
+ * The compose dialog's title (issue #1264).
+ *
+ * The id field is editable in every non-closing dialog — "Record" opens it
+ * empty, "Amend" opens it prefilled but still editable — so whether this says
+ * "Amend" cannot be "is `composing.id` non-empty" (that flips true on the
+ * first keystroke of a row that has never been saved, before it exists). It
+ * has to ask whether the *current* typed id names a row this ledger already
+ * has, checked against whatever is currently loaded (`existingIds`) the same
+ * way `save()` treats the id — trimmed.
+ */
+export function composeDialogTitle(
+  ledger: LedgerSummary,
+  composing: { id: string; closing: boolean },
+  existingIds: ReadonlySet<string>,
+): string {
+  if (composing.closing) return `Close ${composing.id}`;
+  return existingIds.has(composing.id.trim())
+    ? `Amend ${composing.id}`
+    : `New row on ${ledger.title}`;
+}
+
+/** The compose dialog's description — the same "does this id exist" read as the title. */
+export function composeDialogDescription(
+  composing: { id: string },
+  existingIds: ReadonlySet<string>,
+): string {
+  return existingIds.has(composing.id.trim())
+    ? "Only what you change is written; everything else on the row is left alone."
+    : "Give it a short, readable id — it is how anybody names this row later.";
+}
+
 /** Whether this status ends a row's life on this ledger. */
 export function isClosingStatus(ledger: LedgerSummary, status: string): boolean {
   return ledger.statuses.some(

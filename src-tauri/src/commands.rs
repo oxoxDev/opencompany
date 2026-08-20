@@ -398,6 +398,19 @@ pub async fn oc_forget_local_instance(
     local.forget(&id)
 }
 
+/// Every coding harness this shell knows how to drive over ACP, and whether
+/// each is actually usable right now.
+///
+/// Takes no state and no connection id: unlike everything else in this file,
+/// readiness is a property of *this machine*, not of a host it talks to. The
+/// probe reads `PATH` and the credential files each harness keeps under the
+/// user's home — see `acp::discovery`'s module docs for why that is checked by
+/// file rather than by starting the harness.
+#[tauri::command]
+pub fn oc_acp_harnesses() -> Vec<crate::acp::discovery::HarnessStatus> {
+    crate::acp::discovery::survey(&crate::acp::discovery::SystemProbe)
+}
+
 #[cfg(test)]
 mod test {
     use std::sync::Arc;

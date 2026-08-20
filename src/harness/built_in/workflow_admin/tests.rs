@@ -437,6 +437,7 @@ async fn read_round_trips_into_an_update_that_keeps_the_workflow_enabled() {
             .unwrap(),
         )
         .unwrap(),
+        None,
     )
     .await
     .expect("creates");
@@ -530,6 +531,7 @@ async fn a_stale_version_token_is_the_company_layers_conflict() {
         &store,
         None,
         draft,
+        None,
     )
     .await
     .expect("creates");
@@ -557,6 +559,7 @@ async fn a_stale_version_token_is_the_company_layers_conflict() {
         &revisions,
         None,
         other,
+        None,
         None,
     )
     .await
@@ -679,6 +682,7 @@ async fn a_scheduled_workflow_is_refused_by_the_tools_and_still_writable_by_the_
         None,
         draft,
         None,
+        None,
     )
     .await
     .expect("the console path is not gated by the agent tools' refusal");
@@ -738,6 +742,7 @@ async fn delete_removes_the_body_the_enabled_id_and_the_history() {
         &store,
         None,
         draft,
+        None,
     )
     .await
     .expect("creates");
@@ -754,6 +759,7 @@ async fn delete_removes_the_body_the_enabled_id_and_the_history() {
         &revisions,
         None,
         edited,
+        None,
         None,
     )
     .await
@@ -882,6 +888,7 @@ async fn an_agent_edit_cannot_bypass_the_per_kind_config_rules() {
         &store,
         None,
         draft,
+        None,
     )
     .await
     .expect("creates");

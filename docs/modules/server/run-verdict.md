@@ -6,7 +6,7 @@ the synchronous `POST …/workflows/{wid}/run` body and every row of
 `GET …/workflows/runs`:
 
 ```text
-running | failed | stopped | blocked | undelivered | awaiting-approval | ok
+running | failed | stopped | stranded | blocked | undelivered | awaiting-approval | ok
 ```
 
 **Always serialized**, unlike the optional fields around it. Its whole purpose
@@ -41,10 +41,75 @@ green on some surface:
 | `running` | `running` | an unsettled run has no error, no cancel and no deliveries yet, so without this it falls to `ok` |
 | `failed` | `error` | **the more serious fact first** — a run that broke mid-graph *and* dropped a report reads `failed`, with its delivery rows still on the body |
 | `stopped` | `cancelled` | issue #383: a stop somebody asked for is not a fault, and a cancelled run has no deliveries to weigh |
+| `stranded` | `pendingApprovals` **and** `strandedApprovals` | issue #1189: every gate has lost its card, so the two readings below — both of which say "go and decide it" — are the one thing that is no longer true |
 | `blocked` | `blockedNodes` | issue #881: carries no error, is not cancelled, is not running and routed no report — the shape that fell through every check |
 | `undelivered` | `deliveries` | issue #981: a report that will not go out without a change outranks one waiting on a human |
 | `awaiting-approval` | `pendingApprovals` **and** `pending` delivery rows | issue #846: a run that paused at a gate reached no `output` node, so a delivery-only read scored the gated case clean |
 | `ok` | — | finished, delivered what it routed, waiting on nobody |
+
+## A run nobody can act on any more (issue #1189)
+
+`stranded` fires when the run stopped for somebody, **every** one of those gates
+has no live card left in the queue, and no report is parked either. A run only
+*partly* stranded keeps its old verdict — something there really is still
+decidable, and the per-node `blockedNodes[].stranded` count carries the loss.
+
+### Why it needed a word of its own
+
+A run has two ways to stop for a person and only one of them was ever
+reconciled against the live queue:
+
+| shape | what it records | join key |
+| --- | --- | --- |
+| **blocked node** | `blockedNodes[].approvalIds` — the ids its gated calls parked. The cards are ordinary tool-call effects and carry no node id. | approval id (issue #1143) |
+| **gate** | nothing but a node id on `pendingApprovals`. `park_pending_gates` writes no approval-row receipt and no blocked-node row; the parked `workflow.approve` card is the only thing that knows the pair. | `(run_id, node_id)` (issue #1189) |
+
+#1143's join is keyed on ids the gate shape does not have, so it structurally
+could not reach it — and the gate shape is the larger half. On the marketing
+tenant, 34 of 60 runs are `{"verdict":"awaiting-approval","pendingApprovals":
+["fetch_bbc","fetch_espn","fetch_guardian"],"blockedNodes":[],"approvals":[]}`
+against an **empty** queue: a third of the tenant's history claiming to wait on
+a person who had nothing to answer.
+
+Without this arm there was no honest verdict for that state, so it kept the
+dishonest one. `blocked` and `awaiting-approval` both tell an operator to go and
+decide something; `stranded` is precisely the state in which there is nothing to
+decide, which is why it outranks them rather than sitting below.
+
+### It claims nothing about why
+
+Approving a gate does not continue the parent run: `resume_run` →
+`spawn_continuation` starts a **new** run with a new id and records no link back
+to the one that paused. So a run whose gates were all *approved* is
+indistinguishable, from this end, from one whose cards were *lost*. The join is
+still right — no decision left can move either run — but the copy must not claim
+data loss. Every surface says only what is observable ("nothing here is waiting
+on you any more; this run cannot be continued") and offers a re-run as an
+option, never as a remedy for a stated cause.
+
+The console paints it `idle`, not the amber `blocked`/`awaiting-approval` share:
+amber is the "needs your attention, go and decide this" state, and reprinting
+that in colour is the claim this reading exists to remove. Not red either — the
+graph did not break. See `docs/design-system/color.md`.
+
+### Derived after the reconciliation, not before it
+
+`strandedApprovals` is computed on each read of `GET …/workflows/runs`, and the
+verdict pass now runs **after** that join. Until #1189 the pass sat above
+`reverse()`/`truncate()` and above the join, so even the shape #1143 *did*
+reconcile got a verdict read from pre-join data — a blocked-node list saying
+"cannot be continued" beside a run verdict saying `blocked`.
+
+`reverse` and `truncate` moved above the pass to make room. Neither touches a
+single field of a row — they reorder and drop whole rows — so the invariant the
+pass is placed on ("derive after everything that can still change its inputs")
+is not weakened. It is extended: the reconciliation genuinely does change an
+input.
+
+The synchronous `POST …/workflows/{wid}/run` path deliberately passes a literal
+`0`. Its body is written microseconds after `park_pending_gates` minted the
+cards, so joining against the queue there would be a guaranteed-zero query on
+the hot path; the reconciliation is a fact about a run somebody comes back to.
 
 An empty `error` string is not a failure. No producer writes one, and the
 console's `if (run.error)` has always read it as falsy — the host agreeing costs

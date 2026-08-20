@@ -325,3 +325,52 @@ OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL=1  # operator asserts /data is durable
 OPENCOMPANY_MONGODB_URI=mongodb://…
 # → boots; engine memory persists under /data/memory/<workspace>/ as usual.
 ```
+
+## Selection scope — a decision, not a gap (2026-08-20)
+
+Engine selection is **infra-operator only**: instance-wide, expressed through
+the `OPENCOMPANY_MEMORY*` environment, read once at boot. There is no
+per-company selection, no per-agent selection, no API setter, and no Console
+setter — the Console's Brain and Settings panels are read-only views of
+`/spec` by design, so a console admin can see the engine but never repoint a
+deployment's storage. This deliberately does **not** follow the per-company
+`[inference]` model, for the reason recorded at the selection site in
+`src/store/select.rs`: memory is storage, and nothing model-shaped may ever
+repoint it. A deployment with mixed needs runs the engine that fits its
+dominant workload; splitting workloads across engines (traces local, facts
+hosted) is a possible future refinement of *routing*, not of selection.
+
+## Switching engines — the operator runbook
+
+Selection is infra-operator only (previous section), so switching is an env
+flip plus a restart — and because **nothing migrates between engines** (a
+switched engine starts empty by design), the data step comes first.
+
+1. **Export what the live engine holds** (until `export` reads the live
+   overlay, capture what matters by hand — the gap is tracked in the P1
+   follow-ups). A future `opencompany memory migrate --from --to` built on the
+   contract's Portability family is the intended tool here.
+2. **Set the variables** for the target engine (the `.env.example` block names
+   all five). A hosted engine needs the build to carry the `tinymemory`
+   feature; `namespace` needs `tinymemory-embedded`. A feature-less build
+   refuses at boot naming the missing feature.
+3. **Restart.** Selection is read once at boot; a running process never
+   re-reads it.
+4. **Verify on `GET /spec`**: `memory.backend` and `memory.driver_id` name
+   what you selected, `memory.capabilities` lists what it negotiated, and
+   `memory.healthy` reports the boot-time reachability probe — `false` means
+   bound-but-unreachable (bad endpoint or credential); absent means "not
+   probed" (the `store` default or the direct engine overlay).
+
+Misconfiguration never falls back: an unknown mode, a missing driver, URL or
+key, or a missing cargo feature is a boot refusal naming the knob to change.
+
+> **`namespace` caveat (2026-08-20):** #1201 (writes corrupted by the PII
+> scrubber redacting Luhn-valid digit runs — most often `at_millis` timestamps
+> — into broken JSON) is fixed in this change's own stack: the scrubber now
+> corroborates before redacting, and two regression nets pin it (the
+> Luhn-timestamp round-trip, and the survival contract in
+> `store::memory::upstream_conformance_test`). One defect remains open —
+> #1238 (a dropped context chunk and reordered traces under the port
+> conformance suite). Until it lands, prefer the incumbent `embedded` engine
+> overlay or a hosted engine for anything real.

@@ -3406,6 +3406,65 @@ async fn mcp_servers_crud_round_trips_and_token_is_write_only() {
     assert_eq!(list.as_array().unwrap().len(), 0);
 }
 
+/// Issue #1270: a build without the `mcp` feature must serve List A exactly as
+/// before and answer the directory routes `not_wired`.
+///
+/// Gated on the absence of the feature rather than written once for both builds:
+/// with `mcp` on, these routes reach a live registry and two upstream
+/// directories over the network, which is not a thing a unit test may do. The
+/// default `cargo test --locked` lane is what runs this, and it is the lane that
+/// compiles the unwired half in the first place.
+#[cfg(not(feature = "mcp"))]
+#[tokio::test]
+async fn without_the_mcp_feature_the_directory_is_not_wired_and_list_a_is_unchanged() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/mcp/servers",
+        Some(json!({ "name": "notion", "endpoint": "https://notion.example/mcp" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // List A is served, and carries none of the registry-only keys.
+    let (status, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["source"], "runtime");
+    for key in ["serverId", "qualifiedName", "iconUrl", "transport"] {
+        assert!(
+            list[0].get(key).is_none(),
+            "`{key}` must not appear without a registry install"
+        );
+    }
+
+    // Every directory route answers the console's degrade signal.
+    for (method, uri) in [
+        ("GET", "/api/v1/company/mcp/registry/search?q=git"),
+        (
+            "GET",
+            "/api/v1/company/mcp/registry/entry?qualifiedName=@a/b",
+        ),
+        ("POST", "/api/v1/company/mcp/registry/install"),
+        ("POST", "/api/v1/company/mcp/registry/sid/connect"),
+        ("POST", "/api/v1/company/mcp/registry/sid/disconnect"),
+        ("PUT", "/api/v1/company/mcp/registry/sid/env"),
+        ("DELETE", "/api/v1/company/mcp/registry/sid"),
+    ] {
+        let (status, body) = send(&state, method, uri, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}");
+        assert_eq!(body["code"], "not_wired", "{method} {uri}");
+    }
+
+    // And the List A delete still works with no install behind the row.
+    let (status, _) = send(&state, "DELETE", "/api/v1/company/mcp/servers/notion", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
 #[tokio::test]
 async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
     let home_dir = home();
@@ -7632,6 +7691,157 @@ async fn a_proposal_that_fails_validation_keeps_the_card_in_review() {
             .iter()
             .all(|w| w["id"] != "weekly-digest"),
         "a refused proposal must not leave a workflow behind"
+    );
+}
+
+/// A company with one desk, so its runtime deliverable set is exactly
+/// `["engineering"]` — enough to tell a channel target that works from one that
+/// does not (issue #1191).
+fn desk_manifest() -> CompanyManifest {
+    toml::from_str(
+        "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+         [[group_chat]]\nid = \"engineering\"\nname = \"Engineering\"\nmembers = [\"ceo\"]\n\
+         [policy]\nmode = \"full\"\n",
+    )
+    .unwrap()
+}
+
+/// [`digest_ops`], with the output node posting its report to `target`.
+fn digest_ops_posting_to(target: &str) -> Value {
+    json!({
+        "id": "weekly-digest",
+        "name": "Weekly digest",
+        "description": "Post the weekly digest",
+        "nodes": [
+            { "id": "start", "kind": "trigger", "name": "Start" },
+            { "id": "write", "kind": "agent", "name": "Draft it", "agent": "ceo" },
+            {
+                "id": "post_summary",
+                "kind": "output",
+                "name": "Post to engineering desk",
+                "destination": { "kind": "channel", "target": target }
+            }
+        ],
+        "edges": [
+            { "from": "start", "to": "write" },
+            { "from": "write", "to": "post_summary" }
+        ]
+    })
+}
+
+/// **The #1191 regression.** The builder appended `-desk` to a desk's display
+/// name, so the proposal routed its report to `engineering-desk` — not a channel
+/// this runtime can deliver to.
+///
+/// Apply used to persist it: the operator was told "Workflow created — the card
+/// is done", the card flipped to Done, and the workflow that now existed could
+/// never deliver and could not be saved again from the editor without first
+/// fixing a destination the operator never chose. Apply is a save, and it is now
+/// held to the save rule — with the located `workflow_invalid` envelope, so the
+/// console can say WHICH node.
+#[tokio::test]
+async fn applying_a_proposal_with_an_unwired_channel_is_refused_and_keeps_the_card_in_review() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_manifest(&home, desk_manifest()).await;
+    let id = seed_proposal_card(&state, digest_ops_posting_to("engineering-desk")).await;
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "workflow_invalid", "{body}");
+    let problem = body["problems"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the refusal must carry a breakdown: {body}"))
+        .iter()
+        .find(|p| p["node_id"] == "post_summary")
+        .unwrap_or_else(|| panic!("no problem names the output node: {body}"));
+    assert_eq!(problem["field"], "destination.target", "{body}");
+    assert!(
+        problem["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("is not a workflow delivery channel"),
+        "{body}"
+    );
+
+    // The card is recoverable, exactly as it is for roster drift: still In
+    // Review, still carrying its proposal, with the reason on its note.
+    let (_status, card) = send(&state, "GET", &format!("/api/v1/company/tasks/{id}"), None).await;
+    assert_eq!(card["task"]["column"], "in_review", "{card}");
+    assert!(card["task"].get("workflowProposal").is_some(), "{card}");
+    assert!(
+        card["task"]["note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("still waiting for review"),
+        "{card}"
+    );
+
+    // …and nothing was persisted.
+    let (_status, workflows) = send(&state, "GET", "/api/v1/company/workflows", None).await;
+    assert!(
+        workflows
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|w| w["id"] != "weekly-digest"),
+        "a refused apply must not leave a workflow behind: {workflows}"
+    );
+}
+
+/// The invariant the defect broke, stated directly: whatever apply persists,
+/// the ordinary editor save route accepts back unchanged.
+///
+/// Before #1191 these two routes gave opposite answers to the same bytes —
+/// apply created the graph and `PUT` refused it — so the operator's first edit
+/// of a copilot-built workflow was blocked on a destination they never chose.
+#[tokio::test]
+async fn an_applied_proposal_can_be_saved_again_unchanged() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_manifest(&home, desk_manifest()).await;
+    let id = seed_proposal_card(&state, digest_ops_posting_to("engineering")).await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+    assert_eq!(card["column"], "done");
+
+    // Read the created graph back and save it straight to the editor's route,
+    // byte-for-byte, with its own version token.
+    let (status, graph) = send(
+        &state,
+        "GET",
+        "/api/v1/company/workflows/weekly-digest",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{graph}");
+
+    let mut body = graph.clone();
+    body["expectedVersion"] = graph["version"].clone();
+    let (status, saved) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/workflows/weekly-digest",
+        Some(body),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "what apply persists, the editor must accept back unchanged: {saved}"
     );
 }
 

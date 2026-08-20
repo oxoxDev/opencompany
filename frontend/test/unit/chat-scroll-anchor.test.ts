@@ -120,7 +120,7 @@ function items(n: number, ch: Channel): TimelineItem[] {
     text: `line ${i}`,
     at: 1_700_000_000_000 + i * 1_000,
   }));
-  return buildTimelineItems(buildTimeline(messages, ch), []);
+  return buildTimelineItems(buildTimeline(messages, ch, []), []);
 }
 
 // `createElement` rather than JSX because the unit suite's vitest `include` is
@@ -137,6 +137,8 @@ function render(ch: Channel, rows: TimelineItem[], historyPending = false) {
         typing: false,
         onOpenThread: () => {},
         onReact: () => {},
+        onDismissCard: () => {},
+        dismissingCardId: null,
       }),
     );
   });

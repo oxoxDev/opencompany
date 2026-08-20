@@ -10,7 +10,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use opencompany_desktop_lib::acp::client::{AcpClient, AcpError, ClientHandler, ConfinedFiles};
+use opencompany_desktop_lib::acp::client::{
+    AcpClient, AcpError, AutoApprovingFiles, ClientHandler, ConfinedFiles,
+};
 use opencompany_desktop_lib::acp::confine::Confinement;
 use serde_json::Value;
 
@@ -54,6 +56,7 @@ async fn connect(root: &Path, handler: Arc<dyn ClientHandler>) -> (AcpClient, Up
         "python3",
         &[fixture().to_str().unwrap()],
         root,
+        &[],
         handler,
         updates.sink(),
     )
@@ -227,6 +230,25 @@ async fn an_option_the_agent_never_offered_is_not_echoed_back() {
 
     client.prompt(&session, "ask").await.unwrap();
     assert_eq!(updates.said(), "chose:no");
+}
+
+#[tokio::test]
+async fn auto_approving_files_picks_the_allow_once_option_unprompted() {
+    // `LocalAcpAgent`'s production handler (issue #1245) — the opposite of
+    // `permission_defaults_to_refusing_rather_than_allowing` above by design:
+    // no configured id at all, yet it still answers "yes", because it looks
+    // at `kind` rather than needing one told to it.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let handler: Arc<dyn ClientHandler> = Arc::new(AutoApprovingFiles::new(ConfinedFiles::new(
+        Confinement::new(&root).unwrap(),
+        None,
+    )));
+    let (client, updates) = connect(&root, handler).await;
+    let session = client.new_session(&root).await.unwrap();
+
+    client.prompt(&session, "ask").await.unwrap();
+    assert_eq!(updates.said(), "chose:yes");
 }
 
 #[tokio::test]

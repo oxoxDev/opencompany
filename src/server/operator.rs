@@ -4642,6 +4642,35 @@ mode = "full"
         let state = state_with_company(&home, "running").await;
         let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
 
+        // The card has to actually be on the board: the history projection
+        // reports `taskId` only for a card that still exists, so that a chip
+        // cannot come back pointing at a card someone deleted (issue #984).
+        runtime
+            .tasks()
+            .upsert(
+                runtime.id(),
+                &crate::ports::tasks::TaskRecord {
+                    id: "t-77".to_string(),
+                    title: "Draft the launch note".to_string(),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_TODO.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: String::new(),
+                    updated_at_millis: 1,
+                    origin_chat_id: None,
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                },
+            )
+            .await
+            .unwrap();
+
         for (text, task_id) in [
             ("opened one", Some("t-77".to_string())),
             ("just talking", None),

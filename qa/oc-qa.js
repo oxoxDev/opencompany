@@ -178,6 +178,13 @@
    *   both colours are claims the host has not made.
    * - `cancelled` before the delivery reads: a stop somebody asked for is not a
    *   fault, and a cancelled run has no deliveries to weigh.
+   * - `stranded` (issue #1189) above BOTH of them: a run whose every gate has
+   *   lost its card is the one state in which "go and decide it" is false, and
+   *   `blocked` and `awaiting-approval` both say exactly that. Only the host can
+   *   make the join — it needs the live approvals queue — so the fallback
+   *   reads the host's own `strandedApprovals`, and treats its absence as "not
+   *   reconciled" rather than as "nothing is stranded". A run only PARTLY
+   *   stranded keeps its old verdict.
    * - `blocked` (issue #881) before the delivery reads: a run that stopped short
    *   at a gate carries no `error`, is not `cancelled`, is not `running` and
    *   routed no report — so before its own arm it fell through every check to
@@ -190,7 +197,7 @@
    *   reached an `output` node, so its `deliveries` are empty and a
    *   delivery-only read scored the gated case — the common one — as clean.
    *
-   * These are exactly the seven words the host's `WorkflowRunVerdict` uses, in
+   * These are exactly the eight words the host's `WorkflowRunVerdict` uses, in
    * the same order — which is what makes the fallback and the answer
    * interchangeable rather than merely similar.
    */
@@ -200,6 +207,7 @@
     if (run.running === true) return "running";
     if (run.error) return "failed";
     if (run.cancelled) return "stopped";
+    if (isStranded(run)) return "stranded";
     if (isBlocked(run)) return "blocked";
     if (undeliveredCount(run.deliveries) > 0) return "undelivered";
     if (awaitingCount(run) > 0) return "awaiting-approval";
@@ -215,14 +223,46 @@
   }
 
   /**
-   * Everything about this run that is waiting on a person: the gates it paused
-   * at **and** the reports it parked (issue #846).
+   * Whether nothing in the queue is waiting on this run any more, so no
+   * decision can move it (issue #1189).
+   *
+   * `pendingApprovals` is a receipt of where the run stopped and cannot go
+   * stale — but the question each entry points at can, and on one staging
+   * tenant 34 of 60 runs were pointing at nothing. Only the host can reconcile
+   * the two, because the join needs the live approvals queue; a host predating
+   * #1189 sends no `strandedApprovals` at all, which reads here as "not
+   * reconciled" and never as "nothing is stranded".
+   *
+   * Mirrors the host's rule rather than inventing a second one: it stopped for
+   * somebody, EVERY gate lost its card, and no report is parked either. A
+   * partly stranded run keeps its old verdict — something there really is still
+   * decidable.
+   */
+  function isStranded(run) {
+    const pending = (run.pendingApprovals || []).length;
+    return (
+      pending > 0 &&
+      (run.strandedApprovals || 0) >= pending &&
+      pendingCount(run.deliveries) === 0
+    );
+  }
+
+  /**
+   * Everything about this run that is **still** waiting on a person: the gates
+   * it paused at that still have a card, plus the reports it parked (issues
+   * #846, #1189).
    *
    * The two were never read together, and that is what let a run report success
-   * while a human had not answered it.
+   * while a human had not answered it. Issue #1189 added the other half: the
+   * gates were counted raw, so a run whose cards the queue had lost went on
+   * claiming somebody was being waited on. `strandedApprovals` is the host's
+   * reconciliation; clamped at 0 because a negative would render as
+   * "-1 awaiting approval", which is a worse failure than the one being fixed.
    */
   function awaitingCount(run) {
-    return (run.pendingApprovals || []).length + pendingCount(run.deliveries);
+    const pending = (run.pendingApprovals || []).length;
+    const live = Math.max(0, pending - (run.strandedApprovals || 0));
+    return live + pendingCount(run.deliveries);
   }
 
   /**

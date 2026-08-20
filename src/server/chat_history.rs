@@ -208,6 +208,12 @@ pub struct MessageView {
     /// REST and GraphQL cannot disagree about which messages carry a card
     /// (issue #65's whole point). `None` on operator messages and on every
     /// reply journaled before the field existed.
+    ///
+    /// Also `None` once the card itself is gone, whoever deleted it — see
+    /// [`drop_dead_cards`]. The journal still records that the turn opened a
+    /// card, because it did; this field answers the narrower question the
+    /// renderer actually asks, which is whether there is still a card to link
+    /// to (issue #984).
     pub task_id: Option<String>,
     /// The message this one replies to (issue #364), by that message's own id —
     /// what makes a thread survive a reload rather than living in one browser.
@@ -716,7 +722,71 @@ pub async fn history_for_desk(
             message.reactions = reactions.remove(&message.id).unwrap_or_default();
         }
     }
+
+    drop_dead_cards(runtime, &mut messages).await?;
     Ok(messages)
+}
+
+/// Blanks `task_id` on any row naming a card the board no longer has
+/// (issue #984).
+///
+/// # Why this is a projection concern and not a write
+///
+/// The obvious fix — clear `task_id` on the journaled rows when the card is
+/// deleted — is not available, and it is worth saying why so nobody reaches for
+/// it later. `task_id` is not a column on a mutable chat row: it is a field of
+/// the [`CompanyEvent::AgentReply`] that *happened*, and the journal is
+/// append-only. Rewriting it would be editing history to record that a turn
+/// never opened a card, when it did.
+///
+/// So the id stays in the journal and the **projection** stops reporting it once
+/// the card is gone. That is also strictly more correct than a write would have
+/// been:
+///
+/// - It covers a card deleted by **any** path, not just the chat chip — the
+///   board's own `TaskEditDialog` delete leaves exactly the same stale chip, and
+///   always did.
+/// - It covers cards deleted **before** this change, which no write-time fix
+///   could reach.
+/// - It cannot drift: there is one board, read at render time, rather than a
+///   denormalised copy that a missed call site leaves stale.
+///
+/// Without this a dismissal survives only until the next full reload:
+/// `transcripts` is React state and is never serialised, but the console
+/// rehydrates from this projection (`lib/chat.ts`'s `fromHistory`) and merges by
+/// message id, so an empty transcript takes every row back — chip included. The
+/// chip would return pointing at a `404`, which reads as the delete having
+/// failed.
+///
+/// One board read per history, and only when the window actually carries a
+/// card — the same shape as the single roster read above, not a read per
+/// message.
+async fn drop_dead_cards(
+    runtime: &CompanyRuntime,
+    messages: &mut [MessageView],
+) -> Result<(), OpenCompanyError> {
+    if !messages.iter().any(|message| message.task_id.is_some()) {
+        return Ok(());
+    }
+
+    let live: HashSet<String> = runtime
+        .tasks()
+        .list(runtime.id())
+        .await?
+        .into_iter()
+        .map(|task| task.id)
+        .collect();
+
+    for message in messages {
+        if message
+            .task_id
+            .as_deref()
+            .is_some_and(|id| !live.contains(id))
+        {
+            message.task_id = None;
+        }
+    }
+    Ok(())
 }
 
 /// Counts a desk's messages before a cursor without materialising them.
@@ -1448,5 +1518,200 @@ mod test {
             assert_eq!(audit.replies, 1);
             assert_eq!(audit.affected, 1);
         }
+    }
+}
+
+#[cfg(test)]
+mod dead_card_test {
+    use super::*;
+    use crate::company::CompanyManifest;
+    use crate::ports::tasks::{COLUMN_TODO, TaskDeliverable, TaskRecord};
+    use crate::ports::types::CompanyId;
+    use crate::runtime::RuntimeBuilder;
+    use std::sync::Arc;
+
+    fn manifest() -> CompanyManifest {
+        toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n")
+            .expect("parse manifest")
+    }
+
+    fn card(id: &str) -> TaskRecord {
+        TaskRecord {
+            id: id.to_string(),
+            title: "Draft the launch note".to_string(),
+            note: None,
+            column: COLUMN_TODO.to_string(),
+            priority: "medium".to_string(),
+            assignee: String::new(),
+            updated_at_millis: 1,
+            origin_chat_id: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+        }
+    }
+
+    /// A reply that opened a card, exactly as the dispatch path journals it.
+    fn reply_naming(task_id: &str) -> CompanyEvent {
+        CompanyEvent::AgentReply {
+            parent: None,
+            task_id: Some(task_id.to_string()),
+            chat_id: MAIN_THREAD_ID.to_string(),
+            agent_id: "ceo".to_string(),
+            text: "Opened a card for that.".to_string(),
+            steps: Vec::new(),
+        }
+    }
+
+    async fn runtime(home: &std::path::Path) -> Arc<CompanyRuntime> {
+        Arc::new(
+            RuntimeBuilder::new(home.to_path_buf(), manifest())
+                .with_id(CompanyId::new("acme"))
+                .build()
+                .await
+                .expect("build a runtime"),
+        )
+    }
+
+    /// The chip survives a reload while the card is still on the board — the
+    /// behaviour issue #246 added and `chat-to-card.spec.ts` pins.
+    ///
+    /// Asserted first so the test below cannot pass by the projection simply
+    /// dropping every `task_id` it sees.
+    #[tokio::test]
+    async fn a_reply_keeps_its_card_while_the_card_exists() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        runtime
+            .tasks()
+            .upsert(&id, &card("card-1"))
+            .await
+            .expect("seed the board");
+        runtime
+            .events()
+            .append(&id, reply_naming("card-1"))
+            .await
+            .expect("journal the reply");
+
+        let history = history_for_desk(
+            &runtime,
+            MAIN_THREAD_ID,
+            MAIN_THREAD_ID,
+            &Viewer::Operator,
+            None,
+            50,
+        )
+        .await
+        .expect("history");
+
+        assert_eq!(
+            history.iter().filter_map(|m| m.task_id.as_deref()).count(),
+            1,
+            "the chip is projected while the card is on the board: {history:?}"
+        );
+    }
+
+    /// **The reload half of the dismissal (issue #984).**
+    ///
+    /// The journal still records that the turn opened a card — it did, and that
+    /// event is not rewritten. What must not happen is the *projection* handing
+    /// the console an id it can only render as a link to a `404`, which is how a
+    /// completed delete comes back looking like a failed one.
+    ///
+    /// Deleting the card is the only difference from the test above.
+    #[tokio::test]
+    async fn a_reply_loses_its_card_once_the_card_is_deleted() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        runtime
+            .tasks()
+            .upsert(&id, &card("card-1"))
+            .await
+            .expect("seed the board");
+        runtime
+            .events()
+            .append(&id, reply_naming("card-1"))
+            .await
+            .expect("journal the reply");
+        assert!(
+            runtime
+                .tasks()
+                .delete(&id, "card-1")
+                .await
+                .expect("delete the card"),
+            "the card was there to delete"
+        );
+
+        let history = history_for_desk(
+            &runtime,
+            MAIN_THREAD_ID,
+            MAIN_THREAD_ID,
+            &Viewer::Operator,
+            None,
+            50,
+        )
+        .await
+        .expect("history");
+
+        assert!(
+            !history.is_empty(),
+            "the reply itself still belongs in the transcript — only its card is gone"
+        );
+        assert!(
+            history.iter().all(|m| m.task_id.is_none()),
+            "a rehydrated chip for a deleted card is a link to a 404, which reads \
+             as the delete having failed: {history:?}"
+        );
+    }
+
+    /// The board is read once per history, and not at all when no row carries a
+    /// card — the cost argument for doing this in the projection.
+    ///
+    /// Asserted through behaviour rather than a call count: a transcript with no
+    /// cards comes back unchanged.
+    #[tokio::test]
+    async fn a_transcript_with_no_cards_is_untouched() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::AgentReply {
+                    parent: None,
+                    task_id: None,
+                    chat_id: MAIN_THREAD_ID.to_string(),
+                    agent_id: "ceo".to_string(),
+                    text: "just talking".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal the reply");
+
+        let history = history_for_desk(
+            &runtime,
+            MAIN_THREAD_ID,
+            MAIN_THREAD_ID,
+            &Viewer::Operator,
+            None,
+            50,
+        )
+        .await
+        .expect("history");
+
+        assert_eq!(history.len(), 1, "{history:?}");
+        assert!(history[0].task_id.is_none(), "{history:?}");
     }
 }

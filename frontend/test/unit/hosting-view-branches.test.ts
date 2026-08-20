@@ -83,6 +83,9 @@ describe("HostingView status surfaces", () => {
 
     expect(at("hosting-not-granted")?.textContent).toContain("[tools].allow");
     expect(at("hosting-not-in-build")).toBeNull();
+    // The token is fully configured (HOSTING_OK) and the badge must still not
+    // agree with a page that just said this integration reaches nobody.
+    expect(at("hosting-connected")).toBeNull();
   });
 
   it("says the host lacks the tools, and says only that", async () => {
@@ -93,6 +96,7 @@ describe("HostingView status surfaces", () => {
 
     expect(at("hosting-not-in-build")).not.toBeNull();
     expect(at("hosting-not-granted")).toBeNull();
+    expect(at("hosting-connected")).toBeNull();
   });
 
   it("shows the page-level error when the status cannot be read", async () => {

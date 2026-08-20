@@ -107,14 +107,25 @@ impl HarnessRouter {
     /// The single place both the brain and the workflow runner assemble a
     /// router from the same four pieces, so the two dispatch points cannot
     /// drift about which agent lands on which engine.
+    ///
+    /// `default_lane` is `None` when the default harness itself has no engine
+    /// on this host (e.g. an `acp` default with no ACP transport wired) — the
+    /// caller must have already recorded its reason in `unavailable`, keyed by
+    /// `default_harness` ([`lanes::build`](crate::harness::lanes::build)
+    /// guarantees this). `engine_for` then falls through to that entry the same
+    /// way it does for any other harness with no engine, instead of this
+    /// constructor silently substituting something.
     pub fn from_lanes(
         default_harness: &str,
-        default_lane: Arc<dyn RunTurn>,
+        default_lane: Option<Arc<dyn RunTurn>>,
         lanes: &[(String, Arc<dyn RunTurn>)],
         unavailable: &[(String, String)],
         bindings: &HashMap<String, String>,
     ) -> Self {
-        let mut router = Self::new(default_harness).with_engine(default_harness, default_lane);
+        let mut router = Self::new(default_harness);
+        if let Some(default_lane) = default_lane {
+            router = router.with_engine(default_harness, default_lane);
+        }
         for (id, engine) in lanes {
             router = router.with_engine(id, engine.clone());
         }

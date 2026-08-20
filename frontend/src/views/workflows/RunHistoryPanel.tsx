@@ -22,10 +22,11 @@ import { BlockedNodeApprovals } from "./BlockedNodeApprovals";
 import { failedNodeOf, nodeName } from "./graph";
 import {
   awaitingCount,
-  decidableApprovalCount,
   formatDuration,
   isBlocked,
   isRunning,
+  isStranded,
+  liveParkedApprovalCount,
   relativeTime,
   runDuration,
   runTone,
@@ -353,12 +354,20 @@ function RunHistoryRow({
   // Issue #881 / #880: read once, so the chip, the badge and the terminal line
   // below cannot disagree about whether this run stopped for a person.
   const blocked = run.blockedNodes ?? [];
-  // Issue #900: `decidableApprovalCount`, not `parkedApprovalCount` — this
-  // paragraph tells the operator a card is waiting, so it must count only
-  // the receipts that actually landed one. Counting a failed park here said
-  // "needs your approval" and "decide it in Approvals" about a call the very
-  // next sentence admitted nobody would ever be asked about.
-  const parked = decidableApprovalCount(run);
+  // Issue #900: only the receipts that actually landed a card, because this
+  // paragraph tells the operator one is waiting. Counting a failed park here
+  // said "needs your approval" and "decide it in Approvals" about a call the
+  // very next sentence admitted nobody would ever be asked about.
+  //
+  // Issue #1189 took the same argument one step further: a card that landed and
+  // has since fallen out of the queue is in exactly the position of one that
+  // never landed, and `decidableApprovalCount` cannot see the difference —
+  // a receipt records that a card was opened, never that it is still open. So
+  // the count is the live one, and the sentence below can stand behind it.
+  const parked = liveParkedApprovalCount(run);
+  // Issue #1189: the run's own reading, so the paragraph, the badge and the
+  // blocked-node list beneath them all branch off ONE fact.
+  const stranded = isStranded(run);
   // The loud half: calls nobody will ever be asked about, because the park
   // itself failed or the excess was dropped past the per-turn cap. Strictly
   // worse than a parked one — there is no card to click.
@@ -407,6 +416,12 @@ function RunHistoryRow({
             parked {parked} approval{parked === 1 ? "" : "s"}
           </Badge>
         ) : (
+          // Issue #1189: `!stranded`, because this badge is the run row's own
+          // copy of the claim the drawer makes below. A stranded run has an
+          // empty receipt (a paused gate files none), so `parked` is 0 and this
+          // fallback fired — painting "3 pending approvals", in amber, on the
+          // one run for which nothing is pending at all.
+          !stranded &&
           run.pendingApprovals.length > 0 && (
             <Badge
               variant="outline"
@@ -554,12 +569,23 @@ function RunHistoryRow({
               unparkable — a call nobody will ever be asked about. That read
               as a promise of a card that does not exist, and contradicted the
               closing sentence below whenever `parked` was 0. */}
+          {/* Issue #1189: THREE branches, on both clauses, because dropping
+              `parked` to 0 for a stranded run flipped each of them to something
+              wrong in its own way. The opening clause became "could not be
+              queued for approval" — but these calls WERE queued; the card was
+              opened and later lost, which is a different fact and the only one
+              of the two an operator can act on differently. The closing clause
+              became "change the policy and run the workflow again" — but no
+              policy refused anything here, so it sends them to edit a setting
+              that was never the problem. */}
           Not finished — {blocked.map((b) => `“${b.nodeId}”`).join(", ")}{" "}
           {parked > 0
             ? blocked.length === 1
               ? "needs your approval"
               : "need your approval"
-            : "could not be queued for approval"}, so{" "}
+            : stranded
+              ? "needed your approval"
+              : "could not be queued for approval"}, so{" "}
           {blocked.length === 1 ? "it" : "they"} produced nothing and the steps
           after {blocked.length === 1 ? "it" : "them"} did not run.{" "}
           {parked > 0 &&
@@ -568,7 +594,15 @@ function RunHistoryRow({
             `${unparkable} call${unparkable === 1 ? "" : "s"} could not be queued for approval at all, so you will not be asked about ${unparkable === 1 ? "it" : "them"}. `}
           {parked > 0
             ? `Approve ${parked === 1 ? "it" : "them"} in Approvals and this run continues on its own — approving re-runs the step, so a changed decision may ask again.`
-            : "Nothing here can be approved; change the policy and run the workflow again."}
+            : stranded
+              ? // Says only what is observable. Approving a gate starts a NEW
+                // run rather than continuing this one, and records no link back
+                // — so a run whose approvals were all decided and one whose
+                // cards were lost look identical from here, and claiming
+                // either would be a diagnosis the console cannot make. Re-run
+                // is offered as an option, not as a remedy for a stated cause.
+                "Nothing here is waiting on you any more, and this run cannot be continued. Run the workflow again if you still need it."
+              : "Nothing here can be approved; change the policy and run the workflow again."}
         </p>
         {/* Issue #1014 (PR-B): the gated tool names per blocked node and a link
             per parked card to the Approvals queue — the sentence above says
@@ -586,6 +620,44 @@ function RunHistoryRow({
         <p className="text-2xs text-muted-foreground">
           Still running — reports are routed when it finishes.
         </p>
+      ) : stranded ? (
+        // Issue #1189, and the arm the issue text does not enumerate — but the
+        // one the 34 runs actually render. The chain above it is
+        // `error → cancelled → isBlocked → running`, and `isBlocked` reads
+        // `blockedNodes.length`. A fully stranded GATE run has no blocked-node
+        // rows at all (a paused gate writes none), so it fell straight through
+        // to the `pendingApprovals` arm below — whose closing line is "Approve
+        // or decline it in Approvals to carry the run on." Fixing the summary,
+        // the badge and the verdict and leaving this would have shipped the
+        // same defect on the half the issue calls bigger.
+        //
+        // Placed above `pendingApprovals` to mirror the host ladder, where
+        // `stranded` outranks `awaiting-approval` for exactly this reason: both
+        // arms describe a run stopped for a person, and only one of them is
+        // still true.
+        //
+        // Muted rather than amber: amber is the console's "needs your
+        // attention" state, and nothing here needs anybody's. Same reasoning as
+        // the tone in `run-health.ts`.
+        <>
+          {/* The reports it DID route before the gate, on the same terms the
+              awaiting arm shows them: replacing them would trade one silent
+              omission for another. */}
+          {run.deliveries.length > 0 && (
+            <DeliveryRows deliveries={run.deliveries} />
+          )}
+          <p
+            className="text-2xs text-muted-foreground"
+            data-testid="workflow-run-stranded"
+          >
+            Not finished — this run stopped for your approval on{" "}
+            {run.pendingApprovals.map((node) => `“${node}”`).join(", ")}, and
+            nothing here is waiting on you any more. No decision left can move
+            it
+            {run.deliveries.length === 0 ? ", and no reports were routed" : ""}.
+            Run the workflow again if you still need it.
+          </p>
+        </>
       ) : run.pendingApprovals.length > 0 ? (
         <>
           {/* A paused run can still have routed reports — the output nodes it

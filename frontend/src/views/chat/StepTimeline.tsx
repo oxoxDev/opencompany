@@ -5,11 +5,25 @@ import {
   ChevronDown,
   ChevronRight,
   Hourglass,
+  Loader2,
   Scissors,
   SquareKanban,
   Wrench,
+  X,
   type LucideIcon,
 } from "lucide-react";
+
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 
 import {
   AWAITING_APPROVAL_LABEL,
@@ -177,16 +191,85 @@ function formatElapsed(ms: number | undefined, status: TurnStep["status"]): stri
 
 /**
  * The "a card opened from this reply" chip (issue #246) — links straight to
- * the board card a turn opened, or the one it dispatched to.
+ * the board card a turn opened, or the one it dispatched to, and dismisses it
+ * (issue #984).
+ *
+ * The dismissal is the half #442 promised and never shipped on this surface:
+ * it allowed a turn to open a card from an ordinary message on the grounds
+ * that *"a spurious card can be dismissed in one click"*, while this chip was
+ * a bare link to the card's detail screen. `onDismiss` is optional so a caller
+ * that has no card-delete route — the thread panel, a future read-only
+ * transcript — still renders the link half rather than a control that throws.
  */
-export function CardChip({ taskId }: { taskId: string }) {
-  return (
+export function CardChip({
+  taskId,
+  busy = false,
+  disabled = false,
+  onDismiss,
+}: {
+  taskId: string;
+  busy?: boolean;
+  disabled?: boolean;
+  onDismiss?: (taskId: string) => void;
+}) {
+  const link = (
     <a
       href={`#/tasks/${encodeURIComponent(taskId)}`}
-      className="mt-1.5 flex w-fit items-center gap-1 rounded-full bg-accent px-2 py-0.5 text-2xs font-medium text-accent-foreground transition-opacity hover:opacity-80"
+      className={cn(
+        "flex items-center gap-1 py-0.5 text-2xs font-medium transition-opacity hover:opacity-80",
+        onDismiss ? "pl-2 pr-1" : "px-2",
+      )}
     >
       <SquareKanban className="size-3 shrink-0" />
       Card opened
     </a>
+  );
+  return (
+    <span className="mt-1.5 flex w-fit items-center rounded-full bg-accent text-accent-foreground">
+      {link}
+      {onDismiss && (
+        <AlertDialog>
+          <AlertDialogTrigger
+            render={
+              <button
+                type="button"
+                // Always in the DOM and focusable rather than hover-revealed:
+                // this chip is the only place the card can be dismissed from
+                // the channel, and a hover-only control is unreachable by
+                // keyboard and on touch.
+                className="flex items-center rounded-full py-0.5 pl-0.5 pr-1.5 transition-opacity hover:opacity-80 disabled:opacity-50"
+                disabled={busy || disabled}
+                title="Dismiss this card"
+                aria-label="Dismiss this card"
+              >
+                {busy ? (
+                  <Loader2 className="size-3 shrink-0 animate-spin" />
+                ) : (
+                  <X className="size-3 shrink-0" />
+                )}
+              </button>
+            }
+          />
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Dismiss this card?</AlertDialogTitle>
+              <AlertDialogDescription>
+                This deletes the card from the board and can’t be undone. The
+                message stays in the channel.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Keep card</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={() => onDismiss(taskId)}
+                className="bg-destructive text-white hover:bg-destructive/90"
+              >
+                Dismiss card
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      )}
+    </span>
   );
 }

@@ -193,6 +193,24 @@ export function addableTo(tree: OrgTree, desk: OrgDesk): TeamMember[] {
 }
 
 /**
+ * Whether a seat can be dragged onto a *different* desk (issue #1227).
+ *
+ * Only its provenance decides this. A same-desk reorder only ever calls
+ * `setDeskOrder`, which the host accepts for either provenance — but a
+ * cross-desk move also has to call `removeDeskMember` on the source, and the
+ * host refuses that for a blueprint seat: it is declared in the manifest, not
+ * the overlay, so runtime cannot let go of it. Accepting the drop anyway
+ * would only fail one step later, as a 409 the operator never asked to see;
+ * this is the one predicate every drag/drop-over gate in the chart consults
+ * before accepting a cross-desk drop, so the refusal is decided once and
+ * shown up front — a "not allowed" cursor, or a toast — rather than
+ * discovered from a failed write.
+ */
+export function canDragAcrossDesks(seat: Pick<OrgSeat, "provenance">): boolean {
+  return seat.provenance === "overlay";
+}
+
+/**
  * The desk's member order with `index` moved one place in `direction`, or
  * `null` when that would run off either end.
  *

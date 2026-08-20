@@ -430,6 +430,15 @@ async fn register(
     if let Some(provenance) = provenance {
         builder = builder.with_template_provenance(provenance);
     }
+    // Issue #1245: `with_acp_agents` only exists under `acp` — an
+    // `openhuman`-only build (or one with no `AcpAgentFactory` wired on
+    // `state`, e.g. every non-desktop embedder) leaves the builder's default
+    // `None`, so a `local` acp harness resolves `unavailable` exactly as it
+    // already does.
+    #[cfg(feature = "acp")]
+    if let Some(factory) = state.acp_agents() {
+        builder = builder.with_acp_agents(factory);
+    }
     let runtime = builder.build().await?;
     // The same refusal `serve` applies at boot and provisioning: a `none`-mode
     // company on a routable bind is an unauthenticated admin console. The

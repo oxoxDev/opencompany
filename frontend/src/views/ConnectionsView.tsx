@@ -484,7 +484,7 @@ export function ConnectionsView({ client, company }: Props) {
       <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-1">
-            <h2 className="text-2xl font-semibold tracking-tight">Connections</h2>
+            <h1 className="text-2xl font-semibold tracking-tight">Connections</h1>
             <p className="text-sm text-muted-foreground">
               Wire in the accounts your company acts through. It only uses what you connect.
             </p>

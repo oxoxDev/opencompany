@@ -730,6 +730,45 @@ mod namespace_driver_conformance {
         conformance::assert_context_chunk_stamps(engine.context()).await;
         drop(store_dir);
     }
+
+    /// #1201: the conformance suite failed at random on this driver because
+    /// its write path runs a PII scrubber over the serialized envelope, and a
+    /// 13-digit `at_millis` that happens to pass Luhn (~10% of epoch-millis
+    /// stamps do) was redacted into unparseable JSON — the read side then
+    /// dropped the whole record. Deterministic pin: the middle stamp below is
+    /// the Luhn-valid one from the original failure, so this test fails 100%
+    /// of the time on a driver with that defect, not 10%.
+    #[tokio::test]
+    async fn luhn_valid_timestamps_round_trip_on_the_namespace_driver() {
+        let (store_dir, engine) = real_engine();
+        let memory = engine.memory();
+        let traces = vec![
+            CompressedTrace {
+                cycle_id: "c0".into(),
+                summary: "summary 0".into(),
+                at_millis: 1_787_178_633_770,
+            },
+            CompressedTrace {
+                cycle_id: "c1".into(),
+                summary: "summary 1".into(),
+                at_millis: 1_787_178_633_773,
+            },
+            CompressedTrace {
+                cycle_id: "c2".into(),
+                summary: "summary 2".into(),
+                at_millis: 1_787_178_633_774,
+            },
+        ];
+        for trace in &traces {
+            memory.save_trace(&acme_id(), trace.clone()).await.unwrap();
+        }
+        let read = memory.recent_traces(&acme_id(), usize::MAX).await.unwrap();
+        assert_eq!(
+            read, traces,
+            "every trace round-trips regardless of its timestamp's digits"
+        );
+        drop(store_dir);
+    }
 }
 
 /// #914's acceptance names "taint survives export and re-import" and #1113

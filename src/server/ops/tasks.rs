@@ -514,6 +514,27 @@ async fn patch_task(
     Ok(Json(record.into()))
 }
 
+/// `DELETE …/tasks/{task_id}` — remove a card from the board.
+///
+/// # An in-flight card is refused rather than deleted (issue #984)
+///
+/// A running turn holds its card in memory and writes it back when it settles
+/// (`tasks.upsert` on the harness settle path). Deleting the row underneath it
+/// therefore does not remove the card: the settle re-creates it, in
+/// `in_review`/`done`, *after* every console surface has already dropped the
+/// chip naming it — a card nothing can reach, which is precisely the
+/// "board fills with conversation" failure this is meant to fix.
+///
+/// So an in-flight card is a `409` with the steer route named, not a delete.
+///
+/// **Refusing rather than cancel-then-delete is the deliberate choice**, and not
+/// merely the smaller one. A cancel is cooperative: it sets the run's
+/// [`SteerControl`](crate::company::steer::SteerControl) and the turn stops at
+/// its *next iteration boundary*, which may be after the settle write has
+/// already gone out. Cancel-then-delete would therefore reintroduce the same
+/// race it was meant to close, only less often — the worst kind of fix, because
+/// it would pass a test and fail in production. Refusing is the state the
+/// operator can act on: cancel, watch it stop, then delete.
 async fn delete_task(
     company: ScopedCompany,
     Path(TaskPath { task_id }): Path<TaskPath>,
@@ -522,6 +543,23 @@ async fn delete_task(
     // concurrent re-parent's existence check and its write, which would leave
     // the dangling edge `validate_parent` exists to prevent.
     let _serialized = company.runtime.task_writes.lock().await;
+
+    // Checked under the write lock, so a run that registers after this point
+    // cannot slip between the check and the delete.
+    if company
+        .runtime
+        .steer()
+        .list(company.id())
+        .iter()
+        .any(|run| run.task_id.as_deref() == Some(task_id.as_str()))
+    {
+        return Err(ApiError(OpenCompanyError::Conflict(format!(
+            "task {task_id} is running — cancel it first (POST …/tasks/{task_id}/steer \
+             with `action: \"cancel\", confirm: true`), then delete it. Deleting it now \
+             would not remove it: the turn writes the card back when it settles."
+        ))));
+    }
+
     if company
         .runtime
         .tasks()
@@ -547,8 +585,15 @@ async fn delete_task(
 /// [`RawWorkflow`](crate::company::RawWorkflow) from the **stored** `ops` — the
 /// host is the authority, the browser's copy is never trusted — and runs it
 /// through [`create_company_workflow`], which takes the company write lock,
-/// re-validates shape + roster + id/name uniqueness, and (issue #276) lands any
-/// schedule-carrying graph switched off until a person arms it.
+/// re-validates shape + roster + destinations + id/name uniqueness, and (issue
+/// #276) lands any schedule-carrying graph switched off until a person arms it.
+///
+/// "The same validation an editor save runs" is the whole contract here, and
+/// until issue #1191 it was not true: the channel-destination rule lived on the
+/// two write routes rather than in the shared core, so this path — the ONE path
+/// where the operator did not author the graph, the path #836 exists because of
+/// — was the path with no check. A proposal naming a channel nobody wired was
+/// persisted and the card marked Done.
 ///
 /// On success the card is stamped with a [`TaskOutput`] linking the created
 /// workflow to the build attempt (issue #339) and moved to **Done**, and the
@@ -583,12 +628,19 @@ async fn apply_workflow_proposal(
     })?;
     let draft = raw_workflow_from_spec(&spec)?;
 
+    // Issue #1191: the deliverable channel set, read off the SAME runtime the
+    // console's destination picker is served from. Apply is a save, and it used
+    // to be the one save that skipped the channel rule — so a proposal naming a
+    // channel nobody wired was persisted, the card was marked Done, and the
+    // resulting workflow could not be saved again from the editor without first
+    // fixing a destination the operator never chose.
     let file = match create_company_workflow(
         company.id(),
         company.runtime.source_dir(),
         company.runtime.store(),
         Some(company.runtime.events()),
         draft,
+        Some(&company.runtime.deliverable_channel_ids()),
     )
     .await
     {
@@ -2623,6 +2675,103 @@ mod steer_redirect_test {
             serde_json::from_slice(&bytes).unwrap_or(Value::Null)
         };
         (status, value)
+    }
+
+    // ── Deleting a card that is running (issue #984) ─────────────────────────
+
+    /// Puts a card on the board so a delete has something to remove.
+    async fn seed_card(state: &AppState, id: &str) {
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        runtime
+            .tasks()
+            .upsert(
+                &company,
+                &crate::ports::tasks::TaskRecord {
+                    id: id.to_string(),
+                    title: "Draft the launch note".to_string(),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_IN_PROGRESS.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: String::new(),
+                    updated_at_millis: 1,
+                    origin_chat_id: None,
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn delete_card(state: &AppState, id: &str) -> StatusCode {
+        let request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/v1/company/tasks/{id}"))
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .body(Body::empty())
+            .unwrap();
+        router(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap()
+            .status()
+    }
+
+    async fn board_has(state: &AppState, id: &str) -> bool {
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        runtime
+            .tasks()
+            .list(&company)
+            .await
+            .unwrap()
+            .iter()
+            .any(|task| task.id == id)
+    }
+
+    /// **A running card cannot be deleted out from under its turn.**
+    ///
+    /// The settle path writes the card back from the harness's in-memory clone,
+    /// so a delete that lands mid-turn does not remove the card — it removes it
+    /// until the turn finishes and then gets it back, in `in_review`/`done`,
+    /// after every chat chip naming it has already gone. That is a card on the
+    /// board that nothing can reach, which is the failure #984 is about.
+    ///
+    /// The card staying on the board is asserted as well as the status: a `409`
+    /// that had already deleted the row would be worse than no check at all.
+    #[tokio::test]
+    async fn deleting_a_running_card_is_refused_and_leaves_it_on_the_board() {
+        let home = tempfile::tempdir().unwrap();
+        let (state, _guard) = state_with_inflight_run(home.path()).await;
+        seed_card(&state, "active").await;
+
+        assert_eq!(delete_card(&state, "active").await, StatusCode::CONFLICT);
+        assert!(
+            board_has(&state, "active").await,
+            "the refusal must not have deleted it anyway"
+        );
+    }
+
+    /// And the refusal is aimed at the running card, not at deletes in general.
+    ///
+    /// Without this, a guard that refused *every* delete would satisfy the test
+    /// above — the board's own delete would be broken and the suite would still
+    /// be green.
+    #[tokio::test]
+    async fn deleting_a_card_that_is_not_running_still_works() {
+        let home = tempfile::tempdir().unwrap();
+        let (state, _guard) = state_with_inflight_run(home.path()).await;
+        seed_card(&state, "idle").await;
+
+        assert_eq!(delete_card(&state, "idle").await, StatusCode::NO_CONTENT);
+        assert!(!board_has(&state, "idle").await);
     }
 
     /// The instruction the run's audit event recorded, if any.

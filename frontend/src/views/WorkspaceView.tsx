@@ -52,6 +52,16 @@ import {
   type WorkspaceOrigin,
 } from "@/api/workspace";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -89,6 +99,7 @@ import {
   nodeById,
   pathOf,
   readLegacyLocalNodes,
+  subtreeCounts,
   subtreeIds,
   titleOf,
 } from "@/lib/workspace";
@@ -401,6 +412,10 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   // ride along on both.
   const [repair, setRepair] = useState<RepairState | null>(null);
   const [repairing, setRepairing] = useState(false);
+  // The node awaiting a second click before its delete API call goes out — a
+  // folder recursively takes every note nested inside it, so the dialog must
+  // name what is about to go before it goes (issue #1255).
+  const [confirmDelete, setConfirmDelete] = useState<FsNode | null>(null);
   // The pending scratchpad partitioned by kind, once, for every surface that
   // describes or imports it: the banner's sentence, the import loops, and the
   // receipt. #500 partitioned inside `importLegacy` so the loops and the
@@ -1187,6 +1202,10 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
 
   return (
     <div className="flex flex-1 overflow-hidden">
+      {/* The file tree and editor are the page, with no title of their own
+          (issue #1221) — this names the page for a screen reader the same
+          way every other view's title does. */}
+      <h1 className="sr-only">Workspace</h1>
       {/* Explorer */}
       <aside
         className={cn(
@@ -1336,7 +1355,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
               onOpen={(id) => void open(id)}
               onRename={(node) => setPrompt({ mode: "rename", node })}
               onMove={(node) => setMoving(node)}
-              onDelete={(node) => void remove(node)}
+              onDelete={(node) => setConfirmDelete(node)}
             />
           )}
         </div>
@@ -1544,6 +1563,18 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
         busy={repairing}
         onClose={() => setRepair(null)}
         onConfirm={() => void confirmRepair()}
+      />
+      <DeleteDialog
+        nodes={nodes}
+        node={confirmDelete}
+        onClose={() => setConfirmDelete(null)}
+        onConfirm={(node) => {
+          // Close FIRST: remove() can clear openId/openFile out from under a
+          // still-mounted dialog (same reasoning as WorkflowsView's delete
+          // confirm).
+          setConfirmDelete(null);
+          void remove(node);
+        }}
       />
     </div>
   );
@@ -2065,6 +2096,64 @@ function MoveDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+/**
+ * Delete confirmation for a note or folder (issue #1255).
+ *
+ * A folder's delete recursively takes every note nested inside it in the same
+ * API call, so the dialog names exactly what that means — the file/folder
+ * counts under it, from {@link subtreeCounts} — rather than a bare "are you
+ * sure?" that reads the same for an empty folder and one holding a hundred
+ * notes.
+ */
+function DeleteDialog({
+  nodes,
+  node,
+  onClose,
+  onConfirm,
+}: {
+  nodes: FsNode[];
+  node: FsNode | null;
+  onClose: () => void;
+  onConfirm: (node: FsNode) => void;
+}) {
+  const counts = node ? subtreeCounts(nodes, node.id) : { files: 0, folders: 0 };
+  const description =
+    node?.kind === "file"
+      ? "This permanently deletes this note. There is no undo."
+      : counts.files === 0 && counts.folders === 0
+        ? "This folder is empty. Deleting it can’t be undone."
+        : `This folder and everything inside it — ${describeCounts(counts)} — will be permanently deleted. There is no undo.`;
+
+  return (
+    <AlertDialog open={Boolean(node)} onOpenChange={(o) => !o && onClose()}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete “{node ? titleOf(node) : ""}”?</AlertDialogTitle>
+          <AlertDialogDescription>{description}</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Keep it</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={() => node && onConfirm(node)}
+            className="bg-destructive text-white hover:bg-destructive/90"
+            data-testid="workspace-delete-confirm"
+          >
+            Delete {node?.kind === "folder" ? "folder" : "note"}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+/** "3 notes and 1 folder" / "2 notes" / "1 folder" — for {@link DeleteDialog}. */
+function describeCounts(counts: { files: number; folders: number }): string {
+  const parts: string[] = [];
+  if (counts.files > 0) parts.push(`${counts.files} note${counts.files === 1 ? "" : "s"}`);
+  if (counts.folders > 0) parts.push(`${counts.folders} folder${counts.folders === 1 ? "" : "s"}`);
+  return parts.join(" and ");
 }
 
 /**

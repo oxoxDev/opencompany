@@ -34,13 +34,14 @@ use crate::ports::types::CompanyRecord;
 use crate::runtime::builder::agent_effective_grants;
 use crate::runtime::tools::grants_cover_server;
 use crate::server::error::ApiError;
-use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
+use crate::server::ops::{AdminScopedCompany, ScopedCompany, mcp_registry, scoped};
 
 /// The reminder attached to every mutating response: the effective MCP set is
 /// re-resolved and fingerprinted on every harness cycle (`HarnessPool::ensure`),
 /// so an edit reaches agents on the company's next turn with no restart. The
 /// `mcp_fingerprint` staleness term is what makes this a property of the design.
-const NEXT_TURN_NOTE: &str = "Agents pick up this change on their next turn — no restart needed.";
+pub(super) const NEXT_TURN_NOTE: &str =
+    "Agents pick up this change on their next turn — no restart needed.";
 
 /// Builds the MCP server management route fragment.
 pub fn router() -> Router<AppState> {
@@ -57,24 +58,59 @@ pub fn router() -> Router<AppState> {
 /// One effective MCP server as the console renders it. **Never** carries a
 /// credential — only a non-secret `authConfigured` flag and the last (scrubbed)
 /// probe `health`.
+///
+/// Since issue #1270 this shape also carries a registry install. The four
+/// registry-only fields are all `Option` + `skip_serializing_if`, so a
+/// manifest / default / runtime row serializes **byte-identically** to what it
+/// did before — the console's existing readers cannot tell the change happened.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct McpServerDto {
-    name: String,
-    endpoint: String,
-    description: Option<String>,
-    /// `manifest` (committed), `runtime` (console-added), or `default`
-    /// (shipped by the install — issue #527). The console renders this as the
-    /// source badge, so the three stay distinguishable: a shipped default is
-    /// not something this operator added, and must not be labelled as if it
-    /// were.
-    source: McpSource,
-    enabled: bool,
-    allowed_tools: Vec<String>,
-    disallowed_tools: Vec<String>,
-    timeout_secs: u64,
+pub(super) struct McpServerDto {
+    pub(super) name: String,
+    pub(super) endpoint: String,
+    pub(super) description: Option<String>,
+    /// `manifest` (committed), `runtime` (console-added), `default` (shipped by
+    /// the install — issue #527), or `registry` (installed from an upstream MCP
+    /// directory — issue #1270). The console renders this as the source badge,
+    /// so the four stay distinguishable: a shipped default is not something this
+    /// operator added, and must not be labelled as if it were.
+    ///
+    /// On a **reconciled** row — one server that is both installed from the
+    /// directory and declared/typed in List A — this is the List A provenance.
+    /// See [`mcp_registry::merge_installs`](super::mcp_registry::merge_installs)
+    /// for why that side wins.
+    pub(super) source: McpSource,
+    pub(super) enabled: bool,
+    pub(super) allowed_tools: Vec<String>,
+    pub(super) disallowed_tools: Vec<String>,
+    pub(super) timeout_secs: u64,
     /// Whether an outbound credential is stored — never the credential itself.
-    auth_configured: bool,
+    ///
+    /// On a reconciled row this is the **union**: either List A's token slot or
+    /// the registry install's env values counts. The two are separate stores
+    /// dialled by separate transports, and there is no merging them; what the
+    /// field claims — "a credential is stored for this server" — stays true
+    /// either way, and the alternative (reporting only List A's slot) would
+    /// print "no credential" over a server that authenticates fine.
+    pub(super) auth_configured: bool,
+    /// The stable install id, present only on a row backed by a registry
+    /// install. Registry rows are keyed by this and **not** by `name`: `name` is
+    /// a display slug this surface mints, while `serverId` is what every
+    /// `…/mcp/registry/{serverId}/…` route and OpenHuman's own store address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) server_id: Option<String>,
+    /// The directory's qualified name (`@org/server`), when this row came from
+    /// one. The catalogue's stable identity, and what an install is re-keyed on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) qualified_name: Option<String>,
+    /// The directory's icon, when this row came from one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) icon_url: Option<String>,
+    /// How a registry install is dialled — `http_remote` or `stdio`. Absent on
+    /// a List A-only row, which is always HTTP by construction (`command` is a
+    /// validation error there).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) transport: Option<String>,
     /// The company's agents whose effective tool grants cover this server — who
     /// can actually call it (issue #568). Computed over the same roster the
     /// harness builds (manifest agents + promoted overlay teammates), through the
@@ -86,10 +122,16 @@ struct McpServerDto {
     /// — the harness hands out no tool for it whatever the grants say — so the
     /// console reads the empty case against `enabled` and stays quiet there.
     /// Always serialized (even when empty).
-    reachable_by: Vec<RosterAgentDto>,
+    ///
+    /// A **registry** row lists the whole roster: `build.rs` pushes the registry
+    /// bridge tools into every agent's toolbelt with no grant check, so every
+    /// teammate really can call every installed server. Issue #1270 leaves that
+    /// asymmetry in place deliberately and makes it operator-visible here rather
+    /// than inventing a grant filter the harness does not apply.
+    pub(super) reachable_by: Vec<RosterAgentDto>,
     /// The last recorded probe outcome (scrubbed), or `None` when never probed.
     #[serde(skip_serializing_if = "Option::is_none")]
-    health: Option<McpHealth>,
+    pub(super) health: Option<McpHealth>,
 }
 
 /// One roster agent named on a coverage line, carried as an id **and** the label
@@ -275,6 +317,12 @@ fn dto_from_decl(
         disallowed_tools: decl.disallowed_tools.clone(),
         timeout_secs: decl.timeout_secs,
         auth_configured: decl.auth.is_configured(),
+        // A List A decl knows nothing about a directory install; the merge pass
+        // fills these in when one reconciles onto this row.
+        server_id: None,
+        qualified_name: None,
+        icon_url: None,
+        transport: None,
         reachable_by,
         health,
     }
@@ -370,10 +418,17 @@ fn reachers_of(
         .collect()
 }
 
-/// `GET …/mcp/servers` — the company's effective MCP servers, each with its last
-/// recorded (scrubbed) probe health.
-async fn list_servers(company: ScopedCompany) -> Result<Json<Vec<McpServerDto>>, ApiError> {
-    let runtime = company.runtime.as_ref();
+/// The company's whole MCP surface as one list: the declared servers (manifest ∪
+/// install defaults ∪ runtime index) with the directory installs folded in.
+///
+/// Issue #1270. Every reader of this list — the `GET`, the List A mutation
+/// response, the delete dispatch, and the registry mutation responses — goes
+/// through here, so no two of them can disagree about a row's name, badge or
+/// health. That matters most for the reconciled case: a server that is both
+/// installed and declared has exactly one identity, and it has to be the same
+/// identity in the response to the write that created it as in the read that
+/// follows.
+pub(super) async fn merged_rows(runtime: &CompanyRuntime) -> Result<Vec<McpServerDto>, ApiError> {
     // One record load feeds both the manifest servers (merged into the effective
     // set) and the roster used for reachability (issue #568), rather than loading
     // it twice. The install-wide defaults (issue #527) are the layer *underneath*
@@ -401,7 +456,17 @@ async fn list_servers(company: ScopedCompany) -> Result<Json<Vec<McpServerDto>>,
             .map_err(ApiError)?;
         out.push(dto_from_decl(decl, reachers_of(&grants, decl), health));
     }
-    Ok(Json(out))
+    // The directory half. A registry that cannot be read yields nothing and the
+    // declared servers stand on their own — see `mcp_registry::installs`.
+    let roster: Vec<RosterAgentDto> = grants.iter().map(|(agent, _)| agent.clone()).collect();
+    mcp_registry::merge_installs(&mut out, mcp_registry::installs(runtime).await, &roster);
+    Ok(out)
+}
+
+/// `GET …/mcp/servers` — the company's effective MCP servers, each with its last
+/// recorded (scrubbed) probe health.
+async fn list_servers(company: ScopedCompany) -> Result<Json<Vec<McpServerDto>>, ApiError> {
+    merged_rows(company.runtime.as_ref()).await.map(Json)
 }
 
 /// `POST …/mcp/servers` — add a runtime MCP server (+ optional token).
@@ -559,8 +624,17 @@ async fn update_server(
     mutation_response(runtime, &name, warning).await
 }
 
-/// `DELETE …/mcp/servers/{name}` — remove a runtime server (409 for a manifest
-/// server, which can only be disabled).
+/// `DELETE …/mcp/servers/{name}` — remove a server (409 for a manifest or
+/// default server, which can only be disabled).
+///
+/// **Dispatches on where the row actually lives** (issue #1270). Dropping a
+/// runtime-index row is the right removal for a server an operator typed in, and
+/// the wrong one for a directory install: the install lives in OpenHuman's own
+/// store, keyed by `server_id`, and it stays connected — with its tools on every
+/// agent's belt — no matter what this company's index says. So a row backed by
+/// an install is uninstalled there, and a **reconciled** row (typed in *and*
+/// installed) has both halves removed, because a delete that leaves the server
+/// callable is not a delete.
 async fn delete_server(
     company: AdminScopedCompany,
     Path(NamePath { name }): Path<NamePath>,
@@ -589,28 +663,49 @@ async fn delete_server(
         ))));
     }
 
+    // Which halves this row has. Read from the same merged list the console
+    // rendered, so the delete targets the row the operator actually saw.
+    let install_id = merged_rows(runtime)
+        .await?
+        .into_iter()
+        .find(|row| row.name == name)
+        .and_then(|row| row.server_id);
+
     let mut index = load_runtime_index(runtime.id(), runtime.secrets().as_ref())
         .await
         .map_err(ApiError)?;
     let before = index.len();
     index.retain(|s| s.name.trim() != name);
-    if index.len() == before {
+    let removal = mcp_registry::removal_for(index.len() != before, install_id.is_some());
+    if removal == mcp_registry::Removal::NotFound {
         return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
             "no runtime MCP server named `{name}`."
         ))));
     }
-    save_runtime_index(runtime.id(), runtime.secrets().as_ref(), &index)
-        .await
-        .map_err(ApiError)?;
-    // Best-effort credential + health wipe (the store has no delete; an empty
-    // value reads as unset, so a later server of the same name never inherits a
-    // stale credential or badge).
-    clear_auth(runtime.id(), &name, runtime.secrets().as_ref())
-        .await
-        .map_err(ApiError)?;
-    clear_health(runtime.id(), &name, runtime.secrets().as_ref())
-        .await
-        .map_err(ApiError)?;
+    if matches!(
+        removal,
+        mcp_registry::Removal::IndexRow | mcp_registry::Removal::Both
+    ) {
+        save_runtime_index(runtime.id(), runtime.secrets().as_ref(), &index)
+            .await
+            .map_err(ApiError)?;
+        // Best-effort credential + health wipe (the store has no delete; an empty
+        // value reads as unset, so a later server of the same name never inherits a
+        // stale credential or badge).
+        clear_auth(runtime.id(), &name, runtime.secrets().as_ref())
+            .await
+            .map_err(ApiError)?;
+        clear_health(runtime.id(), &name, runtime.secrets().as_ref())
+            .await
+            .map_err(ApiError)?;
+    }
+    if matches!(
+        removal,
+        mcp_registry::Removal::Install | mcp_registry::Removal::Both
+    ) && let Some(install_id) = install_id
+    {
+        mcp_registry::remove_install(runtime, &install_id).await?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -628,39 +723,22 @@ async fn mutation_response(
     // DTO so the response and a later `GET` agree.
     let test = probe_and_persist(runtime, name).await;
 
-    // One record load: the manifest servers merged into the effective set, and
-    // the roster the mutated server's reachability is computed against (#568).
-    // Install-wide defaults (#527) sit under the manifest and come off the
-    // runtime, so the mutation response reflects the same three-layer merge a
-    // later `GET` will.
-    let record = runtime.store().load(runtime.id()).await.map_err(ApiError)?;
-    let manifest = record
-        .as_ref()
-        .map(|r| r.manifest.mcp_servers.clone())
-        .unwrap_or_default();
-    let decls = resolve_effective(
-        runtime.id(),
-        runtime.default_mcp_servers(),
-        &manifest,
-        runtime.secrets().as_ref(),
-    )
-    .await
-    .map_err(ApiError)?;
-    let decl = decls.iter().find(|d| d.name == name).ok_or_else(|| {
-        ApiError(OpenCompanyError::InvalidRequest(format!(
-            "`{name}` not found"
-        )))
-    })?;
-    let reachable_by = record
-        .as_ref()
-        .map(roster_grants)
-        .map(|grants| reachers_of(&grants, decl))
-        .unwrap_or_default();
-    let health = load_health(runtime.id(), name, runtime.secrets().as_ref())
-        .await
-        .map_err(ApiError)?;
+    // Re-read the same merged list a later `GET` will serve — the three declared
+    // layers (defaults under manifest under runtime) plus any directory install
+    // that reconciles onto this endpoint. Projecting the decl alone would answer
+    // an add-by-URL of an already-installed server with a row missing the
+    // `serverId` the very next read shows (issue #1270).
+    let server = merged_rows(runtime)
+        .await?
+        .into_iter()
+        .find(|row| row.name == name)
+        .ok_or_else(|| {
+            ApiError(OpenCompanyError::InvalidRequest(format!(
+                "`{name}` not found"
+            )))
+        })?;
     Ok(Json(MutationResponse {
-        server: dto_from_decl(decl, reachable_by, health),
+        server,
         note: NEXT_TURN_NOTE.to_string(),
         test,
         warning,

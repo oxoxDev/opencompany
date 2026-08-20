@@ -221,14 +221,21 @@ export interface DeliveryReport {
  * anything folding `nodes[].status` — the QA harness included — scored a
  * dropped report green.
  *
- * The seven words are unchanged from the ladder this console has always used,
- * in the same precedence order; only the place they are decided has moved. See
+ * The words are unchanged from the ladder this console has always used, in the
+ * same precedence order; only the place they are decided has moved. See
  * {@link runTone}.
+ *
+ * `stranded` is the one addition (issue #1189): every person the run stopped
+ * for has nothing left to answer, so no decision can move it. It outranks
+ * `blocked` and `awaiting-approval` because it contradicts them — both tell an
+ * operator to go and decide something, and this is the state in which there is
+ * nothing there.
  */
 export type WorkflowRunVerdict =
   | "running"
   | "failed"
   | "stopped"
+  | "stranded"
   | "blocked"
   | "undelivered"
   | "awaiting-approval"
@@ -510,6 +517,21 @@ export interface WorkflowRunOutcome {
   deliveries: DeliveryReport[];
   /** Node ids the run left waiting on a human approval. */
   pendingApprovals: string[];
+  /**
+   * How many of `pendingApprovals` have **no live card left in the queue**
+   * (issue #1189) — the gate-shaped sibling of `blockedNodes[].stranded`.
+   *
+   * A gate the engine paused at is parked as a `workflow.approve` card that
+   * records no receipt and no blocked-node row, so #1143's per-node count
+   * cannot describe it: the only join is `(runId, nodeId)`, and only the host
+   * can make it. Absent when zero, and absent entirely from a host predating
+   * this — which the console reads as "not reconciled", never as "nothing is
+   * stranded".
+   *
+   * Derived on each read, like `blockedNodes[].stranded`, so it reflects the
+   * queue as it is now rather than what the run recorded when it stopped.
+   */
+  strandedApprovals?: number;
   /** Set when the run failed outright instead of finishing with rows. */
   error?: string;
   /**
@@ -832,7 +854,8 @@ export interface RunsPage {
 
 /**
  * The company's finished workflow runs as one page, **newest first** (issue
- * #228; paginated in #1012).
+ * #228) — now genuinely true of the *displayed* `seq`/`atMillis`, not just the
+ * order two runs started in (issue #1012).
  *
  * `workflow` narrows to one graph's runs; `limit` caps the page (the host
  * defaults to a short recent list and clamps a large ask); `beforeSeq` +

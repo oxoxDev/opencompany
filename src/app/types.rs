@@ -494,6 +494,14 @@ pub struct AppState {
     /// `restartRequired` and the console still says so, which is the honest
     /// answer when a rebuild is genuinely unavailable.
     rebuilder: Option<Arc<dyn crate::runtime::RuntimeRebuilder>>,
+    /// Builds the engine for a `transport = "local"` `acp` harness (issue
+    /// #1245). `None` — every test host, and any embedder that does not wire
+    /// one — leaves every such harness `unavailable`. Only the desktop shell
+    /// has an implementation to give this; it lives at
+    /// [`crate::ports::acp::AcpAgentFactory`], ungated, for the same reason
+    /// [`rebuilder`](Self::rebuilder) above is: the desktop supplies it, this
+    /// crate only defines the seam.
+    acp_agents: Option<Arc<dyn crate::ports::acp::AcpAgentFactory>>,
     /// The boot-only builder inputs recorded per company at registration, so a
     /// rebuild configures the successor exactly as boot configured its
     /// predecessor. See [`BootInputs`](crate::runtime::BootInputs) for why
@@ -543,6 +551,7 @@ impl AppState {
             #[cfg(feature = "mcp")]
             oauth_pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
             rebuilder: None,
+            acp_agents: None,
             boot_inputs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -551,6 +560,17 @@ impl AppState {
     pub fn with_rebuilder(mut self, rebuilder: Arc<dyn crate::runtime::RuntimeRebuilder>) -> Self {
         self.rebuilder = Some(rebuilder);
         self
+    }
+
+    /// Wires this host's local-transport ACP agent factory (issue #1245).
+    pub fn with_acp_agents(mut self, factory: Arc<dyn crate::ports::acp::AcpAgentFactory>) -> Self {
+        self.acp_agents = Some(factory);
+        self
+    }
+
+    /// This host's local-transport ACP agent factory, when one is wired.
+    pub fn acp_agents(&self) -> Option<Arc<dyn crate::ports::acp::AcpAgentFactory>> {
+        self.acp_agents.clone()
     }
 
     /// This host's in-place runtime rebuilder, when one is wired.
@@ -1030,11 +1050,13 @@ impl AppState {
                 backend: crate::store::MemoryBackend::Store.as_str(),
                 driver_id: None,
                 capabilities: Vec::new(),
+                healthy: None,
             },
             Some(overlay) => MemorySpec {
                 backend: overlay.descriptor.backend.as_str(),
                 driver_id: Some(overlay.descriptor.driver_id.clone()),
                 capabilities: overlay.descriptor.capabilities.clone(),
+                healthy: overlay.descriptor.healthy,
             },
         }
     }
@@ -1127,6 +1149,17 @@ pub struct MemorySpec {
     /// provider. An operator reads this to see what a hosted engine does *not*
     /// support before a cycle discovers it.
     pub capabilities: Vec<String>,
+    /// Whether the boot-time reachability probe found the engine usable —
+    /// `Ready` or `Degraded` (reachable, possibly reduced); only `Down`
+    /// serializes as `false`.
+    ///
+    /// Absent means "not probed": the base backend serves memory, the in-pod
+    /// engine is driven directly, or this host predates the probe — a client
+    /// must treat absence as unknown, not unhealthy. `false` is a bound
+    /// engine whose probe failed at boot: still bound, and the first cycle
+    /// that needs memory will fail until the endpoint or credential is fixed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub healthy: Option<bool>,
 }
 
 #[cfg(test)]

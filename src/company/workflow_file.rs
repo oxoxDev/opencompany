@@ -51,6 +51,28 @@ pub const WORKFLOW_NODE_KINDS: &[&str] = &[
 /// deliberate addition, never a free-form string an author can invent.
 pub const WORKFLOW_DESTINATION_KINDS: &[&str] = &["owner", "email", "channel"];
 
+/// The one sentence for an `output` node whose `channel` destination names no
+/// `target` (issue #1191).
+///
+/// `label` is the caller's way of naming the node — `node `post_summary`` from
+/// [`validate`], which has only an index when a node has no id, or the same
+/// shape minted by the author-time gate in
+/// [`validate_draft_against_record`](crate::company::workflow_create) — so both
+/// callers say the identical thing and only differ in whether they can also
+/// carry the id as a structured locator.
+///
+/// A constructor rather than two literals because the sentence is pinned on
+/// three sides: the load path, the author-time path, and the console's
+/// pre-flight in `WorkflowCreateDialog.tsx` (the contract
+/// `destination_messages_match_the_console` asserts). One source means a
+/// rewording cannot silently drift the load path away from the author path.
+pub(crate) fn channel_destination_missing_target_message(label: &str) -> String {
+    format!(
+        "{label} has a `channel` destination with no `target` — name the channel to post the \
+         report to."
+    )
+}
+
 /// A node kind in a workflow graph.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkflowNodeKind {
@@ -1267,9 +1289,10 @@ pub(crate) fn validate(raw: &RawWorkflow, strict: bool) -> Vec<String> {
                 }
                 "channel" => {
                     if target.is_empty() {
-                        problems.push(format!(
-                            "{label} has a `channel` destination with no `target` — name the channel to post the report to."
-                        ));
+                        // The flat backstop. Seed and legacy graphs reach the
+                        // load path without ever passing the author-time gate,
+                        // so this stays — it just no longer owns the sentence.
+                        problems.push(channel_destination_missing_target_message(&label));
                     }
                 }
                 "" => problems.push(format!(

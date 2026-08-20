@@ -58,6 +58,7 @@ import {
 import {
   addableTo,
   buildOrgTree,
+  canDragAcrossDesks,
   reorderedIds,
   reorderedIdsAfterDrop,
   summarize,
@@ -65,6 +66,7 @@ import {
   type OrgPerson,
   type OrgSeat,
   type OrgTree,
+  type Provenance,
 } from "@/lib/org";
 import { cn } from "@/lib/utils";
 import { DeskCreateDialog } from "@/views/company/DeskCreateDialog";
@@ -74,6 +76,31 @@ import {
 } from "@/views/chat/AddMemberDialog";
 
 const SEAT_MIME = "application/x-opencompany-seat";
+
+/**
+ * The seat currently being dragged, if any — lifted to `Chart` (issue #1227).
+ *
+ * `draggingIndex` used to live inside each `DeskNode`, which meant the desk
+ * you dropped *onto* had never heard of a seat coming from a *different*
+ * desk's `DeskNode` instance — that silence was the whole bug. Lifting this
+ * one level, to the common ancestor of every `DeskNode`, is what lets a
+ * target desk answer "what's being dragged, and can I take it" instead of
+ * "I don't recognise this drop."
+ *
+ * `provenance` travels with it because that answer differs by desk: a
+ * same-desk reorder only ever calls `setDeskOrder`, which is fine for a
+ * blueprint seat, but a cross-desk move calls `removeDeskMember` on the
+ * source — and the host refuses that for a blueprint seat. The gate needs to
+ * know which kind of seat this is before a drop is even accepted, not after
+ * the host says no.
+ */
+interface DragSeat {
+  deskId: string;
+  index: number;
+  seatId: string;
+  seatName: string;
+  provenance: Provenance;
+}
 
 /**
  * Where a teammate named on this chart opens: `#/team/<agentId>`, the sub-page
@@ -97,6 +124,20 @@ const SEAT_MIME = "application/x-opencompany-seat";
 function teamHref(agentId: string | null | undefined): string | null {
   const id = agentId?.trim();
   return id ? `#/team/${encodeURIComponent(id)}` : null;
+}
+
+/**
+ * Why a cross-desk drag was refused, for a blueprint seat (issue #1227).
+ *
+ * A blueprint seat is declared in the manifest, and the host refuses to
+ * remove a manifest-declared member from its desk — that is a real backend
+ * invariant, not a frontend bug to work around. The old behaviour was to say
+ * nothing at all when a cross-desk drop landed anywhere; saying *why* here is
+ * the whole fix for that seat's half of the issue, not a workaround for the
+ * refusal itself.
+ */
+function blueprintMoveRefusal(seatName: string): string {
+  return `${seatName} is a blueprint member of their current desk — the manifest still declares them there, so they can't be moved to another desk. Same-desk reordering still works.`;
 }
 
 interface Props {
@@ -419,38 +460,41 @@ export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
             </ol>
           </nav>
         )}
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1">
-            <h2 className="text-2xl font-semibold tracking-tight">Desks</h2>
-            <p className="text-sm text-muted-foreground">
-              How your company is organised: the desks it works from and who
-              staffs each one. Add a desk, move someone between desks, or change
-              who leads.
-            </p>
+        <div className="space-y-1">
+          <div
+            className="flex flex-wrap items-center justify-between gap-3"
+            data-testid="desks-header"
+          >
+            <h1 className="text-2xl font-semibold tracking-tight">Desks</h1>
+            <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={load === "loading"}
+                onClick={() => setCreateOpen(true)}
+              >
+                <Plus className="mr-1.5 size-4" />
+                New desk
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={load === "loading"}
+                onClick={() => {
+                  setAddMemberDeskId(null);
+                  setAddMemberOpen(true);
+                }}
+              >
+                <UserPlus className="mr-1.5 size-4" />
+                New teammate
+              </Button>
+            </div>
           </div>
-          <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={load === "loading"}
-              onClick={() => setCreateOpen(true)}
-            >
-              <Plus className="mr-1.5 size-4" />
-              New desk
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={load === "loading"}
-              onClick={() => {
-                setAddMemberDeskId(null);
-                setAddMemberOpen(true);
-              }}
-            >
-              <UserPlus className="mr-1.5 size-4" />
-              New teammate
-            </Button>
-          </div>
+          <p className="text-sm text-muted-foreground">
+            How your company is organised: the desks it works from and who
+            staffs each one. Add a desk, move someone between desks, or change
+            who leads.
+          </p>
         </div>
 
         {error && (
@@ -504,13 +548,41 @@ export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
                     client.setDeskOrder(desk.id, next, company),
                   );
                 }}
-                onDrop={(desk, fromIndex, toIndex) => {
+                onReorder={(desk, fromIndex, toIndex) => {
                   const next = reorderedIdsAfterDrop(desk, fromIndex, toIndex);
                   if (!next) return;
                   void mutate(`drag:${desk.id}`, () =>
                     client.setDeskOrder(desk.id, next, company),
                   );
                 }}
+                onMoveAcrossDesks={(fromDesk, seatId, toDesk) =>
+                  void mutate(`move:${seatId}`, async () => {
+                    // The host has no "move" verb, only add and remove — so a
+                    // cross-desk move is those two calls plus one refetch
+                    // (`mutate` already does the refetch). The add is not
+                    // wrapped in its own try/catch: nothing has changed on the
+                    // host yet if it fails, so `mutate`'s own catch-and-toast
+                    // is the right place for that failure to land.
+                    await client.addDeskMember(toDesk.id, seatId, company);
+                    try {
+                      await client.removeDeskMember(
+                        fromDesk.id,
+                        seatId,
+                        company,
+                      );
+                    } catch (e) {
+                      // Half-landed: the teammate is now on both desks, which
+                      // is a real, visible inconsistency the operator has to
+                      // resolve by hand — silently swallowing this would be
+                      // exactly the kind of no-op #1227 is about.
+                      throw new Error(
+                        `Added to ${toDesk.name}, but couldn't remove them from ${fromDesk.name}: ${
+                          e instanceof Error ? e.message : "unknown error"
+                        }. They're on both desks now — remove them from ${fromDesk.name} by hand.`,
+                      );
+                    }
+                  })
+                }
                 onDelete={(desk) =>
                   void mutate(`delete:${desk.id}`, () =>
                     client.deleteDesk(desk.id, company),
@@ -555,7 +627,8 @@ function Chart({
   onAdd,
   onRemove,
   onMove,
-  onDrop,
+  onReorder,
+  onMoveAcrossDesks,
   onDelete,
 }: {
   tree: OrgTree;
@@ -567,9 +640,18 @@ function Chart({
   onAdd: (desk: OrgDesk, agentId: string) => void;
   onRemove: (desk: OrgDesk, agentId: string) => void;
   onMove: (desk: OrgDesk, index: number, direction: "up" | "down") => void;
-  onDrop: (desk: OrgDesk, fromIndex: number, toIndex: number) => void;
+  onReorder: (desk: OrgDesk, fromIndex: number, toIndex: number) => void;
+  onMoveAcrossDesks: (
+    fromDesk: OrgDesk,
+    seatId: string,
+    toDesk: OrgDesk,
+  ) => void;
   onDelete: (desk: OrgDesk) => void;
 }) {
+  // The drag source, lifted here rather than into `DeskNode` — see `DragSeat`.
+  // This is what lets a *different* desk's drop handlers know a seat is being
+  // dragged at all, which is the fix for #1227's cross-desk silent no-op.
+  const [dragSeat, setDragSeat] = useState<DragSeat | null>(null);
   return (
     <div role="tree" aria-label="Company org chart" className="space-y-3">
       <div
@@ -601,13 +683,32 @@ function Chart({
                 addable={addableTo(tree, desk)}
                 busy={busy}
                 focused={focusMark === desk.id}
+                dragSeat={dragSeat}
                 onAdd={(agentId) => onAdd(desk, agentId)}
                 onCreateMember={() => onCreateMember(desk)}
                 onRemove={(agentId) => onRemove(desk, agentId)}
                 onMove={(index, direction) => onMove(desk, index, direction)}
-                onDrop={(fromIndex, toIndex) =>
-                  onDrop(desk, fromIndex, toIndex)
+                onSeatDragStart={(seat, index) =>
+                  setDragSeat({
+                    deskId: desk.id,
+                    index,
+                    seatId: seat.id,
+                    seatName: seat.name,
+                    provenance: seat.provenance,
+                  })
                 }
+                onSeatDragEnd={() => setDragSeat(null)}
+                onReorder={(fromIndex, toIndex) =>
+                  onReorder(desk, fromIndex, toIndex)
+                }
+                onMoveIn={() => {
+                  if (!dragSeat || dragSeat.deskId === desk.id) return;
+                  const fromDesk = tree.desks.find(
+                    (d) => d.id === dragSeat.deskId,
+                  );
+                  if (!fromDesk) return;
+                  onMoveAcrossDesks(fromDesk, dragSeat.seatId, desk);
+                }}
                 onDelete={() => onDelete(desk)}
               />
             ))}
@@ -624,11 +725,15 @@ function DeskNode({
   addable,
   busy,
   focused,
+  dragSeat,
   onCreateMember,
   onAdd,
   onRemove,
   onMove,
-  onDrop,
+  onSeatDragStart,
+  onSeatDragEnd,
+  onReorder,
+  onMoveIn,
   onDelete,
 }: {
   desk: OrgDesk;
@@ -636,15 +741,70 @@ function DeskNode({
   busy: string | null;
   /** This desk is the one a `#/company/<deskId>` link asked for. */
   focused: boolean;
+  /** The seat currently being dragged anywhere on the chart, if any. */
+  dragSeat: DragSeat | null;
   onCreateMember: () => void;
   onAdd: (agentId: string) => void;
   onRemove: (agentId: string) => void;
   onMove: (index: number, direction: "up" | "down") => void;
-  onDrop: (fromIndex: number, toIndex: number) => void;
+  onSeatDragStart: (seat: OrgSeat, index: number) => void;
+  onSeatDragEnd: () => void;
+  onReorder: (fromIndex: number, toIndex: number) => void;
+  /** A seat from another desk has been dropped onto this one. */
+  onMoveIn: () => void;
   onDelete: () => void;
 }) {
   const locked = busy !== null;
-  const [draggingIndex, setDraggingIndex] = useState<number | null>(null);
+  // Whether the seat currently being dragged (from anywhere on the chart)
+  // could land on *this* desk: it must come from a different desk, and it
+  // must be an overlay seat — the host refuses to remove a blueprint member
+  // from its desk, so accepting the drop here would only fail one step later
+  // with a 409 the operator never asked to see (issue #1227).
+  const crossDeskDropAllowed =
+    dragSeat !== null &&
+    dragSeat.deskId !== desk.id &&
+    canDragAcrossDesks({ provenance: dragSeat.provenance });
+  const crossDeskDropBlocked =
+    dragSeat !== null &&
+    dragSeat.deskId !== desk.id &&
+    !canDragAcrossDesks({ provenance: dragSeat.provenance });
+  /**
+   * Whether this desk has already told the operator, for the drag in
+   * progress, that it cannot take a blueprint seat.
+   *
+   * Fired on `dragenter` rather than `drop`: whether a browser lets `drop`
+   * fire at all depends on whether *any* element preventDefaulted `dragover`
+   * during the gesture, and this desk deliberately never does that for a
+   * blocked seat (that's what draws the native "not allowed" cursor). A toast
+   * that only fired from a `drop` handler could end up as silent as the bug
+   * this fixes, on a browser that honours the cursor and never sends `drop`
+   * at all. `dragenter` needs no such cooperation — it always fires.
+   */
+  const warnedRef = useRef(false);
+  useEffect(() => {
+    warnedRef.current = false;
+  }, [dragSeat]);
+  function dragEnterDesk() {
+    if (crossDeskDropBlocked && dragSeat && !warnedRef.current) {
+      warnedRef.current = true;
+      toast.error(blueprintMoveRefusal(dragSeat.seatName));
+    }
+  }
+  /**
+   * Accept a drop landing on the desk's open space rather than on a specific
+   * seat row — the only way an empty desk (or the space below its last seat)
+   * can ever be a drop target, since there is no `Seat` there to catch the
+   * event otherwise.
+   */
+  function dragOverGroup(event: DragEvent<HTMLDivElement>) {
+    if (!crossDeskDropAllowed) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  }
+  function dropOnGroup(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    if (crossDeskDropAllowed) onMoveIn();
+  }
   return (
     <div
       role="treeitem"
@@ -661,6 +821,10 @@ function DeskNode({
       // how a screen reader is told where the link landed, but a desk wrapper
       // is not a control and does not belong in the tab order.
       tabIndex={-1}
+      // The desk-wide warning that a blueprint seat can't land here — see
+      // `dragEnterDesk`. Placed on the whole wrapper, not just the seat
+      // list, so entering over the header or the border counts too.
+      onDragEnter={dragEnterDesk}
       className={cn(
         "scroll-mt-4 rounded-xl outline-none",
         focused && "ring-2 ring-primary ring-offset-2 ring-offset-background",
@@ -705,7 +869,16 @@ function DeskNode({
           )}
         </div>
 
-        <div role="group" className="space-y-1 border-t px-3 py-2">
+        <div
+          role="group"
+          className="space-y-1 border-t px-3 py-2"
+          // The empty-space fallback drop target: an empty desk (or the space
+          // below its last seat) has no `Seat` row to catch the event, so it
+          // needs its own handlers to ever be a valid cross-desk drop target
+          // (issue #1227).
+          onDragOver={dragOverGroup}
+          onDrop={dropOnGroup}
+        >
           {desk.seats.length === 0 && (
             <p className="py-1 text-xs text-muted-foreground">
               Nobody staffs this desk yet.
@@ -722,14 +895,16 @@ function DeskNode({
               last={index === desk.seats.length - 1}
               busy={busy === `${desk.id}:${seat.id}`}
               locked={locked}
+              dragSeat={dragSeat}
               onUp={() => onMove(index, "up")}
               onDown={() => onMove(index, "down")}
               onRemove={() => onRemove(seat.id)}
-              onDragStart={() => setDraggingIndex(index)}
-              onDrop={(toIndex) => {
-                if (draggingIndex !== null) onDrop(draggingIndex, toIndex);
-                setDraggingIndex(null);
-              }}
+              onDragStart={() => onSeatDragStart(seat, index)}
+              onDragEnd={onSeatDragEnd}
+              onReorderDrop={(fromIndex, toIndex) =>
+                onReorder(fromIndex, toIndex)
+              }
+              onCrossDeskDrop={onMoveIn}
             />
           ))}
 
@@ -793,11 +968,14 @@ function Seat({
   last,
   busy,
   locked,
+  dragSeat,
   onUp,
   onDown,
   onRemove,
   onDragStart,
-  onDrop,
+  onDragEnd,
+  onReorderDrop,
+  onCrossDeskDrop,
 }: {
   seat: OrgSeat;
   index: number;
@@ -807,11 +985,17 @@ function Seat({
   last: boolean;
   busy: boolean;
   locked: boolean;
+  /** The seat currently being dragged anywhere on the chart, if any. */
+  dragSeat: DragSeat | null;
   onUp: () => void;
   onDown: () => void;
   onRemove: () => void;
   onDragStart: () => void;
-  onDrop: (toIndex: number) => void;
+  onDragEnd: () => void;
+  /** Same-desk reorder: the dragged seat's own index, and where it landed. */
+  onReorderDrop: (fromIndex: number, toIndex: number) => void;
+  /** A seat from another desk landed on this desk (issue #1227). */
+  onCrossDeskDrop: () => void;
 }) {
   function startDrag(event: DragEvent<HTMLDivElement>) {
     onDragStart();
@@ -820,14 +1004,44 @@ function Seat({
     event.dataTransfer.setData("text/plain", `${deskId}:${index}`);
   }
 
-  function drop(event: DragEvent<HTMLDivElement>) {
+  /**
+   * Whether dropping the seat currently in flight, here, is something this
+   * row would honour: a same-desk reorder always is, and a cross-desk
+   * landing only is when the source is an overlay seat — the host refuses to
+   * remove a blueprint member from its desk, so a blueprint source can never
+   * land anywhere but back where it started (issue #1227).
+   */
+  function dropAllowed(): boolean {
+    if (!dragSeat) return false;
+    return (
+      dragSeat.deskId === deskId ||
+      canDragAcrossDesks({ provenance: dragSeat.provenance })
+    );
+  }
+
+  function dragOver(event: DragEvent<HTMLDivElement>) {
+    if (!dropAllowed()) return; // no preventDefault: the browser draws its
+    // own "not allowed" cursor for the rest of the gesture — the visible
+    // refusal a blueprint-sourced cross-desk drag gets instead of silence.
     event.preventDefault();
-    const payload =
-      event.dataTransfer.getData(SEAT_MIME) ||
-      event.dataTransfer.getData("text/plain");
-    const [sourceDeskId, sourceIndex] = payload.split(":");
-    const fromIndex = Number(sourceIndex);
-    if (sourceDeskId === deskId && Number.isInteger(fromIndex)) onDrop(index);
+    event.dataTransfer.dropEffect = "move";
+  }
+
+  function drop(event: DragEvent<HTMLDivElement>) {
+    if (!dropAllowed() || !dragSeat) return;
+    event.preventDefault();
+    // Stop the desk's own fallback handler (on the seat-list container, for
+    // the empty-desk case) from also seeing this same drop and repeating the
+    // write it is about to trigger.
+    event.stopPropagation();
+    if (dragSeat.deskId === deskId) {
+      onReorderDrop(dragSeat.index, index);
+    } else {
+      // Cross-desk: which row it lands on doesn't matter. The host has an
+      // add verb, not an insert-at-position verb, so the whole desk is the
+      // drop target and every row on it lands the seat the same way.
+      onCrossDeskDrop();
+    }
   }
 
   // Where this seat opens, or `null` when it opens nowhere. A seat the roster
@@ -877,7 +1091,8 @@ function Seat({
       draggable={!locked}
       data-seat-id={seat.id}
       onDragStart={startDrag}
-      onDragOver={(event) => event.preventDefault()}
+      onDragEnd={onDragEnd}
+      onDragOver={dragOver}
       onDrop={drop}
       className={cn(
         "flex cursor-grab items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-sm active:cursor-grabbing",

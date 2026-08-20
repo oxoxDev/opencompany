@@ -194,6 +194,23 @@ pub struct HarnessBrain {
     unavailable: Vec<(String, String)>,
     /// The harness id agents naming none run on.
     default_harness: String,
+    /// Override for the default harness's engine, from
+    /// [`lanes::build`](crate::harness::lanes::build)'s resolution
+    /// (issue #1244).
+    ///
+    /// `None` — before [`Self::with_default_engine`] is ever called — means
+    /// "no override yet": [`Self::run_turn`] falls back to building the
+    /// embedded `built_in` engine from `pool`/`deps`, lazily, exactly as it
+    /// always did before named harnesses existed. That laziness matters: doing
+    /// it eagerly here in [`Self::new`] would hold a second `Arc` on `deps` for
+    /// the brain's whole lifetime, breaking every test (and any real caller)
+    /// that assumes the brain is `deps`'s sole holder before the first turn.
+    ///
+    /// Once set, `Some(engine)` is authoritative even when `engine` is itself
+    /// `None` — "this host cannot run the default harness", with the reason in
+    /// `unavailable` — which must win over the lazy built-in fallback, or the
+    /// exact silent-fallback bug #1244 fixed comes back.
+    default_engine: Option<Option<Arc<dyn RunTurn>>>,
     /// The LLM triage escalation, built on first use (issue #678).
     ///
     /// Lazy because it needs the company id, and a brain outlives any one
@@ -316,6 +333,7 @@ impl HarnessBrain {
             bindings,
             unavailable: Vec::new(),
             default_harness,
+            default_engine: None,
             record: std::sync::RwLock::new(Arc::new(record)),
             responder,
             runs: None,
@@ -342,21 +360,48 @@ impl HarnessBrain {
         self
     }
 
+    /// Overrides the default harness's engine with
+    /// [`lanes::build`](crate::harness::lanes::build)'s actual resolution —
+    /// `None` when this host cannot run it, which must win over the lazy
+    /// built-in fallback [`Self::run_turn`] otherwise takes (issue #1244).
+    /// Pass `lanes.default_engine` straight through; its accompanying
+    /// `unavailable` entry, if any, goes through
+    /// [`Self::with_unavailable_lanes`].
+    pub fn with_default_engine(mut self, default_engine: Option<Arc<dyn RunTurn>>) -> Self {
+        self.default_engine = Some(default_engine);
+        self
+    }
+
     /// The [`RunTurn`] this brain's turns go through.
     ///
-    /// With no extra lanes this is the default harness alone — byte-identical
-    /// behaviour to before named harnesses existed, and no routing table is
-    /// consulted. With lanes, it is a [`HarnessRouter`] that sends each agent's
-    /// turn to the harness it is bound to.
+    /// With no extra lanes and a runnable default this is the default engine
+    /// alone — byte-identical behaviour to before named harnesses existed, and
+    /// no routing table is consulted. Otherwise it is a [`HarnessRouter`] that
+    /// sends each agent's turn to the harness it is bound to; a `None` default
+    /// engine (from [`Self::with_default_engine`]) routes through it exactly
+    /// like any other unavailable harness, rather than falling back to the
+    /// lazily-built embedded engine (issue #1244).
     fn run_turn(&self) -> Arc<dyn RunTurn> {
-        let default_lane: Arc<dyn RunTurn> =
-            Arc::new(HarnessRunTurn::new(self.pool.clone(), self.deps.clone()));
-        if self.lanes.is_empty() && self.unavailable.is_empty() {
-            return default_lane;
+        // No override set — every test, and any pre-#1244 caller — falls back
+        // to building the embedded engine fresh, exactly as this always did.
+        // Lazy on purpose: building it eagerly in `new` would hold a second
+        // `Arc` on `deps` for the brain's whole lifetime.
+        let default_engine = self.default_engine.clone().unwrap_or_else(|| {
+            Some(
+                Arc::new(HarnessRunTurn::new(self.pool.clone(), self.deps.clone()))
+                    as Arc<dyn RunTurn>,
+            )
+        });
+
+        if self.lanes.is_empty()
+            && self.unavailable.is_empty()
+            && let Some(engine) = &default_engine
+        {
+            return engine.clone();
         }
         Arc::new(crate::harness::router::HarnessRouter::from_lanes(
             &self.default_harness,
-            default_lane,
+            default_engine,
             &self.lanes,
             &self.unavailable,
             &self.bindings,
@@ -9140,6 +9185,98 @@ kind = "built_in"
         assert!(brain.bindings.is_empty());
         assert_eq!(brain.default_harness, "default");
     }
+
+    /// Issue #1244: a company whose *only* declared harness is `kind = "acp"`
+    /// must not silently run turns on the embedded engine.
+    ///
+    /// Before the fix, `lanes::build`'s early return for a single declared
+    /// harness meant nobody ever asked what *kind* that lone harness was — the
+    /// caller (here, and identically in `RuntimeBuilder`) unconditionally built
+    /// a `HarnessRunTurn` from the shared pool regardless. This exercises the
+    /// real `lanes::build` output rather than a hand-simulated one, so a
+    /// regression in either `lanes::build` or `HarnessBrain::run_turn` fails it.
+    #[tokio::test]
+    async fn a_lone_acp_default_harness_does_not_silently_run_embedded() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: CompanyManifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+
+[[harness]]
+id = "laptop"
+kind = "acp"
+default = true
+
+[harness.acp]
+transport = "local"
+agent = "claude"
+"#,
+        )
+        .expect("valid manifest");
+        let record = CompanyRecord {
+            id: CompanyId::new("acme"),
+            manifest,
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+        };
+
+        let brain = brain_over_mock_with(dir.path(), record);
+        let secrets: Arc<dyn crate::ports::SecretStore> =
+            Arc::new(crate::store::FsSecretStore::new(dir.path()));
+        let lanes = crate::harness::lanes::build(
+            &brain.record(),
+            Arc::new(HarnessPool::new()),
+            &brain.deps,
+            secrets,
+            None,
+            None,
+        );
+
+        assert!(
+            lanes.default_engine.is_none(),
+            "an acp default harness has no built-in engine to fall back to"
+        );
+        assert!(
+            lanes.unavailable.iter().any(|(id, _)| id == "laptop"),
+            "the default harness's own id must carry the unavailable reason: {:?}",
+            lanes.unavailable
+        );
+
+        // Wire the brain exactly as `RuntimeBuilder` would, and confirm the
+        // turn actually fails instead of quietly answering from the embedded
+        // `MockProvider`.
+        let brain = brain
+            .with_lanes(lanes.lanes)
+            .with_unavailable_lanes(lanes.unavailable)
+            .with_default_engine(lanes.default_engine);
+
+        let err = brain
+            .run_turn()
+            .run(&CompanyId::new("acme"), "ceo", "hi", None)
+            .await
+            .expect_err("must not fall back to the embedded engine");
+        let msg = err.to_string();
+        assert!(msg.contains("ceo"), "{msg}");
+        assert!(msg.contains("laptop"), "{msg}");
+        assert!(msg.contains("ACP transport"), "names the fix: {msg}");
+    }
+
     /// Issue #966: a workflow-copilot reply is authored by the copilot.
     ///
     /// This is the assertion the #885 fix was missing on this branch. The bubble

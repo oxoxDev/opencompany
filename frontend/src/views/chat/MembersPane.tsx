@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { Mail, MessageSquare, MoreHorizontal, UserPlus, Wallet } from "lucide-react";
 
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -13,7 +14,6 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { roleSubtitle, type TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
-import { Avatar } from "./Avatar";
 
 interface Props {
   /**
@@ -293,7 +293,7 @@ function MemberRow({
         className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
         title={member.description || member.role}
       >
-        <Avatar name={member.name} tone={member.tone} className="size-8" />
+        <TeammateAvatar name={member.name} tone={member.tone} avatar={member.avatar} className="size-8" />
         <span className="min-w-0">
           <span className="flex items-center gap-1">
             <span className="truncate text-sm font-medium">{member.name}</span>

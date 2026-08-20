@@ -90,6 +90,13 @@ interface Props {
   sub?: string | null;
   onResolved: (systemLine: string) => void;
   onGoToConversation: () => void;
+  /**
+   * Called the instant a decide click starts, before the network call
+   * (issue #1211) — so the shell can mark this approval as "this tab decided
+   * it" before the SSE echo of the resolution has a chance to race ahead of
+   * the awaited response and arrive first.
+   */
+  onDecideStart?: (approvalId: string) => void;
 }
 
 /** The approvals inbox: the few things the company parked for the operator. */
@@ -100,6 +107,7 @@ export function ApprovalsView({
   sub,
   onResolved,
   onGoToConversation,
+  onDecideStart,
 }: Props) {
   // Issue #373: in-flight state is per approval, not a single module-wide slot.
   //
@@ -179,6 +187,7 @@ export function ApprovalsView({
     // Per-row guard: only a double-press on THIS card is ignored. The global
     // early return that used to live here made every other card inert too.
     if (inFlight.has(a.id)) return;
+    onDecideStart?.(a.id);
     markInFlight(a.id, verdict);
     const startedAt = Date.now();
     try {
@@ -262,6 +271,10 @@ export function ApprovalsView({
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-3xl px-4 py-6">
+        {/* The queue's own count heading below only renders once loaded, so
+            it can't be the page's one `h1` — this stays present through
+            loading, error and empty states alike (issue #1221). */}
+        <h1 className="sr-only">Approvals</h1>
         {/* Issue #883: the filter says so, and offers the way out of itself.
             A narrowed queue that looked identical to the whole one would make a
             decided-elsewhere approval look like it had vanished. */}

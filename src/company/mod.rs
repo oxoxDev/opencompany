@@ -149,8 +149,8 @@ pub use workflow_file::{
 // from its request body, renders it to TOML, and re-parses it through
 // `parse_workflow` above for validation before writing to disk.
 pub(crate) use workflow_file::{
-    RawEdge, RawNode, RawWorkflow, raw_workflow_from_toml, render_workflow,
-    required_config_problems,
+    RawEdge, RawNode, RawWorkflow, channel_destination_missing_target_message,
+    raw_workflow_from_toml, render_workflow, required_config_problems,
 };
 // Issue #661 (M7): the read half of the agent workflow-admin surface — a stored
 // graph projected onto the narrow agent authoring schema, plus the policy

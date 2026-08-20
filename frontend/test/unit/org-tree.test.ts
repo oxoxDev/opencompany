@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   addableTo,
   buildOrgTree,
+  canDragAcrossDesks,
   depthOf,
   MAX_DEPTH,
   reorderedIds,
@@ -171,6 +172,25 @@ describe("addableTo", () => {
       ROSTER,
     );
     expect(addableTo(full, full.desks[0])).toEqual([]);
+  });
+});
+
+describe("canDragAcrossDesks", () => {
+  // issue #1227: a same-desk reorder only ever calls `setDeskOrder`, which the
+  // host accepts for either provenance, but a cross-desk move also has to
+  // call `removeDeskMember` on the source — and the host refuses that for a
+  // blueprint seat. This predicate is the one place that refusal is decided,
+  // before any write is attempted.
+  it("allows an overlay seat", () => {
+    const growth = tree().desks[1];
+    expect(canDragAcrossDesks(growth.seats[1])).toBe(true); // hedy, overlay
+  });
+
+  it("refuses a blueprint seat", () => {
+    const growth = tree().desks[1];
+    expect(canDragAcrossDesks(growth.seats[0])).toBe(false); // linus, blueprint
+    const engineering = tree().desks[0];
+    expect(engineering.seats.every((s) => !canDragAcrossDesks(s))).toBe(true);
   });
 });
 

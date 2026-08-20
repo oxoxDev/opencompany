@@ -148,7 +148,7 @@ chart's desk level, since no desk can name a parent desk. See
 | `ChannelRail.tsx` | The channel/DM list, with collapsible sections. |
 | `ChatHeader.tsx` | The bar above the timeline. |
 | `MessageTimeline.tsx` | The scroll body: day dividers, channel intro, loading skeleton, typing row. |
-| `MessageRow.tsx` | One line — avatar gutter, author, body, reactions, hover action bar. |
+| `MessageRow.tsx` | One line — avatar gutter, author, body, reactions, hover action bar, and the board-card chip (link plus its dismissal, issue #984). |
 | `MessageComposer.tsx` | The composer dock; also used compact in the thread panel. |
 | `ThreadPanel.tsx` | Replies to one message, with their own composer. |
 | `MembersPane.tsx` | Who is in this channel, then the rest of the roster. |
@@ -166,15 +166,30 @@ that read as one utterance is worse than an extra avatar.
 
 ## One face per teammate
 
-`Avatar` hashes its mascot out of the `name` it is given, so every surface that
-draws the same person must hand it the same string. A DM is where that bites:
-the rail row and `ChatHeader` sit on screen together, and seeding them
-differently would put two faces on one teammate — worse than the generic glyph
-the header drew before issue #1170. Both go through `dmFace(channel)` in
-`model.ts`; a channel and a DM with no roster entry get `null` there and wear a
-glyph (`#`, `Lock`, `CircleDot`) instead, because neither has one person behind
-it. The header draws its tile at 24px, the floor below which `Avatar`'s
-`markOnly` says a mascot is a smudge and the bare tone tile is the honest mark.
+`TeammateAvatar` (`@/components/teammate-avatar`) draws its mascot from an
+`avatar` key seeded on the teammate's **id** — `TeamMember.avatar`, computed
+once by `fromDto` in `lib/team.ts` — so a rename never changes anyone's face
+(issue #1185). It falls back to hashing the `name` it is given only when no
+`avatar` prop is passed, which is the honest answer for a voice with no
+roster entry behind it (a channel, a cross-posted agent line `senderOf`
+couldn't match against the roster).
+
+A DM is where seeding it wrong bites hardest: the rail row and `ChatHeader`
+sit on screen together, and seeding them differently would put two faces on
+one teammate — worse than the generic glyph the header drew before issue #1170.
+Both go through `dmFace(channel)` in `model.ts`, which reads
+`channel.member.avatar`; a channel and a DM with no roster entry get `null`
+there and wear a glyph (`#`, `Lock`, `CircleDot`) instead, because neither has
+one person behind it. The header draws its tile at 24px, the floor below
+which `TeammateAvatar`'s `markOnly` says a mascot is a smudge and the bare
+tone tile is the honest mark.
+
+The main timeline's `senderOf(message, channel, members)` carries the same
+seed for a message whose `channel` field names a distinct originating voice:
+it looks that id up against the roster (`members.find`) the same way
+`ChatView` already does elsewhere, and simply leaves the mascot unresolved —
+falling back to the name seed, never a wrong face — when the id names a desk
+rather than a teammate.
 
 ## One name per teammate
 

@@ -148,15 +148,15 @@ export function HostingView({ client, company }: Props) {
     );
   }
 
-  const connected = status.apiKeyConfigured;
+  const connected = status.inBuild && status.granted && status.apiKeyConfigured;
 
   return (
     <div className="flex-1 overflow-y-auto" data-testid="hosting-view">
       <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
         <div>
-          <h2 className="flex items-center gap-2 text-lg font-medium">
+          <h1 className="flex items-center gap-2 text-lg font-medium">
             <Globe className="size-5" /> Hosting
-          </h2>
+          </h1>
           <p className="text-sm text-muted-foreground">
             Connect a hosting provider so your teammates can put a site from this
             company&rsquo;s workspace on the internet — with a managed database

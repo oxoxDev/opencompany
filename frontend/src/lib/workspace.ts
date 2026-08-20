@@ -111,6 +111,25 @@ export function subtreeIds(nodes: FsNode[], id: string): Set<string> {
 }
 
 /**
+ * Descendant counts for `id`, split by kind and excluding the node itself —
+ * for a delete confirmation to say "3 notes and 1 folder" rather than a bare
+ * "everything inside it" (issue #1255). Built on {@link subtreeIds}, which
+ * includes `id` itself; this one deliberately does not.
+ */
+export function subtreeCounts(nodes: FsNode[], id: string): { files: number; folders: number } {
+  const ids = subtreeIds(nodes, id);
+  ids.delete(id);
+  let files = 0;
+  let folders = 0;
+  for (const node of nodes) {
+    if (!ids.has(node.id)) continue;
+    if (node.kind === "file") files++;
+    else folders++;
+  }
+  return { files, folders };
+}
+
+/**
  * The tree as it stands after a duplicate-folder repair (issue #759).
  *
  * The host's answer is a list of *changes*, not a new tree, so this replays them

@@ -129,6 +129,15 @@ const MAX_PLAN_STEPS: usize = 30;
 const MAX_PLAN_PREREQS: usize = 30;
 const MAX_STEP_DETAIL_CHARS: usize = 400;
 
+/// How many wired channel ids the grounding section lists (issue #1191).
+///
+/// The deliverable set is one id per desk plus provider channels, so 30 is well
+/// past any real company — but it is a company-controlled list on a metered
+/// path, and every other list here is bounded. Overflow is stated rather than
+/// silently dropped: a model told "…and N more" knows the section is partial and
+/// can say so, instead of confidently inventing from a truncated set.
+const MAX_WIRED_CHANNELS: usize = 30;
+
 /// The node kinds the builder prompt actually specifies. Deliberately narrower
 /// than [`WORKFLOW_NODE_KINDS`](crate::company::WORKFLOW_NODE_KINDS): the model
 /// is only told how to shape these, so offering it the rest of the engine
@@ -528,7 +537,9 @@ pub async fn run_workflow_build_pass(
             return;
         }
     };
-    if let Err(err) = courtesy_validate_draft(&draft, &evidence.record) {
+    if let Err(err) =
+        courtesy_validate_draft(&draft, &evidence.record, Some(&evidence.wired_channels))
+    {
         settle_to_todo(
             &runtime,
             &task_id,
@@ -834,6 +845,9 @@ struct Evidence {
     existing_names: Vec<String>,
     /// Existing workflow ids, so the host mints a non-clashing id.
     existing_ids: HashSet<String>,
+    /// Channel ids an `output` node's `channel` destination may name (issue
+    /// #1191) — see [`CompanyEvidence::wired_channels`].
+    wired_channels: Vec<String>,
 }
 
 /// One roster teammate as the copilot grounds — and the deterministic resolver
@@ -872,6 +886,17 @@ struct CompanyEvidence {
     existing_names: Vec<String>,
     /// Existing workflow ids, so the host mints a non-clashing id.
     existing_ids: HashSet<String>,
+    /// Channel ids an `output` node's `channel` destination may name — this
+    /// deployment's deliverable set (issue #1191).
+    ///
+    /// The `destination` sibling of [`roster`](Self::roster) and the tool slugs:
+    /// gathered once, rendered into the prompt so the model copies a real id,
+    /// and read back by courtesy validation so a proposal that names something
+    /// else never reaches In Review. Before #1191 the pack had no channel
+    /// section at all, which is how the builder came to write `engineering-desk`
+    /// — the desk's display name with `-desk` appended — for a runtime whose
+    /// channels are `engineering`, `product_design`, `go_to_market`.
+    wired_channels: Vec<String>,
 }
 
 /// Reads the company's own state deterministically — the roster, the existing
@@ -920,6 +945,10 @@ async fn gather_company_evidence(runtime: &Arc<CompanyRuntime>) -> crate::Result
         roster,
         existing_names,
         existing_ids,
+        // The same accessor the console's destination picker and the write
+        // routes read, so what the model is offered and what validation accepts
+        // cannot drift.
+        wired_channels: runtime.deliverable_channel_ids(),
         record,
     })
 }
@@ -941,6 +970,7 @@ async fn gather_evidence(
         roster: company.roster,
         existing_names: company.existing_names,
         existing_ids: company.existing_ids,
+        wired_channels: company.wired_channels,
         record: company.record,
     })
 }
@@ -1317,6 +1347,8 @@ fn evidence_prompt(e: &Evidence) -> String {
         out.push_str(&roster_line(entry));
     }
 
+    render_channel_section(&mut out, &e.wired_channels);
+
     out.push_str("\n## Workflows that already exist (do not clash with these names)\n");
     if e.existing_names.is_empty() {
         out.push_str("- (none yet)\n");
@@ -1326,6 +1358,43 @@ fn evidence_prompt(e: &Evidence) -> String {
     }
 
     out
+}
+
+/// Renders the channel ids an `output` node's `channel` destination may name
+/// (issue #1191), in the voice of the roster and tool sections beside it.
+///
+/// The pack had no channel section at all until #1191, and `graph_contract`
+/// names the concept without listing ids — so a model asked to "post to the
+/// engineering desk" had nothing to copy and wrote the desk's display name with
+/// `-desk` appended. Courtesy validation is the guard — it turns that graph into
+/// a card settled back to To-do rather than a broken workflow; this section is
+/// what stops the model reaching for a name it had to invent in the first
+/// place.
+///
+/// The empty case is stated honestly rather than omitted — a company with no
+/// desk and no provider channel can deliver nowhere, and a silent section reads
+/// as "anything goes".
+fn render_channel_section(out: &mut String, wired_channels: &[String]) {
+    out.push_str(
+        "\n## Channels (an `output` node's `channel` `destination.target` must be one of these \
+         ids, copied exactly)\n",
+    );
+    if wired_channels.is_empty() {
+        out.push_str(
+            "- (no channels are wired — this company can deliver nowhere; use an `owner` \
+             destination, or no destination at all)\n",
+        );
+        return;
+    }
+    for id in wired_channels.iter().take(MAX_WIRED_CHANNELS) {
+        out.push_str(&format!("- `{id}`\n"));
+    }
+    if wired_channels.len() > MAX_WIRED_CHANNELS {
+        out.push_str(&format!(
+            "- (…and {} more not listed here)\n",
+            wired_channels.len() - MAX_WIRED_CHANNELS
+        ));
+    }
 }
 
 /// Renders one roster teammate as a prompt line (issue #813). Leads with the
@@ -1382,11 +1451,12 @@ fn description_evidence_prompt(
     out
 }
 
-/// The roster + wired-tool + existing-name grounding shared by the create-time
-/// draft ([`description_evidence_prompt`]) and the fix-from-run correction
-/// ([`fix_evidence_prompt`], issue #840 PR-3), so the two prompts cannot drift in
-/// how they name the teammates an `agent` node may hand work to, the slugs a
-/// `tool_call` may run, and the existing workflow names a new one must not clash
+/// The roster + wired-tool + wired-channel + existing-name grounding shared by
+/// the create-time draft ([`description_evidence_prompt`]) and the fix-from-run
+/// correction ([`fix_evidence_prompt`], issue #840 PR-3), so the two prompts
+/// cannot drift in how they name the teammates an `agent` node may hand work to,
+/// the slugs a `tool_call` may run, the channels an `output` may deliver to
+/// (issue #1191), and the existing workflow names a new one must not clash
 /// with.
 fn render_grounding_sections(
     out: &mut String,
@@ -1439,6 +1509,8 @@ fn render_grounding_sections(
         out.push_str(&granted_but_unwired_slugs.join(", "));
         out.push('\n');
     }
+
+    render_channel_section(out, &e.wired_channels);
 
     out.push_str("\n## Workflows that already exist (do not clash with these names)\n");
     if e.existing_names.is_empty() {

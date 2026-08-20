@@ -50,7 +50,7 @@ export function McpServersView({ client, company }: Props) {
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
         <div className="space-y-1">
-          <h2 className="text-2xl font-semibold tracking-tight">MCP Servers</h2>
+          <h1 className="text-2xl font-semibold tracking-tight">MCP Servers</h1>
           <p className="text-sm text-muted-foreground">
             The tool servers this company&apos;s teammates can call, from its manifest and the
             ones you add here.

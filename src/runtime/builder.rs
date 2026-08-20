@@ -31,8 +31,6 @@ use crate::feedback::tinyhumans::TinyHumansClient;
 use crate::feedback::tool::BuiltinToolProvider;
 use crate::feedback::types::ConsentMode;
 #[cfg(feature = "openhuman")]
-use crate::harness::built_in::run_turn::HarnessRunTurn;
-#[cfg(feature = "openhuman")]
 use crate::harness::provider::{HostedProviderConfig, TenantProvider};
 #[cfg(feature = "openhuman")]
 use crate::harness::router::HarnessRouter;
@@ -474,6 +472,16 @@ pub struct RuntimeBuilder {
     /// consumed when a company **explicitly** grants the `search` namespace.
     #[cfg(feature = "openhuman")]
     search_backend: Option<crate::harness::search::SearchBackend>,
+    /// Issue #1245: builds the engine for a `transport = "local"` `acp`
+    /// harness. `None` — the default — leaves every such harness
+    /// `unavailable`, exactly as before this existed; only the desktop shell
+    /// (the only implementation this crate does not itself provide) sets it.
+    ///
+    /// Gated on `acp` specifically, not `openhuman` — `AcpAgentFactory` lives
+    /// behind the narrower feature (`acp = ["openhuman"]`), so an
+    /// `openhuman`-only build (no `acp`) does not have the type to name here.
+    #[cfg(feature = "acp")]
+    acp_agents: Option<Arc<dyn crate::harness::acp::run_turn::AcpAgentFactory>>,
     /// Issue #290: the live state of the runtime this build is *replacing*.
     ///
     /// Present only on a rebuild. It supplies the per-instance pieces a second
@@ -553,6 +561,8 @@ impl RuntimeBuilder {
             media_backend: None,
             #[cfg(feature = "openhuman")]
             search_backend: None,
+            #[cfg(feature = "acp")]
+            acp_agents: None,
             handover: None,
         }
     }
@@ -966,6 +976,21 @@ impl RuntimeBuilder {
         model_override: Option<String>,
     ) -> Self {
         self.harness_inference = Some((config, model_override));
+        self
+    }
+
+    /// Issue #1245: sets the factory that builds the engine for a
+    /// `transport = "local"` `acp` harness. Only the desktop shell has an
+    /// implementation to give this — a server build leaves it unset, so
+    /// `lanes::build` records every such harness `unavailable` instead of
+    /// having anything to spawn a subprocess with. Feature-gated on `acp`
+    /// specifically; see the field's own doc for why.
+    #[cfg(feature = "acp")]
+    pub fn with_acp_agents(
+        mut self,
+        factory: Arc<dyn crate::harness::acp::run_turn::AcpAgentFactory>,
+    ) -> Self {
+        self.acp_agents = Some(factory);
         self
     }
 
@@ -2653,11 +2678,23 @@ impl RuntimeBuilder {
                             // `serves`) could build the whole roster on the
                             // default provider regardless of which agents it
                             // actually serves.
+                            //
+                            // `self.acp_agents` only exists under `acp`
+                            // (narrower than this whole block's `openhuman`
+                            // gate) — an `openhuman`-only build has nothing to
+                            // pass, so every `local` acp harness resolves to
+                            // `unavailable` there, same as before issue #1245.
+                            #[cfg(feature = "acp")]
+                            let acp_agents = self.acp_agents.as_deref();
+                            #[cfg(not(feature = "acp"))]
+                            let acp_agents = None;
                             let lanes = crate::harness::lanes::build(
                                 &record,
+                                pool.clone(),
                                 &deps,
                                 secrets.clone(),
                                 env_default,
+                                acp_agents,
                             );
                             if !lanes.lanes.is_empty() || !lanes.unavailable.is_empty() {
                                 tracing::info!(
@@ -2676,27 +2713,40 @@ impl RuntimeBuilder {
                             // lane plus each named lane, indexed by agent. Shared
                             // by the brain and the workflow runner so they cannot
                             // disagree about which agent lands on which engine.
-                            let default_lane: Arc<dyn RunTurn> =
-                                Arc::new(HarnessRunTurn::new(pool.clone(), Arc::new(deps.clone())));
-                            let turn: Arc<dyn RunTurn> = if lanes.lanes.is_empty()
-                                && lanes.unavailable.is_empty()
-                            {
-                                default_lane
-                            } else {
-                                let default_harness = record.manifest.default_harness_id();
-                                let bindings: HashMap<String, String> = record
-                                    .manifest
-                                    .agents
-                                    .iter()
-                                    .filter_map(|a| a.harness.clone().map(|h| (a.id.clone(), h)))
-                                    .collect();
-                                Arc::new(HarnessRouter::from_lanes(
-                                    &default_harness,
-                                    default_lane,
-                                    &lanes.lanes,
-                                    &lanes.unavailable,
-                                    &bindings,
-                                ))
+                            //
+                            // `default_engine` is `lanes::build`'s call, not ours
+                            // (issue #1244): a non-`built_in` default harness
+                            // resolves to `None` there, with its own reason
+                            // already folded into `lanes.unavailable` — this must
+                            // not paper over that with a `HarnessRunTurn` built
+                            // straight from `pool`/`deps` the way it used to.
+                            let default_engine = lanes.default_engine.clone();
+                            let turn: Arc<dyn RunTurn> = match (
+                                &default_engine,
+                                lanes.lanes.is_empty(),
+                                lanes.unavailable.is_empty(),
+                            ) {
+                                // The byte-identical single-pool path: a lone
+                                // `built_in` default, nothing else declared.
+                                (Some(engine), true, true) => engine.clone(),
+                                _ => {
+                                    let default_harness = record.manifest.default_harness_id();
+                                    let bindings: HashMap<String, String> = record
+                                        .manifest
+                                        .agents
+                                        .iter()
+                                        .filter_map(|a| {
+                                            a.harness.clone().map(|h| (a.id.clone(), h))
+                                        })
+                                        .collect();
+                                    Arc::new(HarnessRouter::from_lanes(
+                                        &default_harness,
+                                        default_engine.clone(),
+                                        &lanes.lanes,
+                                        &lanes.unavailable,
+                                        &bindings,
+                                    ))
+                                }
                             };
 
                             // Workflow agent nodes route through the shared
@@ -2742,6 +2792,7 @@ impl RuntimeBuilder {
                                 HarnessBrain::new(pool, deps, record)
                                     .with_lanes(lanes.lanes)
                                     .with_unavailable_lanes(lanes.unavailable)
+                                    .with_default_engine(default_engine)
                                     .with_runs(ops.runs.clone()),
                             ) as Arc<dyn Brain>)
                         } else {
@@ -5300,6 +5351,7 @@ mod test {
             runtime.store(),
             None,
             wf_draft("daily_digest", "Daily Digest"),
+            None,
         )
         .await
         .unwrap();

@@ -140,7 +140,7 @@ export function UsageView({ client, company }: Props) {
       <div className="mx-auto w-full max-w-6xl space-y-6 px-4 py-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-1">
-            <h2 className="text-2xl font-semibold tracking-tight">Usage</h2>
+            <h1 className="text-2xl font-semibold tracking-tight">Usage</h1>
             <p className="text-sm text-muted-foreground">
               What your company is burning — tokens and OAuth calls.
             </p>
