@@ -1050,7 +1050,6 @@ export function WorkflowsView({
     // whether the host serves this route.
     if (!selectedId) {
       setRuns([]);
-      setRunsHasMore(false);
       setRunsFor(null);
       // Issue #1012: no selection means no page — clear the cursor too, so a
       // later "Load older" cannot fire against a stale one.
