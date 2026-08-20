@@ -7,6 +7,9 @@ import type {
   WorkflowBlockedNode,
   WorkflowRunApprovalRow,
 } from "@/api/workflows";
+// Issue #981: the one definition of "this report did not go out", shared with
+// the run drawer, the history rows and the host itself.
+import { undeliveredCount } from "@/views/workflows/run-health";
 
 /**
  * One attention item off the company → operator SSE feed (issue #66). Mirrors
@@ -890,21 +893,15 @@ export function handleEvent(
         });
         break;
       }
-      // `pending` is not a failure: it is a report parked for approval, and
-      // toasting it red would send the operator hunting for a bug that isn't
-      // there. Excluded from the count that speaks up.
+      // Issue #981: the shared rung, so this toast, the run's dot, the drawer's
+      // badge and the host's own verdict cannot disagree about a single row. The
+      // filter it replaces fired "1 report didn't go out" on every test run — a
+      // `dry-run` row is a report nothing attempted, on purpose.
       //
-      // Compared through a widened `string` because `pending` joins
-      // `DeliveryStatus` in issue #227 — a literal would be a no-overlap type
-      // error against today's union, and the host can already send a status
-      // this console's type doesn't name yet.
-      const pendingStatus: string = "pending";
       // `deliveries` is host-controlled and may be absent on an event shape this
       // console's types don't name yet (see note above) — default to empty so a
       // missing field can never throw and blank the subscriber.
-      const undelivered = (event.deliveries ?? []).filter(
-        (d) => d.status !== "sent" && d.status !== pendingStatus,
-      ).length;
+      const undelivered = undeliveredCount(event.deliveries ?? []);
       if (undelivered > 0) {
         toast.warning(
           `${undelivered} report${undelivered === 1 ? "" : "s"} didn't go out`,

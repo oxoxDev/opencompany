@@ -76,6 +76,15 @@ let teamWriteAvailable = true;
  */
 let deskAddAvailable = true;
 
+/**
+ * Makes `GET .../desks` fail from the moment a teammate is created, so the
+ * create-landed-then-read-back-failed case is reachable. The write still
+ * succeeds — that is the point: the host has the teammate and the console
+ * cannot see them.
+ */
+let desksReadFailsAfterCreate = false;
+let desksReadable = true;
+
 /** The host's desks, as this stub holds them. Mutated by the write routes. */
 let desks: Desk[] = [];
 
@@ -84,6 +93,8 @@ function reset() {
   roster = [...ROSTER];
   teamWriteAvailable = true;
   deskAddAvailable = true;
+  desksReadFailsAfterCreate = false;
+  desksReadable = true;
   desks = [
     {
       id: "engineering",
@@ -216,6 +227,7 @@ async function mockApi(page: Page) {
         desks = [...desks, created];
         return json(created, 201);
       }
+      if (!desksReadable) return json({ error: "unavailable" }, 500);
       return json(desks);
     }
 
@@ -234,6 +246,7 @@ async function mockApi(page: Page) {
       };
       roster = [...roster, created];
       writes.push({ method, path, body });
+      if (desksReadFailsAfterCreate) desksReadable = false;
       return json(created, 201);
     }
     if (path.endsWith("/team")) return json(roster);
@@ -300,7 +313,10 @@ const deskNode = (page: Page, name: string) =>
  * which needs a second navigation and therefore clicks instead.
  */
 async function openChart(page: Page) {
-  await page.goto("/#/company");
+  // The chart has an address of its own since #1193 — it is a destination under
+  // the Company page, not a mode of it, so it survives a reload and can be
+  // linked. `#/company` is the roster.
+  await page.goto("/#/company/desks");
   await expect(chart(page)).toBeVisible({ timeout: 30_000 });
 }
 
@@ -353,11 +369,16 @@ test("#311 the org chart is reachable, which it was not before", async ({
   // also the stronger claim: it proves the nav entry *routes*, which typing a
   // URL does not.
   await nav.click();
+  // Cards first (issue #1141): the nav entry lands on the teammates. The chart
+  // is one named action away rather than gone — "Manage desks", because desk
+  // management is what it is for (issue #1193).
+  await expect(page.getByTestId("team-card").first()).toBeVisible({ timeout: 30_000 });
+  await page.getByTestId("company-manage-desks").click();
   await expect(chart(page)).toBeVisible({ timeout: 30_000 });
 
-  // And the hash survives rather than being rewritten to the fallback view,
-  // which is exactly what `#/desks` does — it names no view.
-  await expect.poll(() => page.url()).toContain("#/company");
+  // And the hash names where we are rather than being rewritten to the
+  // fallback view, which is exactly what `#/desks` does — it names no view.
+  await expect.poll(() => page.url()).toContain("#/company/desks");
 });
 
 test("#311 the chart is three levels and never a fourth", async ({ page }) => {
@@ -567,6 +588,39 @@ test("#1099 a teammate added from the company page is confirmed by name", async 
   // through sonner's own type attribute so the two cannot be confused by
   // wording alone.
   await expect(toasts(page).first()).toHaveAttribute("data-type", "success");
+});
+
+test("#1099 a teammate the chart cannot read back is not confirmed as added", async ({
+  page,
+}) => {
+  // The host takes the teammate and then the chart's own read fails. `boot`
+  // swallows that — it has to, the chart has an error state and a Retry — so
+  // without the check the console toasted "Added Grace Murray." over a banner
+  // saying the chart could not be loaded.
+  desksReadFailsAfterCreate = true;
+  await mockApi(page);
+  await openChart(page);
+
+  await page.getByRole("button", { name: "New teammate" }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Name").fill("Grace Murray");
+  await dialog.getByLabel("Role").fill("Compiler");
+  await dialog.getByRole("button", { name: "Add teammate" }).click();
+
+  const notice = toasts(page).first();
+  await expect(notice).toContainText("Added Grace Murray, but");
+  await expect(notice).toContainText("chart couldn't be read back");
+  await expect(notice).toHaveAttribute("data-type", "warning");
+  // The teeth: nothing anywhere claims the clean add. `Added Grace Murray.`
+  // with a full stop is the exact string the success arm produces.
+  await expect(page.getByText("Added Grace Murray.", { exact: true })).toHaveCount(0);
+  // And the write really did land, so this is the honest half-landing rather
+  // than a failure being reported as one.
+  expect(
+    writes.find(
+      (write) => write.method === "POST" && write.path.endsWith("/team"),
+    ),
+  ).toBeTruthy();
 });
 
 test("#311 the lead can be changed from the chart and survives a reload", async ({
@@ -790,10 +844,12 @@ test("#485 following the same desk link twice still lands on it", async ({
     "true",
   );
 
-  // Off to the bare chart. The view stays mounted, so whatever it remembers
-  // about the last honoured id survives.
+  // Off to the bare chart — `#/company/desks` since #1193, because plain
+  // `#/company` is the roster now and would unmount this view rather than leave
+  // it holding what it remembers. The view stays mounted, so whatever it
+  // remembers about the last honoured id survives.
   await page.evaluate(() => {
-    window.location.hash = "#/company";
+    window.location.hash = "#/company/desks";
   });
   await expect(chart(page)).toBeVisible();
   // The previous desk must not keep wearing the ring once it is no longer the
@@ -912,9 +968,9 @@ test("#1102 a teammate on the chart opens their detail page", async ({
   await expect(grace).toHaveAttribute("href", "#/team/grace");
   await grace.click();
   await expect.poll(() => page.url()).toContain("#/team/grace");
-  await expect(
-    page.getByRole("button", { name: "Back to team" }),
-  ).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("agent-breadcrumb-company")).toBeVisible({
+    timeout: 30_000,
+  });
 
   // The chips under "Not on a desk" name the same teammates and were the worse
   // half of #1102 — bordered pills that read as controls and did nothing.

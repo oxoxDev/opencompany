@@ -48,7 +48,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ports::workflow_runner::{DeliveryReport, DeliveryStatus};
+use crate::ports::workflow_runner::{DeliveryReason, DeliveryReport, DeliveryStatus};
 
 /// What a workflow run adds up to, as a closed set (issue #981).
 ///
@@ -192,28 +192,67 @@ impl RunVerdictFacts<'_> {
     }
 }
 
-/// Reports that did **not** reach their destination and will not without a
-/// change — the count worth acting on.
+/// Whether **this one report** did not reach a destination and will not without
+/// a change (issue #981).
 ///
-/// `pending` is excluded on purpose: it is a report parked for an operator's
-/// approval, so counting it here would score a working approvals queue as a
-/// failure. It is counted by [`awaiting_count`] instead.
+/// The single rung every surface stands on: the verdict below, the scheduler's
+/// alert number, the sidecar's and the orchestrator's summaries, the console's
+/// "N not delivered" badge, the SSE toast, and — since this exists — the
+/// per-node delivery marker the console paints on the `output` node itself.
+/// Written once here because a rung that only some readers honour is worse than
+/// no rung at all.
 ///
-/// Read off [`DeliveryStatus`] rather than off
-/// [`DeliveryReason`](crate::ports::DeliveryReason), which keeps this identical
-/// to the reading every existing surface already performs — the console's
-/// "N not delivered" badge, the scheduler's log line, the SSE toast. Three of
-/// the reasons that land on [`Skipped`](DeliveryStatus::Skipped) arguably do not
-/// belong in this count at all (`already-delivered`, `no-destination-configured`
-/// and `dry-run` each describe a report that was never owed to an address), but
-/// reclassifying them would move the badge and the verdict apart unless every
-/// surface moved together. That is its own change; this one moves the *ladder*
-/// to the host without moving the rungs.
+/// # Status alone is not the reading
+///
+/// `sent` obviously did land and `pending` is a report parked for an operator's
+/// approval — counting the latter here would score a working approvals queue as
+/// a failure, so it is counted by [`awaiting_count`] instead.
+///
+/// The interesting half is [`Skipped`](DeliveryStatus::Skipped), which the
+/// delivery path writes for three genuinely different situations. The axis that
+/// separates them is **whether the report's fate is accounted for**, not whether
+/// it "was owed to an address":
+///
+/// * [`AlreadyDelivered`](DeliveryReason::AlreadyDelivered) — an earlier run in
+///   this approval lineage **sent it** (issue #438). Approving a gate re-runs the
+///   graph from the trigger, so every upstream `output` node is reached a second
+///   time; the report is at its destination and re-counting it as lost would
+///   paint every resumed gate red.
+/// * [`DryRun`](DeliveryReason::DryRun) — a test run (issue #542). Nothing was
+///   attempted, on purpose, in a mode the operator chose. Counting it made the
+///   *only* safe way to try a graph report a failure every single time.
+/// * [`NoDestinationConfigured`](DeliveryReason::NoDestinationConfigured) — the
+///   report was **produced and then lost**, with nothing accounting for it
+///   (issue #925). This row exists precisely so that "the author routed nothing
+///   on purpose" and "the author never configured a destination" stop being the
+///   same observation; excusing it here would restore the silence issues #947
+///   and #963 were filed about. **It counts.**
+///
+/// The match on [`DeliveryStatus`] is exhaustive and only the `Skipped` arm
+/// reads a reason, so a new delivery status cannot be added without classifying
+/// it, and a hypothetical `failed`/`dry-run` pair still counts.
+///
+/// A row carrying [`Unspecified`](DeliveryReason::Unspecified) — the only
+/// reachable value on a `WorkflowRunFinished` journaled before issue #248 added
+/// the field — counts, which is the safe direction: an unreadable reason must
+/// not excuse a report from the number an operator acts on.
+pub fn is_undelivered(report: &DeliveryReport) -> bool {
+    match report.status {
+        DeliveryStatus::Sent | DeliveryStatus::Pending => false,
+        DeliveryStatus::Skipped => !matches!(
+            report.reason,
+            DeliveryReason::AlreadyDelivered | DeliveryReason::DryRun
+        ),
+        DeliveryStatus::Denied | DeliveryStatus::Failed => true,
+    }
+}
+
+/// How many of a run's reports did **not** reach their destination and will not
+/// without a change — the count worth acting on.
+///
+/// A fold of [`is_undelivered`], which is where the reasoning lives.
 pub fn undelivered_count(deliveries: &[DeliveryReport]) -> usize {
-    deliveries
-        .iter()
-        .filter(|d| !matches!(d.status, DeliveryStatus::Sent | DeliveryStatus::Pending))
-        .count()
+    deliveries.iter().filter(|d| is_undelivered(d)).count()
 }
 
 /// Everything about a run that is waiting on a person: the gates it paused at
@@ -454,6 +493,109 @@ mod test {
             );
             assert_eq!(verdict.as_str(), token);
             assert_eq!(verdict.to_string(), token);
+        }
+    }
+
+    /// Issue #981, the second half: a **test run** attempted nothing, on
+    /// purpose, so its rows are not reports that went missing.
+    ///
+    /// This was a live false positive, not a theoretical one — `deliver_outputs_dry`
+    /// writes one `skipped`/`dry-run` row per routed `output` node, so before
+    /// this every single test run of a graph with a destination scored
+    /// `undelivered` and the console badged the safest thing an operator can do
+    /// as a failure.
+    #[test]
+    fn a_dry_run_is_not_undelivered() {
+        let dry = [row(DeliveryStatus::Skipped, DeliveryReason::DryRun)];
+        assert!(!is_undelivered(&dry[0]));
+        assert_eq!(undelivered_count(&dry), 0);
+        assert_eq!(
+            WorkflowRunVerdict::of(RunVerdictFacts {
+                deliveries: &dry,
+                ..clean()
+            }),
+            WorkflowRunVerdict::Ok
+        );
+    }
+
+    /// Issue #438: approving a gate re-runs the graph from the trigger, so an
+    /// `output` node upstream of the gate is reached a second time and
+    /// deliberately not sent again. The report is at its destination; the
+    /// continuation is not a run that lost one.
+    #[test]
+    fn an_already_delivered_report_is_not_undelivered() {
+        let again = [row(
+            DeliveryStatus::Skipped,
+            DeliveryReason::AlreadyDelivered,
+        )];
+        assert!(!is_undelivered(&again[0]));
+        assert_eq!(
+            WorkflowRunVerdict::of(RunVerdictFacts {
+                deliveries: &again,
+                ..clean()
+            }),
+            WorkflowRunVerdict::Ok
+        );
+    }
+
+    /// The deliberate **non**-move, and the reason the other two could move at
+    /// all: an `output` node with nowhere to send produced a report and lost it,
+    /// with nothing accounting for it. Issue #925 added the row precisely so
+    /// that case stops being indistinguishable from a graph that routed nothing
+    /// on purpose; excusing it here restores the silence issues #947 and #963
+    /// were filed about.
+    #[test]
+    fn an_output_node_with_no_destination_is_still_undelivered() {
+        let nowhere = [row(
+            DeliveryStatus::Skipped,
+            DeliveryReason::NoDestinationConfigured,
+        )];
+        assert!(is_undelivered(&nowhere[0]));
+        assert_eq!(
+            WorkflowRunVerdict::of(RunVerdictFacts {
+                deliveries: &nowhere,
+                ..clean()
+            }),
+            WorkflowRunVerdict::Undelivered
+        );
+    }
+
+    /// A row journaled before issue #248 added `reason` deserializes as
+    /// `Unspecified`, and an unreadable reason must not excuse a report from the
+    /// number an operator acts on.
+    #[test]
+    fn a_skipped_row_with_no_recorded_reason_still_counts() {
+        let old = [row(DeliveryStatus::Skipped, DeliveryReason::Unspecified)];
+        assert!(is_undelivered(&old[0]));
+    }
+
+    /// Only the `skipped` arm reads a reason. A `failed` row is a report that
+    /// was attempted and did not work, whatever it claims about why — so the
+    /// two exemptions cannot leak onto a status that means something broke.
+    #[test]
+    fn the_exemptions_are_scoped_to_skipped() {
+        for status in [DeliveryStatus::Failed, DeliveryStatus::Denied] {
+            for reason in [DeliveryReason::DryRun, DeliveryReason::AlreadyDelivered] {
+                assert!(
+                    is_undelivered(&row(status, reason)),
+                    "{status:?}/{reason:?} is not a skip"
+                );
+            }
+        }
+    }
+
+    /// `sent` and `pending` are excused by **status**, so no reason can pull
+    /// them into the count either.
+    #[test]
+    fn sent_and_pending_are_never_undelivered() {
+        for status in [DeliveryStatus::Sent, DeliveryStatus::Pending] {
+            for reason in [
+                DeliveryReason::ChannelPosted,
+                DeliveryReason::ParkedForApproval,
+                DeliveryReason::NoDestinationConfigured,
+            ] {
+                assert!(!is_undelivered(&row(status, reason)));
+            }
         }
     }
 }

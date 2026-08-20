@@ -51,6 +51,38 @@ export function fileByTitle(nodes: FsNode[], target: string): FsNode | undefined
   return nodes.find((x) => x.kind === "file" && titleOf(x).toLowerCase() === want);
 }
 
+/**
+ * The folder whose contents are written by code and never by hand.
+ *
+ * Kept in step with `DERIVED_DIR` in `src/ledger/spec.rs`. If the host ever
+ * renames it, a write refused here would be one the console still offered.
+ */
+export const DERIVED_DIR = "derived";
+
+/**
+ * Whether the node at `id` is one the host will refuse to let a person write
+ * (issue #1222).
+ *
+ * A **folder** rule, mirroring `is_derived_path` in `src/ledger/derived.rs`
+ * character for character — including the case-insensitive comparison, because
+ * "a guard that can be stepped around by capitalising a letter is not a guard".
+ * That module's header argues why the invariant is the folder and not the file:
+ * a per-file rule fails open, because a ledger declared next week renders a file
+ * no list has heard of.
+ *
+ * The console applies the same rule rather than reading a flag because the wire
+ * carries none — `GET …/workspace` returns no `readOnly` — and because a rule
+ * evaluated from the same fact on both sides cannot drift the way two lists
+ * would. It is what lets the pane refuse *before* the typing instead of after,
+ * which is the whole of #1222.
+ */
+export function isDerivedNode(nodes: FsNode[], id: string | null): boolean {
+  const ancestry = pathOf(nodes, id);
+  const head = ancestry[0];
+  if (!head) return false;
+  return head.kind === "folder" && head.name.trim().toLowerCase() === DERIVED_DIR;
+}
+
 /** Ancestor folders (root → current), for breadcrumbs. */
 export function pathOf(nodes: FsNode[], id: string | null): FsNode[] {
   const path: FsNode[] = [];

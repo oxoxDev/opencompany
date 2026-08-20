@@ -1784,10 +1784,12 @@ fn summarize_event(event: &CompanyEvent) -> String {
                 // invite it to act on work an operator deliberately stopped.
                 None if *cancelled => format!("{how} workflow run stopped: {workflow_id}"),
                 None => {
-                    let undelivered = deliveries
-                        .iter()
-                        .filter(|d| !matches!(d.status, crate::ports::DeliveryStatus::Sent))
-                        .count();
+                    // Issue #981: the shared rung, not a local one. As in the
+                    // sidecar's projection, the filter this replaces counted
+                    // `Pending` — a report waiting on a human read to the
+                    // orchestrator as one that had been lost, and it would act
+                    // on that.
+                    let undelivered = crate::ports::undelivered_count(deliveries);
                     format!(
                         "{how} workflow run finished: {workflow_id} ({undelivered} not delivered)"
                     )
@@ -3915,12 +3917,7 @@ fn summarize_run(
     let undelivered: Vec<&crate::ports::DeliveryReport> = run
         .deliveries
         .iter()
-        .filter(|d| {
-            !matches!(
-                d.status,
-                crate::ports::DeliveryStatus::Sent | crate::ports::DeliveryStatus::Pending
-            )
-        })
+        .filter(|d| crate::ports::is_undelivered(d))
         .collect();
     if !undelivered.is_empty() {
         md.push_str(&format!(
@@ -9161,6 +9158,54 @@ name = "Morning"
         };
         let md = summarize_run(&file, &parked, "run-parked", RunOutputStored::Stored);
         assert!(!md.contains("did NOT reach a destination"), "{md}");
+
+        // Issue #981, the second half. This paragraph's own prose is the
+        // argument: it says the report "did not go out, and it will not without
+        // a change". Neither is true of a test run, which attempted nothing on
+        // purpose, nor of a continuation whose report an earlier run in the
+        // lineage already sent — so telling the model to "fix the destination"
+        // for either would send it at a graph that is behaving as designed.
+        for reason in [
+            crate::ports::DeliveryReason::DryRun,
+            crate::ports::DeliveryReason::AlreadyDelivered,
+        ] {
+            let accounted = WorkflowRun {
+                deliveries: vec![crate::ports::DeliveryReport {
+                    node: "worker".into(),
+                    kind: "channel".into(),
+                    target: Some("engineering".into()),
+                    status: crate::ports::DeliveryStatus::Skipped,
+                    detail: "nothing was sent".into(),
+                    reason,
+                }],
+                ..dropped.clone()
+            };
+            let md = summarize_run(&file, &accounted, "run-skip", RunOutputStored::Stored);
+            assert!(
+                !md.contains("did NOT reach a destination"),
+                "{reason:?}: {md}"
+            );
+        }
+
+        // The deliberate non-move: an `output` node with nowhere to send DID
+        // lose its report, and the model is exactly the reader that should be
+        // told (issues #925 / #947 / #963).
+        let nowhere = WorkflowRun {
+            deliveries: vec![crate::ports::DeliveryReport {
+                node: "worker".into(),
+                kind: "none".into(),
+                target: None,
+                status: crate::ports::DeliveryStatus::Skipped,
+                detail: "this output node has no destination".into(),
+                reason: crate::ports::DeliveryReason::NoDestinationConfigured,
+            }],
+            ..dropped.clone()
+        };
+        let md = summarize_run(&file, &nowhere, "run-nowhere", RunOutputStored::Stored);
+        assert!(
+            md.contains("1 report(s) did NOT reach a destination"),
+            "{md}"
+        );
     }
 
     /// T3: a successful run populates the cache and the tool's JSON payload

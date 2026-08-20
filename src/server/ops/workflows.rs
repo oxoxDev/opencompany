@@ -8562,6 +8562,46 @@ label = "ok"
         /// not go out. The exact shape issue #981 caught reading green.
         struct DroppedReportRunner;
 
+        /// A runner whose only delivery row is a **dry run**'s (issue #542): the
+        /// report was routed as far as its destination and deliberately not
+        /// dispatched. The row shape a real `deliver_outputs_dry` writes.
+        struct DryRunRunner;
+
+        #[async_trait::async_trait]
+        impl WorkflowRunner for DryRunRunner {
+            async fn run(
+                &self,
+                _company: &CompanyId,
+                _workflow: &crate::company::WorkflowFile,
+                _input: serde_json::Value,
+                _ctx: &WorkflowRunContext,
+            ) -> crate::Result<WorkflowRun> {
+                Ok(WorkflowRun {
+                    output: serde_json::json!({ "run": {}, "nodes": {} }),
+                    pending_approvals: Vec::new(),
+                    deliveries: vec![crate::ports::DeliveryReport {
+                        node: "done".to_string(),
+                        kind: "channel".to_string(),
+                        target: Some("engineering".to_string()),
+                        status: crate::ports::DeliveryStatus::Skipped,
+                        detail: "this was a test run — nothing was sent".to_string(),
+                        reason: crate::ports::DeliveryReason::DryRun,
+                    }],
+                    cancelled: false,
+                    nodes: vec![crate::ports::WorkflowRunNodeRow {
+                        node_id: "done".to_string(),
+                        status: crate::ports::types::WorkflowNodeStatus::Ok,
+                        elapsed_ms: 3,
+                        diagnostics: Vec::new(),
+                    }],
+                    notices: Vec::new(),
+                    board: Vec::new(),
+                    blocked_nodes: Vec::new(),
+                    approvals: Vec::new(),
+                })
+            }
+        }
+
         #[async_trait::async_trait]
         impl WorkflowRunner for DroppedReportRunner {
             async fn run(
@@ -8716,6 +8756,37 @@ label = "ok"
                 body["deliveries"][0]["reason"], "channel-not-wired",
                 "{body}"
             );
+        }
+
+        /// Issue #981, the second half: a **test run** is not a run that lost
+        /// its report.
+        ///
+        /// `deliver_outputs_dry` writes one `skipped`/`dry-run` row per routed
+        /// `output` node, so before this every single test run of a graph with
+        /// a destination answered `undelivered` — the console badged the safest
+        /// thing an operator can do as a failure, every time. The rows stay on
+        /// the body: they are what say *where* the report would have gone.
+        ///
+        /// Asked for as a **real dry run** (`dry_run: true`) and the `dryRun`
+        /// discriminator asserted alongside the verdict, so this cannot pass on
+        /// a run that was not one — a stub runner returning a `dry-run` row is
+        /// only half the claim.
+        #[tokio::test]
+        async fn a_test_run_is_not_a_run_that_lost_its_report() {
+            let home_dir = home();
+            let app = company_with_runner(home_dir.path(), Arc::new(DryRunRunner)).await;
+
+            let response = app
+                .oneshot(run_request(serde_json::json!({ "dry_run": true })))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+
+            assert_eq!(body["verdict"], "ok", "{body}");
+            assert_eq!(body["dryRun"], serde_json::json!(true), "{body}");
+            assert_eq!(body["deliveries"][0]["reason"], "dry-run", "{body}");
+            assert_eq!(body["deliveries"][0]["status"], "skipped", "{body}");
         }
 
         /// The other direction, which is the one that must not regress: a run

@@ -131,8 +131,21 @@ const DETAIL_CONTROLS: Array<{ label: string; find: (page: Page) => Locator }> =
     find: (p) => p.getByTestId("workflow-back-to-index"),
   },
   {
+    // Issue #1204 made Run a split control, so it is addressed by test id now.
+    // The name match it used to use — `{ name: "Run", exact: false }.first()` —
+    // would silently resolve to whichever half rendered first, and "whichever
+    // half" is not what a reachability spec should be measuring.
     label: "Run",
-    find: (p) => p.getByRole("button", { name: "Run", exact: false }).first(),
+    find: (p) => p.getByTestId("workflow-run"),
+  },
+  {
+    // The other half: the affordance the run-input field moved behind. It is
+    // the newest control on the row, which by this spec's own reasoning — "the
+    // row grows every time a control is added" — is exactly the one most worth
+    // measuring. Icon-only, with its name in `sr-only` text, so it is addressed
+    // by test id like Pause and the back link.
+    label: "Run with input",
+    find: (p) => p.getByTestId("workflow-run-with-input"),
   },
   {
     label: "Test run",

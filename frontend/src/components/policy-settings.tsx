@@ -9,6 +9,7 @@ import {
   resetPolicy,
   setPolicy,
 } from "@/api/policy";
+import { listWorkflowToolSlugs } from "@/api/workflows";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -21,6 +22,50 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+
+/**
+ * Tools worth naming as an *example* of something to always ask about, most
+ * consequential first (issue #1226).
+ *
+ * A placeholder is a suggestion, so it should suggest a gate an operator might
+ * actually want. Taking the host's list in its own order put
+ * `read_workspace_state` — a read — in the worked example, which is a valid
+ * entry and a pointless one. This orders the candidates; the datalist under the
+ * field still carries the deployment's full set in the host's order, because
+ * that is a lookup rather than a recommendation.
+ *
+ * Not a validator and not a filter: anything wired here is offered, and a tool
+ * absent from this list simply sorts after the ones on it.
+ */
+const WORTH_GATING = [
+  "publish_artifact",
+  "shell",
+  "http_request",
+  "curl",
+  "git_operations",
+  "apply_patch",
+  "web_fetch",
+];
+
+/**
+ * Up to three worked examples, drawn from what this deployment wired.
+ *
+ * Falls back to real tool names when the host served nothing — a host predating
+ * `…/workflows/tool-slugs` still deserves an example that would work, and the
+ * one this field used to give (`payment.send, filing.submit, external.publish`)
+ * is the one issue #684 deleted for gating nothing.
+ */
+export function alwaysAskPlaceholder(wired: string[]): string {
+  if (wired.length === 0) return "shell, http_request, publish_artifact";
+  const rank = (slug: string) => {
+    const at = WORTH_GATING.indexOf(slug);
+    return at === -1 ? WORTH_GATING.length : at;
+  };
+  return [...wired]
+    .sort((a, b) => rank(a) - rank(b) || wired.indexOf(a) - wired.indexOf(b))
+    .slice(0, 3)
+    .join(", ");
+}
 
 interface Props {
   client: OpenCompanyClient;
@@ -62,6 +107,22 @@ export function PolicySettings({ client, company }: Props) {
   // half-typed effect kind never reaches the gate.
   const [draftAlways, setDraftAlways] = useState("");
   const [dirty, setDirty] = useState(false);
+  /**
+   * The tool names this deployment can actually gate (issue #1226).
+   *
+   * An `always_approve` entry IS a tool name on the harness path — see
+   * `src/policy/always_approve.rs`, which explains that the two were never
+   * separate namespaces. So the honest set of worked examples is the set of
+   * tools wired here, and this is the same read the workflow copilot grounds on
+   * (issues #783 / #874) for the same reason: so nothing suggests a tool this
+   * deployment does not have.
+   *
+   * Empty on a host predating the route, which degrades to the plain field the
+   * operator had before — the suggestions are help, never a constraint. The
+   * namespace stays open on purpose (a hosted brain may emit a kind this
+   * repository has never seen), so nothing here validates what is typed.
+   */
+  const [wiredTools, setWiredTools] = useState<string[]>([]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -84,6 +145,25 @@ export function PolicySettings({ client, company }: Props) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Deliberately silent about its own failure, and deliberately not part of
+  // `load`: these are suggestions under a free-text box. A host that cannot
+  // serve them costs the operator a datalist, not the setting, and a second
+  // error banner would report the policy card as broken when it is merely
+  // plainer — the same reasoning `LedgersView.refreshTasks` gives.
+  useEffect(() => {
+    let live = true;
+    void listWorkflowToolSlugs(client, company)
+      .then((r) => {
+        if (live) setWiredTools(r.slugs);
+      })
+      .catch(() => {
+        if (live) setWiredTools([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
 
   /**
    * Applies a server response.
@@ -233,20 +313,52 @@ export function PolicySettings({ client, company }: Props) {
 
             <div className="space-y-2">
               <Label htmlFor="always-approve">Always ask first</Label>
+              {/* Issue #1226: what an entry IS, said here rather than left to
+                  the placeholder. `payment.send, filing.submit,
+                  external.publish` used to be the only worked example this
+                  field offered — the exact three strings issue #684 deleted
+                  from the shipped default because, on the harness path, none of
+                  them names a tool and so none of them gated anything. An
+                  operator following the suggestion got a fence that was not
+                  there, confirmed by a "list updated" toast.
+
+                  A tool name and an effect kind were never two namespaces (see
+                  `src/policy/always_approve.rs`), so naming the tool case first
+                  is naming the case that applies to every company running the
+                  openhuman toolbelt. The prefix rule is stated because it is
+                  what `always_approve::matches` implements and nothing in the
+                  console said it. */}
               <p className="text-xs text-muted-foreground">
-                Effect kinds that park for approval whatever the tier — these win
-                even on Full. Comma-separated.
+                What the teammates always park for approval, whatever the tier —
+                these win even on Full. Comma-separated. An entry is a tool name
+                (<code>shell</code>, <code>http_request</code>), or a dotted
+                effect kind a hosted brain emits; a leading segment matches the
+                rest, so <code>invoice</code> covers{" "}
+                <code>invoice.send</code>.
               </p>
               <Input
                 id="always-approve"
                 value={draftAlways}
                 disabled={saving}
-                placeholder="payment.send, filing.submit, external.publish"
+                list={wiredTools.length > 0 ? "always-approve-tools" : undefined}
+                placeholder={alwaysAskPlaceholder(wiredTools)}
                 onChange={(event) => {
                   setDraftAlways(event.target.value);
                   setDirty(true);
                 }}
               />
+              {/* Suggestions, never a constraint: the effect namespace is open
+                  on purpose, because a hosted brain may emit a kind this
+                  repository has never seen, and a `datalist` leaves free text
+                  free. Rendered only when the host served the set, so a host
+                  predating the route degrades to the plain box. */}
+              {wiredTools.length > 0 && (
+                <datalist id="always-approve-tools">
+                  {wiredTools.map((slug) => (
+                    <option key={slug} value={slug} />
+                  ))}
+                </datalist>
+              )}
               {dirty && (
                 <Button
                   size="sm"

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Check, Loader2, ShieldCheck, X } from "lucide-react";
+import { Check, Loader2, ShieldAlert, ShieldCheck, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
@@ -114,7 +114,7 @@ export function ApprovalsView({
   // an approve and a decline are different promises to the operator ("the agent
   // is doing it" vs "recorded"), and the card says which one it is waiting on.
   const [inFlight, setInFlight] = useState<ReadonlyMap<string, Verdict>>(() => new Map());
-  const { approvals, now } = feed;
+  const { approvals, now, queue } = feed;
   /**
    * The card the queue is narrowed to, or `null` for the whole queue (#883).
    *
@@ -278,7 +278,19 @@ export function ApprovalsView({
             </a>
           </div>
         )}
-        {visible.length === 0 ? (
+        {/* Issue #1229: "nothing parked" and "we could not read what is parked"
+            are different facts, and only one of them is an instruction to stop
+            looking. The queue's own load state decides which is on screen —
+            `approvals` being empty cannot, because it is empty in both cases.
+            A queue that has been read once keeps its rows through a later
+            failure, so this branch is only ever the cold path. */}
+        {queue !== "ready" && approvals.length === 0 ? (
+          queue === "loading" ? (
+            <LoadingApprovals />
+          ) : (
+            <UnreadableApprovals onRetry={() => void feed.refresh()} />
+          )
+        ) : visible.length === 0 ? (
           focusTaskId !== null ? (
             <ClearedForTask />
           ) : (
@@ -742,6 +754,61 @@ function ClearedForTask() {
           approvals of their own — use <span className="font-medium">Show all</span> to see them.
         </p>
       </div>
+    </div>
+  );
+}
+
+/**
+ * The queue is on the wire (issue #1229).
+ *
+ * A skeleton rather than the word "Loading": this page is a list, and the shape
+ * of the list is the honest placeholder for it. Deliberately *not* the "All
+ * clear" panel — that panel makes a claim, and nothing is known yet.
+ */
+function LoadingApprovals() {
+  return (
+    <div className="space-y-3" aria-busy="true" aria-label="Loading approvals">
+      {Array.from({ length: 3 }).map((_, i) => (
+        <div key={i} className="h-28 animate-pulse rounded-xl border bg-muted/40" />
+      ))}
+    </div>
+  );
+}
+
+/**
+ * The queue could not be read, and never has been (issue #1229).
+ *
+ * The page this replaces said "All clear — nothing is waiting on you" over a
+ * read that failed, beside a sidebar badge that said fourteen things were.
+ * On the one surface whose job is to catch what needs a person, a confident
+ * false negative is the most expensive thing it can say: every parked request
+ * has a deadline after which it is declined on its own.
+ *
+ * So this says what is actually known — nothing — and offers the only useful
+ * next move. `role="alert"` because it is a correction to what the operator
+ * came here to find out.
+ */
+function UnreadableApprovals({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div
+      role="alert"
+      className="mt-16 flex flex-col items-center gap-3 text-center"
+      data-testid="approvals-unreadable"
+    >
+      <div className="flex size-12 items-center justify-center rounded-2xl bg-destructive/10 text-destructive">
+        <ShieldAlert className="size-6" />
+      </div>
+      <div className="space-y-1">
+        <p className="font-medium">Couldn&apos;t read what&apos;s waiting</p>
+        <p className="max-w-sm text-sm text-muted-foreground">
+          The company host didn&apos;t answer. This is not the same as nothing
+          being parked — anything waiting is still waiting, and still on its
+          deadline.
+        </p>
+      </div>
+      <Button variant="outline" size="sm" onClick={onRetry}>
+        Try again
+      </Button>
     </div>
   );
 }

@@ -1248,13 +1248,22 @@ struct ChatMessage {
     /// rather than a silently-dropped thread.
     #[serde(default)]
     parent: Option<String>,
-    /// Whether an actionable request in this message opens a one-off card or a
-    /// workflow card (issue #580). The operator chooses explicitly (decision
-    /// D2a); absent means `once`, so an ordinary chat request is unchanged. Only
-    /// consulted when the message actually carries a task intent — a greeting or
-    /// a question opens no card regardless.
+    /// What this message is **for** (issues #580, #1152) — whether an
+    /// actionable request opens a one-off card or a workflow card, or whether
+    /// the operator is saying it is not a request for work at all.
+    ///
+    /// The operator chooses explicitly (decision D2a); absent means `once`, so
+    /// an ordinary chat request is unchanged. `once` and `workflow` are only
+    /// consulted when the message actually carries a task intent — a greeting
+    /// or a question opens no card regardless; `chat` is consulted whatever the
+    /// triage said, because withholding is the whole point of it.
+    ///
+    /// **One field, one choice.** The `chat` word rides the existing
+    /// `deliverable` key rather than arriving as a second `intent` field, so a
+    /// body cannot assert "build me the workflow" and "just chatting" about the
+    /// same message — the split-brain #1035 closed, pointed the other way.
     #[serde(default)]
-    deliverable: Option<crate::ports::tasks::TaskDeliverable>,
+    deliverable: Option<crate::ports::types::MessageIntent>,
 }
 
 /// A chat or approval-resolution response: the company's channel replies.
@@ -1427,8 +1436,30 @@ async fn run_chat(
     // inside the `!confined` guard — a copilot thread still opens nothing,
     // because a message *about* a graph is not a request to build one.
     let workflow_requested =
-        !confined && message.deliverable == Some(crate::ports::tasks::TaskDeliverable::Workflow);
-    if let Some(title) = (!confined)
+        !confined && message.deliverable == Some(crate::ports::types::MessageIntent::Workflow);
+    // Issue #1152: and the other direction — the operator said this message is
+    // NOT a request for work ("Just chatting"), so no deterministic path may
+    // card it whatever the triage read in the words.
+    //
+    // The operator could already *mint* a card the classifier declined
+    // (`workflow_requested`, above) and could never *withhold* one. That
+    // asymmetry is the bug: a message the triage happens to read as `Track` —
+    // "we should probably rewrite the pricing page some day" — opened a card,
+    // assigned it to a desk, and there was no control anywhere that said
+    // otherwise. This is that control, and it is the same kind of evidence the
+    // override above is: a positive statement by the person who wrote the
+    // message, which is better than a lexical guess about it.
+    //
+    // **No `!confined` term, deliberately.** `workflow_requested` needs one
+    // because it *mints* a card, and minting one on a workflow copilot thread —
+    // a conversation ABOUT one graph — is exactly what #416 suppresses. This
+    // only ever *subtracts*, and on a copilot thread the branch below is already
+    // suppressed, so a `!confined` term here would be inert at best and would
+    // read as though the two were symmetrical.
+    let not_work = message
+        .deliverable
+        .is_some_and(crate::ports::types::MessageIntent::is_chat);
+    if let Some(title) = (!confined && !not_work)
         .then(|| crate::company::task_intent::triage_message(&message.text))
         .and_then(|triage| match triage {
             crate::company::task_intent::MessageTriage::Track(title) => Some(title),
@@ -1515,7 +1546,10 @@ async fn run_chat(
             // card through the builder pass when it reaches In Progress. Nothing
             // here infers the choice from the text (decision D2a).
             planning_attempts: Vec::new(),
-            deliverable: message.deliverable.unwrap_or_default(),
+            deliverable: message
+                .deliverable
+                .and_then(crate::ports::types::MessageIntent::deliverable)
+                .unwrap_or_default(),
             workflow_proposal: None,
             // Issue #983: the turn that opened it. A card raised from chat used
             // to be the *only* visible sign that a long turn was under way, and
@@ -3381,6 +3415,101 @@ mode = "full"
             tasks[0].title,
             crate::company::task_intent::to_title(text),
             "a bypassed card must be titled byte-for-byte as a tracked one"
+        );
+    }
+
+    /// Issue #1152: an explicit "Just chatting" **withholds** the card the
+    /// triage would otherwise have opened.
+    ///
+    /// The mirror of the test above, and the asymmetry it closes. Since #845 the
+    /// operator could override the classifier *upward* — mint a card it
+    /// declined — and there was no control anywhere that overrode it downward.
+    /// So a message the lexical layer reads as `Track` ("can you build the
+    /// landing page?" asked rhetorically, while thinking out loud) opened a
+    /// card, assigned it to a desk, and started a planning pass, and the only
+    /// recourse was to go to the board and delete it.
+    ///
+    /// The fixture's verdict is asserted `Track` **first**, in the strongest
+    /// direction available: the `chat` run is made before any other, on an empty
+    /// board, and the unmarked run right after it opens the card on the very
+    /// same words. So "zero cards" is the intent doing the work, not a message
+    /// the classifier was never going to card.
+    #[tokio::test]
+    async fn just_chatting_withholds_the_card_the_triage_would_have_opened() {
+        use crate::ports::tasks::TaskDeliverable;
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        // Work by construction — the request frame beats the interrogative, so
+        // the triage names a title and the card branch fires.
+        let text = "can you build the landing page?";
+        assert!(
+            matches!(
+                crate::company::task_intent::triage_message(text),
+                crate::company::task_intent::MessageTriage::Track(_)
+            ),
+            "fixture must be a message the handler cards, or this proves nothing"
+        );
+
+        let chat = |intent: Option<&str>| {
+            let body = match intent {
+                Some(i) => format!(
+                    r#"{{"text":{},"deliverable":"{i}"}}"#,
+                    serde_json::json!(text)
+                ),
+                None => format!(r#"{{"text":{}}}"#, serde_json::json!(text)),
+            };
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/company/chat")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap()
+        };
+
+        // `chat`: the operator's statement outranks the classifier's `Track`.
+        let r = app.clone().oneshot(chat(Some("chat"))).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "the message is still answered");
+        assert!(
+            runtime.tasks().list(&id).await.unwrap().is_empty(),
+            "a message sent as chat must open no card, whatever the triage read"
+        );
+
+        // The same words, unmarked: the card the run above withheld.
+        let r = app.clone().oneshot(chat(None)).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(
+            tasks.len(),
+            1,
+            "an unmarked message is unchanged — this is what the `chat` run withheld"
+        );
+        assert_eq!(tasks[0].deliverable, TaskDeliverable::Once);
+
+        // …and so are both work words, on the same words again.
+        let r = app.clone().oneshot(chat(Some("once"))).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(
+            runtime.tasks().list(&id).await.unwrap().len(),
+            2,
+            "`once` is unchanged"
+        );
+
+        let r = app.oneshot(chat(Some("workflow"))).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(tasks.len(), 3, "`workflow` is unchanged");
+        assert!(
+            tasks
+                .iter()
+                .any(|t| t.deliverable == TaskDeliverable::Workflow),
+            "and still routes its card to the builder pass: {tasks:?}"
         );
     }
 
@@ -8003,6 +8132,24 @@ mode = "full"
             .collect()
     }
 
+    /// The authors of every journaled `AgentReply`, in order (issue #966).
+    ///
+    /// Separate from [`agent_replies`] because that one folds the author away.
+    async fn agent_reply_authors(runtime: &Arc<CompanyRuntime>) -> Vec<String> {
+        use crate::ports::types::EventSeq;
+        runtime
+            .events()
+            .read_from(runtime.id(), EventSeq::new(0), 10_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|s| match s.event {
+                CompanyEvent::AgentReply { agent_id, .. } => Some(agent_id),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn approve_detached(id: &ApprovalId) -> Request<Body> {
         resolve_request(id, serde_json::json!({"verdict":"approve","detach":true}))
     }
@@ -8317,6 +8464,18 @@ mode = "full"
         assert!(
             replies[0].contains("approving again is safe"),
             "the notice has to say what to do about it, got {replies:?}"
+        );
+        // Issue #966, asserted on the journaled row rather than on the
+        // constructor: this drives the real approve path, so it pins that
+        // `announce_continuation_failure` *calls* the named notice. Asserting
+        // the constructor alone leaves the call site free to go back to an
+        // inline `AgentReply` authored by the operator channel — a correct
+        // system row byte-identical to one the pre-#885 defect damaged.
+        let authors = agent_reply_authors(&c.runtime).await;
+        assert_eq!(
+            authors,
+            vec![crate::ports::SYSTEM_AUTHOR.to_string()],
+            "the runtime authored this notice, so it must not be stored under its destination"
         );
     }
 }

@@ -12,6 +12,7 @@ import { useTheme } from "next-themes";
 import {
   ArrowLeft,
   Bot,
+  ChevronDown,
   FlaskConical,
   History,
   LayoutGrid,
@@ -66,6 +67,14 @@ import {
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { WorkflowNode } from "@/components/workflow-node";
@@ -77,6 +86,7 @@ import type { DecidedApproval } from "@/views/chat/model";
 import { cn } from "@/lib/utils";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import type { NodeRunState } from "@/lib/workflow-sample";
+import { workflowSavedToast } from "@/lib/workflow-saved-toast";
 // Issue #303: the canvas arithmetic, the run-state folds and the three drawers
 // moved out when this file passed 1800 lines and was about to grow an index and
 // a copilot. See `workflows/graph.ts` for why the fold is pure.
@@ -98,6 +108,9 @@ import { RunFailurePanel } from "@/views/workflows/RunFailurePanel";
 import { RunResultPanel } from "@/views/workflows/RunResultPanel";
 import { CanvasShell } from "@/views/workflows/CanvasShell";
 import { approvalsForRun } from "@/views/workflows/run-approvals";
+// Issue #981: which nodes produced a report that never went out, so the canvas
+// card can say so beside the DONE badge instead of leaving it to a banner.
+import { undeliveredNodes } from "@/views/workflows/run-health";
 import { NodeDetailPanel } from "@/views/workflows/NodeDetailPanel";
 import { type NodeOutputView, nodeOutputFor } from "@/views/workflows/run-output";
 
@@ -112,6 +125,11 @@ const EMPTY_FAILED: Record<string, string> = {};
 /** A stable empty default for `runEvents`, so an omitted prop does not hand the
  * fold a fresh array identity on every render. */
 const EMPTY_RUN_EVENTS: CompanyStreamEvent[] = [];
+
+/** A stable empty set for the canvas's undelivered-node marks (issue #981), so
+ * the common case — a run that delivered what it routed — hands `layout` the
+ * same identity every render and does not re-lay the graph out. */
+const EMPTY_UNDELIVERED: Set<string> = new Set();
 
 /** `decodeURIComponent` that survives a hand-edited address bar. A lone `%`
  * makes it throw, and a malformed hash must not take the whole view down —
@@ -308,6 +326,10 @@ export function WorkflowsView({
   // a stale `selectedId` (issue #840 PR-3: guards the copilot-fix race).
   const selectedIdRef = useRef<string | null>(null);
   selectedIdRef.current = selectedId;
+  // Issue #1089: guards the company-switch race in the Resume handler — the same
+  // pattern as selectedIdRef: captured in the toast closure, checked after await.
+  const companyRef = useRef<string | null>(company);
+  companyRef.current = company;
   const [graph, setGraph] = useState<WorkflowGraph | null>(null);
   const [loadingList, setLoadingList] = useState(true);
   const [loadingGraph, setLoadingGraph] = useState(false);
@@ -337,8 +359,21 @@ export function WorkflowsView({
   // Issue #154: what the operator is asking this run to work on. `ranWith` is
   // pinned when the run is dispatched so the result panel echoes the request the
   // shown output came from, not whatever has been typed since.
+  //
+  // Issue #1204: `request` is the DRAFT held by the "Run with input" dialog, not
+  // an implicit argument to running. It used to be a text box wired straight
+  // into `run()`'s closure, sitting open on the toolbar; taking the box off the
+  // bar without also cutting that wire would have been worse than leaving it
+  // there, because a draft typed once and then forgotten would keep riding
+  // along on every later press of Run with nothing on screen to say so. So the
+  // payload is a PARAMETER of `run()` now (see below) and this state is only
+  // ever read at the moment a dialog button is pressed. It survives the dialog
+  // closing on purpose — reopening restores what was typed, which is what makes
+  // "run it again with a tweak" one edit rather than a retype.
   const [request, setRequest] = useState("");
   const [ranWith, setRanWith] = useState("");
+  // Issue #1204: whether that dialog is up.
+  const [runInputOpen, setRunInputOpen] = useState(false);
   // Issue #1002: the roster read behind the cards' "Asked by" line, keyed to the
   // approvals of the run on screen rather than to the whole queue — so a console
   // with a run drawer closed does not fetch the roster for cards it is not
@@ -1135,7 +1170,13 @@ export function WorkflowsView({
     }
   }, [client, company, historyCursor, loadingOlder]);
 
-  const run = useCallback(async (dryRun = false) => {
+  // `input` is the trigger payload for THIS dispatch (issue #1204), handed in by
+  // whichever control fired rather than read out of `request` state. The toolbar's
+  // Run and Test run pass nothing and therefore genuinely run with no input; only
+  // the "Run with input" dialog passes its draft. That is the whole guarantee the
+  // dialog rests on: there is no way to run with a payload the operator cannot
+  // see at the moment they press the button.
+  const run = useCallback(async (dryRun = false, input = "") => {
     if (!selectedId) return;
     setStarting(true);
     // Clear the last refusal and the own-run-start watch before this attempt, so
@@ -1167,7 +1208,7 @@ export function WorkflowsView({
     setOptimistic(dryRun ? null : graph ? initialRunState(graph) : null);
     // Trimmed once here so the echoed request and the payload the host receives
     // can never disagree.
-    const asked = request.trim();
+    const asked = input.trim();
     // Issue #1007: the browser's own clock, not the host's. It is what the
     // failure panel measures against and what the optimistic history row counts
     // from, and both are on screen before the host has said anything at all.
@@ -1294,7 +1335,10 @@ export function WorkflowsView({
     } finally {
       setStarting(false);
     }
-  }, [client, company, selectedId, request, graph]);
+    // `request` is deliberately NOT a dependency (issue #1204): the payload
+    // arrives as an argument, so this callback no longer changes identity on
+    // every keystroke in the dialog.
+  }, [client, company, selectedId, graph]);
 
   /**
    * Issue #383: stop the run this view started.
@@ -1412,11 +1456,80 @@ export function WorkflowsView({
     }
   }, [client, company, selectedId, graph]);
 
+  /**
+   * Say out loud that a write left this workflow's schedule off, and offer the
+   * one click that undoes it.
+   *
+   * Issue #1017 wrote this for the edit path; issue #1209 extracted it, because
+   * **create disarms too** and was raising a flat "Workflow created." over a
+   * workflow the host had just switched off. Two write paths that produce the
+   * same state owe the operator the same sentence, and a second copy of this
+   * closure is a second copy of the switched-company and switched-selection
+   * guards below — the two things this is careful about and the two things a
+   * copy would eventually stop being careful about.
+   *
+   * `lead` is the only part that differs ("Saved, and paused" / "Created, and
+   * paused"): what happened is not the same, what it means is.
+   */
+  const announceDisarm = useCallback(
+    (lead: string, workflow: WorkflowGraph) => {
+      toast.warning(
+        `${lead} “${workflow.name}”. Its schedule is off — it won't run on its own until you resume it.`,
+        {
+          action: {
+            label: "Resume",
+            onClick: () => {
+              void (async () => {
+                try {
+                  const resumeCompany = company;
+                  const updated = await setWorkflowEnabled(client, company, workflow.id, true);
+                  // The operator may have switched companies while this Resume
+                  // was in flight. Discard the response — the new company's list
+                  // is what matters, and mutating state keyed to the old one
+                  // would overwrite it.
+                  if (companyRef.current !== resumeCompany) return;
+                  // Newer than any list request already in flight.
+                  localWriteRef.current += 1;
+                  // The operator may have selected a different workflow while
+                  // this Resume was in flight. Only replace the displayed graph
+                  // when it still belongs to the selection — otherwise the
+                  // picker would identify the new workflow while the canvas
+                  // showed (and a later edit would mutate) the old one. The list
+                  // update below is safe unconditionally: it keys by id.
+                  if (selectedIdRef.current === updated.id) {
+                    setGraph(updated);
+                  }
+                  setWorkflows((prev) =>
+                    prev.map((w) =>
+                      w.id === updated.id ? { ...w, enabled: updated.enabled } : w,
+                    ),
+                  );
+                  toast.success(
+                    `Resumed “${updated.name}”. It will run on its schedule again.`,
+                  );
+                } catch (e) {
+                  toast.error(
+                    e instanceof Error ? e.message : "could not change the workflow",
+                  );
+                }
+              })();
+            },
+          },
+        },
+      );
+    },
+    [client, company],
+  );
+
   // Issue #259: the edit dialog saved. The host answers with the stored graph
   // AND a fresh version token, so holding onto it is what lets the operator
   // save again without a re-read — dropping it and re-fetching would be a round
   // trip that can only return the same thing.
   const handleSaved = useCallback((saved: WorkflowGraph) => {
+    // Issue #1017: read the armed state BEFORE overwriting `graph`, so a save
+    // that silently disarmed the workflow (a schedule edit comes back
+    // `enabled: false`) can be told apart from an ordinary one below.
+    const wasEnabled = graph?.enabled;
     // Newer than any list request already in flight — see `localWriteRef`.
     localWriteRef.current += 1;
     setGraph(saved);
@@ -1443,8 +1556,15 @@ export function WorkflowsView({
     // The write landed, so whatever we hold is current — the same reasoning as
     // the graph-load effect's clear.
     setConflict(null);
-    toast.success("Workflow saved.");
-  }, []);
+    // Issue #1017: a save that just disarmed the workflow gets a paused toast
+    // with a one-click Resume, instead of a "saved" that hid that its schedule
+    // was switched off. Every other save keeps the plain acknowledgement.
+    if (workflowSavedToast(wasEnabled, saved.enabled) === "disarmed") {
+      announceDisarm("Saved, and paused", saved);
+    } else {
+      toast.success("Workflow saved.");
+    }
+  }, [announceDisarm, graph]);
 
   // The creator posts the full graph back, so the new entry can be spliced
   // straight into the list and selected — no extra round trip to re-list.
@@ -1476,8 +1596,19 @@ export function WorkflowsView({
     // editing it. The hash mirror pushes that as a navigation, so Back returns
     // to the index they created it from.
     setSelectedId(created.id);
-    toast.success("Workflow created.");
-  }, []);
+    // Issue #1209: create disarms too. `#276`'s rule switches off any workflow
+    // authored WITH a schedule, and this used to acknowledge that with a flat
+    // "Workflow created." — leaving the operator to notice the paused chip on a
+    // detail screen nothing pointed them at. A create is armed-by-assumption
+    // before the host answers, so `true` is the honest "before" to classify
+    // against; the same reducer the edit path uses then names the one transition
+    // worth interrupting for.
+    if (workflowSavedToast(true, created.enabled) === "disarmed") {
+      announceDisarm("Created, and paused", created);
+    } else {
+      toast.success("Workflow created.");
+    }
+  }, [announceDisarm]);
 
   // Issue #1110: leave the workflow on screen and go back to the index.
   //
@@ -1737,6 +1868,12 @@ export function WorkflowsView({
     // the newly-selected one's.
     setRunFailure(null);
     setPendingRun(null);
+    // Issue #1204: and the run-input draft, which names work for the workflow
+    // being LEFT — "the Q3 board deck" carried onto another workflow's dialog is
+    // the same category of wrong as the drawers above, and the dialog itself
+    // must not survive a switch it was opened on the other side of.
+    setRequest("");
+    setRunInputOpen(false);
     // Issue #863: the adopted run belonged to the workflow being left. Holding
     // it across the switch would keep painting one graph's trail onto another's
     // canvas the moment the two share a node id.
@@ -1804,6 +1941,30 @@ export function WorkflowsView({
   // we started has not settled yet.
   const running = starting || activeRunId !== null;
 
+  /**
+   * Issue #1204: dispatch from the run-input dialog.
+   *
+   * Closes first, then runs. A synchronous run holds the request open for the
+   * whole run (#528), so a dialog left up would sit over the canvas and the
+   * history rail — the two surfaces that report what is happening — for as long
+   * as the run takes.
+   *
+   * The draft is deliberately NOT cleared: the operator who ran on "Q3 board
+   * deck" and wants to run again on "Q4 board deck" should be editing two
+   * characters, not retyping the line. It is cleared when the workflow changes,
+   * where it stops being about the work in front of them.
+   */
+  const runWithInput = useCallback(
+    (dryRun: boolean) => {
+      // The buttons are disabled in these states and Enter bypasses them, so the
+      // guard is here rather than only on the controls.
+      if (!selectedId || running || loadingGraph) return;
+      setRunInputOpen(false);
+      void run(dryRun, request);
+    },
+    [selectedId, running, loadingGraph, run, request],
+  );
+
   // What the canvas actually paints, in priority order: a past run the operator
   // explicitly asked to see, else the live fold, else the optimistic frontier.
   const paintedStates = useMemo<Record<string, NodeRunState>>(() => {
@@ -1815,13 +1976,27 @@ export function WorkflowsView({
     if (overlayRun) return elapsedFromRun(overlayRun);
     return liveRun?.elapsed ?? {};
   }, [overlayRun, liveRun]);
+  // Issue #981, in the same priority order. The live SSE fold carries no
+  // delivery rows — delivery happens after the engine returns, so they arrive
+  // with the settled body — and correctly contributes nothing here. The
+  // just-finished manual run DOES have them, and is the case the issue was
+  // filed about: an operator presses Run, watches the output node land on DONE,
+  // and the report is gone. It is matched on `runId` so a stale result cannot
+  // mark up a different run's canvas.
+  const paintedUndelivered = useMemo<Set<string>>(() => {
+    if (overlayRun) return undeliveredNodes(overlayRun.deliveries);
+    if (result && (!liveRun || liveRun.runId === result.runId)) {
+      return undeliveredNodes(result.deliveries ?? []);
+    }
+    return EMPTY_UNDELIVERED;
+  }, [overlayRun, result, liveRun]);
 
   const { nodes, edges } = useMemo(
     () =>
       graph
-        ? layout(graph, paintedStates, paintedElapsed)
+        ? layout(graph, paintedStates, paintedElapsed, paintedUndelivered)
         : { nodes: [], edges: [] },
-    [graph, paintedStates, paintedElapsed],
+    [graph, paintedStates, paintedElapsed, paintedUndelivered],
   );
 
   const selected = workflows.find((w) => w.id === selectedId) ?? null;
@@ -2062,34 +2237,59 @@ export function WorkflowsView({
               data-testid="workflow-detail-actions"
             >
               {/* run intent — the point of the screen, and the only filled
-                  button on it. */}
+                  control on it.
+
+                  Issue #1204: it is ONE control in two halves now, not a text
+                  box and a button. The box — "What should this run work on?" —
+                  was the widest thing on a row of nine and empty on almost every
+                  visit, so the common case (press Run) was reached past an input
+                  that the uncommon case needed. The halves invert that: Run is a
+                  click, and the payload is a click plus a dialog.
+
+                  What the second half must NOT become is a hiding place. The
+                  capability behind it is real (issue #154 — the host seeds the
+                  payload as the trigger node's item, and a first step bound to
+                  `=items` reads it), which is exactly why the draft is passed to
+                  `run()` explicitly rather than left in a closure: pressing the
+                  left half always means "no input", visibly and always. */}
               <div className="flex min-w-0 items-center gap-2">
-                <Input
-                  value={request}
-                  onChange={(e) => setRequest(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && selectedId && !running && !loadingGraph) {
-                      void run();
-                    }
-                  }}
-                  disabled={!selectedId || running}
-                  placeholder="What should this run work on?"
-                  aria-label="Request for this run"
-                  className="h-8 w-64 max-w-full"
-                />
-                <Button
-                  size="sm"
-                  onClick={() => void run()}
-                  disabled={!selectedId || running || loadingGraph}
-                  data-testid="workflow-run"
-                >
-                  {running ? (
-                    <Loader2 className="mr-1.5 size-4 animate-spin" />
-                  ) : (
-                    <Play className="mr-1.5 size-4" />
-                  )}
-                  Run
-                </Button>
+                <div className="flex items-center" data-testid="workflow-run-split">
+                  <Button
+                    size="sm"
+                    onClick={() => void run()}
+                    disabled={!selectedId || running || loadingGraph}
+                    data-testid="workflow-run"
+                    className="rounded-r-none"
+                  >
+                    {running ? (
+                      <Loader2 className="mr-1.5 size-4 animate-spin" />
+                    ) : (
+                      <Play className="mr-1.5 size-4" />
+                    )}
+                    Run
+                  </Button>
+                  {/* The other half. Same fill and no gap, because a detached
+                      outline button beside Run reads as a ninth control rather
+                      than as more of this one; the hairline is what says the two
+                      belong together. Icon-only, with the name carried by
+                      `sr-only` text so it is announced and so it does not widen
+                      the row back out.
+
+                      Its `disabled` predicate is Run's, copied whole and not
+                      narrowed: opening the dialog against a graph that has not
+                      loaded would offer a run that cannot be dispatched. */}
+                  <Button
+                    size="sm"
+                    onClick={() => setRunInputOpen(true)}
+                    disabled={!selectedId || running || loadingGraph}
+                    data-testid="workflow-run-with-input"
+                    className="rounded-l-none border-l border-primary-foreground/25 px-2"
+                    title="Run this workflow on something specific — a topic, a link, a question. The first step receives it."
+                  >
+                    <ChevronDown className="size-4" />
+                    <span className="sr-only">Run with input…</span>
+                  </Button>
+                </div>
                 {/* Issue #383. Present only while a run this view started is actually
                     in flight — which is knowable at all because the host now hands
                     back the run id before the run ends. Hidden once the host has told
@@ -2545,11 +2745,12 @@ export function WorkflowsView({
           )}
         </div>
       ) : (
-        /* Issue #1107: canvas and left rail side by side. `CanvasShell` owns
-           the detail view's column layout and documents which slot a new panel
-           belongs in — left rail, right overlay, or bottom strip. */
+        /* Issue #1107 (extended by #1205): canvas with a rail on each side.
+           `CanvasShell` owns the detail view's column layout and documents
+           which slot a new panel belongs in — left rail, right rail, or right
+           overlay. */
         <CanvasShell
-          rail={
+          leftRail={
             historyOpen && historySupported ? (
               <RunHistoryPanel
                 runs={historyRows}
@@ -2568,6 +2769,37 @@ export function WorkflowsView({
                 hasMore={historyHasMore}
                 onLoadOlder={loadOlder}
                 loadingOlder={loadingOlder}
+              />
+            ) : null
+          }
+          // Issue #1205: `result` and `runFailure` are mutually exclusive by
+          // construction — `run()` clears both on dispatch, and only one arm
+          // of its try/catch sets one — so this is a ternary, not two
+          // independent siblings. Both are per-workflow chrome, so this is
+          // still gated by being inside the `detailOpen` branch, same as the
+          // left rail above.
+          rightRail={
+            result ? (
+              <RunResultPanel
+                result={result}
+                graph={graph}
+                request={ranWith}
+                onClose={() => setResult(null)}
+                // Issue #1002: the whole queue, narrowed by the panel to this
+                // run. Handed in unfiltered on purpose — the Approvals page
+                // reads the same array and must keep showing every row.
+                approvals={approvals}
+                now={approvalsNow}
+                askerNames={askerNames}
+                deciding={decidingApprovals}
+                decided={decidedApprovals}
+                failed={failedApprovals}
+                onDecide={onDecideApproval}
+              />
+            ) : runFailure ? (
+              <RunFailurePanel
+                failure={runFailure}
+                onClose={() => setRunFailure(null)}
               />
             ) : null
           }
@@ -2637,42 +2869,77 @@ export function WorkflowsView({
         </CanvasShell>
       )}
 
-      {/* Issue #1110: the two strips below belong to ONE workflow, so neither
-          may outlive leaving it. Their state is cleared on every selection
-          change, but a drawer is the wrong thing to be wrong about —
-          `detailOpen` makes it structural rather than a promise about ordering.
-          The third drawer this used to cover, run history, is now the detail
-          view's left rail (#1107) and is gated by the same branch structurally:
-          it renders inside `CanvasShell`, which only the detail side has. */}
-      {detailOpen && result && (
-        <RunResultPanel
-          result={result}
-          graph={graph}
-          request={ranWith}
-          onClose={() => setResult(null)}
-          // Issue #1002: the whole queue, narrowed by the panel to this run.
-          // Handed in unfiltered on purpose — the Approvals page reads the same
-          // array and must keep showing every row.
-          approvals={approvals}
-          now={approvalsNow}
-          askerNames={askerNames}
-          deciding={decidingApprovals}
-          decided={decidedApprovals}
-          failed={failedApprovals}
-          onDecide={onDecideApproval}
-        />
-      )}
+      {/* Issue #1110's reasoning, extended by #1205: `result` and `runFailure`
+          are per-workflow chrome that must not outlive leaving the workflow.
+          Both used to render as full-width strips here, below `CanvasShell`.
+          They are now `CanvasShell`'s `rightRail` (see the call above), gated
+          by the very same `detailOpen` branch structurally — a list of
+          workflows has no single run's outcome to show, so there is nothing
+          for a rail to be beside, the same reason run history (#1107) lives
+          inside `CanvasShell` rather than out here. */}
 
-      {/* Issue #1007: the same slot, for the outcome that had no surface at all.
-          The two are mutually exclusive by construction — `run()` clears both on
-          dispatch and only one of its arms sets one — so they are rendered as
-          siblings rather than as a branch. */}
-      {detailOpen && runFailure && (
-        <RunFailurePanel
-          failure={runFailure}
-          onClose={() => setRunFailure(null)}
-        />
-      )}
+      {/* Issue #1204: where the toolbar's run-input box went.
+
+          Both dispatches live here, not just Run. The box fed the toolbar's Run
+          AND its Test run, so a dialog offering only Run would have quietly
+          taken "prove this graph against a real input, without sending
+          anything" away — the rehearsal that matters most for a workflow whose
+          first step reads `=items`. */}
+      <Dialog open={runInputOpen} onOpenChange={setRunInputOpen}>
+        <DialogContent className="sm:max-w-lg" data-testid="workflow-run-input-dialog">
+          <DialogHeader>
+            <DialogTitle>Run with input</DialogTitle>
+            {/* Says what the payload DOES, which the bare placeholder never
+                did. An operator who has to guess whether their graph reads this
+                will guess wrong in both directions. */}
+            <DialogDescription>
+              What this run should work on. It is handed to the workflow&rsquo;s first
+              step, and any step bound to <code className="font-mono">=items</code>{" "}
+              reads it. Leave it empty to run the workflow as its schedule does.
+            </DialogDescription>
+          </DialogHeader>
+          <Input
+            autoFocus
+            value={request}
+            onChange={(e) => setRequest(e.target.value)}
+            onKeyDown={(e) => {
+              // Enter runs, exactly as it did from the toolbar box (#154).
+              if (e.key === "Enter") runWithInput(false);
+            }}
+            placeholder="What should this run work on?"
+            aria-label="Request for this run"
+          />
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setRunInputOpen(false)}
+              data-testid="workflow-run-input-cancel"
+            >
+              Cancel
+            </Button>
+            {/* Issue #542&apos;s test run, carrying the same payload. Outline
+                beside the filled Run for the same reason it is outline on the
+                toolbar: it is the rehearsal, not the act. */}
+            <Button
+              variant="outline"
+              onClick={() => runWithInput(true)}
+              disabled={!selectedId || running || loadingGraph}
+              data-testid="workflow-run-input-test-run"
+            >
+              <FlaskConical className="mr-1.5 size-4" />
+              Test run
+            </Button>
+            <Button
+              onClick={() => runWithInput(false)}
+              disabled={!selectedId || running || loadingGraph}
+              data-testid="workflow-run-input-submit"
+            >
+              <Play className="mr-1.5 size-4" />
+              Run
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <WorkflowCreateDialog
         client={client}

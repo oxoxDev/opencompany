@@ -101,17 +101,79 @@ The orchestrator's `run_workflow` tool summary
 `DeliveryReason` and never `detail` — the closed set is the log-safe half of the
 pair (issue #248), and a summary rides wherever the model's turn rides.
 
-## Not in scope
+## What counts as undelivered
 
-**What counts as undelivered is unchanged**: any row that is neither `sent` nor
-`pending`, exactly as the console's badge, the scheduler's log line and the SSE
-toast have always counted it. Three reasons that land on `skipped` arguably do
-not belong in that count — `already-delivered`, `no-destination-configured` and
-`dry-run` each describe a report that was never owed to an address — but
-reclassifying them moves the badge and the verdict apart unless every surface
-moves together. That is its own change; this one moved the ladder to the host
-without moving the rungs.
+A report is undelivered when it **did not reach a destination and will not
+without a change**. `crate::ports::is_undelivered` is the one rung, and every
+surface stands on it: the verdict above, the scheduler's alert number, the
+sidecar's and the orchestrator's run summaries, the console's "N not delivered"
+badge, the SSE toast, and the per-node marker the console paints on the `output`
+node itself.
+
+`sent` landed. `pending` is a report parked for an operator's approval, counted
+by `awaiting_count` instead — counting it here would score a working approvals
+queue as a failure. `denied` and `failed` always count.
+
+`skipped` is the interesting one, because the delivery path writes it for three
+genuinely different situations. The axis that separates them is **whether the
+report's fate is accounted for** (issue #981):
+
+| reason | counts? | why |
+| --- | --- | --- |
+| `already-delivered` | no | an earlier run in this approval lineage **sent it** (issue #438). Approving a gate re-runs the graph from the trigger, so every upstream `output` node is reached again; the report is at its destination. |
+| `dry-run` | no | a test run (issue #542). Nothing was attempted, on purpose, in a mode the operator chose. |
+| `no-destination-configured` | **yes** | the report was produced and then **lost**, with nothing accounting for it (issue #925). |
+
+The third is the deliberate non-move, and it is the reason the other two could
+move at all. That row exists precisely so "the author routed nothing on purpose"
+and "the author never configured a destination" stop being the same observation;
+excusing it here would restore the silence issues #947 and #963 were filed
+about. The earlier framing — that all three "describe a report that was never
+owed to an address" — reads the wrong axis: a report with nowhere to go was owed
+to nobody *because the graph is wrong*, which is the finding, not the excuse.
+
+The match on `DeliveryStatus` is exhaustive and only the `skipped` arm reads a
+reason, so a new status cannot be added without classifying it. A row carrying
+`unspecified` — the only reachable value on a `WorkflowRunFinished` journaled
+before issue #248 added the field — counts, which is the safe direction.
+
+## The node cell answers a different question
+
+`nodes[].status` stays `ok | error | blocked` and a delivery failure still does
+not move it. The node cell answers **"did the engine run this step?"**, and the
+honest answer for a dropped report is yes: delivery is post-engine, the node ran,
+its work is valid, and the fix is a destination or a runtime wiring.
+
+Issue #981's second report was that the console then showed `ok` on the output
+node of a run reading `undelivered` — two readings contradicting each other on
+one screen. The resolution is **not** a fourth status word:
+
+* `frontend/src/views/workflows/graph.ts`'s `nodeStateFrom` fail-safes any status
+  it does not recognise to `error`, so a new word would make every console
+  predating it paint a node that ran perfectly as failed;
+* one field would then answer two questions decided by two subsystems at two
+  different times — the collapse issues #383 and #881 each had to undo once.
+
+Instead the node cell stops being alone. `DeliveryReport.node` carries the
+`output` node's id, so the console joins the delivery rows to the nodes locally —
+**no new wire field, and no third notion of "this run did not fully work"**. Three
+surfaces render the join beside the node's own state, each explicitly labelled so
+the two facts read as different questions rather than as a contradiction:
+
+* the canvas node keeps its green ring and `DONE` badge and gains a
+  `report not delivered` strip (and a tooltip that says "This step ran. Its
+  report did not go out.");
+* the run drawer's **Steps** row keeps its `ok` badge and gains a
+  `not delivered` badge beside it;
+* the history panel's node chip keeps its green dot and gains a red
+  `not delivered` segment.
+
+`undeliveredNodes` in `frontend/src/views/workflows/run-health.ts` is that join,
+folding the same `isUndelivered` the counts use.
+
+## Not in scope
 
 The SSE `workflow_run_finished` frame carries no verdict. It already reads the
 delivery rows correctly and toasts an undelivered report, so nothing there
-scores a dropped report green.
+scores a dropped report green — it now toasts through the shared predicate, so a
+test run no longer warns that a report it never attempted "didn't go out".

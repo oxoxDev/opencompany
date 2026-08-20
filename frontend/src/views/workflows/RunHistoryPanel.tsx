@@ -30,6 +30,7 @@ import {
   runDuration,
   runTone,
   undeliveredCount,
+  undeliveredNodes,
 } from "./run-health";
 
 /** Badge styling per delivery outcome. A report that did NOT go out must not
@@ -52,9 +53,11 @@ export function DeliveryRows({ deliveries }: { deliveries: DeliveryReport[] }) {
   // broken — badging it red alongside a transport failure would send them
   // hunting for a bug when the fix is a click in Approvals.
   const pending = deliveries.filter((d) => d.status === "pending").length;
-  const undelivered = deliveries.filter(
-    (d) => d.status !== "sent" && d.status !== "pending",
-  ).length;
+  // Issue #981: the shared rung, not a fourth transcription of it. The filter
+  // this replaces badged every test run "1 not delivered" — a `dry-run` row is
+  // a report nothing attempted, on purpose — and said the same of a gate
+  // continuation whose report an earlier run had already sent.
+  const undelivered = undeliveredCount(deliveries);
   return (
     <div className="mb-3 space-y-1.5 rounded-lg border bg-background/40 p-2">
       <div className="flex items-center gap-2">
@@ -341,6 +344,12 @@ function RunHistoryRow({
 }) {
   const tone = runTone(run);
   const nodes = run.nodes ?? [];
+  // Issue #981: which of those nodes produced a report that never went out.
+  // Joined off `DeliveryReport.node` — the same rows the delivery block below
+  // renders — so the chip and the block cannot disagree, and so the node the
+  // operator clicks into stops claiming a clean run this row calls
+  // `not delivered`.
+  const droppedNodes = undeliveredNodes(run.deliveries);
   // Issue #881 / #880: read once, so the chip, the badge and the terminal line
   // below cannot disagree about whether this run stopped for a person.
   const blocked = run.blockedNodes ?? [];
@@ -439,7 +448,11 @@ function RunHistoryRow({
           data-testid="workflow-run-nodes"
         >
           {nodes.map((node) => (
-            <RunNodeChip key={`${node.nodeId}-${node.elapsedMs}`} node={node} />
+            <RunNodeChip
+              key={`${node.nodeId}-${node.elapsedMs}`}
+              node={node}
+              undelivered={droppedNodes.has(node.nodeId)}
+            />
           ))}
         </div>
       )}
@@ -646,8 +659,23 @@ function RunHistoryRow({
   );
 }
 
-/** One node's outcome in a history row: its id, how it went, how long it took. */
-function RunNodeChip({ node }: { node: WorkflowRunNode }) {
+/** One node's outcome in a history row: its id, how it went, how long it took —
+ * and, since issue #981, whether the report it produced actually went out.
+ *
+ * The two are separate facts and the chip states them separately. `node.status`
+ * answers "did the engine run this step?", and for a dropped report the honest
+ * answer is `ok`: delivery happens after the engine returns, so the node really
+ * did run and its work stands. What was wrong was that the chip said only that,
+ * beside a run the same panel scored `undelivered`. So the green dot stays and a
+ * second, labelled segment carries the delivery — nothing here is re-tinted to
+ * mean something it does not. */
+function RunNodeChip({
+  node,
+  undelivered,
+}: {
+  node: WorkflowRunNode;
+  undelivered: boolean;
+}) {
   // Issue #881: three tones, not two. A blocked step is neither green nor red —
   // painting it red sends an operator hunting for a bug when the fix is a click
   // in Approvals, and painting it green is the lie the issue was filed about.
@@ -680,6 +708,16 @@ function RunNodeChip({ node }: { node: WorkflowRunNode }) {
           ? `${node.elapsedMs}ms`
           : `${(node.elapsedMs / 1000).toFixed(1)}s`}
       </span>
+      {undelivered && (
+        <span
+          className="flex items-center gap-1 border-l border-status-failed/40 pl-1.5 text-[var(--status-failed-text)]"
+          data-testid="workflow-run-node-undelivered"
+          title="This step ran. Its report did not go out — see Report delivery below."
+        >
+          <span className="size-1.5 rounded-full bg-status-failed" />
+          not delivered
+        </span>
+      )}
     </span>
   );
 }

@@ -125,7 +125,7 @@ test("first-run setup builds a real team from three answers", async ({ page, req
   expect(roster.length).toBeGreaterThanOrEqual(4);
 
   // 6. And the Team page shows that roster, refreshed without a reload.
-  await page.goto("/#/team");
+  await page.goto("/#/company");
   for (const member of roster.slice(0, 3)) {
     await expect(page.getByText(member.role, { exact: false }).first()).toBeVisible();
   }
@@ -153,7 +153,7 @@ test("skipping setup leaves a way back in", async ({ page, request }) => {
   await expect(page.getByTestId("setup-dialog")).toBeHidden();
 
   // Skipping must not be a dead end: the Team page keeps offering it in place.
-  await page.goto("/#/team");
+  await page.goto("/#/company");
   await expect(page.getByTestId("setup-prompt")).toBeVisible({ timeout: 20_000 });
 
   // And nothing was created by skipping.

@@ -3,7 +3,8 @@ import { Check, CircleDot, Copy, Hash, Lock, PanelLeft, Users } from "lucide-rea
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { channelTitle, type Channel } from "./model";
+import { Avatar } from "./Avatar";
+import { channelSubtitle, channelTitle, dmFace, type Channel } from "./model";
 
 interface Props {
   channel: Channel;
@@ -18,10 +19,15 @@ interface Props {
 /**
  * The bar above a channel's timeline.
  *
- * It is deliberately thin — a kind icon, the name, and the purpose in the
- * tooltip — with the two things you actually reach for on the right: the
- * member pane and a copy of the channel name. The copy button only appears on
- * hover so the title reads clean at rest.
+ * It is deliberately thin — a kind mark (the teammate's avatar on a DM), the
+ * name, and a muted second line past the divider — with the two things you
+ * actually reach for on the right: the member pane and a copy of the channel
+ * name. The copy button only appears on hover so the title reads clean at rest.
+ *
+ * That second line is [`channelSubtitle`], which answers `null` when the only
+ * thing it could say is what the title already says. The whole `<span>` goes
+ * with it: it carries the `border-l` that draws the divider, so rendering it
+ * empty would leave a rule hanging beside the name with nothing after it.
  */
 export function ChatHeader({
   channel,
@@ -32,6 +38,7 @@ export function ChatHeader({
 }: Props) {
   const [copied, setCopied] = useState(false);
   const title = channelTitle(channel);
+  const subtitle = channelSubtitle(channel);
 
   async function copyName() {
     try {
@@ -61,7 +68,7 @@ export function ChatHeader({
         <KindIcon channel={channel} />
         <h1
           className="min-w-0 truncate text-base font-semibold tracking-tight"
-          title={channel.purpose}
+          title={subtitle ?? undefined}
         >
           {channel.name}
         </h1>
@@ -75,9 +82,11 @@ export function ChatHeader({
         >
           {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
         </Button>
-        <span className="hidden min-w-0 truncate border-l pl-2 text-xs text-muted-foreground sm:block">
-          {channel.purpose}
-        </span>
+        {subtitle && (
+          <span className="hidden min-w-0 truncate border-l pl-2 text-xs text-muted-foreground sm:block">
+            {subtitle}
+          </span>
+        )}
       </div>
 
       <Button
@@ -98,9 +107,27 @@ export function ChatHeader({
   );
 }
 
+/**
+ * What sits to the left of the title: a channel's kind, or a DM's teammate.
+ *
+ * A channel has no face, so `#` and `Lock` are the honest marks for one. A DM
+ * has exactly one person on the other end, and drawing a glyph for them while
+ * the rail row a few pixels away drew their mascot gave one teammate two faces
+ * on one screen (issue #1170). Both now seed off [`dmFace`], so they cannot
+ * disagree about who you are talking to.
+ *
+ * `size-6` — 24px — rather than the rail's 20px: this header has the room, and
+ * 24px is the floor `Avatar`'s `markOnly` draws for a mascot being legible
+ * rather than a smudge, so the drawing is worth rendering at all here.
+ */
 function KindIcon({ channel }: { channel: Channel }) {
   const cls = "size-4 shrink-0 text-muted-foreground";
-  if (channel.kind === "dm") return <CircleDot className={cls} aria-hidden />;
+  if (channel.kind === "dm") {
+    const face = dmFace(channel);
+    // A DM with no roster entry behind it has nobody to draw — the rail falls
+    // back to the same glyph rather than inventing a face for a stranger.
+    return face ? <Avatar {...face} className="size-6" /> : <CircleDot className={cls} aria-hidden />;
+  }
   if (channel.private) return <Lock className={cls} aria-hidden />;
   return <Hash className={cls} aria-hidden />;
 }

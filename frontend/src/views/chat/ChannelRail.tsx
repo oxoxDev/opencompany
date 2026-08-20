@@ -4,7 +4,7 @@ import { ChevronRight, CircleDot, Hash, Lock, SquarePen } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Avatar } from "./Avatar";
-import type { Channel, ChannelSection } from "./model";
+import { channelSubtitle, dmFace, type Channel, type ChannelSection } from "./model";
 
 /**
  * What an unread badge actually claims (issue #364).
@@ -148,7 +148,12 @@ function ChannelRow({
       type="button"
       onClick={() => onSelect(channel.id)}
       aria-current={active ? "page" : undefined}
-      title={channel.purpose}
+      // The row's own label is `channel.name`, so a tooltip that resolves to
+      // the same string is the header's issue-#1180 duplicate in a slower
+      // form: you hover for a second fact and get the one already under the
+      // cursor. No tooltip at all is the better answer, and `undefined` — not
+      // `""` — is what suppresses the native bubble.
+      title={channelSubtitle(channel) ?? undefined}
       className={cn(
         "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
         active
@@ -178,8 +183,9 @@ function ChannelRow({
 
 function ChannelIcon({ channel }: { channel: Channel }) {
   if (channel.kind === "dm") {
-    return channel.member ? (
-      <Avatar name={channel.name} tone={channel.tone} className="size-5 text-3xs" />
+    const face = dmFace(channel);
+    return face ? (
+      <Avatar {...face} className="size-5 text-3xs" />
     ) : (
       <CircleDot className="size-4 shrink-0" aria-hidden />
     );

@@ -145,6 +145,33 @@ export function initials(name: string): string {
   );
 }
 
+/**
+ * The muted line that sits under a teammate's name, or `null` when there is
+ * nothing left to say (issue #1208).
+ *
+ * A roster row carries a `name` and a `role`, and the console's own fallback
+ * makes them the same string whenever the host sends no display name:
+ * `fromDto` below resolves `name` as `dto.name?.trim() || dto.role`, and a
+ * manifest-declared agent has no `name` at all — `GET {scope}/team` answers
+ * `{"id":"backend_engineer","role":"Backend Engineer",…}`. Every surface that
+ * drew the title and then the role drew the same words twice.
+ *
+ * Answering `null` rather than an empty string is deliberate: a caller has to
+ * skip the element, not render an empty one, or the layout keeps the gap the
+ * repeat used to fill.
+ *
+ * Compared case-insensitively and whitespace-trimmed, because the two strings
+ * come from different places — one may have been typed by an operator into the
+ * add-teammate dialog while the other came out of a manifest — and "Backend
+ * engineer" under "Backend Engineer" is the same repeat wearing a different
+ * capital.
+ */
+export function roleSubtitle(name: string, role: string): string | null {
+  const trimmed = role.trim();
+  if (!trimmed) return null;
+  return trimmed.toLowerCase() === name.trim().toLowerCase() ? null : trimmed;
+}
+
 /** Map a host roster entry into the console's team model. */
 export function fromDto(dto: TeamMemberDto): TeamMember {
   const name = dto.name?.trim() || dto.role;

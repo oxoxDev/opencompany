@@ -30,7 +30,14 @@ export function RunFailurePanel({
   // died after four minutes got somewhere first.
   const ranFor = Math.max(0, failure.atMillis - failure.startedAtMillis);
   return (
-    <div className="border-t bg-card/60" data-testid="workflow-run-failure">
+    // Issue #1205: a right rail at `xl`, the bottom strip it used to always be
+    // below that — same pattern as `RunResultPanel` next door, which is the
+    // mutually exclusive sibling this panel replaces in the same slot.
+    <aside
+      aria-label="Run failure"
+      className="flex h-full flex-col border-t bg-card/60 xl:border-t-0 xl:border-l"
+      data-testid="workflow-run-failure"
+    >
       <div className="flex items-center justify-between px-4 py-2">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-medium">Run failed</span>
@@ -57,7 +64,8 @@ export function RunFailurePanel({
           Dismiss
         </Button>
       </div>
-      <div className="max-h-72 overflow-auto px-4 pb-3">
+      {/* Capped as a strip, growing as a rail — see `RunResultPanel`'s body. */}
+      <div className="max-h-72 overflow-auto px-4 pb-3 xl:min-h-0 xl:max-h-none xl:flex-1">
         <Alert variant="destructive" className="py-2">
           <AlertDescription
             className="text-xs"
@@ -87,16 +95,20 @@ export function RunFailurePanel({
         )}
         {/* Two genuinely different next steps, and collapsing them sends the
             operator to the wrong place. A host that answered has journaled the
-            run (#228), so its per-node trail is one drawer down. Something that
+            run (#228), so its per-node trail is in Run history. Something that
             gave up in between may have left no run at all — and telling someone
             to look in History for a row that does not exist is how a transport
-            failure comes to read as a missing feature. */}
+            failure comes to read as a missing feature.
+
+            No positional wording ("below") on purpose: History has been a left
+            rail since #1107, and this panel is itself a right rail since #1205,
+            so neither is spatially "below" the other. */}
         <p className="mt-2 text-2xs text-muted-foreground">
           {failure.fromHost
-            ? "The host records failed runs, so this one is in Run history below with the step it stopped at."
-            : "The request didn't complete, so the host may or may not have started this run. Run history below is the answer either way."}
+            ? "The host records failed runs, so this one is in Run history, with the step it stopped at."
+            : "The request didn't complete, so the host may or may not have started this run. Run history is the answer either way."}
         </p>
       </div>
-    </div>
+    </aside>
   );
 }

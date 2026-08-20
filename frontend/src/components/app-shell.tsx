@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  AppWindow,
+  // AppWindow,  // re-add with the Pages nav entry below
   FolderClosed,
   LayoutDashboard,
   type LucideIcon,
@@ -40,9 +40,8 @@ import {
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
 import {
-  AutoCollapse,
   RESTING_ROW,
-  SidebarCollapseToggle,
+  SidebarCollapseButton,
   SidebarControls,
 } from "@/components/sidebar-controls";
 import { SetupController } from "@/setup/SetupController";
@@ -71,7 +70,7 @@ import { writeLastChannel } from "@/lib/last-channel";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
 import { Overview } from "@/views/Overview";
-import { OrgChartView } from "@/views/company/OrgChartView";
+import { CompanyView } from "@/views/company/CompanyView";
 import { ChatView } from "@/views/ChatView";
 import {
   channelIdForThread,
@@ -156,7 +155,12 @@ const NAV: NavItem[] = [
   // Agent-authored internal dashboard pages, rendered in a sandboxed iframe
   // (docs/spec/runtime/pages.md). Placed beside Workflows: both are the
   // "something an agent built" surfaces, as opposed to the fixed views above.
-  { view: "pages", label: "Pages", icon: AppWindow },
+  // Pages is deliberately not offered in the nav. The view and its `#/pages`
+  // route stay live, so an address or an existing link still resolves — this
+  // is the same treatment `feedback`, `inbox`, `memory`, `finances`,
+  // `conversation` and `team` already get. Do not "fix" the omission by
+  // adding it back.
+  // { view: "pages", label: "Pages", icon: AppWindow },
   { view: "settings", label: "Settings", icon: Settings2 },
 ];
 
@@ -169,9 +173,18 @@ const NAV: NavItem[] = [
  * are untouched, and re-listing one in `NAV` above is all it takes to bring it
  * back. Conversation and Team are the surfaces the Chat workspace replaces —
  * everything they can do it can do in one screen, including the teammate
- * budget controls `MembersPane` ported from Team (issue #360) — but they
- * keep answering `#/conversation` and `#/team` until the chat covers the
- * last of what they still do better (a desk's persisted transcript).
+ * budget controls `MembersPane` ported from Team (issue #360) — but
+ * Conversation keeps answering `#/conversation` until the chat covers the
+ * last of what it still does better (a desk's persisted transcript).
+ *
+ * `team` is here for a narrower reason than it used to be (issue #1141). Bare
+ * `#/team` no longer resolves to it at all — `REWRITE_RETIRED` sends that to
+ * `#/company`, whose Cards half is the grid it used to draw. What this line
+ * keeps alive is `#/team/<agentId>`: the teammate detail page, deliberately a
+ * page rather than a modal so it can be linked, and linked to today from the
+ * org chart's seats, its "Not on a desk" chips and the chat member pane. Drop
+ * `team` from this list and `useHashView` discards the head *and* its sub-page,
+ * so every one of those lands on Overview instead of the teammate they named.
  *
  * `tasks` is here for a different reason than the rest, and it is the load-
  * bearing line of issue #1140. The board page is gone, but `#/tasks/<id>` is
@@ -195,6 +208,28 @@ const HIDDEN_VIEWS: View[] = [
 const VIEWS: View[] = [...NAV.map((i) => i.view), ...HIDDEN_VIEWS];
 
 /**
+ * Views whose **nav row always means the parent page**, never the sub-page the
+ * operator was last on.
+ *
+ * Remembering a sub-segment per view is right for a tab whose sub-pages are
+ * places *within* it — `#/workflows/<id>` is still Workflows, and returning to
+ * the tab should not throw away which workflow was open.
+ *
+ * Company is not that (issue #1193). Its segments are two different surfaces:
+ * `#/company` is the roster and `#/company/desks` is the org chart, which is
+ * where desks are created, deleted and re-staffed. Remembering the segment
+ * would mean an operator who once opened Desks gets the org chart every time
+ * they click Company afterwards — the same "the page opens on the chart for
+ * someone who wanted their team" failure that the remembered *mode* had, wearing
+ * a different mechanism. #1193 removed the mode; this keeps the route honest.
+ *
+ * Explicit addresses are untouched: a `#/company/desks` link, a `#/company/<deskId>`
+ * deep link from chat (issue #485), and `onNavigate` all pass a segment
+ * outright, and this only governs the no-segment case.
+ */
+const NAV_ALWAYS_PARENT = new Set<View>(["company"]);
+
+/**
  * `#/tasks` with no card named the board page, which is retired (issue #1140).
  *
  * It lands where the board actually lives now, so a bookmark, a habit, or a
@@ -209,10 +244,18 @@ const VIEWS: View[] = [...NAV.map((i) => i.view), ...HIDDEN_VIEWS];
 const REWRITE_RETIRED = (
   head: string,
   sub: string | null,
-): [View, string | null] | null =>
-  head === "tasks" && taskIdFromSegment(sub) === null
-    ? ["ledgers", BOARD_LEDGER]
-    : null;
+): [View, string | null] | null => {
+  if (head === "tasks" && taskIdFromSegment(sub) === null) return ["ledgers", BOARD_LEDGER];
+  // Bare `#/team` is the Company page now (issue #1141). It rendered the
+  // teammate card grid from a route with no nav entry, so nobody arrived at it;
+  // the grid is Company's Cards half, and leaving `#/team` answering as well
+  // would leave two live addresses drawing one grid with no relationship
+  // between them. A named teammate is untouched — `#/team/<agentId>` is the
+  // detail sub-page (issue #264), it is what the org chart's rows and the chat
+  // pane's chips link to, and it is deliberately a page so it can be linked.
+  if (head === "team" && !sub) return ["company", null];
+  return null;
+};
 
 /** How many workflow run-progress frames (issue #371) the shell keeps for the
  * Workflows canvas. A run emits roughly one per node, so this holds many runs'
@@ -337,7 +380,9 @@ export function AppShell({
         navigate(next, nextSub);
         return;
       }
-      const remembered = lastSubByViewRef.current[next];
+      const remembered = NAV_ALWAYS_PARENT.has(next)
+        ? undefined
+        : lastSubByViewRef.current[next];
       if (remembered) {
         navigate(next, remembered);
         return;
@@ -1292,22 +1337,39 @@ export function AppShell({
       {/* Mobile turns the sidebar into a sheet, so its own collapse control is
           not mounted while it is closed. Keep the way back fixed to the
           viewport and below the page controls rather than competing with a
-          view's toolbar. Desktop keeps the labelled collapse row in the
-          sidebar itself. */}
+          view's toolbar. Desktop keeps its own collapse button in the
+          sidebar's header. */}
       <SidebarTrigger
         aria-label="Toggle sidebar"
         className="fixed bottom-4 left-4 z-50 md:hidden"
       />
-      <AutoCollapse view={view} />
       <Sidebar collapsible="icon">
         <SidebarHeader>
-          {/* Which host, and how every host is doing. It sits above the collapse
-              toggle because it names where you are — the first thing the column
-              should answer — and it is the only control here that can take you
-              somewhere else entirely. See `host-switcher.tsx`; it replaced the
-              icon rail that used to stand outside this sidebar (issue #1142). */}
-          <HostSwitcher companyName={feed.status.name} />
-          <SidebarCollapseToggle />
+          {/* The header is the column talking about itself: which host this
+              console is looking at, and whether the column is showing.
+              Everything BELOW it — the nav group and the footer's standing
+              controls — takes you somewhere. Collapse used to be the first row
+              under the switcher, which put a chrome control at the head of a
+              list of destinations and made it read as one (issue #1177).
+
+              `flex-col` on the rail is not a preference. The collapsed column
+              is `--sidebar-width-icon` (3rem) and this block is `p-2`, leaving
+              32px — the exact width of the switcher's glyph, with nothing left
+              over to put beside it. See `SidebarCollapseButton`. */}
+          <div className="flex items-center gap-1.5 group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:gap-1">
+            {/* Which host, and how every host is doing. It leads because it
+                names where you are — the first thing the column should answer
+                — and it is the only control here that can take you somewhere
+                else entirely. See `host-switcher.tsx`; it replaced the icon
+                rail that used to stand outside this sidebar (issue #1142).
+
+                `min-w-0` so the nameplate truncates instead of pushing the
+                button off the end of a 13.5rem column. */}
+            <div className="min-w-0 flex-1 group-data-[collapsible=icon]:w-full group-data-[collapsible=icon]:flex-none">
+              <HostSwitcher companyName={feed.status.name} />
+            </div>
+            <SidebarCollapseButton />
+          </div>
         </SidebarHeader>
         <SidebarContent data-tour="sidebar">
           <SidebarGroup>
@@ -1373,7 +1435,7 @@ export function AppShell({
             <Overview client={client} company={company} />
           )}
           {view === "company" && (
-            <OrgChartView
+            <CompanyView
               client={client}
               company={company}
               // Issue #485: chat's member pane links in at a desk
@@ -1382,7 +1444,24 @@ export function AppShell({
               // had no per-desk address to link to. `useHashView` hands the
               // segment back unvalidated, so the chart resolves an unknown id
               // itself rather than this shell guessing which desks exist.
-              focusDeskId={sub}
+              //
+              // Issue #1193: and the segment decides the surface outright.
+              // Nothing (`#/company`) is the roster; `desks` is the org chart;
+              // anything else is a desk on it. There is no remembered mode to
+              // disagree with the address.
+              sub={sub}
+              onNavigate={(next) => navigate("company", next ?? undefined)}
+              // The roster half's own sub-page is `#/team/<agentId>`, not a
+              // second segment of this view — the teammate detail page is a
+              // linkable address of its own (issue #264) and stays one.
+              onOpenAgent={(agentId) =>
+                agentId ? navigate("team", agentId) : navigate("company")
+              }
+              // Setup just staffed the company, so the roster read is stale.
+              refreshKey={teamBuilt}
+              // Skipping setup must not be a dead end: an unstaffed company keeps
+              // a visible way back in.
+              onRunSetup={() => setSetupForced(true)}
             />
           )}
           {view === "chat" && (
@@ -1484,16 +1563,24 @@ export function AppShell({
               onReviewApprovals={(taskId) => navigate("approvals", encodeURIComponent(taskId))}
             />
           )}
+          {/*
+            `#/team/<agentId>` only. Bare `#/team` is rewritten to `#/company`
+            below (issue #1141) — the grid it used to render is the Company
+            page's Cards half now, and two addresses drawing the same grid is
+            the ambiguity that rewrite exists to remove.
+
+            The sub-page comes back unvalidated, as `useHashView` documents:
+            only this view knows which ids exist, and the detail screen resolves
+            an unknown one against the host rather than guessing here.
+          */}
           {view === "team" && (
             <TeamView
               client={client}
               company={company}
-              // `#/team/<agentId>` opens that agent (issue #264). The sub-page
-              // comes back unvalidated, as `useHashView` documents: only this
-              // view knows which ids exist, and the detail screen resolves an
-              // unknown one against the host rather than guessing here.
               sub={sub}
-              onOpenAgent={(agentId) => navigate("team", agentId ?? undefined)}
+              onOpenAgent={(agentId) =>
+                agentId ? navigate("team", agentId) : navigate("company")
+              }
               // Setup just staffed the company, so the roster read is stale.
               refreshKey={teamBuilt}
               // Skipping setup must not be a dead end: an unstaffed company keeps

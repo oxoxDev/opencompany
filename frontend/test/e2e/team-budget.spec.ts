@@ -29,7 +29,7 @@ import { expect, test } from "@playwright/test";
 test("the Team page shows a capped teammate's daily budget and omits it for uncapped ones", async ({
   page,
 }) => {
-  await page.goto("/#/team");
+  await page.goto("/#/company");
 
   const cards = page.getByTestId("team-card");
   await expect(cards.first()).toBeVisible({ timeout: 30_000 });
@@ -56,7 +56,7 @@ test("the Team page shows a capped teammate's daily budget and omits it for unca
     localStorage.clear();
     sessionStorage.clear();
   });
-  await page.goto("/#/team");
+  await page.goto("/#/company");
   await expect(
     page.getByTestId("team-card").filter({ hasText: "Writer" }).first().getByTestId("team-budget"),
   ).toHaveText(/\$5\.00\/day/, { timeout: 30_000 });

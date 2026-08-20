@@ -12,12 +12,21 @@
 //
 // WHAT A CARD IS ALLOWED TO SAY is the whole design constraint here. Two
 // requests back this surface — `GET …/workflows` (id, name, description,
-// editable) and `GET …/workflows/runs` (the company-wide run journal) — and a
-// card renders strictly what those two carry. In particular it does NOT show a
-// schedule or a node count: both live only in the full graph, which is a
-// per-workflow `GET …/workflows/{wid}`, and fetching one per card would be an
-// N+1 on every render of this panel. Showing "no schedule" without having
-// looked would be a lie, so the card says nothing at all about schedules.
+// editable, enabled) and `GET …/workflows/runs` (the company-wide run journal)
+// — and a card renders strictly what those two carry. In particular it does NOT
+// show *when* a workflow is scheduled, or a node count: both live only in the
+// full graph, which is a per-workflow `GET …/workflows/{wid}`, and fetching one
+// per card would be an N+1 on every render of this panel. Showing "no schedule"
+// without having looked would be a lie, so the card never names a cron.
+//
+// It does say whether a schedule is OFF (issue #1209), because `enabled` is on
+// the list wire and needs no second request. The two are different claims: "it
+// runs at 02:15" needs the graph, "it will not start on its own" does not. The
+// host disarms every workflow created with a schedule (#276's rule), so a
+// company's scheduled workflows arrive paused — and without this badge an
+// operator who authored one is shown a row indistinguishable from the ones that
+// do fire. The detail header has said it since #276 (`workflow-paused-badge`);
+// this is the same reading, on the surface an operator meets first.
 
 import type { WorkflowRunOutcome, WorkflowSummary } from "@/api/workflows";
 import { Badge } from "@/components/ui/badge";
@@ -34,6 +43,34 @@ import {
 
 /** Which rendering the index is showing. Persisted by the caller. */
 export type IndexMode = "cards" | "list";
+
+/** The one sentence a paused row is allowed to say, and the way out of it.
+ * Named once because a card and a list row both carry it (the same reason
+ * {@link NO_RUNS_LABEL} is a constant) and two copies would drift. */
+const PAUSED_TITLE =
+  "This workflow's schedule is off, so it won't start on its own. " +
+  "Open it and press Resume to arm it.";
+
+/**
+ * The "this will not fire" badge, or `null` when the workflow is armed.
+ *
+ * Issue #276's rule, repeated exactly as the `editable` checks beside it
+ * repeat #259's: only an explicit `false` is off. A host predating #276 sends no
+ * field, and `undefined` must not render every workflow as paused.
+ */
+function PausedBadge({ enabled }: { enabled: boolean | undefined }) {
+  if (enabled !== false) return null;
+  return (
+    <Badge
+      variant="outline"
+      className="h-4 shrink-0 px-1.5 text-3xs font-normal border-status-blocked/40 bg-status-blocked-soft"
+      title={PAUSED_TITLE}
+      data-testid="workflow-index-paused"
+    >
+      Paused
+    </Badge>
+  );
+}
 
 /** How many recent runs the health strip shows per workflow. */
 const STRIP_RUNS = 5;
@@ -150,18 +187,23 @@ function WorkflowCard({
     >
       <div className="flex items-start justify-between gap-2">
         <span className="min-w-0 truncate text-sm font-semibold">{workflow.name}</span>
-        {/* Issue #259's rule, repeated exactly: only an explicit `false` is a
-            refusal — a host predating it sends no field, and `undefined` must
-            not render as "you can't edit this". */}
-        {workflow.editable === false && (
-          <Badge
-            variant="outline"
-            className="h-4 shrink-0 px-1.5 text-3xs font-normal"
-            title="Defined by a file in the company source tree, so it can't be changed or removed from the console."
-          >
-            in source
-          </Badge>
-        )}
+        <span className="flex shrink-0 items-center gap-1">
+          {/* Paused first: it is the one that changes whether this workflow
+              does anything, and "in source" only qualifies who may edit it. */}
+          <PausedBadge enabled={workflow.enabled} />
+          {/* Issue #259's rule, repeated exactly: only an explicit `false` is a
+              refusal — a host predating it sends no field, and `undefined` must
+              not render as "you can't edit this". */}
+          {workflow.editable === false && (
+            <Badge
+              variant="outline"
+              className="h-4 shrink-0 px-1.5 text-3xs font-normal"
+              title="Defined by a file in the company source tree, so it can't be changed or removed from the console."
+            >
+              in source
+            </Badge>
+          )}
+        </span>
       </div>
 
       {workflow.description ? (
@@ -226,7 +268,8 @@ function WorkflowRow({
           {workflow.name}
         </span>
         {/* Issue #1136: inside the name cell, not floating between columns —
-            the badge qualifies the name, so it travels with it. */}
+            the badges qualify the name, so they travel with it. */}
+        <PausedBadge enabled={workflow.enabled} />
         {workflow.editable === false && (
           <Badge
             variant="outline"

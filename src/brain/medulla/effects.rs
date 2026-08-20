@@ -14,7 +14,6 @@ use crate::ports::types::{
     ChunkAddr, CompanyEvent, ContextChunk, ContextOp, ContextOpResult, Effect, EffectGroup,
     LedgerEntry, OutboundMessage, Verdict,
 };
-use crate::ports::workflow_runner::DeliveryStatus;
 
 use super::wire::{EffectFrame, Role, WireEvent};
 
@@ -383,10 +382,15 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
                     format!("{how} run of workflow {workflow_id} was stopped by an operator")
                 }
                 None => {
-                    let undelivered = deliveries
-                        .iter()
-                        .filter(|d| !matches!(d.status, DeliveryStatus::Sent))
-                        .count();
+                    // Issue #981: `crate::ports::is_undelivered`, not a fourth
+                    // transcription of the rule. The local filter this replaces
+                    // counted anything that was not `Sent` — which folded in
+                    // `Pending`, so a report parked for an operator's approval
+                    // was reported to the sidecar as "1 not delivered, 1 pending
+                    // approval" on the same line: the same row, counted twice,
+                    // once as a loss it is not. It also counted a test run's
+                    // rows and a continuation's already-sent ones.
+                    let undelivered = crate::ports::undelivered_count(deliveries);
                     format!(
                         "{how} run of workflow {workflow_id} finished — {} report(s) routed, \
                          {undelivered} not delivered, {} pending approval",
@@ -673,7 +677,7 @@ pub(crate) fn payload_bool(value: &Value, key: &str) -> Option<bool> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::ports::workflow_runner::{DeliveryReason, DeliveryReport};
+    use crate::ports::workflow_runner::{DeliveryReason, DeliveryReport, DeliveryStatus};
 
     /// A recipient address for fixtures. `.invalid` is reserved by RFC 2606 and
     /// can never resolve, so a fixture that escapes names nobody.
@@ -729,6 +733,58 @@ mod test {
         assert!(wired.body.contains("digest"), "{}", wired.body);
         assert!(wired.body.contains("1 not delivered"), "{}", wired.body);
         assert_eq!(wired.kind, "workflow.run");
+    }
+
+    /// **Issue #981: a parked report is not a lost one, and must be counted
+    /// once.**
+    ///
+    /// This projection folded anything that was not `sent`, so a report waiting
+    /// in the approvals queue was reported to the sidecar on one line as both
+    /// "1 not delivered" *and* "1 pending approval" — the same row, counted
+    /// twice, once as a loss it is not. A test run's rows and an approval-gate
+    /// continuation's already-sent ones landed in the same bucket for the same
+    /// reason. All three now fold `crate::ports::undelivered_count`, the one
+    /// rung the host's verdict and the console stand on.
+    #[test]
+    fn a_parked_or_accounted_for_report_is_not_wired_out_as_undelivered() {
+        let event = CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".to_string(),
+            scheduled: true,
+            run_id: None,
+            deliveries: vec![
+                DeliveryReport {
+                    node: "owner_summary".to_string(),
+                    kind: "email".to_string(),
+                    target: Some(RECIPIENT.to_string()),
+                    status: DeliveryStatus::Pending,
+                    detail: "waiting in Approvals".to_string(),
+                    reason: DeliveryReason::ParkedForApproval,
+                },
+                DeliveryReport {
+                    node: "digest".to_string(),
+                    kind: "channel".to_string(),
+                    target: Some("engineering".to_string()),
+                    status: DeliveryStatus::Skipped,
+                    detail: "already delivered by an earlier run".to_string(),
+                    reason: DeliveryReason::AlreadyDelivered,
+                },
+            ],
+            pending_approvals: vec!["owner_summary".to_string()],
+            error: None,
+            cancelled: false,
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        };
+
+        let wired = wire_event(8, &event);
+
+        assert!(wired.body.contains("0 not delivered"), "{}", wired.body);
+        assert!(wired.body.contains("1 pending approval"), "{}", wired.body);
+        // The rows themselves are still counted as routed — nothing is hidden,
+        // only classified.
+        assert!(wired.body.contains("2 report(s) routed"), "{}", wired.body);
     }
 
     /// **Issue #383: a stopped run must not wire out as a finished one.**

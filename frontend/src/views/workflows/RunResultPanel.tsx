@@ -28,6 +28,9 @@ import { DeliveryRows } from "./RunHistoryPanel";
 import { type NodeResult, parseRunNodes } from "./run-output";
 // Issue #1002: which of the company's parked cards this run is held on.
 import { blockingApprovals, runApprovals, type RunApproval } from "./run-approvals";
+// Issue #981: the one rung for "this report did not go out", shared with the
+// history rows, the run dot, the SSE toast and the host itself.
+import { undeliveredCount, undeliveredNodes } from "./run-health";
 
 /** Stable empty defaults, so an omitted prop cannot churn the card's props. */
 const EMPTY_APPROVALS: ApprovalSummary[] = [];
@@ -126,9 +129,13 @@ export function RunResultPanel({
   const pendingDeliveryCount = deliveries.filter(
     (d) => d.status === "pending",
   ).length;
-  const undeliveredCount = deliveries.filter(
-    (d) => d.status !== "sent" && d.status !== "pending",
-  ).length;
+  // Issue #981: the shared predicate. The local filter this replaces counted a
+  // `dry-run` row, so the panel that exists to make a TEST run readable told the
+  // operator their test had failed to deliver every single time.
+  const droppedReports = undeliveredCount(deliveries);
+  // Which nodes those rows belong to, so the Steps trail can say it beside the
+  // step instead of leaving the delivery block to say it alone.
+  const droppedNodes = undeliveredNodes(deliveries);
   // Issue #542: a test run. The header says so plainly, and the delivery rows
   // (already `skipped`) read as "would have gone to …" rather than as failures.
   const isDry = result.dryRun === true;
@@ -154,7 +161,16 @@ export function RunResultPanel({
   const canDecideHere = runRows.length > 0 && !!onDecide;
 
   return (
-    <div className="border-t bg-card/60" data-testid="workflow-run-result">
+    // Issue #1205: a right rail at `xl`, the bottom strip it used to always be
+    // below that — the same pattern `RunHistoryPanel` proved on the left for
+    // issue #1107, mirrored. `border-l` (not `border-r`) because this rail
+    // sits on the canvas's right, so it borders the canvas on its OWN left
+    // edge; `CanvasShell` owns the placement and the width.
+    <aside
+      aria-label="Run result"
+      className="flex h-full flex-col border-t bg-card/60 xl:border-t-0 xl:border-l"
+      data-testid="workflow-run-result"
+    >
       <div className="flex items-center justify-between px-4 py-2">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">Run result</span>
@@ -180,12 +196,12 @@ export function RunResultPanel({
               {pendingDeliveryCount === 1 ? "" : "s"} awaiting approval
             </Badge>
           )}
-          {undeliveredCount > 0 && (
+          {droppedReports > 0 && (
             <Badge
               variant="outline"
               className="border-status-failed/40 bg-status-failed-soft"
             >
-              {undeliveredCount} report{undeliveredCount === 1 ? "" : "s"} not
+              {droppedReports} report{droppedReports === 1 ? "" : "s"} not
               delivered
             </Badge>
           )}
@@ -217,7 +233,11 @@ export function RunResultPanel({
           Dismiss
         </Button>
       </div>
-      <div className="max-h-72 overflow-auto px-4 pb-3">
+      {/* Capped as a strip, growing as a rail — same as `RunHistoryPanel`'s
+          body. `min-h-0` is what actually lets it scroll inside the column;
+          without it the flex item floors at its content height and the rail
+          overflows the view instead. */}
+      <div className="max-h-72 overflow-auto px-4 pb-3 xl:min-h-0 xl:max-h-none xl:flex-1">
         {request && (
           <p className="mb-2 text-xs text-muted-foreground">
             <span className="font-medium text-foreground">Requested:</span>{" "}
@@ -300,7 +320,11 @@ export function RunResultPanel({
             this is the only place a test run's step-by-step trail appears, since
             the canvas paints no optimistic frontier for it. */}
         {nodeTimeline.length > 0 && (
-          <NodeTimeline nodes={nodeTimeline} graph={graph} />
+          <NodeTimeline
+            nodes={nodeTimeline}
+            graph={graph}
+            undelivered={droppedNodes}
+          />
         )}
 
         {nodeResults && nodeResults.length > 0 ? (
@@ -328,7 +352,7 @@ export function RunResultPanel({
           </pre>
         </details>
       </div>
-    </div>
+    </aside>
   );
 }
 
@@ -567,9 +591,12 @@ function NodeResultCard({ node }: { node: NodeResult }) {
 function NodeTimeline({
   nodes,
   graph,
+  undelivered,
 }: {
   nodes: WorkflowRunNode[];
   graph: WorkflowGraph | null;
+  /** The nodes whose report did not go out (issue #981). */
+  undelivered: Set<string>;
 }) {
   const nameById = new Map(graph?.nodes.map((n) => [n.id, n.name]) ?? []);
   return (
@@ -602,6 +629,23 @@ function NodeTimeline({
             <span className="text-2xs text-muted-foreground">
               {n.elapsedMs} ms
             </span>
+            {/* Issue #981. A SECOND badge rather than a different first one:
+                `n.status` answers "did the engine run this step?", and for a
+                dropped report the honest answer is `ok` — delivery happens after
+                the engine returns, so the node ran and its work stands. What was
+                wrong was that this row said only that, next to a run the drawer
+                above scored `not delivered`. Two labelled badges state two facts;
+                one re-tinted badge would just move the ambiguity. */}
+            {undelivered.has(n.nodeId) && (
+              <Badge
+                variant="outline"
+                className="h-4 px-1.5 text-3xs font-normal border-status-failed/40 bg-status-failed-soft"
+                data-testid="workflow-run-step-undelivered"
+                title="This step ran. Its report did not go out — see Report delivery above."
+              >
+                not delivered
+              </Badge>
+            )}
           </div>
           {/* Issue #1014: the engine's own broken-wiring list for this node —
               every config binding that resolved to null, by its config path.

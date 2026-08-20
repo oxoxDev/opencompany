@@ -203,6 +203,24 @@ export interface AssigneeCandidate {
  */
 export type TaskDeliverable = "once" | "workflow";
 
+/**
+ * What the operator says one chat **message** is for (issue #1152).
+ *
+ * The two work words mean exactly what they mean on a card. `"chat"` is the
+ * operator saying this message is not a request for work at all — the composer's
+ * "Just chatting" — so no deterministic path opens a card for it.
+ *
+ * Deliberately **not** a widening of `TaskDeliverable`. That type is the card
+ * field, shared by `CreateTask`, `TaskPatch` and `TaskDto`, and a card can never
+ * *be* "not work": widening it would make `"chat"` assignable in every one of
+ * those positions and put the compiler on the wrong side of the invariant. This
+ * is message-scoped, and the host draws the same line (`MessageIntent` beside
+ * `TaskDeliverable` in `src/ports/types.rs`).
+ *
+ * Sent only when it is not the default — see `OpenCompanyClient.chat`.
+ */
+export type MessageIntent = "chat" | TaskDeliverable;
+
 /** A positive source-currency USD amount or an explicit role-redacted state. */
 export interface TaskCost {
   amountUsd?: number;

@@ -21,6 +21,22 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   runState?: NodeRunState;
   /** Wall-clock duration of the node's execution, once it has finished. */
   elapsedMs?: number;
+  /**
+   * Whether the report this `output` node produced did NOT go out (issue #981).
+   *
+   * A field of its own rather than a fourth {@link NodeRunState}, because it is
+   * not the same question. `runState` is the engine's verdict on the step, and
+   * for a dropped report the honest answer is `ok`: delivery is post-engine, the
+   * node ran, and its work stands. Widening the run-state union would have made
+   * one ring colour encode two subsystems' verdicts — and, since
+   * `nodeStateFrom()` fail-safes an unrecognised status to `error`, would have
+   * made every console predating this paint a node that ran perfectly as failed.
+   *
+   * So the card carries both: the green ring and `DONE` for the step, and a
+   * labelled strip for the report. Absent on every node of a run that delivered
+   * what it routed, which is the resting case.
+   */
+  reportUndelivered?: boolean;
 }
 
 /**

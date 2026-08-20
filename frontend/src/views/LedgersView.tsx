@@ -73,6 +73,8 @@ import {
   composableFields,
   defineLedger,
   deleteEntry,
+  EVERY_STATUS,
+  filteredEmptyNotice,
   isClosingStatus,
   isWritable,
   listLedgers,
@@ -81,6 +83,7 @@ import {
   renderedLedger,
   retireLedger,
   statusField,
+  statusFilterLabel,
   statusNeedsReason,
   type LedgerEntry,
   type LedgerRead,
@@ -198,7 +201,7 @@ export function LedgersView({
   const [reading, setReading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState(EVERY_STATUS);
   const [composing, setComposing] = useState<Composing | null>(null);
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<LedgerEntry | null>(null);
@@ -252,6 +255,19 @@ export function LedgersView({
   /** The clock the "blocked since" labels measure against (issue #883). */
   const clock = now ?? Date.now();
 
+  /**
+   * Why this ledger is showing nothing, when a filter is the reason (#1217).
+   * `null` when nothing is filtering, which is the only case where "Nothing
+   * recorded here yet" is a true sentence.
+   */
+  const emptyNotice = filteredEmptyNotice(ledger, query, statusFilter);
+
+  /** Put the ledger back to showing everything it holds. */
+  const clearFilters = useCallback(() => {
+    setQuery("");
+    setStatusFilter(EVERY_STATUS);
+  }, []);
+
   const refreshList = useCallback(async () => {
     if (!company) return;
     try {
@@ -298,7 +314,7 @@ export function LedgersView({
       try {
         const next = await readLedger(client, company, selected, {
           q: query.trim() || undefined,
-          status: statusFilter === "all" ? undefined : statusFilter,
+          status: statusFilter === EVERY_STATUS ? undefined : statusFilter,
           limit: 100,
         });
         setRead(next);
@@ -686,17 +702,22 @@ export function LedgersView({
                 </div>
                 <Select
                   value={statusFilter}
-                  onValueChange={(value) => setStatusFilter(value ?? "all")}
+                  onValueChange={(value) => setStatusFilter(value ?? EVERY_STATUS)}
                 >
+                  {/* Explicit trigger text, for the reason issue #813 gave the
+                      destination picker its own: base-ui renders the stored
+                      value in the collapsed control unless told otherwise, so
+                      this read `all` while the list under it read "Every
+                      status", and a chosen board column read `in_progress`
+                      beside columns headed "In progress". */}
                   <SelectTrigger className="w-[12rem]">
-                    <SelectValue />
+                    <SelectValue>{statusFilterLabel(ledger, statusFilter)}</SelectValue>
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="all">Every status</SelectItem>
+                    <SelectItem value={EVERY_STATUS}>Every status</SelectItem>
                     {ledger.statuses.map((status) => (
                       <SelectItem key={status.name} value={status.name}>
-                        {status.name}
-                        {status.closed ? " (closed)" : ""}
+                        {statusFilterLabel(ledger, status.name)}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -763,10 +784,26 @@ export function LedgersView({
                 </p>
               )}
 
+              {/* Issue #1217: zero rows back means "no matches" and "no rows"
+                  indistinguishably — the read is filtered server-side. The two
+                  are not the same claim, and saying the stronger one over a
+                  ledger the nav is counting 14 rows for is simply false. */}
               {read && read.entries.length === 0 && !reading && (
-                <p className="text-sm text-muted-foreground">
-                  Nothing recorded here yet.
-                </p>
+                emptyNotice ? (
+                  <div
+                    className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground"
+                    data-testid="ledger-filtered-empty"
+                  >
+                    <span>{emptyNotice}</span>
+                    <Button size="sm" variant="outline" onClick={clearFilters}>
+                      Clear filters
+                    </Button>
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground" data-testid="ledger-empty">
+                    Nothing recorded here yet.
+                  </p>
+                )
               )}
 
               {mode === "board" && read ? (

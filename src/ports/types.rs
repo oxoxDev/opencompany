@@ -204,6 +204,77 @@ pub enum Verdict {
     Deny,
 }
 
+/// What the operator says one chat message is **for** (issue #1152).
+///
+/// # Why this is not a third `TaskDeliverable`
+///
+/// [`TaskDeliverable`](crate::ports::tasks::TaskDeliverable) answers a question
+/// about a **card**: once the work exists, does doing it produce a one-off
+/// result or a reusable workflow. This answers the question one step earlier —
+/// whether the message is a request for work at all. A card can never *be* "not
+/// work", so a third `TaskDeliverable` variant would be
+/// representable-but-invalid in every position that field is stored and read
+/// (`TaskRecord::deliverable`, the builder pass's dispatch check, the console's
+/// task edit dialog), and every one of those readers would owe a branch for a
+/// state that cannot occur.
+///
+/// [`deliverable`](Self::deliverable) returning `None` for [`Chat`](Self::Chat)
+/// is that same statement, made in the type: no card, therefore no deliverable
+/// to choose.
+///
+/// # The operator chooses; nothing guesses
+///
+/// Like `TaskDeliverable` (decision D2a of issue #580), this is only ever set
+/// from an explicit control a person pressed. Nothing reads a message and
+/// decides it "looks like chatter" — that judgement already exists one layer
+/// down, as the lexical triage (issue #267) and the model escalation (issue
+/// #984), and this is deliberately not a third one of those. It is the person's
+/// own statement about their own message, settled before any model runs.
+///
+/// Additive on the wire: the two work values are the exact `TaskDeliverable`
+/// words, so every `deliverable` value ever journaled on a
+/// [`CompanyEvent::OperatorMessage`] still deserializes, and a message that
+/// carried no choice still serializes with the field absent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageIntent {
+    /// Not a request for work — the composer's "Just chatting". No
+    /// deterministic path opens a card for this message.
+    Chat,
+    /// A request for work, done once. The historical default: identical in
+    /// behaviour, and on the wire, to a message that expressed no choice.
+    Once,
+    /// A request for work, built as a reusable workflow. The card it opens
+    /// routes through the builder pass.
+    Workflow,
+}
+
+impl MessageIntent {
+    /// The deliverable a card opened for this message carries, or `None` when
+    /// the operator said the message asks for no card at all.
+    pub fn deliverable(self) -> Option<crate::ports::tasks::TaskDeliverable> {
+        match self {
+            Self::Chat => None,
+            Self::Once => Some(crate::ports::tasks::TaskDeliverable::Once),
+            Self::Workflow => Some(crate::ports::tasks::TaskDeliverable::Workflow),
+        }
+    }
+
+    /// Whether the operator stated this message is not a request for work.
+    pub fn is_chat(self) -> bool {
+        matches!(self, Self::Chat)
+    }
+
+    /// The wire word, for a log line or a note a person reads.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Once => "once",
+            Self::Workflow => "workflow",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
@@ -255,9 +326,10 @@ pub enum CompanyEvent {
         /// terms above, so no stored record migrates.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent: Option<EventSeq>,
-        /// The composer's once-vs-workflow choice for this message (issue #845),
-        /// as the operator set it — [`TaskDeliverable::Workflow`] when they
-        /// picked "Build me the workflow".
+        /// What the operator's composer said this message is **for** (issues
+        /// #845, #1152), as they set it — [`MessageIntent::Workflow`] when they
+        /// picked "Build me the workflow", [`MessageIntent::Chat`] when they
+        /// picked "Just chatting".
         ///
         /// Carried on the event because the cycle is the only place that holds
         /// both this fact and the turn about to answer, and without it the turn
@@ -269,12 +341,20 @@ pub enum CompanyEvent {
         /// [`CompanyRuntime::inject_workflow_builder_awareness`](crate::company::runtime::CompanyRuntime)
         /// reads this to tell the turn who owns the authoring.
         ///
+        /// Typed [`MessageIntent`] rather than
+        /// [`TaskDeliverable`](crate::ports::tasks::TaskDeliverable) since
+        /// #1152, because the operator can now say the message is not a request
+        /// for work at all — which is a statement about the *message*, not a
+        /// choice of what a card produces. The field keeps its name and its wire
+        /// key: one operator choice, one field, so `{"deliverable":"workflow"}`
+        /// and "just chatting" cannot both be asserted about one message.
+        ///
         /// `None` means the caller expressed no choice — every message journaled
         /// before this field existed, and every non-chat producer. Additive on
-        /// exactly the `by` / `chat` / `parent` terms above, so no stored record
-        /// migrates.
+        /// exactly the `by` / `chat` / `parent` terms above, and the two work
+        /// words are unchanged, so no stored record migrates.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        deliverable: Option<crate::ports::tasks::TaskDeliverable>,
+        deliverable: Option<MessageIntent>,
     },
     /// A turn was **accepted** for an operator message (issue #983) — the
     /// transcript line that says the company took the work on.
@@ -1996,6 +2076,26 @@ impl TokenUsage {
 }
 
 /// Everything the brain needs to run one cycle.
+///
+/// **A cycle carries no working memory.** The struct once also carried
+/// `compressed_history` (32 recent [`CompressedTrace`]s) and `context_index`
+/// (every [`ChunkMeta`] in the company, unbounded), loaded from the
+/// [`MemoryStore`](crate::ports::MemoryStore) and
+/// [`ContextStore`](crate::ports::ContextStore) on every cycle — and read by no
+/// [`Brain`](crate::ports::Brain) implementation. Two facts made them dead
+/// rather than merely unused: no summariser exists anywhere in the crate, so a
+/// trace's `summary` is a constant string like `harness cycle handled 3
+/// event(s)`, and no brain ever consulted either field. A `roster` field was
+/// dead on the same terms; every brain re-derives the roster from the company
+/// record. Issue #1175 removed all three, so the cycle stops paying an
+/// unbounded full scan per turn for a `Vec` it drops.
+///
+/// The one live recall path is elsewhere and is untouched by this: before each
+/// turn `HarnessPool::run` retrieves the top-5 prior task outcomes from the
+/// `ContextStore` and injects them as text (`src/harness/memory_loop.rs`, under
+/// the `openhuman` feature). Traces are still *written* every cycle
+/// (they travel with the export bundle); nothing reads them back. Do not
+/// re-add a field here until something consumes it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CycleRequest {
     /// Unique id for this cycle.
@@ -2011,12 +2111,6 @@ pub struct CycleRequest {
     /// idempotent `POST /events` on the durable log seq.
     #[serde(default)]
     pub event_seqs: Vec<EventSeq>,
-    /// Compressed traces of prior cycles.
-    pub compressed_history: Vec<CompressedTrace>,
-    /// The company roster (agent ids).
-    pub roster: Vec<String>,
-    /// The context index available to the brain.
-    pub context_index: Vec<ChunkMeta>,
 }
 
 /// The brain's output from one cycle.
@@ -2931,17 +3025,26 @@ impl OverlayBlob {
 }
 
 /// Ids [`CompanyRecord::mint_agent_id`] will never hand to a teammate, however
-/// free the roster leaves them: the always-present operator channel and the two
-/// workspace system roots.
+/// free the roster leaves them: the always-present operator channel, the two
+/// workspace system roots, and the author the runtime speaks under.
 ///
 /// Held as references to the real constants rather than re-typed literals, so a
-/// rename of any of the three moves this list with it instead of quietly
+/// rename of any of the four moves this list with it instead of quietly
 /// unreserving a name. Compared case-insensitively, which is why `Agents` and
 /// `Desks` cover a minted (always-lowercase) `agents` / `desks`.
-pub const RESERVED_AGENT_IDS: [&str; 3] = [
+///
+/// [`SYSTEM_AUTHOR`](crate::ports::SYSTEM_AUTHOR) earns its place for the same
+/// reason `OPERATOR_CHANNEL` does, and issue #966 is why it was noticed: it
+/// reaches the console's centred system pill **by value**, so a teammate minted
+/// onto it would render as the host. `"system"` is an ordinary legal slug —
+/// `agent_slug("System")` produces it — which is what separates it from
+/// [`CONFINED_AGENT_ID`](crate::ports::CONFINED_AGENT_ID), unmintable by
+/// construction because slugs never emit a hyphen.
+pub const RESERVED_AGENT_IDS: [&str; 4] = [
     crate::runtime::OPERATOR_CHANNEL,
     crate::company::workspace_scaffold::AGENTS_ROOT,
     crate::company::workspace_scaffold::DESKS_ROOT,
+    crate::ports::SYSTEM_AUTHOR,
 ];
 
 /// A durable company record: charter/roster (manifest) plus ledger and
@@ -4349,6 +4452,141 @@ mod test {
         );
     }
 
+    /// The three intents are exactly the three wire words, and only those
+    /// (issue #1152).
+    ///
+    /// Pinned as literals because the console and the journal both write them:
+    /// a rename here silently stops matching every message already on disk.
+    #[test]
+    fn a_message_intent_round_trips_through_its_wire_word() {
+        for (intent, word) in [
+            (MessageIntent::Chat, "chat"),
+            (MessageIntent::Once, "once"),
+            (MessageIntent::Workflow, "workflow"),
+        ] {
+            let json = serde_json::to_string(&intent).unwrap();
+            assert_eq!(json, format!("\"{word}\""));
+            assert_eq!(
+                serde_json::from_str::<MessageIntent>(&json).unwrap(),
+                intent
+            );
+            assert_eq!(intent.as_str(), word);
+        }
+        assert!(
+            serde_json::from_str::<MessageIntent>(r#""build""#).is_err(),
+            "the set is closed: an unknown word is a 400, not a silent default"
+        );
+    }
+
+    /// "Just chatting" has no deliverable, and that is the whole point of the
+    /// type (issue #1152).
+    ///
+    /// A card can never *be* "not work", so the honest mapping from a `Chat`
+    /// message onto the card field is "there is no card" — `None` — rather than
+    /// a third `TaskDeliverable` variant every stored reader would owe a branch
+    /// for.
+    #[test]
+    fn only_a_work_intent_maps_onto_a_card_deliverable() {
+        use crate::ports::tasks::TaskDeliverable;
+
+        assert_eq!(MessageIntent::Chat.deliverable(), None);
+        assert_eq!(
+            MessageIntent::Once.deliverable(),
+            Some(TaskDeliverable::Once)
+        );
+        assert_eq!(
+            MessageIntent::Workflow.deliverable(),
+            Some(TaskDeliverable::Workflow)
+        );
+        assert!(MessageIntent::Chat.is_chat());
+        assert!(!MessageIntent::Once.is_chat());
+        assert!(!MessageIntent::Workflow.is_chat());
+    }
+
+    /// **No journaled record migrates** (issue #1152).
+    ///
+    /// Retyping `OperatorMessage::deliverable` from `TaskDeliverable` to
+    /// [`MessageIntent`] is only safe if every value already written under that
+    /// key still loads, and still writes back the same bytes. Getting this wrong
+    /// does not fail CI — it fails on somebody's event log, on whichever of the
+    /// three backends they run, the next time a company boots. So the claim is a
+    /// test rather than a sentence in a doc comment.
+    ///
+    /// The blobs are asserted verbatim in both directions: parsed to the value
+    /// the new type gives them, and re-serialized byte-for-byte back to what is
+    /// on disk.
+    #[test]
+    fn every_journaled_deliverable_value_still_loads_and_writes_back_identically() {
+        for (blob, expected) in [
+            (r#"{"kind":"OperatorMessage","text":"hi"}"#, None),
+            (
+                r#"{"kind":"OperatorMessage","text":"ship the landing page","deliverable":"once"}"#,
+                Some(MessageIntent::Once),
+            ),
+            (
+                r#"{"kind":"OperatorMessage","text":"build me a weekly report","deliverable":"workflow"}"#,
+                Some(MessageIntent::Workflow),
+            ),
+        ] {
+            let event: CompanyEvent = serde_json::from_str(blob).unwrap_or_else(|e| {
+                panic!("a stored line must still load: {blob} — {e}");
+            });
+            match &event {
+                CompanyEvent::OperatorMessage { deliverable, .. } => {
+                    assert_eq!(*deliverable, expected, "{blob}")
+                }
+                other => panic!("unexpected variant: {other:?}"),
+            }
+            assert_eq!(
+                serde_json::to_string(&event).unwrap(),
+                blob,
+                "a stored line must serialize back byte-for-byte"
+            );
+        }
+    }
+
+    /// The new word travels on the same key, and only when it was chosen
+    /// (issue #1152).
+    ///
+    /// The absent case is the compatibility half that matters most: "Do it
+    /// once" is not the default *because it is sent* — it is the default
+    /// because nothing is sent, so an unmarked message is byte-identical on the
+    /// wire to every message journaled before this control existed.
+    #[test]
+    fn a_chat_intent_journals_under_the_same_key_and_absence_stays_absent() {
+        let chatting = CompanyEvent::OperatorMessage {
+            text: "morning all".into(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable: Some(MessageIntent::Chat),
+        };
+        assert_eq!(
+            serde_json::to_string(&chatting).unwrap(),
+            r#"{"kind":"OperatorMessage","text":"morning all","deliverable":"chat"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<CompanyEvent>(
+                r#"{"kind":"OperatorMessage","text":"morning all","deliverable":"chat"}"#
+            )
+            .unwrap(),
+            chatting
+        );
+
+        let unmarked = CompanyEvent::OperatorMessage {
+            text: "morning all".into(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&unmarked).unwrap(),
+            r#"{"kind":"OperatorMessage","text":"morning all"}"#,
+            "no choice must still put nothing on the wire"
+        );
+    }
+
     #[test]
     fn an_operator_message_journaled_before_attribution_still_loads() {
         // Exactly what is already on disk in every existing company's event
@@ -5036,7 +5274,38 @@ mod test {
         assert_eq!(record.mint_agent_id("Operator"), "operator_2");
         assert_eq!(record.mint_agent_id("Agents"), "agents_2");
         assert_eq!(record.mint_agent_id("desks"), "desks_2");
-        assert_eq!(RESERVED_AGENT_IDS, ["operator", "Agents", "Desks"]);
+        assert_eq!(record.mint_agent_id("System"), "system_2");
+        assert_eq!(
+            RESERVED_AGENT_IDS,
+            ["operator", "Agents", "Desks", "system"]
+        );
+    }
+
+    /// Issue #966: the host's own author is not a name a teammate can be given.
+    ///
+    /// `SYSTEM_AUTHOR` reaches the console's centred system pill by value —
+    /// `MessageView` projects an `AgentReply`'s `agent_id` straight into
+    /// `author`, and the console keys on the string. A teammate holding that id
+    /// would therefore render *as the host*, which is a worse confusion than the
+    /// one this issue set out to fix, and the value it replaces (`"operator"`)
+    /// was already reserved.
+    ///
+    /// Its sibling `CONFINED_AGENT_ID` needs no entry here: `agent_slug` emits
+    /// only lowercase alphanumerics and underscores, so `"workflow-copilot"` is
+    /// unmintable by construction. `"system"` is an ordinary legal slug.
+    #[test]
+    fn mint_agent_id_never_returns_the_host_author() {
+        let record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
+        assert_eq!(
+            agent_slug("System"),
+            crate::ports::SYSTEM_AUTHOR,
+            "the guard is needed precisely because this is a legal slug"
+        );
+        assert_ne!(
+            record.mint_agent_id("System"),
+            crate::ports::SYSTEM_AUTHOR,
+            "a teammate must never be minted onto the id the runtime speaks under"
+        );
     }
 
     /// Issue #1162: the resolve every surface that takes a teammate key runs.

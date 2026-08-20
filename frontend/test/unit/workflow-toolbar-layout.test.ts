@@ -183,7 +183,20 @@ describe("the detail toolbar carries only this workflow's controls (#1135)", () 
 describe("one filled button per screen (#1135)", () => {
   it("makes Run the detail screen's primary, and nothing else", async () => {
     await mountAt("#/workflows/alpha", makeClient());
-    expect(filled()).toEqual(["Run"]);
+    // Issue #1204 made Run a split control, so the fill is worn by two
+    // elements. That is not a second primary: they are the two halves of one
+    // button, which the next assertion is what actually proves — the pair is
+    // accepted only because both sit inside `workflow-run-split`. A filled
+    // button anywhere ELSE on the detail screen still fails here, which is the
+    // property #1135 asked for.
+    expect(filled()).toEqual(["Run", "Run with input…"]);
+    const split = testId("workflow-run-split");
+    expect(split).not.toBeNull();
+    for (const button of buttons().filter((b) =>
+      b.className.split(/\s+/).includes("bg-primary"),
+    )) {
+      expect(split?.contains(button)).toBe(true);
+    }
   });
 
   it("makes New workflow the index's primary, and nothing else", async () => {
@@ -220,7 +233,9 @@ describe("the detail toolbar is two rows (#1135)", () => {
 
     const order = idsWithin("workflow-detail-actions");
     expect(order).toEqual([
+      "workflow-run-split",
       "workflow-run",
+      "workflow-run-with-input",
       "workflow-test-run",
       "workflow-copilot-toggle",
       "workflow-history-toggle",
@@ -229,13 +244,25 @@ describe("the detail toolbar is two rows (#1135)", () => {
       "workflow-delete",
     ]);
 
+    // Issue #1204: the free-text field is OFF the bar. This used to assert that
+    // the field and Run shared a parent, which is the arrangement the issue was
+    // filed against — the widest control on a row of nine, in the way of the
+    // one thing an operator comes here to press. The stronger statement is that
+    // the toolbar mounts no such field at all, which is false for the old
+    // layout and for any half-measure that merely narrowed the box.
+    expect(
+      container.querySelector('input[aria-label="Request for this run"]'),
+    ).toBeNull();
+
     // Grouped, not one undifferentiated strip. Asserted as what each group
-    // EXCLUDES as well as what it holds: "Run and the field share a parent" is
+    // EXCLUDES as well as what it holds: "the two halves share a parent" is
     // also true of the flat row this issue replaced, since everything shared
     // one parent there.
-    const requestField = container.querySelector('input[aria-label="Request for this run"]');
-    const runGroup = testId("workflow-run")?.parentElement;
-    expect(runGroup).toBe(requestField?.parentElement);
+    const split = testId("workflow-run-split");
+    expect(split?.contains(testId("workflow-run"))).toBe(true);
+    expect(split?.contains(testId("workflow-run-with-input"))).toBe(true);
+    expect(split?.contains(testId("workflow-test-run"))).toBe(false);
+    const runGroup = split?.parentElement;
     expect(runGroup?.contains(testId("workflow-test-run"))).toBe(false);
 
     const utility = testId("workflow-delete")?.closest("div");

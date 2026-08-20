@@ -20,8 +20,10 @@ job.
 tour, some tooltips. We already have that in the console.
 
 **Company setup** is this document. It builds someone a business. When it is
-done, there are named agents on the team page — colleagues that did not exist
-ninety seconds earlier.
+done, there are named agents on the Company page — colleagues that did not exist
+ninety seconds earlier. That page is the teammate card grid, which is what
+`#/company` leads with since issue #1141; bare `#/team`, the address the roster
+used to answer on, redirects there.
 
 The tour is not the product. The company is. Setup runs first; the tour, if it
 runs at all, comes after and now has something worth pointing at.
@@ -36,7 +38,7 @@ exactly the work they came here to avoid.
 We want the opposite message: *we already started for you.*
 
 Someone answers three questions, watches their company get built, and lands on a
-team page with five agents on it. Their reaction should be "how did it know
+Company page with five agents on it. Their reaction should be "how did it know
 that?" — followed immediately by wanting to fix the two things we got slightly
 wrong. That second part is not a failure. Someone correcting our guess is
 someone who has already accepted the premise.
@@ -66,7 +68,7 @@ cannot fail that way, which is exactly why it goes first.
 
 - All three questions (yes, including the automation one — see below).
 - The build-out screen, showing agents created one at a time.
-- A real roster on the team page, each agent with a name, a role and a clear
+- A real roster on the Company page, each agent with a name, a role and a clear
   mandate.
 - The answers stored, so Phase 2 never has to ask again.
 
@@ -365,7 +367,7 @@ Two related problems surfaced in the same run, both fixed:
    content, agency and consulting will beat a generated one every time. The long
    tail has to be generated. Where is the line? Curating the top few is also the
    fastest route to a good demo.
-4. **Does the team page say what to do next?** Phase 1 hands someone five
+4. **Does the Company page say what to do next?** Phase 1 hands someone five
    colleagues and no automation. If the page does not suggest "open one and give
    it a brief", the roster risks being admired and then ignored.
 

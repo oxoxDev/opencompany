@@ -159,7 +159,17 @@ export function buildChannels(members: TeamMember[], desks: Desk[] = defaultDesk
     id: dmChannelId(m),
     name: m.name,
     kind: "dm" as const,
-    purpose: m.role,
+    // The teammate's **description**, which is the field parallel to a desk's
+    // `blurb` above — both answer "what is this line for", and neither repeats
+    // what the title already said. This used to read `m.role`, an identity
+    // field in a description slot, and that is precisely what made the header
+    // say the same words twice (issue #1180): `fromDto` falls back
+    // `dto.name?.trim() || dto.role`, so a company that names roles rather than
+    // people has name === role, and the title and the slot after the divider
+    // resolved to one string. The role is still the fallback — for a teammate
+    // the host *did* name it is a real second fact — and {@link channelSubtitle}
+    // is what declines to render even that when it just echoes the title.
+    purpose: m.description.trim() || m.role,
     tone: m.tone,
     member: m,
   }));
@@ -294,6 +304,98 @@ export function channelMembers(channel: Channel, roster: TeamMember[]): TeamMemb
 /** How a channel is titled in the header and the rail. */
 export function channelTitle(channel: Channel): string {
   return channel.kind === "dm" ? channel.name : `#${channel.name}`;
+}
+
+/**
+ * The line that goes *beside* the title — the muted slot after the header's
+ * divider, the rail row's tooltip, the conversation intro's clause — or `null`
+ * when there is nothing to say that the title has not already said.
+ *
+ * `null` rather than the empty string, and a rule rather than a DM special
+ * case. A subtitle exists to add a second fact; one that repeats the first is
+ * not a hierarchy, it is the same word twice with two type styles, and the
+ * honest render of "nothing more to say" is nothing. Issue #1180 is what that
+ * looks like when it ships: every agent in a company that declares roles and no
+ * names read `Backend Engineer │ Backend Engineer` across the top of its DM.
+ *
+ * The comparison is case- and whitespace-insensitive because the duplicate is a
+ * duplicate to a reader either way — a manifest whose description restates the
+ * role in sentence case is the same non-fact as one that restates it verbatim.
+ *
+ * Kind-agnostic on purpose. A DM is where this bites today, but a desk whose
+ * blurb is just its own name is the identical duplicate under `#`, and a rule
+ * that only fires for DMs would let that one through. Channels are otherwise
+ * untouched: a blurb that says something the slug does not — which is every
+ * desk that bothered to write one — comes back exactly as before.
+ */
+export function channelSubtitle(channel: Channel): string | null {
+  const purpose = channel.purpose.trim();
+  if (!purpose) return null;
+  // Collapse runs of internal whitespace too, not just the outer trim — a
+  // manifest description copy-pasted from the role with a doubled space or a
+  // stray newline in the middle is still the same duplicate to a reader, and
+  // the doc comment above promises "whitespace-insensitive" without
+  // qualification.
+  const normalize = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
+  if (normalize(purpose) === normalize(channel.name)) return null;
+  return purpose;
+}
+
+/**
+ * The line under the identity block at the top of an empty transcript.
+ *
+ * Pure, exported and here rather than inline in `MessageTimeline` because it is
+ * four branches of prose over two nullable inputs, and prose defects are
+ * invisible to a type checker. The one this arrived with: the DM branch used to
+ * append a full stop by hand, which was right while the subtitle was a role
+ * (`Backend Engineer`) and produced "…and services.." the moment issue #1180
+ * made it a description that brings its own punctuation. `sentence` is the rule
+ * for that, so every branch goes through it.
+ *
+ * `loading` renders the subtitle alone: both finished sentences are positive
+ * claims that the channel has no history, and neither may be made before the
+ * host has answered (issue #934).
+ */
+export function channelIntroSentence(channel: Channel, loading: boolean): string {
+  const subtitle = channelSubtitle(channel);
+  if (loading) return subtitle ? sentence(subtitle) : "";
+  if (channel.kind === "dm") {
+    // No subtitle drops the clause, not the sentence: where you are is still
+    // worth saying, the tautology after it is not.
+    return subtitle
+      ? `This is the start of your direct message with ${channel.name} — ${sentence(lower(subtitle))}`
+      : `This is the start of your direct message with ${channel.name}.`;
+  }
+  return `This is the very beginning of ${channelTitle(channel)}.${subtitle ? ` ${sentence(subtitle)}` : ""}`;
+}
+
+/** Lowercases the first character only, for a clause continuing a sentence. */
+function lower(s: string): string {
+  return s.charAt(0).toLowerCase() + s.slice(1);
+}
+
+/** Terminates `s` with a full stop unless it already ends in punctuation. */
+function sentence(s: string): string {
+  const t = s.trim();
+  return /[.!?]$/.test(t) ? t : `${t}.`;
+}
+
+/**
+ * The face a DM wears — the `Avatar` seed for the teammate on the other end —
+ * or `null` for anything that has no face: a channel, and a DM with no roster
+ * entry behind it (both of those wear a glyph instead).
+ *
+ * One function rather than the same two props written out at each call site,
+ * because the rail row and the header sit on screen together and `Avatar`
+ * derives its mascot from the `name` it is handed. A call site that seeded on
+ * anything else — the teammate's id, its role — would draw a *different* face
+ * for the same person a few pixels away, which is worse than the generic glyph
+ * the header used to show (issue #1170). Deriving both from here is what makes
+ * that drift impossible rather than merely unlikely.
+ */
+export function dmFace(channel: Channel): { name: string; tone?: string } | null {
+  if (channel.kind !== "dm" || !channel.member) return null;
+  return { name: channel.name, tone: channel.tone };
 }
 
 /**

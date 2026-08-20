@@ -6,9 +6,28 @@ import { startVisiblePolling } from "@/lib/visible-poll";
 
 const POLL_MS = 5000;
 
+/**
+ * How far the console has got with this company's approval queue (issue #1229).
+ *
+ * The distinction `approvals: []` cannot make on its own: an empty array is
+ * both "the host answered, with nothing parked" and "the host has never
+ * answered". The Approvals page renders the first as **"All clear — nothing is
+ * waiting on you"**, which is a confident instruction to stop looking, and it
+ * was rendering it for the second as well — beside a sidebar badge, carried
+ * over from the bootstrap status read, that said fourteen were waiting.
+ *
+ * `"error"` is only ever reached from `"loading"`. Once a queue has been read,
+ * a later failure keeps the last good view and stays `"ready"`: the rows on
+ * screen are real, only possibly stale, and blanking them for a dropped poll
+ * would be a second lie in the other direction.
+ */
+export type QueueLoad = "loading" | "ready" | "error";
+
 export interface CompanyFeed {
   status: CompanyStatus;
   approvals: ApprovalSummary[];
+  /** Whether {@link CompanyFeed.approvals} has ever been read. See {@link QueueLoad}. */
+  queue: QueueLoad;
   /** Wall-clock at the last successful refresh, for relative timestamps. */
   now: number;
   refresh: () => Promise<void>;
@@ -64,6 +83,7 @@ export function useCompany(
 ): CompanyFeed {
   const [status, setStatus] = useState<CompanyStatus>(initialStatus);
   const [approvals, setApprovals] = useState<ApprovalSummary[]>([]);
+  const [queue, setQueue] = useState<QueueLoad>("loading");
   const [now, setNow] = useState(() => Date.now());
   const mounted = useRef(true);
 
@@ -79,18 +99,41 @@ export function useCompany(
   useEffect(() => {
     setStatus(initialStatus);
     setApprovals([]);
+    // Back to "not read yet", for the same reason the queue is emptied: this
+    // console has not seen the new company's parked set, and the *previous*
+    // company's verdict must not vouch for it (issue #1229).
+    setQueue("loading");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [company]);
 
   const refresh = useCallback(async () => {
-    try {
-      const [s, a] = await Promise.all([client.status(company), client.approvals(company)]);
-      if (!mounted.current) return;
-      setStatus(withApprovalCount(s, a));
-      setApprovals(a);
+    // Settled rather than all-or-nothing (issue #1229). `Promise.all` rejects
+    // on the first failure and threw away the other response with it, so one
+    // bad status discarded a queue that had arrived intact — and the badge and
+    // the page were then reading two different moments with nothing saying so.
+    const [s, a] = await Promise.allSettled([
+      client.status(company),
+      client.approvals(company),
+    ]);
+    if (!mounted.current) return;
+
+    if (a.status === "fulfilled") {
+      setApprovals(a.value);
+      setQueue("ready");
+      // Reconciled only against a queue that actually arrived. A status paired
+      // with a failed read is a count with nothing to check it against.
+      if (s.status === "fulfilled") setStatus(withApprovalCount(s.value, a.value));
       setNow(Date.now());
-    } catch {
-      /* transient; keep the last good view */
+      return;
+    }
+
+    // The queue did not answer. A view that already has one keeps it — stale
+    // rows are still real rows — but a console that has never read one must
+    // say so rather than let an untouched `[]` render as "all clear".
+    setQueue((current) => (current === "ready" ? "ready" : "error"));
+    if (s.status === "fulfilled") {
+      setStatus(s.value);
+      setNow(Date.now());
     }
   }, [client, company]);
 
@@ -111,5 +154,5 @@ export function useCompany(
     };
   }, [refresh]);
 
-  return { status, approvals, now, refresh };
+  return { status, approvals, queue, now, refresh };
 }

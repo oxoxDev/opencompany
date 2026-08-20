@@ -127,3 +127,25 @@ export const PRIORITY_STYLES: Record<TaskPriority, string> = {
   medium: "border-status-blocked/30 bg-status-blocked-soft text-status-blocked-text",
   low: "border-border bg-muted text-muted-foreground",
 };
+
+/**
+ * The board columns that mean *a teammate is on this right now*.
+ *
+ * These are the two ids the host files under its "In flight" section
+ * (`src/ledger/board.rs`): `planning` is a planning pass turning a card into a
+ * brief, `in_progress` is an open attempt. `paused` and `in_review` are
+ * deliberately not here — that module calls them "stopped, not finished", and
+ * they are waiting on a person rather than on the teammate.
+ *
+ * Named ids rather than a flag read off the wire, because the section is the
+ * one part of the column table the host does not send: `LedgerStatus` carries
+ * `name`, `label` and `closed`, and nothing else.
+ *
+ * This is *not* the drift the header of this file warns about. That warning is
+ * about a console-side copy of a table a company can extend; this table is
+ * explicitly the one ledger a company may **not** declare — entering a column
+ * here spends money, so `board.rs` fixes the set at six and says so. A host
+ * that renames one of these reports every teammate idle, which is the honest
+ * failure: it under-claims rather than inventing activity.
+ */
+export const IN_FLIGHT_COLUMNS = ["planning", "in_progress"];

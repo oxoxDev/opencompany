@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Mail, MoreHorizontal, Plus, Sparkles, UserPlus, Wallet } from "lucide-react";
+import { Mail, MoreHorizontal, Network, Plus, Sparkles, UserPlus, Wallet } from "lucide-react";
 import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { setInboxEnabled } from "@/api/inbox";
+import { listTasks } from "@/api/tasks";
 import { ApiError, type TeamMemberDto } from "@/api/types";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -29,15 +29,17 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { emptyDraft, type AgentDraft, type AgentFieldKey } from "@/lib/agent";
-import { addMemberFailure, reportAddMember } from "@/lib/member-feedback";
+import { fetchBoardColumns } from "@/lib/board-columns";
 import {
-  fromDto,
-  initials,
-  newMember,
-  TEAM_TONES,
-  type TeamMember,
-} from "@/lib/team";
+  addMemberFailure,
+  addOutcome,
+  reportAddMember,
+  type MissedStep,
+} from "@/lib/member-feedback";
+import { fromDto, newMember, roleSubtitle, type TeamMember } from "@/lib/team";
+import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
+import { Avatar } from "@/views/chat/Avatar";
 import { AgentDetailView } from "@/views/team/AgentDetailView";
 import { AgentFields } from "@/views/team/AgentFields";
 
@@ -62,6 +64,15 @@ interface Props {
    * nobody on it, so skipping the dialog is not a dead end.
    */
   onRunSetup?: () => void;
+  /**
+   * Go to the org chart — desks, seats, leads (issue #1193).
+   *
+   * The one way there from here, and a named destination rather than half of a
+   * toggle: the chart is not another rendering of this roster, it is the only
+   * surface that can create a desk or move somebody between two. Optional, so
+   * this view still stands alone.
+   */
+  onManageDesks?: () => void;
 }
 
 type Load = "loading" | "ready";
@@ -74,6 +85,7 @@ export function TeamView({
   onOpenAgent,
   refreshKey,
   onRunSetup,
+  onManageDesks,
 }: Props) {
   const [load, setLoad] = useState<Load>("loading");
   const [fromHost, setFromHost] = useState(false);
@@ -95,6 +107,15 @@ export function TeamView({
   const [people, setPeople] = useState<Person[]>([]);
   // The member whose budget dialog is open, if any.
   const [budgetFor, setBudgetFor] = useState<TeamMember | null>(null);
+  /**
+   * Open cards and running state per teammate (issue #1141), or `null` while
+   * nothing has been read and for a host that cannot answer.
+   *
+   * `null` and an empty map are the same *rendering* — no dot, no count — and
+   * that is the point: the alternative was a `0` on every card, which claims
+   * every teammate is free on a host that never said so. See `lib/team-workload.ts`.
+   */
+  const [workload, setWorkload] = useState<Map<string, Workload> | null>(null);
 
   /**
    * Hiding the budget controls from a non-admin is **courtesy, not enforcement**.
@@ -122,39 +143,15 @@ export function TeamView({
   }, [client, company]);
 
   /**
-   * Give a teammate an inbox, or take it away, on the host — keyed by the
-   * roster **agent id**, which is the `InboxStore` key the Inbox page reads and
-   * the ingest webhook files mail under. Nothing is persisted client-side: if
-   * the write fails the switch goes back, so the console never claims an inbox
-   * the host doesn't have.
+   * Re-read the roster. Answers whether it landed.
    *
-   * Starter-team cards are locally-invented placeholders, not host records, so
-   * their ids are not real inbox keys — refuse rather than file mail under one.
+   * The catch below is right to show nobody, and wrong to stay silent about
+   * after a write we know the host took: a failed read here does not leave a
+   * stale list, it empties the one the operator is about to be congratulated
+   * over. `addMember` is the only caller that looks at the answer; the effects
+   * and the Back handler still fire and forget.
    */
-  async function toggleMemberInbox(member: TeamMember) {
-    if (!fromHost) {
-      toast.error("Add this teammate to your company first — an inbox needs a saved teammate.");
-      return;
-    }
-    const next = !member.inboxEnabled;
-    const apply = (enabled: boolean) =>
-      setMembers((ms) => ms.map((m) => (m.id === member.id ? { ...m, inboxEnabled: enabled } : m)));
-    apply(next);
-    try {
-      await setInboxEnabled(client, company, member.id, next);
-    } catch (error) {
-      apply(!next);
-      toast.error(
-        error instanceof ApiError && error.status === 404
-          ? "This host doesn't offer teammate inboxes yet."
-          : error instanceof Error
-            ? error.message
-            : "Couldn't change the inbox.",
-      );
-    }
-  }
-
-  const boot = useCallback(async () => {
+  const boot = useCallback(async (): Promise<boolean> => {
     try {
       const roster = await client.listTeam(company);
       if (roster.length) {
@@ -172,6 +169,7 @@ export function TeamView({
         setFromHost(false);
         setHostEmpty(true);
       }
+      return true;
     } catch {
       // The roster read failed, so we never learned who is on this company.
       // Show nobody rather than a fabricated team: an operator cannot tell an
@@ -180,18 +178,49 @@ export function TeamView({
       setMembers([]);
       setFromHost(false);
       setHostEmpty(false);
+      return false;
     } finally {
       setLoad("ready");
     }
+  }, [client, company]);
+
+  /**
+   * The board, read for what it says about the people rather than the cards.
+   *
+   * Two reads, both best-effort and neither of them blocking: the roster is the
+   * page, and a host with no `…/tasks` route — or a network that dropped — must
+   * still render every teammate. Both failures land on `null`, which draws no
+   * status line at all rather than a fabricated "idle · 0 open".
+   *
+   * The columns come with it because "open" is the host's word, not this
+   * console's: `closed` is declared per column on the `tasks` ledger.
+   */
+  const loadWorkload = useCallback(async () => {
+    if (!company) {
+      setWorkload(null);
+      return;
+    }
+    const [tasks, columns] = await Promise.all([
+      listTasks(client, company).catch(() => null),
+      fetchBoardColumns(client, company).catch(() => null),
+    ]);
+    // `columns.length === 0` is a *third* failure and the easiest to miss:
+    // `fetchBoardColumns` resolves empty — it does not reject — for a host whose
+    // ledger list carries no `tasks` ledger at all. Treating that as a known
+    // vocabulary would put "Idle · 0 open tasks" on every card of a company
+    // whose board this console never found, which is the exact false claim the
+    // `null` state exists to prevent.
+    setWorkload(tasks && columns?.length ? workloadByAssignee(tasks, columns) : null);
   }, [client, company]);
 
   useEffect(() => {
     setLoad("loading");
     void boot();
     void loadViewer();
+    void loadWorkload();
     // `refreshKey` re-runs the read after setup staffs the company; without it
     // the operator lands on the roster they had before their team was built.
-  }, [boot, loadViewer, refreshKey]);
+  }, [boot, loadViewer, loadWorkload, refreshKey]);
 
   /**
    * Re-read the roster on the way back from the agent sub-page (issue #264).
@@ -289,33 +318,33 @@ export function TeamView({
       return;
     }
 
+    const missed: MissedStep[] = [];
     // Enable the inbox against the host's real agent id *before* refetching, so
     // the reloaded roster already reports the toggle as on.
-    let inboxMissed = false;
     if (fields.inbox) {
       try {
         await setInboxEnabled(client, company, created.id, true);
       } catch {
-        inboxMissed = true;
+        missed.push({
+          what: "their inbox couldn't be switched on",
+          fix: "Turn it on from their actions menu.",
+        });
       }
     }
     // Persisted on the host — refetch so the card reflects the real record
     // (id, merge order, inbox state) rather than a locally-guessed one.
-    await boot();
+    if (!(await boot())) {
+      missed.push({
+        what: "the roster couldn't be read back",
+        fix: "The roster below is empty because that read failed, not because your company is — reload to see them.",
+      });
+    }
     setAddOpen(false);
-    // Announced after the refetch, not on the response: the roster the operator
-    // is looking at is the one being claimed about, so a read that contradicted
-    // the write would contradict the toast too rather than follow it.
-    reportAddMember(
-      inboxMissed
-        ? {
-            kind: "partial",
-            name: fields.name,
-            missed: "their inbox couldn't be switched on.",
-            fix: "Turn it on from their actions menu.",
-          }
-        : { kind: "added", name: fields.name },
-    );
+    // Announced after the refetch, not on the response, and only as a clean add
+    // when that refetch actually landed: the roster the operator is looking at
+    // is the one being claimed about, so a read that could not confirm the
+    // write must not be toasted over as though it had.
+    reportAddMember(addOutcome(fields.name, missed));
   }
 
   async function removeMember(member: TeamMember) {
@@ -351,16 +380,31 @@ export function TeamView({
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
+        {/*
+          Headed "Company", not "Team" (issue #1141). This grid is no longer a
+          page of its own — bare `#/team` redirects to `#/company` — it is the
+          Company page's Cards half, and the org chart beside it heads the same
+          way. Two headings over one page's two halves is how an operator ends
+          up believing they are on two different pages.
+        */}
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-1">
-            <h2 className="text-2xl font-semibold tracking-tight">Team</h2>
+            <h2 className="text-2xl font-semibold tracking-tight">Company</h2>
             <p className="text-sm text-muted-foreground">
-              The teammates that make up your company. {fromHost ? "Defined by this company." : "Start from these and shape your own."}
+              The teammates that make up your company — what each does, and what
+              they're on. {fromHost ? "Defined by this company." : "Start from these and shape your own."}
             </p>
           </div>
-          <Button onClick={() => setAddOpen(true)}>
-            <UserPlus className="size-4" /> Add teammate
-          </Button>
+          <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+            {onManageDesks && (
+              <Button variant="outline" onClick={onManageDesks} data-testid="company-manage-desks">
+                <Network className="size-4" /> Manage desks
+              </Button>
+            )}
+            <Button onClick={() => setAddOpen(true)}>
+              <UserPlus className="size-4" /> Add teammate
+            </Button>
+          </div>
         </div>
 
         {/*
@@ -399,8 +443,6 @@ export function TeamView({
               <MemberCard
                 key={m.id}
                 member={m}
-                inboxOn={m.inboxEnabled}
-                onToggleInbox={() => void toggleMemberInbox(m)}
                 onRemove={() => void removeMember(m)}
                 // Only a host-backed teammate can be opened: a starter-team
                 // card is a local placeholder with no record behind it, so its
@@ -414,6 +456,14 @@ export function TeamView({
                 onRemoveCap={() => void applyBudget(m, null)}
                 onResetBudget={() => void resetBudget(m)}
                 setByLabel={m.budgetSetBy ? whoSet(m.budgetSetBy) : undefined}
+                // Looked up by roster id, so a card the board assigned to a
+                // *desk* is never attributed to the people on it.
+                //
+                // The two ways of having no entry are different facts and are
+                // kept apart here: the board answered and this teammate is on
+                // nothing (idle, zero — worth saying), versus the board never
+                // answered (undefined — the card says nothing at all).
+                workload={workload ? (workload.get(m.id) ?? IDLE) : undefined}
               />
             ))}
             <button
@@ -448,6 +498,14 @@ export function TeamView({
   );
 }
 
+/**
+ * A teammate the board knows about and has given nothing to.
+ *
+ * Shared rather than rebuilt per card: it is a constant fact, and a fresh
+ * object per render would change `MemberCard`'s props on every pass.
+ */
+const IDLE: Workload = { open: 0, status: "idle" };
+
 /** The fields the add dialog collects. */
 interface AddMemberFields {
   name: string;
@@ -475,8 +533,6 @@ function budgetError(error: unknown, fallback: string): string {
 
 function MemberCard({
   member,
-  inboxOn,
-  onToggleInbox,
   onRemove,
   onOpen,
   canEditBudget,
@@ -484,10 +540,9 @@ function MemberCard({
   onRemoveCap,
   onResetBudget,
   setByLabel,
+  workload,
 }: {
   member: TeamMember;
-  inboxOn: boolean;
-  onToggleInbox: () => void;
   onRemove: () => void;
   /** Open this agent's detail page. Undefined when the card has no host record. */
   onOpen?: () => void;
@@ -498,24 +553,35 @@ function MemberCard({
   onResetBudget: () => void;
   /** Who set the current override, already resolved to something readable. */
   setByLabel?: string;
+  /**
+   * What this teammate is on and carrying, or undefined when the board could
+   * not be read — in which case the card says nothing about either.
+   */
+  workload?: Workload;
 }) {
   const capped = member.budgetUsdDaily !== undefined;
   // An override exists (someone set this deliberately), as opposed to the cap
   // simply coming from the company's own definition.
   const overridden = member.budgetSetBy !== undefined;
+  // Issue #1208: the role only earns its line when it is not the name again.
+  // Every manifest-declared agent in the shipped companies resolves both to one
+  // string, so this slot was the same words twice on every card — directly
+  // above the description that actually says what the teammate does.
+  const subtitle = roleSubtitle(member.name, member.role);
   return (
     <Card data-testid="team-card">
       <CardContent className="flex h-full flex-col gap-3 py-4">
         <div className="flex items-start gap-3">
-          <div
-            className={cn(
-              "flex size-11 shrink-0 items-center justify-center rounded-xl text-sm font-semibold",
-              TEAM_TONES[member.tone] ?? "bg-muted text-muted-foreground",
-            )}
-            aria-hidden
-          >
-            {initials(member.name)}
-          </div>
+          {/*
+            The shared chat avatar, not a hand-rolled tile (issue #1181). This
+            drew `initials()` over a `TEAM_TONES` background — the same visual
+            language as chat, minus the mascot — so a teammate had a face in a DM
+            and letters on the page that is *about* them.
+
+            44px, comfortably above the ~24px floor under which a mascot is a
+            smudge and the bare tone tile is the honest fallback.
+          */}
+          <Avatar name={member.name} tone={member.tone} className="size-11 rounded-xl text-sm" />
           {onOpen ? (
             // The card's own name is the way in (issue #264). A whole-card
             // click would swallow the inbox switch and the actions menu, both
@@ -527,12 +593,16 @@ function MemberCard({
               data-testid="team-card-open"
             >
               <p className="truncate font-medium">{member.name}</p>
-              <p className="truncate text-xs text-muted-foreground">{member.role}</p>
+              {subtitle && (
+                <p className="truncate text-xs text-muted-foreground">{subtitle}</p>
+              )}
             </button>
           ) : (
             <div className="min-w-0 flex-1">
               <p className="truncate font-medium">{member.name}</p>
-              <p className="truncate text-xs text-muted-foreground">{member.role}</p>
+              {subtitle && (
+                <p className="truncate text-xs text-muted-foreground">{subtitle}</p>
+              )}
             </div>
           )}
           <DropdownMenu>
@@ -576,26 +646,71 @@ function MemberCard({
           </DropdownMenu>
         </div>
         {member.description && (
-          <p className="line-clamp-3 text-sm text-muted-foreground">{member.description}</p>
+          <p className="line-clamp-3 text-sm text-muted-foreground" data-testid="team-card-description">
+            {member.description}
+          </p>
         )}
+        {workload && <WorkloadLine workload={workload} />}
         <DailyBudgetLine member={member} setByLabel={setByLabel} />
-        <div className="mt-auto flex items-center justify-between gap-2 border-t pt-3">
-          <Badge variant="secondary" className="gap-1">
-            <Sparkles className="size-3" /> Teammate
-          </Badge>
-          <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
-            <Mail className="size-3.5" />
-            Inbox
-            <Switch
-              checked={inboxOn}
-              onCheckedChange={onToggleInbox}
-              aria-label="Give this teammate an inbox"
-              data-testid="team-inbox-toggle"
-            />
-          </label>
-        </div>
+        {/*
+          The card's footer is gone with the Inbox switch it existed to hold
+          (issue #1190).
+
+          The switch was the only control on the card that *wrote* to the host,
+          at the same weight as the name, on a grid of thirteen — a card is for
+          recognising a teammate, and a mis-click while scanning silently
+          changed a per-teammate setting with no confirmation. It moved to the
+          teammate's own page, which already reported inbox state as a badge and
+          offered no way to change it. See `AgentDetailView`.
+
+          Its companion — a "Teammate" badge — went with it rather than being
+          left behind a border rule on its own. On a page whose every card is a
+          teammate it labelled nothing, and a bordered band holding one inert
+          chip reads as something that failed to load.
+        */}
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * What a teammate is on, and how much of it (issue #1141).
+ *
+ * One line for two facts an operator scanning the roster is actually asking:
+ * is anybody working on my behalf right now, and how much is queued behind
+ * them. Neither is a host field — both are derived from the board, and
+ * `lib/team-workload.ts` carries the reasoning.
+ *
+ * Coloured through the console's status vocabulary rather than a palette step,
+ * so `working` is the same cyan as a running workflow node and `idle` the same
+ * neutral as everything that is asking nothing of anyone. Both themes come from
+ * the tokens.
+ */
+function WorkloadLine({ workload }: { workload: Workload }) {
+  const working = workload.status === "working";
+  return (
+    <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+      <span
+        className={cn(
+          "size-2 shrink-0 rounded-full",
+          working ? "bg-status-running" : "bg-status-idle",
+        )}
+        aria-hidden
+      />
+      <span
+        className={cn(
+          "font-medium",
+          working ? "text-status-running-text" : "text-status-idle-text",
+        )}
+        data-testid="team-card-status"
+      >
+        {working ? "Working" : "Idle"}
+      </span>
+      <span aria-hidden>·</span>
+      <span data-testid="team-card-tasks">
+        {workload.open === 1 ? "1 open task" : `${workload.open} open tasks`}
+      </span>
+    </p>
   );
 }
 

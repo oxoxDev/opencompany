@@ -57,7 +57,7 @@ async function setCap(page: Page, role: string, amount: string) {
 }
 
 test.beforeEach(async ({ page }) => {
-  await page.goto("/#/team");
+  await page.goto("/#/company");
   await dismissOnboarding(page);
   await expect(page.getByTestId("team-card").first()).toBeVisible({ timeout: 30_000 });
 });
@@ -84,7 +84,7 @@ test("an admin can cap a teammate the company left uncapped, and reset it back",
     localStorage.clear();
     sessionStorage.clear();
   });
-  await page.goto("/#/team");
+  await page.goto("/#/company");
   await dismissOnboarding(page);
   await expect(card(page, "Engineer").getByTestId("team-budget")).toHaveText(/\$9\.00\/day/, {
     timeout: 30_000,

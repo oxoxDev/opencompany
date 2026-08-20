@@ -24,14 +24,72 @@ import type {
  */
 const PENDING_STATUS: string = "pending";
 
+/** The `skipped` delivery status, widened for the same reason as
+ * {@link PENDING_STATUS}: the host owns this union and may grow it. */
+const SKIPPED_STATUS: string = "skipped";
+
+/**
+ * The two `skipped` reasons that do NOT count as a lost report (issue #981).
+ *
+ * `already-delivered` — an earlier run in this approval lineage sent it (issue
+ * #438); approving a gate re-runs the graph from the trigger, so every upstream
+ * `output` node is reached again and the report is already at its destination.
+ * `dry-run` — a test run (issue #542) attempted nothing, on purpose.
+ *
+ * `no-destination-configured` is deliberately NOT here. That report was produced
+ * and then lost with nothing accounting for it, which is exactly what issue #925
+ * added the row to make visible; excusing it restores the silence issues #947
+ * and #963 were filed about. See docs/modules/server/run-verdict.md.
+ */
+const ACCOUNTED_FOR_REASONS: readonly string[] = [
+  "already-delivered",
+  "dry-run",
+];
+
+/**
+ * Whether THIS one report did not reach a destination and will not without a
+ * change — the host's `is_undelivered`, mirrored (issue #981).
+ *
+ * Every count and every marker below folds this, so the run's dot, the drawer's
+ * badge, the toast and the per-node marker cannot disagree about a single row.
+ *
+ * `reason` is optional on the type: a host predating issue #248 sends no reason
+ * at all. An absent one **counts**, which is the safe direction — an unreadable
+ * reason must not excuse a report from the number an operator acts on.
+ */
+export function isUndelivered(d: DeliveryReport): boolean {
+  if (d.status === "sent" || d.status === PENDING_STATUS) return false;
+  // Only a skip can be accounted for. A `failed` or `denied` row is a report
+  // that was attempted and did not work, whatever it claims about why.
+  if (d.status !== SKIPPED_STATUS) return true;
+  return !ACCOUNTED_FOR_REASONS.includes(d.reason ?? "");
+}
+
 /** Reports that did NOT reach their destination **and will not without a
- * change** — the number worth acting on. `pending` is excluded on purpose: it
- * is a report parked for an operator's approval, so counting it here would
- * badge a working approvals queue as a failure. */
+ * change** — the number worth acting on. A fold of {@link isUndelivered}. */
 export function undeliveredCount(deliveries: DeliveryReport[]): number {
-  return deliveries.filter(
-    (d) => d.status !== "sent" && d.status !== PENDING_STATUS,
-  ).length;
+  return deliveries.filter(isUndelivered).length;
+}
+
+/**
+ * The `output` nodes whose report did not go out (issue #981).
+ *
+ * The join that lets the console answer TWO questions about one node without
+ * conflating them. `nodes[].status` says whether the engine ran the step — for a
+ * dropped report the honest answer is `ok`, because delivery happens after the
+ * engine returns — and this says whether its report reached anybody. Rendering
+ * only the first is what put a green `DONE` on the output node of a run the same
+ * screen called `undelivered`.
+ *
+ * Local, off `DeliveryReport.node` (the `output` node's id, on every delivery
+ * row the host writes), so this needs **no new wire field** and adds no third
+ * notion of "this run did not fully work" beyond the verdict itself.
+ *
+ * Takes the rows rather than a run: the settled `WorkflowRunResult` and the
+ * history's `WorkflowRunOutcome` are different shapes that both carry them.
+ */
+export function undeliveredNodes(deliveries: DeliveryReport[]): Set<string> {
+  return new Set(deliveries.filter(isUndelivered).map((d) => d.node));
 }
 
 /** Reports waiting on an operator's verdict rather than on a fix. */

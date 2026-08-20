@@ -50,6 +50,7 @@ backend, and there is no per-channel routing on the host.
 | Threads | A reply posts its `parent` — the parent message's own id — and comes back under it. Both halves of the exchange hang off the row the thread opened from. |
 | Reactions | One durable row per person per emoji, so a chip says who reacted and whether one of them was you. `POST {scope}/chat/messages/{seq}/reactions` with an explicit `on`, which makes a retry idempotent. |
 | Message ids | A sent message comes back with the id it was journaled under (`messageId`), which is what a thread reply or a reaction names. Until the id lands the row's reply/react actions are disabled and say why. |
+| Message intent | The composer's three positions — "Just chatting" / "Do it once" / "Build me the workflow" — travel as `deliverable` on the message and are journaled with it. Only a non-default value is sent, so an unmarked line is byte-identical on the wire to a pre-#580 one. `chat` withholds the card the host would otherwise open by construction; it does **not** take the orchestrator's own `spawn_task` away, so it means "not automatically carded", not "never carded". |
 
 **Still console-local:**
 
@@ -162,3 +163,35 @@ first row carries the avatar and the author, and continuation rows leave the
 gutter empty and reveal their timestamp there on hover. A run also breaks on a
 day boundary, and on any row that has replies — a summary row between two lines
 that read as one utterance is worse than an extra avatar.
+
+## One face per teammate
+
+`Avatar` hashes its mascot out of the `name` it is given, so every surface that
+draws the same person must hand it the same string. A DM is where that bites:
+the rail row and `ChatHeader` sit on screen together, and seeding them
+differently would put two faces on one teammate — worse than the generic glyph
+the header drew before issue #1170. Both go through `dmFace(channel)` in
+`model.ts`; a channel and a DM with no roster entry get `null` there and wear a
+glyph (`#`, `Lock`, `CircleDot`) instead, because neither has one person behind
+it. The header draws its tile at 24px, the floor below which `Avatar`'s
+`markOnly` says a mascot is a smudge and the bare tone tile is the honest mark.
+
+## One name per teammate
+
+The header's title is `channel.name`; the muted slot past the divider is
+`channelSubtitle(channel)`. A DM's `purpose` is the teammate's **description**,
+falling back to their role — the field parallel to a desk's blurb, since both
+answer "what is this line for". It used to be the role alone, which is an
+identity field in a description slot, and `fromDto` resolves a teammate's name
+as `dto.name?.trim() || dto.role`: a company that declares roles and names
+nobody made the two slots one string, and every DM header in it read
+`Backend Engineer │ Backend Engineer` (issue #1180).
+
+So `channelSubtitle` returns `null` — not `""` — for a purpose that is empty or
+that only repeats the title, compared case- and whitespace-insensitively. The
+header drops the entire `<span>` when it does, divider included: the `border-l`
+lives on that element, so keeping it empty would leave a rule hanging beside the
+name. `ChannelRail`'s row tooltip and `MessageTimeline`'s conversation-intro
+clause read the same helper, for the same reason. The rule is kind-agnostic: a
+desk whose blurb just restates its slug is the identical non-fact under `#`, and
+a blurb that says something the slug does not is untouched.

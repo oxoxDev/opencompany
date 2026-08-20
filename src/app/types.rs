@@ -161,6 +161,26 @@ pub fn namespace_company_id(tenant: &str, id: CompanyId) -> CompanyId {
     }
 }
 
+/// A tenant namespace must not contain the `--` id delimiter.
+///
+/// [`namespace_company_id`] and `app::orphans::filter_to_tenant` both encode a
+/// tenant as the `<tenant>--` prefix, so a namespace containing `--` makes the
+/// encoding ambiguous: `acme` namespacing `other--company` collides with
+/// `acme--other` namespacing `company`, and the shorter tenant's filter then
+/// claims the longer tenant's ids. Reject the delimiter at the boundary that
+/// reads `OPENCOMPANY_TENANT_ID` so a malformed namespace fails loudly instead
+/// of silently misattributing another tenant's companies.
+pub fn validate_tenant_namespace(tenant: &str) -> Result<(), String> {
+    if tenant.contains("--") {
+        Err(format!(
+            "tenant namespace `{tenant}` contains `--`, which is the company-id \
+             delimiter; a namespace may not contain it"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// The canonical form of a tenant identifier for ownership: the bare slug, with
 /// any leading `tenant:` prefix stripped.
 ///
@@ -654,7 +674,34 @@ impl AppState {
         if let Some(cached) = self.skill_registry.get() {
             return Ok(cached.clone());
         }
-        let registry: Arc<[SkillDoc]> = load_dir_skills(dir)?.into();
+        // A *configured* library that is missing or not a directory is a host
+        // misconfiguration, not a parse failure `load_dir_skills` would flag —
+        // it returns `Ok(empty)` for a nonexistent `dir`, which would silently
+        // downgrade a server-authoritative install to a client-authored one
+        // (the exact invariant `shared_skill_registry`'s doc forbids). Reject it
+        // as `Config` (a 500 / failed boot) before the load can flatten it away.
+        if !dir.is_dir() {
+            return Err(crate::OpenCompanyError::Config(format!(
+                "shared skill library at {} is not a directory",
+                dir.display()
+            )));
+        }
+        // `load_dir_skills` reports a parse/validation failure via the same
+        // `DataParse`/`DataInvalid` variants a per-company workflow file uses,
+        // where the HTTP mapping (issue #1017) treats them as the *caller's*
+        // bad input (400/422). Here the "file" is the operator-provisioned
+        // shared library, not anything a caller submitted, so that mapping
+        // would misreport a host misconfiguration as a client error. Recast
+        // as `Config` — already the crate's "runtime setup is broken" variant
+        // (see `app/config.rs`) — so it renders the 500 documented above.
+        let registry: Arc<[SkillDoc]> = load_dir_skills(dir)
+            .map_err(|error| {
+                crate::OpenCompanyError::Config(format!(
+                    "shared skill library at {} failed to load: {error}",
+                    dir.display()
+                ))
+            })?
+            .into();
         // A concurrent caller may have set it first; keep whichever won.
         let _ = self.skill_registry.set(registry.clone());
         Ok(self.skill_registry.get().cloned().unwrap_or(registry))
@@ -1416,6 +1463,23 @@ mod tests {
     }
 
     #[test]
+    fn skill_registry_rejects_a_configured_but_missing_library() {
+        // A configured `skills_root` that does not exist is a host
+        // misconfiguration. `load_dir_skills` returns `Ok(empty)` for a missing
+        // dir, so without the `is_dir` guard the registry would silently flatten
+        // to empty — downgrading a server-authoritative install to a
+        // client-authored one, the invariant `shared_skill_registry` forbids.
+        let state = AppState::new(AppConfig::default());
+        let err = state
+            .skill_registry(std::path::Path::new("/nonexistent"))
+            .expect_err("a missing configured library must fail, not load empty");
+        assert!(
+            matches!(err, crate::OpenCompanyError::Config(_)),
+            "expected a Config error for a missing library, got {err:?}"
+        );
+    }
+
+    #[test]
     fn namespaced_company_id_is_noop_when_unset() {
         let config = AppConfig::default();
         assert!(config.tenant_namespace.is_none());
@@ -1454,6 +1518,20 @@ mod tests {
         // Only the leading `tenant:` is stripped, and only once.
         assert_eq!(canonical_tenant("company:acme"), "company:acme");
         assert_eq!(canonical_tenant("tenant:tenant:x"), "tenant:x");
+    }
+
+    #[test]
+    fn tenant_namespace_rejects_the_id_delimiter() {
+        // A namespace containing `--` makes the `<tenant>--` id prefix
+        // ambiguous between tenants, so the boundary that reads
+        // `OPENCOMPANY_TENANT_ID` rejects it.
+        assert!(validate_tenant_namespace("acme").is_ok());
+        assert!(validate_tenant_namespace("acme-corp").is_ok());
+        assert_eq!(
+            validate_tenant_namespace("acme--other").unwrap_err(),
+            "tenant namespace `acme--other` contains `--`, which is the company-id \
+             delimiter; a namespace may not contain it"
+        );
     }
 
     #[test]

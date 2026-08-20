@@ -71,12 +71,18 @@ export function WorkflowNode({ data, selected }: NodeProps) {
             )}
             // "running" is now reported by the engine (issue #382), not a
             // derived frontier — the node really is executing when this shows.
+            // Issue #981: the last arm used to say "This node finished." on a
+            // node whose report was refused, which is true and reads as a
+            // promise it cannot make. It now says what it is actually a verdict
+            // on, and the strip below says the rest.
             title={
               runState === "running"
                 ? "This node is executing now."
                 : runState === "error"
                   ? "This node failed."
-                  : "This node finished."
+                  : d.reportUndelivered
+                    ? "This step ran. Its report did not go out."
+                    : "This node finished."
             }
           >
             {RUN_STATE_LABEL[runState]}
@@ -91,6 +97,22 @@ export function WorkflowNode({ data, selected }: NodeProps) {
           </span>
         )}
       </div>
+      {/* Issue #981. The complaint was a run reading `undelivered` whose output
+          node painted DONE, green, and said nothing else — so the truth lived
+          only in a banner somewhere off the canvas. The ring and the badge above
+          are unchanged, because they answer whether the STEP ran and it did;
+          this answers what became of its report, in its own words, on the same
+          card. Read together they are two facts, not a contradiction. */}
+      {d.reportUndelivered && (
+        <div
+          className="flex items-center gap-1.5 rounded-b-[10px] border-t border-status-failed/40 bg-status-failed-soft px-3 py-1 text-3xs font-medium text-[var(--status-failed-text)]"
+          data-testid="workflow-node-undelivered"
+          title="This step ran. Its report did not go out — open the run in History for the reason."
+        >
+          <span className="size-1.5 shrink-0 rounded-full bg-status-failed" />
+          report not delivered
+        </div>
+      )}
       <Handle
         type="source"
         position={Position.Right}

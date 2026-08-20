@@ -26,6 +26,15 @@ interface Props {
    */
   avatar?: string;
   className?: string;
+  /**
+   * Forwarded to the tile so a spec can name one avatar among several on a page.
+   *
+   * Declared rather than picked up from a rest spread: a hyphenated prop passes
+   * TypeScript's excess-property check on any component, so an undeclared
+   * `data-testid` here would type-check happily and then be dropped at render —
+   * a selector that silently matches nothing.
+   */
+  "data-testid"?: string;
 }
 
 /**
@@ -35,7 +44,15 @@ interface Props {
  * avatar from a contact-list one — DM rows, message gutters, and the member
  * pane all draw the same tile at different sizes.
  */
-export function Avatar({ name, tone, company, markOnly, avatar, className }: Props) {
+export function Avatar({
+  name,
+  tone,
+  company,
+  markOnly,
+  avatar,
+  className,
+  "data-testid": testId,
+}: Props) {
   if (company) {
     return (
       <span
@@ -44,6 +61,7 @@ export function Avatar({ name, tone, company, markOnly, avatar, className }: Pro
           className,
         )}
         aria-hidden
+        data-testid={testId}
       >
         <Building2 className="size-1/2" />
       </span>
@@ -63,6 +81,7 @@ export function Avatar({ name, tone, company, markOnly, avatar, className }: Pro
           className,
         )}
         aria-hidden
+        data-testid={testId}
       />
     );
   }
@@ -78,6 +97,7 @@ export function Avatar({ name, tone, company, markOnly, avatar, className }: Pro
         className,
       )}
       aria-hidden
+      data-testid={testId}
     >
       <span className="absolute inset-0 flex items-center justify-center">{initials(name)}</span>
       <img

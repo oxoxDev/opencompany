@@ -430,8 +430,8 @@ impl MessageView {
                 task_id, column, ..
             } => MessageView {
                 id,
-                channel: "system".to_string(),
-                author: "system".to_string(),
+                channel: crate::ports::SYSTEM_AUTHOR.to_string(),
+                author: crate::ports::SYSTEM_AUTHOR.to_string(),
                 text: dispatch_marker_text(&column),
                 at_millis,
                 mine: false,
@@ -443,8 +443,8 @@ impl MessageView {
             // `owns` never admits other variants into a history.
             other => MessageView {
                 id,
-                channel: "system".to_string(),
-                author: "system".to_string(),
+                channel: crate::ports::SYSTEM_AUTHOR.to_string(),
+                author: crate::ports::SYSTEM_AUTHOR.to_string(),
                 text: format!("{other:?}"),
                 at_millis,
                 mine: false,
@@ -461,6 +461,22 @@ impl MessageView {
 ///
 /// Reported rather than repaired. See [`channel_attributed_replies`] for why a
 /// repair is not available.
+///
+/// # The figure is not comparable across the #966 cutover
+///
+/// Host-authored notices — the approval-overflow line, the `"Acknowledged."`
+/// fallback, the failed-continuation report — used to journal under the
+/// operator channel, so every one already on disk is counted here as damage.
+/// Since #966 they journal under [`SYSTEM_AUTHOR`](crate::ports::SYSTEM_AUTHOR)
+/// and are not counted, because they are correct rows and inflating this number
+/// with them would make the one figure that has to be trustworthy the least
+/// trustworthy one.
+///
+/// The consequence is a step in the series that nothing on the wire labels: a
+/// company's `affected` can fall without a single row being repaired, purely
+/// because it stopped minting new false positives. Read a decline across that
+/// boundary as "the bleeding stopped", never as "history got better" — no row
+/// counted here has ever become attributable, and none can.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct AttributionAudit {
     /// Every `AgentReply` inspected.
@@ -533,7 +549,15 @@ impl AttributionAudit {
 /// bound; in practice that notice is rare enough not to move it.
 /// Whether a stored `agent_id` names an author we can actually resolve.
 ///
-/// The roster, **plus the confined copilot** (issue #966). `CONFINED_AGENT_ID`
+/// The roster, **plus two ids that are truthful authors without being teammates**.
+///
+/// [`SYSTEM_AUTHOR`](crate::ports::SYSTEM_AUTHOR) (issue #966) is the runtime
+/// speaking for itself — an approval-overflow notice, the `"Acknowledged."`
+/// fallback, a failed-continuation report. Those rows are *correct*, so counting
+/// them as damage would inflate the one figure in #965 that has to be
+/// trustworthy, and would caption a legitimate system message as unattributable.
+///
+/// `CONFINED_AGENT_ID`
 /// is deliberately not a roster id — it names no teammate, carries no manifest
 /// grants and cannot be addressed — but a copilot turn genuinely authored its
 /// reply, so the id is a truthful author rather than a destination that leaked
@@ -546,6 +570,7 @@ impl AttributionAudit {
 /// which rows are unknown.
 pub fn is_known_author(agent_id: &str, record: &CompanyRecord) -> bool {
     agent_id == crate::ports::CONFINED_AGENT_ID
+        || agent_id == crate::ports::SYSTEM_AUTHOR
         || record.resolve_roster_agent_id(agent_id).is_some()
 }
 
@@ -1262,6 +1287,58 @@ mod test {
                 template_provenance: None,
                 setup: None,
             }
+        }
+
+        /// Issue #966. The runtime speaking for itself is a *correct* row, not
+        /// damage. Counting it would inflate the blast-radius figure on a company
+        /// doing nothing wrong, and would caption a legitimate system message as
+        /// something nobody can attribute.
+        #[test]
+        fn a_host_authored_notice_is_a_known_author_not_an_affected_row() {
+            let record = record();
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[reply(1, crate::ports::SYSTEM_AUTHOR), reply(2, "engineer")],
+                |agent_id| is_known_author(agent_id, &record),
+            );
+            assert_eq!(audit.replies, 2);
+            assert_eq!(audit.affected, 0);
+        }
+
+        /// Issue #966. The console reaches the centred system pill by comparing
+        /// the projected author against a literal `"system"`
+        /// (`frontend/src/lib/chat.ts`), and `MessageView` projects an
+        /// `AgentReply`'s `agent_id` straight into that field. So the *value* is
+        /// the contract with the console, not merely the constant's identity.
+        ///
+        /// Redefining `SYSTEM_AUTHOR` to anything else keeps every other test
+        /// here green and silently returns these three notices to rendering as
+        /// company bubbles — the exact appearance this change exists to end.
+        /// Two copies of one literal is the same coupling
+        /// `dispatch_marker_text` already carries with that file, and it is
+        /// deliberate for the same reason.
+        #[test]
+        fn the_notice_author_is_the_literal_the_console_keys_on() {
+            assert_eq!(
+                crate::ports::SYSTEM_AUTHOR,
+                "system",
+                "frontend/src/lib/chat.ts renders `author === \"system\"` as the centred pill"
+            );
+        }
+
+        /// The whole point of the reserved id: a notice and a damaged reply used
+        /// to be the same bytes. This pins that they are now different ones, so
+        /// the distinction a marker would rely on actually exists in the data.
+        #[test]
+        fn a_notice_and_an_overwritten_reply_are_no_longer_the_same_author() {
+            let record = record();
+            assert_ne!(
+                crate::ports::SYSTEM_AUTHOR,
+                "operator",
+                "a notice must not share the author a destination-overwrite produces"
+            );
+            assert!(is_known_author(crate::ports::SYSTEM_AUTHOR, &record));
+            assert!(!is_known_author("operator", &record));
         }
 
         /// Issue #966. A copilot turn genuinely authored its reply, so the id it

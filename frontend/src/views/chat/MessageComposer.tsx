@@ -13,23 +13,24 @@ import {
   Strikethrough,
 } from "lucide-react";
 
-import type { TaskDeliverable } from "@/api/tasks";
+import type { MessageIntent } from "@/api/tasks";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 interface Props {
   placeholder: string;
   disabled?: boolean;
-  onSend: (text: string, deliverable?: TaskDeliverable) => void;
+  onSend: (text: string, intent?: MessageIntent) => void;
   /** Compact form, for the narrower thread panel. */
   compact?: boolean;
   /**
-   * Show the once-vs-workflow control (issue #580), opt-in per composer.
+   * Show the what-is-this-message-for control (issues #580, #1152), opt-in per
+   * composer.
    *
    * The channel and DM composers ask for it — either can open a board card, so
-   * "do it once" versus "build me the workflow" belongs at both prompt boxes.
-   * The thread and copilot composers never carry it, so their `onSend` stays a
-   * plain `(text)` and their wire shape is unchanged.
+   * "just chatting" versus "do it once" versus "build me the workflow" belongs
+   * at both prompt boxes. The thread and copilot composers never carry it, so
+   * their `onSend` stays a plain `(text)` and their wire shape is unchanged.
    *
    * DMs were omitted when #580 landed (issue #845). Nothing downstream was
    * scoped to channels — the chat route reads `deliverable` off the payload
@@ -64,10 +65,15 @@ export function MessageComposer({
   deliverableChoice,
 }: Props) {
   const [draft, setDraft] = useState("");
-  // The once-vs-workflow choice for the NEXT line only. It resets to "once"
-  // after every send so a workflow request never silently carries into the
-  // ordinary message after it — each build is an explicit, per-line decision.
-  const [deliverable, setDeliverable] = useState<TaskDeliverable>("once");
+  // What the NEXT line is for, and only the next one. It resets to "once"
+  // after every send so neither a workflow request nor a "just chatting" mark
+  // silently carries into the message after it — each is an explicit, per-line
+  // decision.
+  //
+  // "once" is the initial value, and stays it (issue #1152): "Just chatting" is
+  // a third position, not the new default, so an unmarked message is
+  // byte-identical on the wire to one sent before this control existed.
+  const [intent, setIntent] = useState<MessageIntent>("once");
   // The formatting row is opt-in, behind the `Aa` toggle in the icon row. It
   // used to sit open above every composer, which spent the widest strip of the
   // dock on four buttons most lines never use.
@@ -78,8 +84,8 @@ export function MessageComposer({
     const text = draft.trim();
     if (!text || disabled) return;
     setDraft("");
-    onSend(text, deliverableChoice ? deliverable : undefined);
-    setDeliverable("once");
+    onSend(text, deliverableChoice ? intent : undefined);
+    setIntent("once");
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -168,10 +174,19 @@ export function MessageComposer({
             <div
               className="mr-1 flex items-center gap-0.5 rounded-lg border p-0.5"
               role="group"
-              aria-label="What this should produce"
+              // Issue #1152: the group no longer only asks what the message
+              // should *produce* — "Just chatting" produces nothing — so it asks
+              // what the message is for.
+              aria-label="What this message is for"
             >
               {(
                 [
+                  // "Just chatting" leads, because it is the position that
+                  // withholds: the operator reaches for it to stop something
+                  // happening, and a control you press to prevent an action
+                  // belongs before the ones that cause it. It is NOT pre-pressed
+                  // — "Do it once" stays the default.
+                  { value: "chat", label: "Just chatting" },
                   { value: "once", label: "Do it once" },
                   { value: "workflow", label: "Build me the workflow" },
                 ] as const
@@ -179,12 +194,12 @@ export function MessageComposer({
                 <button
                   key={option.value}
                   type="button"
-                  aria-pressed={deliverable === option.value}
-                  onClick={() => setDeliverable(option.value)}
+                  aria-pressed={intent === option.value}
+                  onClick={() => setIntent(option.value)}
                   data-testid={`composer-deliverable-${option.value}`}
                   className={cn(
                     "rounded-md px-2 py-1 text-2xs font-medium transition-colors",
-                    deliverable === option.value
+                    intent === option.value
                       ? "bg-primary text-primary-foreground"
                       : "text-muted-foreground hover:text-foreground",
                   )}
