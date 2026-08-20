@@ -24,6 +24,13 @@ human_role = "Executive workshops"
 # setting it to `0` pauses search without editing this list.
 allow = ["*", "media", "composio", "search"]
 
+# The engagement-delivery desk aligns the recommendation, client deck, and implementation plan.
+[[group_chat]]
+id = "engagement_delivery"
+name = "Engagement delivery desk"
+description = "Coordinate the client-ready strategy and implementation materials."
+members = ["strategist", "deck_builder", "implementation_planner"]
+
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]

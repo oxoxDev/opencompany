@@ -28,14 +28,51 @@ pub const AUTH_MODES: &[&str] = &["email", "wallet", "none"];
 
 /// Inference providers selectable in `[inference].provider` (issue #56 — BYOK).
 ///
-/// * `managed` — the hosted TinyHumans / Medulla brain (the default path).
-/// * `openrouter` — OpenRouter's OpenAI-compatible aggregator (needs a key +
-///   the `HTTP-Referer` / `X-Title` attribution headers).
+/// * `openrouter` — OpenRouter's OpenAI-compatible aggregator, and the default.
+///   With **no** key it resolves to the platform endpoint and the subscription
+///   pays; with a tenant `sk-or-…` it goes direct to OpenRouter on the tenant's
+///   own account. Either way it carries OpenRouter's `HTTP-Referer` / `X-Title`
+///   attribution headers.
 /// * `openai_compatible` — any OpenAI-compatible endpoint the tenant runs
 ///   (needs a `base_url`, usually a key).
 /// * `ollama` — a local Ollama server's OpenAI-compatible surface (needs a
 ///   `base_url`; no key).
-pub const INFERENCE_PROVIDERS: &[&str] = &["managed", "openrouter", "openai_compatible", "ollama"];
+///
+/// `managed` was removed: OpenCompany no longer exposes its own model SKUs, so
+/// there is nothing for a distinct managed kind to name. A manifest or stored
+/// runtime blob still saying `managed` aliases to `openrouter` — see
+/// [`inference::LEGACY_MANAGED`](crate::company::inference::LEGACY_MANAGED).
+pub const INFERENCE_PROVIDERS: &[&str] = &["openrouter", "openai_compatible", "ollama"];
+
+/// Harness kinds selectable in `[[harness]].kind`.
+///
+/// * `built_in` — the embedded OpenHuman loop, in this process, against the
+///   inference provider the harness itself declares.
+/// * `acp` — an external agent driven over the Agent Client Protocol. Runs on
+///   whatever credential *it* holds, so it needs no `[harness.inference]`.
+pub const HARNESS_KINDS: &[&str] = &["built_in", "acp"];
+
+/// The default harness kind, used for the implicit harness a company with no
+/// `[[harness]]` block gets.
+pub const DEFAULT_HARNESS_KIND: &str = "built_in";
+
+/// The id given to the implicit harness synthesized for a company that declares
+/// no `[[harness]]` block.
+pub const IMPLICIT_HARNESS_ID: &str = "default";
+
+/// Transports selectable in `[harness.acp].transport`.
+///
+/// A remote runner is a *transport*, not a third harness kind: `RunnerDispatch`
+/// already implements the same `AcpAgent` port the local subprocess does, so the
+/// only thing that differs is how bytes reach the agent.
+pub const ACP_TRANSPORTS: &[&str] = &["local", "runner"];
+
+/// ACP agents selectable in `[harness.acp].agent`, for `transport = "local"`.
+///
+/// Kept in step with the desktop's own `ACP_HARNESSES` catalogue, which encodes
+/// how to put each one into ACP mode — guessing those arguments wrong spawns a
+/// process that hangs waiting for interactive input.
+pub const ACP_AGENTS: &[&str] = &["claude", "codex", "goose"];
 
 /// The abstract cognition tiers the tenant `[inference].models` table maps to
 /// concrete provider model ids. These are the workload names the harness
@@ -363,6 +400,15 @@ pub struct CompanyManifest {
     /// Brain selection.
     #[serde(default)]
     pub brain: Brain,
+    /// The named execution engines this company's agents run on. Renamed from
+    /// the `[[harness]]` array-of-tables.
+    ///
+    /// Empty (the default) means one implicit `built_in` harness on the
+    /// company-level [`inference`](Self::inference) — resolve through
+    /// [`effective_harnesses`](Self::effective_harnesses) rather than reading
+    /// this field, so the implicit case is never forgotten.
+    #[serde(default, rename = "harness")]
+    pub harnesses: Vec<Harness>,
     /// Per-tenant Bring-Your-Own-Key inference routing (issue #56). Declarative
     /// intent — a provider kind, an OpenAI-compatible `base_url`, an optional
     /// *named* secret key (`api_key_secret`), and an abstract-tier → model map.
@@ -470,6 +516,15 @@ pub struct Agent {
     /// Cognition tier hint; never selects a model.
     #[serde(default)]
     pub tier: Option<String>,
+    /// Which `[[harness]]` this agent runs its turns on, by id.
+    ///
+    /// `None` means the harness marked `default = true`. Deliberately separate
+    /// from [`tier`](Self::tier): a tier names a *workload* and is resolved
+    /// against whatever provider the harness turns out to use, whereas this
+    /// picks the engine and the credential. An agent can keep its tier while
+    /// moving between harnesses.
+    #[serde(default)]
+    pub harness: Option<String>,
     /// Tool grant globs, intersected with `[tools].allow`.
     #[serde(default)]
     pub tools: Vec<String>,
@@ -1029,6 +1084,92 @@ impl Default for Brain {
 
 fn default_brain_mode() -> String {
     "hosted".to_string()
+}
+
+/// A `[[harness]]` entry — one named execution engine the company's agents may
+/// run their turns on.
+///
+/// A company declares a set of these and binds each agent to one with
+/// [`Agent::harness`], so a single roster can span a cheap model, an expensive
+/// one, and the operator's own Claude Code — the last needing no credential from
+/// us at all.
+///
+/// Like [`McpServer`] and [`Inference`], this is declarative intent and **never**
+/// carries a token: a `built_in` harness's credential is named by
+/// `[harness.inference].api_key_secret`, and an `acp` harness holds its own.
+///
+/// The TOML shape is an array-of-tables with sub-tables:
+///
+/// ```toml
+/// [[harness]]
+/// id      = "embedded"
+/// kind    = "built_in"
+/// default = true
+///
+/// [harness.inference]      # attaches to the entry above
+/// provider = "openrouter"
+/// ```
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Harness {
+    /// snake_case, unique within the company. Agents name this.
+    pub id: String,
+    /// One of [`HARNESS_KINDS`].
+    #[serde(default = "default_harness_kind")]
+    pub kind: String,
+    /// Whether agents naming no harness run here. Exactly one entry must set
+    /// it, whenever any `[[harness]]` is declared.
+    #[serde(default)]
+    pub default: bool,
+    /// This harness's own inference routing. `built_in` only. Absent falls back
+    /// to the company-level `[inference]` section.
+    #[serde(default)]
+    pub inference: Option<Inference>,
+    /// How to reach the external agent. `acp` only.
+    #[serde(default)]
+    pub acp: Option<AcpHarness>,
+}
+
+fn default_harness_kind() -> String {
+    DEFAULT_HARNESS_KIND.to_string()
+}
+
+impl Harness {
+    /// The implicit harness a company with no `[[harness]]` block runs on: one
+    /// `built_in` entry, marked default, inheriting the company-level
+    /// `[inference]`.
+    ///
+    /// Synthesized rather than required in every manifest so that adding named
+    /// harnesses changes nothing for a company that never asked for them —
+    /// every bundle under `companies/` lands here.
+    pub fn implicit() -> Self {
+        Self {
+            id: IMPLICIT_HARNESS_ID.to_string(),
+            kind: DEFAULT_HARNESS_KIND.to_string(),
+            default: true,
+            inference: None,
+            acp: None,
+        }
+    }
+
+    /// Whether this is the embedded loop — the only kind that consults
+    /// `[inference]`.
+    pub fn is_built_in(&self) -> bool {
+        self.kind == "built_in"
+    }
+}
+
+/// `[harness.acp]` — how to reach an external ACP agent.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AcpHarness {
+    /// One of [`ACP_TRANSPORTS`].
+    #[serde(default)]
+    pub transport: String,
+    /// Which agent to spawn, one of [`ACP_AGENTS`]. `local` transport only.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// Which registered runner holds this scope. `runner` transport only.
+    #[serde(default)]
+    pub runner: Option<String>,
 }
 
 /// `[inference]` — per-tenant Bring-Your-Own-Key inference routing (issue #56).

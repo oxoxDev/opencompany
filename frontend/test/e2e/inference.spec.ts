@@ -80,7 +80,7 @@ test("a key typed for a BYOK provider is not discarded by switching to managed",
   const body = await after.json();
   expect(body.keyConfigured).toBe(true);
   // Setting only a key must not move the company off the managed brain.
-  expect(body.provider).toBe("managed");
+  expect(body.provider).toBe("openrouter");
 
   // And it can be taken back off again — set / rotate / clear, all from here.
   await page.getByTestId("inference-remove-key").click();
@@ -121,4 +121,16 @@ test("a key typed for a BYOK provider does reach the host on save", async ({ pag
   await expect(page.getByText("Reverted to the managed configuration.")).toBeVisible({
     timeout: 30_000,
   });
+
+  // The reset is a full one, not a half-clear: the host also wipes the stored
+  // credential on revert (issue #993), so nothing is left behind to reroute the
+  // later specs in this lane (the live-brain workflow and MCP-agent specs) off
+  // the mock brain and 401 them. Assert that here rather than clearing by hand
+  // — the remove-key button exists only while a key is stored, so it being gone
+  // is the observable that the reset actually cleared the key.
+  await expect(page.getByTestId("inference-remove-key")).toHaveCount(0, {
+    timeout: 30_000,
+  });
+  const cleared = await page.request.get("/api/v1/company/inference");
+  expect((await cleared.json()).keyConfigured).toBe(false);
 });

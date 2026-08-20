@@ -2424,6 +2424,57 @@ async fn skills_registry_is_empty_when_no_library_is_served() {
     assert_eq!(body.as_array().expect("an array").len(), 0);
 }
 
+/// A slug is also a directory name (`skills/<slug>/`), so the handlers that
+/// take one from the URL must refuse the values that could escape or traverse
+/// the scratch tree: a parent segment (`..`), a path separator (`a/b`), and a
+/// leading uppercase (`A` — slugs are lowercase by contract).
+#[tokio::test]
+async fn skill_handlers_reject_unsafe_slugs_and_write_nothing() {
+    let home_dir = home();
+    let state = state_with_registry(home_dir.path()).await;
+
+    // `a%2Fb` is how a `/` arrives *inside* one path segment — the router sees
+    // one slug and the handler must reject it rather than letting a separator
+    // into a directory name.
+    for bad in ["..", "a%2Fb", "A"] {
+        let (status, body) = send(
+            &state,
+            "POST",
+            &format!("/api/v1/company/skills/{bad}/install"),
+            Some(json!({"name": "Name", "description": "desc"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "install {bad}: {body}");
+
+        let (status, body) = send(
+            &state,
+            "PUT",
+            &format!("/api/v1/company/skills/{bad}"),
+            Some(json!({"enabled": true})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "toggle {bad}: {body}");
+    }
+
+    // A rejected slug must never reach the skill store.
+    assert!(
+        persisted_skills(&state).await.is_empty(),
+        "an unsafe slug must not persist a delta"
+    );
+
+    // The same handlers still accept a well-formed slug.
+    let (status, skill) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/skills/a-1",
+        Some(json!({"enabled": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{skill}");
+    assert_eq!(skill["id"], "a-1");
+    assert_eq!(skill["enabled"], true);
+}
+
 #[tokio::test]
 async fn skills_install_toggle_custom_and_builtin_uninstall_conflict() {
     let home_dir = home();

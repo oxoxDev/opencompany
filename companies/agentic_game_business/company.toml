@@ -7,6 +7,13 @@ name = "Agentic Game Business"
 output = "LiveOps, user acquisition, and monetization for a live game"
 human_role = "Monetization and growth strategy"
 
+# The liveops desk coordinates the event decisions that affect revenue and the player community.
+[[group_chat]]
+id = "liveops"
+name = "LiveOps desk"
+description = "Coordinate live events, monetization, and community communications."
+members = ["liveops_manager", "monetization_designer", "community_manager"]
+
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]

@@ -83,6 +83,10 @@ id = "done"
 kind = "output"
 name = "Report back"
 summary = "Report what ran and how it did."
+# The newsroom desk owns the verified story and its publication outcome.
+[node.destination]
+kind = "channel"
+target = "newsroom"
 
 [[edge]]
 from = "tip"

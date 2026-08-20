@@ -57,11 +57,11 @@ tinyplace      | tested       | tinyplace                       | Runs the whole
 
 sqlite         | partial      | sqlite                          | store::sqlite
 mongodb        | partial      | mongodb                         | store::mongodb store::select
-acp            | partial      | acp,runner,tinymemory | server::acp harness::acp_run_turn
+acp            | partial      | acp,runner,tinymemory | server::acp harness::acp::run_turn
 runner         | partial      | acp,runner,tinymemory | runner
-mcp            | partial      | openhuman,mcp,telegram,media    | harness::build::tests app::types
-media          | partial      | openhuman,mcp,telegram,media    | harness::build::tests harness::toolbelt
-composio       | partial      | openhuman,tinycortex,chargebee,paypal,composio | harness::composio::isolation_tests harness::composio::ops_helper_tests harness::composio::live::live_tests server::ops::composio::tests::gated_tests
+mcp            | partial      | openhuman,mcp,telegram,media    | harness::built_in::build::tests app::types
+media          | partial      | openhuman,mcp,telegram,media    | harness::built_in::build::tests harness::built_in::toolbelt
+composio       | partial      | openhuman,tinycortex,chargebee,paypal,composio | harness::built_in::composio::isolation_tests harness::built_in::composio::ops_helper_tests harness::built_in::composio::live::live_tests server::ops::composio::tests::gated_tests
 export         | partial      | export                          | store::export
 imap           | partial      | imap,smtp                       | server::ops::imap
 chargebee      | partial      | openhuman,tinycortex,chargebee,paypal,composio | chargebee

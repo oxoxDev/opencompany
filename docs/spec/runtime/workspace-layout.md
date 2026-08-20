@@ -81,6 +81,48 @@ subdirectories, it can only fail on a genuinely broken mount or an explicitly
 misconfigured `OPENHUMAN_WORKSPACE`, so it cannot turn a healthy tenant into one
 that will not wake.
 
+#### Seeing an append failure that happens anyway (issue #450)
+
+Boot proving the root writable does not make the sink infallible — a volume can
+fill, go read-only or disappear under a running tenant. The vendored append
+worker no longer prints its one-line-per-event flood described above; since
+tinyagents `73e6f5d` it keeps a failure-run state machine and reports through
+`tracing` on the target `tinyagents::observability`. Only the **first** failure of
+a run is `error`. The three lines that say how bad it got are `warn`:
+
+| Line | Level | Says |
+|---|---|---|
+| `durable append failed; the observation is lost…` | `error` | a failure run started |
+| `…still failing after N consecutive observations` | `warn` | it is still going (rate-limited reminder) |
+| `durable append recovered; N observation(s) lost` | `warn` | it ended, and the cost |
+| `…never recovered before shutdown, N observation(s) lost` | `warn` | it outlived the process |
+
+The binary's default `EnvFilter` is `error` and nothing in the container images,
+compose files or deploy workflows sets `RUST_LOG`, so those three `warn` lines
+were dropped in every deployed tenant: an operator saw a degraded run begin and
+never learned that it continued, that it ended, or how many observations went
+missing. `DEFAULT_LOG_FILTER` in `src/bin/opencompany.rs` is therefore
+`error,tinyagents::observability=warn` — today's default plus that one target.
+`RUST_LOG`, when set, still replaces the whole thing — and is parsed *lossily*,
+carrying the same `error` default the binary had before this constant existed, so
+one unparseable directive drops itself rather than the operator's whole
+configuration, and an empty value still reports errors rather than silencing the
+binary outright. The desktop shell
+(`src-tauri/src/lib.rs`) names the same target for a sharper reason: its fallback
+has no global directive at all, so an unnamed target is dropped at every level
+including `error`.
+
+**Known limitation.** The worker's own subscriber-independent fallback,
+`AppendWorker::append_failures()` — a counter of appends attempted and rejected,
+documented there as "the only subscriber-free signal of durable-log loss" — is
+`pub(crate)` in tinyagents. OpenCompany cannot read it, and there is no other
+seam that exposes it: the worker is constructed inside OpenHuman's agent journal,
+which hands out no handle to it. So the log filter is the *whole* mechanism here,
+and a tenant whose operator overrides `RUST_LOG` with something that excludes
+`tinyagents::observability` has no second channel. Surfacing the count — as a
+health field, a metric, or simply a `pub` accessor — needs an upstream tinyagents
+change first; do not try to plumb it from this repo.
+
 ### Agent sandboxes (`<home>/harness`)
 
 The tree an agent's file tools actually act in hangs off the **home**, not off a

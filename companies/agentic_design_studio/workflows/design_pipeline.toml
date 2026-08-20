@@ -62,6 +62,10 @@ id = "done"
 kind = "output"
 name = "Deliver for direction"
 summary = "Hand the system to the operator for sign-off."
+# The creative-direction desk gathers the system for the operator's design review.
+[node.destination]
+kind = "channel"
+target = "creative_direction"
 
 [[edge]]
 from = "brief"

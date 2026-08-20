@@ -582,6 +582,17 @@ export function WorkflowCreateDialog({
    * refreshed on every render, so the post-await read sees what is on screen now.
    */
   const draftDirtyRef = useRef(false);
+  /**
+   * The current node rows, readable **after** an await (issue #1016).
+   *
+   * `submit()` captures `nodes` from the render that built its closure, but the
+   * operator is invited to keep editing through the in-flight write. When the
+   * host answers with node-scoped `problems`, each one has to be matched against
+   * the rows on screen NOW — a `node_id` the operator renamed since clicking
+   * Save must fall through to the flat banner, not silently miss. Refreshed on
+   * every render below, mirroring `draftDirtyRef`.
+   */
+  const nodesRef = useRef<DraftNode[]>([]);
   /** Per-field problems raised on blur (issue #261), keyed by
    * {@link errorKey}. Separate from `error`, the submit-time banner: this one
    * is inline, scoped to the control that caused it, and never blocks Save on
@@ -911,7 +922,34 @@ export function WorkflowCreateDialog({
   }
 
   function updateNode(key: string, fields: Partial<DraftNode>) {
+    // The row's id BEFORE this edit, read off the render snapshot the same way
+    // `removeNode` does. An edge references a node by its id, so a rename has to
+    // carry every edge that pointed at the old id over to the new one (issue
+    // #1016) — otherwise the edge dangles, `validate()` refuses the save, and
+    // the edge Select's option list (fed by the current node ids) drops the
+    // renamed node, leaving the operator nothing to re-point it at.
+    const prevId = nodes.find((n) => n.key === key)?.id;
     setNodes((rows) => rows.map((r) => (r.key === key ? { ...r, ...fields } : r)));
+    const nextId = fields.id;
+    // `""` is a real previous id (the field cleared mid-edit, see below) and
+    // must still be tracked — only a missing row (`prevId === undefined`) or
+    // an edit that didn't touch `id` (`nextId === undefined`) skips the
+    // cascade. Using `prevId &&`/`fields.id` truthiness here previously
+    // dropped the rewrite once `prevId` was `""`, so clearing an id and then
+    // typing a replacement left edges stranded pointing at `""` forever.
+    if (nextId !== undefined && prevId !== undefined && nextId !== prevId) {
+      // Continuously, on every keystroke of the id: the edges track the row's
+      // id so a rename can never orphan them. A transient empty id (the field
+      // cleared mid-edit) cascades to `""`, which is harmless — `validate()`
+      // blocks the save on it and the edges re-follow on the next keystroke.
+      setEdges((rows) =>
+        rows.map((e) => ({
+          ...e,
+          from: e.from === prevId ? nextId : e.from,
+          to: e.to === prevId ? nextId : e.to,
+        })),
+      );
+    }
     clearSubmitError();
     // Clear whatever the edit invalidated. This MUST stay in step with
     // `changeKind`: that reset exists so the draft never holds a value whose
@@ -1201,6 +1239,13 @@ export function WorkflowCreateDialog({
     draftDirtyRef.current = isDraftDirty();
   });
 
+  // Issue #1016: keep the post-await view of the node rows current, so `submit`'s
+  // catch matches the host's `problems` against what is on screen when the answer
+  // lands — not the snapshot its closure captured at click time.
+  useEffect(() => {
+    nodesRef.current = nodes;
+  });
+
   /** Draft a graph from the description and hydrate the form with it (issue
    * #753). The hydrated, editable form IS the review surface — there is no
    * read-only diff — so on success the operator lands in the ordinary create
@@ -1416,6 +1461,55 @@ export function WorkflowCreateDialog({
       }
       onOpenChange(false);
     } catch (e) {
+      // Issue #1016: a `workflow_invalid` refusal carries per-node `problems`.
+      // Land each on the control that caused it so the operator sees the
+      // complaint next to the field, instead of a flat banner that names a node
+      // they then have to hunt for. Anything without an on-screen home — a
+      // graph-level field (`from`/`to`/`workflow_id`), a config key this kind
+      // has no control for, or a node that no longer exists — falls through to
+      // the banner, so nothing the host said is ever silently dropped.
+      if (e instanceof ApiError && e.problems?.length) {
+        const mapped: Record<string, string> = {};
+        const leftovers: string[] = [];
+        for (const p of e.problems) {
+          // Matched against the CURRENT rows (`nodesRef`), not the closure's
+          // snapshot: the operator may have renamed a node during the write, and
+          // a stale `node_id` must fall back to the banner rather than misfile.
+          // `.trim()` on our side because the submit path trims every id before
+          // sending it (see `outNodes.push` above) — the host's `problems`
+          // therefore carry the trimmed id, and comparing it against a raw
+          // draft id with surrounding whitespace would never match.
+          const row = nodesRef.current.find((n) => n.id.trim() === p.node_id);
+          const configKey = p.field?.startsWith("config.")
+            ? p.field.slice("config.".length)
+            : undefined;
+          const onScreen =
+            row !== undefined &&
+            configKey !== undefined &&
+            configFieldSpecs(row.kind).some((s) => s.key === configKey);
+          if (row && onScreen) {
+            mapped[errorKey(row.key, `config:${configKey}`)] = p.message;
+          } else {
+            leftovers.push(row ? `${nodeLabel(row)}: ${p.message}` : p.message);
+          }
+        }
+        // One write, merged over any blur errors (#261) already showing — a
+        // server field-error clears on the next edit of that field or the next
+        // submit, never wiping a legitimate blur error the operator has not
+        // touched.
+        if (Object.keys(mapped).length) {
+          setFieldErrors((prev) => ({ ...prev, ...mapped }));
+        }
+        // Everything that had no field home goes to the banner. If it ALL landed
+        // on a field, the banner still says something non-raw so Create never
+        // reads as a button that did nothing.
+        showError(
+          leftovers.length
+            ? leftovers.join(" ")
+            : "Some fields need attention — see the highlighted nodes below.",
+        );
+        return;
+      }
       showError(
         e instanceof Error
           ? e.message

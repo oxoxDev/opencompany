@@ -90,6 +90,8 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/ports-runs.md](runtime/ports-runs.md) | `RunStore`: attempts and their traces |
 | [runtime/events.md](runtime/events.md) | `CompanyEvent` vocabulary + journal correlation rules |
 | [runtime/manifest.md](runtime/manifest.md) | `company.toml` schema, `agents.toml` compatibility |
+| [runtime/harnesses.md](runtime/harnesses.md) | Named execution engines: `built_in` vs `acp`, transports, per-agent binding |
+| [runtime/providers.md](runtime/providers.md) | Inference providers, dual-mode OpenRouter, per-harness credentials |
 | [runtime/globals.md](runtime/globals.md) | The global baseline every company gets: agents, workflows, skills, the starting tool belt, and `[globals].disable` |
 | [runtime/lifecycle.md](runtime/lifecycle.md) | Company state machine and durability |
 | [runtime/planning.md](runtime/planning.md) | The Planning station: pass contract, prerequisite verdicts, boot sweep |

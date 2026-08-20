@@ -70,8 +70,9 @@ use tinyflows::error::{EngineError, Result as TfResult};
 
 use crate::harness::orchestrator::MAX_DELEGATIONS_PER_TURN;
 use crate::harness::policy::{ApprovalScope, MAX_APPROVAL_REQUESTS_PER_TURN, PolicyMode};
-use crate::harness::{HarnessDeps, HarnessPool, toolbelt};
+use crate::harness::{HarnessDeps, toolbelt};
 use crate::ports::types::{CompanyId, CompanyRecord};
+use crate::runtime::delegation::RunTurn;
 
 use self::http::GuardedHttpClient;
 use self::resolver::StoreWorkflowResolver;
@@ -141,8 +142,8 @@ pub struct RunContext<'a> {
 /// `_` prefix keeps it from ever colliding with a roster agent's own workspace
 /// directory.
 ///
-/// `pool`/`deps` are shared with the rest of the harness surface — the roster the
-/// agent nodes address is the one already resident in `pool`.
+/// `turn`/`deps` are shared with the rest of the harness surface — the roster the
+/// agent nodes address is the one resident in the harness(es) the turn routes to.
 ///
 /// `run_request` is the operator's topic for this run (issue #154), threaded to
 /// the agent capability so every agent node's turn message carries what was
@@ -168,7 +169,7 @@ pub struct RunContext<'a> {
 /// rather than proceeding with effects pointed at a directory that does not
 /// exist. A dry run builds no workspace and is infallible.
 pub async fn build_capabilities(
-    pool: Arc<HarnessPool>,
+    turn: Arc<dyn RunTurn>,
     deps: HarnessDeps,
     record: &CompanyRecord,
     run: RunContext<'_>,
@@ -345,7 +346,7 @@ pub async fn build_capabilities(
         // `deps.search`, `deps.meter`, `deps.secrets`, `deps.workspace_root`,
         // `deps.delegations`) are all done by here.
         let agent: Arc<dyn AgentRunner> = Arc::new(HarnessAgentRunner::new(
-            pool,
+            turn,
             deps,
             record.clone(),
             company.clone(),
@@ -475,7 +476,10 @@ fn hex_segment(value: &str) -> String {
 /// `publish_artifact` needs a card to attach a version to, which a run does not
 /// have, so a refusal there remains the truthful answer.
 pub struct HarnessAgentRunner {
-    pool: Arc<HarnessPool>,
+    /// The turn a workflow agent node runs on: the lane-aware router in a
+    /// multi-harness company, the default lane over the pool in a
+    /// single-harness one (see `run_workflow`'s single-pool entrypoint).
+    turn: Arc<dyn RunTurn>,
     deps: HarnessDeps,
     /// The company record, for the board drain's desk/assignee resolution (issue
     /// #661 / M5) — the same record the rest of this bundle was built from, so a
@@ -675,12 +679,14 @@ impl ParkedCalls {
 }
 
 impl HarnessAgentRunner {
-    /// Builds a runner over an already-populated pool for `company`, carrying
-    /// the run's id (issue #395) and the operator's run request (issue #154)
-    /// when one was supplied.
+    /// Builds a runner over `turn` for `company`, carrying the run's id (issue
+    /// #395) and the operator's run request (issue #154) when one was supplied.
+    /// The turn is the lane-aware router where lanes are declared, or the
+    /// default lane over the pool otherwise, so a workflow agent node addressing
+    /// a named-harness agent reaches that harness's engine.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        pool: Arc<HarnessPool>,
+        turn: Arc<dyn RunTurn>,
         deps: HarnessDeps,
         record: CompanyRecord,
         company: CompanyId,
@@ -694,7 +700,7 @@ impl HarnessAgentRunner {
         board_claim: Arc<crate::harness::orchestrator::DelegationClaim>,
     ) -> Self {
         Self {
-            pool,
+            turn,
             deps,
             record,
             company,
@@ -1139,7 +1145,7 @@ impl AgentRunner for HarnessAgentRunner {
         tracing::debug!(
             company = %self.company,
             agent = agent_ref,
-            "workflow agent node: routing to harness pool"
+            "workflow agent node: routing through harness turn"
         );
         // Issue #439: this run's own approval scope, replacing #395's boundary
         // index. The index was only ever a narrowing — it was taken against a
@@ -1168,11 +1174,10 @@ impl AgentRunner for HarnessAgentRunner {
         // first spawning run without these.
         let turn = Box::pin(async {
             let outcome = claim
-                .scoped(Box::pin(self.pool.run_background(
+                .scoped(Box::pin(self.turn.run_background(
                     &self.company,
                     agent_ref,
                     &message,
-                    &self.deps,
                 )))
                 .await;
             // Drained on BOTH arms, deliberately. A turn that errored may still have
@@ -1606,6 +1611,15 @@ impl CodeRunner for UnwiredCode {
 mod tests {
     use super::*;
 
+    /// The single-harness turn over a fresh pool, as the non-lane entrypoint
+    /// wraps — what a workflow agent node runs on when no lanes are declared.
+    fn single_turn(deps: &HarnessDeps) -> Arc<dyn RunTurn> {
+        Arc::new(crate::harness::built_in::run_turn::HarnessRunTurn::new(
+            Arc::new(crate::harness::HarnessPool::new()),
+            Arc::new(deps.clone()),
+        ))
+    }
+
     /// Issue #638: a node that gates more calls than the cap allows leaves the
     /// operator a **notice**, not only a log line.
     ///
@@ -1683,7 +1697,7 @@ mod tests {
         let notices = RunNotices::default();
         let board_claim = Arc::new(deps.delegations.claim_board("run-1"));
         let runner = HarnessAgentRunner::new(
-            Arc::new(HarnessPool::new()),
+            single_turn(&deps),
             deps,
             crate::workflows::gated_tool_turn_test::record(),
             CompanyId::new("acme"),
@@ -2230,7 +2244,7 @@ mod tests {
         let record = crate::workflows::gated_tool_turn_test::record();
 
         let caps = build_capabilities(
-            Arc::new(HarnessPool::new()),
+            single_turn(&deps),
             deps,
             &record,
             RunContext {
@@ -2276,7 +2290,7 @@ mod tests {
         let record = crate::workflows::gated_tool_turn_test::record();
 
         let caps = build_capabilities(
-            Arc::new(HarnessPool::new()),
+            single_turn(&deps),
             deps,
             &record,
             RunContext {
@@ -2439,7 +2453,7 @@ mod tests {
 
         // `Capabilities` is not `Debug`, so match rather than `expect_err`.
         let err = match build_capabilities(
-            Arc::new(HarnessPool::new()),
+            single_turn(&deps),
             deps,
             &record,
             RunContext {
@@ -2492,7 +2506,7 @@ mod tests {
         let record = crate::workflows::gated_tool_turn_test::record();
 
         build_capabilities(
-            Arc::new(HarnessPool::new()),
+            single_turn(&deps),
             deps,
             &record,
             RunContext {

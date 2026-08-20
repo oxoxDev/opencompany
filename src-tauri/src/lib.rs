@@ -86,10 +86,23 @@ fn dirs_next_data_dir() -> Option<PathBuf> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // The `tinyagents::observability` directive is the vendored durable-append
+    // writer's reporting target, and it has to be named explicitly here for a
+    // reason the host binary's filter does not share: this fallback carries no
+    // global directive at all, only per-target ones, so an unnamed target is
+    // dropped at *every* level — `error` included. Without this the writer's
+    // "still failing" reminders, its "recovered, N observation(s) lost" summary
+    // and its "never recovered before shutdown" summary are silent, and so is
+    // the first-failure `error` line. See `DEFAULT_LOG_FILTER` in
+    // `src/bin/opencompany.rs` for the full argument (issue #450). Latent while
+    // this crate does not enable the `openhuman` feature; a landmine for
+    // whoever does.
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "opencompany_desktop_lib=info,opencompany=info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "opencompany_desktop_lib=info,opencompany=info,tinyagents::observability=warn"
+                    .into()
+            }),
         )
         .init();
 

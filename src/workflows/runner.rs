@@ -94,6 +94,28 @@ pub async fn run_workflow(
     input: Value,
     ctx: &WorkflowRunContext,
 ) -> Result<WorkflowRun> {
+    // A single pool is the single-harness case: the router is just the default
+    // lane over that pool. Kept as its own entrypoint so the many single-pool
+    // tests (and any single-harness caller) need not hand-assemble a router.
+    let turn: Arc<dyn crate::runtime::delegation::RunTurn> = Arc::new(
+        crate::harness::built_in::run_turn::HarnessRunTurn::new(pool, Arc::new(deps.clone())),
+    );
+    run_workflow_lane_aware(turn, deps, record, workflow, input, ctx).await
+}
+
+/// [`run_workflow`] over an already-assembled, lane-aware router.
+///
+/// The production [`HarnessWorkflowRunner`] takes this path so a workflow
+/// `agent` node addressing a named-harness agent routes to that harness's
+/// engine instead of the default pool.
+pub async fn run_workflow_lane_aware(
+    turn: Arc<dyn crate::runtime::delegation::RunTurn>,
+    deps: HarnessDeps,
+    record: &CompanyRecord,
+    workflow: &WorkflowFile,
+    input: Value,
+    ctx: &WorkflowRunContext,
+) -> Result<WorkflowRun> {
     // Issue #151 part a: refuse an unbounded re-entry before it takes the host
     // down. `run_workflow` is an orchestrator tool, and a workflow `agent` node
     // may address the orchestrator — so a graph whose agent node runs a
@@ -122,7 +144,7 @@ pub async fn run_workflow(
     WORKFLOW_DEPTH
         .scope(
             depth + 1,
-            run_workflow_inner(pool, deps, record, workflow, input, ctx),
+            run_workflow_inner(turn, deps, record, workflow, input, ctx),
         )
         .await
 }
@@ -241,7 +263,7 @@ impl tinyflows::observability::RunObserver for ProgressObserver {
 /// The run itself, always executed inside a [`WORKFLOW_DEPTH`] scope so a
 /// nested run sees this one on the chain.
 async fn run_workflow_inner(
-    pool: Arc<HarnessPool>,
+    turn: Arc<dyn crate::runtime::delegation::RunTurn>,
     deps: HarnessDeps,
     record: &CompanyRecord,
     workflow: &WorkflowFile,
@@ -379,7 +401,7 @@ async fn run_workflow_inner(
     let blocks = super::caps::RunBlocks::default();
     let approvals = super::caps::RunApprovals::default();
     let capabilities = super::caps::build_capabilities(
-        pool,
+        turn,
         deps,
         record,
         super::caps::RunContext {
@@ -1676,19 +1698,24 @@ fn map_engine_error(err: tinyflows::error::EngineError) -> OpenCompanyError {
 }
 
 /// The [`WorkflowRunner`] port backed by the embedded harness: it holds the
-/// shared pool, its deps, and the company record so it can ensure the roster is
-/// built before a run and route agent nodes onto it.
+/// lane-aware router so every agent node dispatches to the engine its harness
+/// demands, plus the deps and company record it needs to warm every lane before
+/// a run.
 pub struct HarnessWorkflowRunner {
-    pool: Arc<HarnessPool>,
+    turn: Arc<dyn crate::runtime::delegation::RunTurn>,
     deps: HarnessDeps,
     record: CompanyRecord,
 }
 
 impl HarnessWorkflowRunner {
-    /// Builds a runner sharing `pool`/`deps` with the rest of the harness surface
-    /// for the company described by `record`.
-    pub fn new(pool: Arc<HarnessPool>, deps: HarnessDeps, record: CompanyRecord) -> Self {
-        Self { pool, deps, record }
+    /// Builds a runner dispatching through `turn`, sharing `deps` with the
+    /// rest of the harness surface for the company described by `record`.
+    pub fn new(
+        turn: Arc<dyn crate::runtime::delegation::RunTurn>,
+        deps: HarnessDeps,
+        record: CompanyRecord,
+    ) -> Self {
+        Self { turn, deps, record }
     }
 }
 
@@ -1701,12 +1728,14 @@ impl WorkflowRunner for HarnessWorkflowRunner {
         input: Value,
         ctx: &WorkflowRunContext,
     ) -> Result<WorkflowRun> {
-        // Idempotent: builds the roster on first use, a no-op after. The run
-        // addresses the record's own company; `_company` is the routed scope,
-        // which the runtime resolves to this same record.
-        self.pool.ensure(&self.record, &self.deps).await?;
-        run_workflow(
-            self.pool.clone(),
+        // Idempotent: builds the roster on first use, a no-op after. Warmed
+        // through the router so every lane's pool — not just the default's — is
+        // populated before a node addresses it. The run addresses the record's
+        // own company; `_company` is the routed scope, which the runtime
+        // resolves to this same record.
+        self.turn.ensure(&self.record).await?;
+        run_workflow_lane_aware(
+            self.turn.clone(),
             self.deps.clone(),
             &self.record,
             workflow,
@@ -1725,6 +1754,64 @@ mod tests {
     use crate::harness::provider::MockProvider;
     use crate::ports::run_output::WorkflowRunOutputStore;
     use crate::store::{FsCompanyStore, FsContextStore, FsOps};
+
+    /// A workflow lane that records which agent it served. Its reply names the
+    /// lane so the run output proves the same routing decision as the call log.
+    struct RecordingLane {
+        label: &'static str,
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingLane {
+        fn new(label: &'static str) -> Arc<Self> {
+            Arc::new(Self {
+                label,
+                seen: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl crate::runtime::delegation::RunTurn for RecordingLane {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _chat_id: Option<&str>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.seen.lock().unwrap().push(agent_id.to_string());
+            Ok(crate::harness::TurnOutcome {
+                reply: self.label.to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+                halted_for_spend: None,
+            })
+        }
+
+        async fn run_steered(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            message: &str,
+            _control: &crate::company::steer::SteerControl,
+            chat_id: Option<&str>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.run(company, agent_id, message, chat_id).await
+        }
+
+        async fn run_steered_background(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.run(company, agent_id, message, None).await
+        }
+    }
 
     fn record() -> CompanyRecord {
         let manifest = toml::from_str(
@@ -1768,6 +1855,7 @@ description = "Runs Acme."
             run_supervisor: crate::runtime::RunSupervisor::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
+            serves: None,
             context: Arc::new(FsContextStore::new(dir)),
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
@@ -2587,7 +2675,12 @@ to = "done"
         let dir = tempfile::tempdir().unwrap();
         let pool = Arc::new(HarnessPool::new());
         let rec = record();
-        let runner = HarnessWorkflowRunner::new(pool, deps(dir.path()), rec.clone());
+        let deps = deps(dir.path());
+        let turn = Arc::new(crate::harness::built_in::run_turn::HarnessRunTurn::new(
+            pool,
+            Arc::new(deps.clone()),
+        ));
+        let runner = HarnessWorkflowRunner::new(turn, deps, rec.clone());
 
         let file = parse_workflow(GREET).expect("workflow parses");
         let run = WorkflowRunner::run(
@@ -2600,6 +2693,39 @@ to = "done"
         .await
         .expect("workflow runs");
         assert!(run.output.to_string().contains("hello-marker"));
+    }
+
+    /// The workflow port keeps the lane-aware router intact: an agent bound to
+    /// a named harness must not fall back to the default engine.
+    #[tokio::test]
+    async fn port_impl_routes_an_agent_node_to_its_named_harness() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = record();
+        let deps = deps(dir.path());
+        let default = RecordingLane::new("default-lane");
+        let deep = RecordingLane::new("deep-lane");
+        let turn: Arc<dyn crate::runtime::delegation::RunTurn> = Arc::new(
+            crate::harness::router::HarnessRouter::new("embedded")
+                .with_engine("embedded", default.clone())
+                .with_engine("deep", deep.clone())
+                .bind("ceo", "deep"),
+        );
+        let runner = HarnessWorkflowRunner::new(turn, deps, rec.clone());
+
+        let file = parse_workflow(GREET).expect("workflow parses");
+        let run = WorkflowRunner::run(
+            &runner,
+            &rec.id,
+            &file,
+            serde_json::json!({}),
+            &WorkflowRunContext::new(false),
+        )
+        .await
+        .expect("workflow runs through the named lane");
+
+        assert!(run.output.to_string().contains("deep-lane"));
+        assert!(default.seen.lock().unwrap().is_empty());
+        assert_eq!(&*deep.seen.lock().unwrap(), &["ceo".to_string()]);
     }
 
     /// A workflow with no trigger is a caller-facing bad request, not a harness

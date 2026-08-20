@@ -7,6 +7,13 @@ name = "Agentic Game Studio"
 output = "Shippable games"
 human_role = "Creative and design direction"
 
+# The release desk joins the build, quality, and launch owners before a game ships.
+[[group_chat]]
+id = "release"
+name = "Release desk"
+description = "Coordinate game quality, release readiness, and launch marketing."
+members = ["gameplay_engineer", "qa_tester", "marketer"]
+
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]

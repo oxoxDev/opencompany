@@ -83,6 +83,10 @@ id = "done"
 kind = "output"
 name = "Report to operator"
 summary = "Report cohort outcomes and the ask."
+# The cohort-review desk gathers the decisions that need accelerator operator review.
+[node.destination]
+kind = "channel"
+target = "cohort_review"
 
 [[edge]]
 from = "open"

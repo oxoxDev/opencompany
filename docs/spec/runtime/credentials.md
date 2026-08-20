@@ -189,8 +189,20 @@ one account into a broken toolkit: when the console revokes an account, and when
 whatever credential the company's *declared provider* wants — an OpenRouter
 `sk-or-…`, a raw BYOK token, an `openai_compatible` key. It is provider-scoped,
 not an identity, and handing it to the TinyHumans backend would present one
-vendor's credential to another. The two coincide only when the declared provider
-is `managed`, and even then they are the same value for different reasons.
+vendor's credential to another.
+
+Since `managed`'s removal the two never coincide, which makes the separation
+cleaner rather than looser. A company holding **no** inference key rides the
+subscription on the platform's own credential — resolved from this host's
+identity, not from `inference/key` — and a company that sets one is naming an
+OpenRouter account that has nothing to do with TinyHumans. See
+[providers.md](providers.md).
+
+There is one such slot **per harness**: the default harness keeps the flat
+`inference/key`, and every named one uses `harness/<id>/inference/key`. The
+asymmetry is deliberate — the `SecretStore` has no rename, so namespacing the
+default too would orphan the stored credential of every company already
+running.
 
 ## What this does not cover
 

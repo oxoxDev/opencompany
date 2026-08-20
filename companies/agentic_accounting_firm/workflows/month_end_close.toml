@@ -55,6 +55,10 @@ id = "review"
 kind = "output"
 name = "Park for sign-off"
 summary = "Send the close package to the operator."
+# The close-review desk owns the package that needs filing approval.
+[node.destination]
+kind = "channel"
+target = "close_review"
 
 [[edge]]
 from = "close"

@@ -34,6 +34,19 @@ const DEFAULT_CATEGORY: &str = "Ops";
 /// The publisher stamped on shared-library skills (mirrors the GraphQL type).
 const REGISTRY_PUBLISHER: &str = "OpenCompany";
 
+/// Whether `slug` is a safe skill id: `^[a-z0-9][a-z0-9-]*$`. A slug is also a
+/// directory name in the agent's scratch tree (`skills/<slug>/`), so a
+/// traversal (`..`) or a path separator here would escape it. Mirrors
+/// `harness::built_in::skills::valid_slug`.
+fn valid_slug(slug: &str) -> bool {
+    let mut chars = slug.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
 /// Builds the skills route fragment.
 pub fn router() -> Router<AppState> {
     scoped("/skills/{slug}/install", post(install))
@@ -296,6 +309,12 @@ async fn install(
     Path(SlugPath { slug }): Path<SlugPath>,
     body: Option<Json<InstallSkill>>,
 ) -> Result<Json<InstalledSkill>, ApiError> {
+    if !valid_slug(&slug) {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+            "`{slug}` is not a valid skill slug. Skills live under `skills/<slug>/`, so a slug \
+             is `[a-z0-9][a-z0-9-]*`."
+        ))));
+    }
     let registry = state.shared_skill_registry()?;
     let doc = match registry.iter().find(|doc| doc.slug == slug) {
         Some(doc) => render_skill_md(doc),
@@ -381,6 +400,12 @@ async fn set_enabled(
     Path(SlugPath { slug }): Path<SlugPath>,
     Json(body): Json<SetEnabled>,
 ) -> Result<Json<InstalledSkill>, ApiError> {
+    if !valid_slug(&slug) {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+            "`{slug}` is not a valid skill slug. Skills live under `skills/<slug>/`, so a slug \
+             is `[a-z0-9][a-z0-9-]*`."
+        ))));
+    }
     // Preserve an existing delta's source and custom doc; a first toggle of a
     // built-in company skill records a Company-sourced override.
     let existing = company
@@ -592,5 +617,188 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].id, "web-research");
         assert_eq!(out[0].source, SkillSource::Registry);
+    }
+
+    /// `valid_slug` is the gate both write handlers share: a slug is also a
+    /// directory name under `skills/<slug>/`, so a traversal (`..`) or a path
+    /// separator (`/`) must never reach the filesystem, and the alphabet is
+    /// lowercase-only. The path extractor can only ever hand a handler a single
+    /// segment, so `a/b` cannot arrive as a path — but the function is the
+    /// contract every slug-bearing caller routes through, so it is the right
+    /// place to pin all three shapes the review named.
+    #[test]
+    fn valid_slug_rejects_traversal_separator_and_case() {
+        // The shapes the review named.
+        assert!(!valid_slug(".."), "parent traversal");
+        assert!(!valid_slug("a/b"), "path separator");
+        assert!(!valid_slug("A"), "uppercase start");
+        // And the rest of the boundary.
+        assert!(!valid_slug(""), "empty");
+        assert!(!valid_slug("-leading"), "leading dash");
+        assert!(!valid_slug("has space"), "interior space");
+        assert!(
+            !valid_slug("under_score"),
+            "underscore is not in the alphabet"
+        );
+        assert!(!valid_slug("UPPER"), "all uppercase");
+        // And the shape that must pass.
+        assert!(valid_slug("a-1"), "lowercase, digit, dash");
+        assert!(valid_slug("0"), "single digit");
+        assert!(valid_slug("seo-audit"), "typical slug");
+    }
+
+    /// HTTP-level coverage of the two path-slug handlers. A slug that fails
+    /// `valid_slug` must be rejected with `400` **before** any write, so the
+    /// effective skill set is untouched; a valid slug succeeds and lands.
+    ///
+    /// `..` and `a/b` cannot be carried as a single path segment (a `/` splits
+    /// them, and `..` is normalized away by the router), so their rejection is
+    /// pinned in [`valid_slug_rejects_traversal_separator_and_case`]. `A` is a
+    /// single segment the router will pass through, so it is the shape we drive
+    /// through the handlers to prove the `400` and the no-mutation guarantee.
+    mod http {
+        use axum::body::{Body, to_bytes};
+        use axum::http::{Request, StatusCode};
+        use serde_json::Value;
+        use tower::ServiceExt;
+
+        use crate::company::CompanyManifest;
+        use crate::ports::CompanyStore;
+        use crate::ports::types::{CompanyId, CompanyRecord};
+        use crate::runtime::RuntimeBuilder;
+        use crate::server::router;
+        use crate::server::test_support::{fixed_cookie, seed_fixed_admin};
+        use crate::{AppConfig, AppState};
+
+        async fn state_with_company(home: &std::path::Path) -> AppState {
+            let id = CompanyId::new("acme");
+            let manifest: CompanyManifest =
+                toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+            crate::store::FsCompanyStore::new(home.to_path_buf())
+                .save(&CompanyRecord {
+                    id: id.clone(),
+                    manifest: manifest.clone(),
+                    ledger: Vec::new(),
+                    lifecycle: "running".to_string(),
+                    overlay_agents: Vec::new(),
+                    overlay_desk_members: Vec::new(),
+                    overlay_desk_order: Vec::new(),
+                    overlay_desks: Vec::new(),
+                    overlay_workflows: Vec::new(),
+                    overlay_budgets: Vec::new(),
+                    overlay_policy: None,
+                    overlay_desk_tools: Default::default(),
+                    disabled_workflows: Vec::new(),
+                    template_provenance: None,
+                    setup: None,
+                })
+                .await
+                .unwrap();
+            let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+                .with_id(id.clone())
+                .build()
+                .await
+                .unwrap();
+            let state = AppState::new(AppConfig::default());
+            state.registry().insert(id, std::sync::Arc::new(runtime));
+            seed_fixed_admin(&state, "acme").await;
+            state
+        }
+
+        async fn send(
+            state: &AppState,
+            method: &str,
+            uri: &str,
+            body: Option<&str>,
+        ) -> (StatusCode, Value, String) {
+            let request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("cookie", fixed_cookie("acme"));
+            let request = match body {
+                Some(body) => request
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+                None => request.body(Body::empty()).unwrap(),
+            };
+            let response = router(state.clone()).oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let raw = String::from_utf8_lossy(&bytes).to_string();
+            let value = if bytes.is_empty() {
+                Value::Null
+            } else {
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+            };
+            (status, value, raw)
+        }
+
+        /// The effective skill set, as the console reads it.
+        async fn slugs(state: &AppState) -> Vec<String> {
+            let (status, value, raw) = send(state, "GET", "/api/v1/company/skills", None).await;
+            assert_eq!(status, StatusCode::OK, "list skills: {raw}");
+            value
+                .as_array()
+                .expect("skills list is an array")
+                .iter()
+                .map(|s| s["id"].as_str().expect("an id").to_string())
+                .collect()
+        }
+
+        /// Both write handlers reject an invalid slug with `400` and leave the
+        /// effective skill set untouched; a valid slug then succeeds and lands.
+        #[tokio::test]
+        async fn invalid_slugs_are_400_and_leave_state_unchanged() {
+            let home = tempfile::tempdir().unwrap();
+            let state = state_with_company(home.path()).await;
+
+            let before = slugs(&state).await;
+
+            // `install` rejects the uppercase slug without writing.
+            let (status, _, raw) =
+                send(&state, "POST", "/api/v1/company/skills/A/install", None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "install A: {raw}");
+            assert!(
+                raw.contains("not a valid skill slug"),
+                "the 400 explains why: {raw}"
+            );
+
+            // `set_enabled` rejects the same slug without writing.
+            let (status, _, raw) = send(
+                &state,
+                "PUT",
+                "/api/v1/company/skills/A",
+                Some(r#"{"enabled":true}"#),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "set_enabled A: {raw}");
+
+            // Neither attempt mutated the effective set.
+            assert_eq!(
+                slugs(&state).await,
+                before,
+                "a rejected slug must not land a delta"
+            );
+
+            // A valid slug succeeds on both handlers and does land.
+            let (status, _, raw) =
+                send(&state, "POST", "/api/v1/company/skills/a-1/install", None).await;
+            assert_eq!(status, StatusCode::OK, "install a-1: {raw}");
+
+            let (status, _, raw) = send(
+                &state,
+                "PUT",
+                "/api/v1/company/skills/a-1",
+                Some(r#"{"enabled":false}"#),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "set_enabled a-1: {raw}");
+
+            assert!(
+                slugs(&state).await.iter().any(|s| s == "a-1"),
+                "the valid slug lands in the effective set"
+            );
+        }
     }
 }

@@ -394,7 +394,10 @@ async fn runtime(home: &std::path::Path) -> Arc<crate::company::runtime::Company
     let pool = Arc::new(crate::harness::HarnessPool::new());
     pool.ensure(&record(), &deps).await.expect("roster builds");
     rt.set_workflow_runner(Arc::new(super::runner::HarnessWorkflowRunner::new(
-        pool,
+        Arc::new(crate::harness::built_in::run_turn::HarnessRunTurn::new(
+            pool,
+            Arc::new(deps.clone()),
+        )),
         deps,
         record(),
     )));

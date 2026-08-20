@@ -93,6 +93,31 @@ pub trait RunTurn: Send + Sync {
         control: &SteerControl,
         run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome>;
+
+    /// An un-streamed, un-steered turn — a workflow agent node, which drops its
+    /// steps and shows no operator chat bubble. Its transient frames must not
+    /// reach the console timeline, which is the same reason this method exists
+    /// beside [`run_steered_background`](Self::run_steered_background) rather
+    /// than reusing [`run`](Self::run).
+    ///
+    /// Defaults to [`run`](Self::run) so the sentinel and test doubles need not
+    /// re-declare the same nothing; the streaming harness engines override it
+    /// to suppress the live stream.
+    async fn run_background(
+        &self,
+        company: &CompanyId,
+        agent_id: &str,
+        message: &str,
+    ) -> Result<TurnOutcome> {
+        self.run(company, agent_id, message, None).await
+    }
+
+    /// Warms whatever roster this engine caches before the first turn. The
+    /// default is a no-op; a harness that builds its roster lazily behind a
+    /// pool overrides it so a caller can ensure every lane before dispatch.
+    async fn ensure(&self, _company: &CompanyRecord) -> Result<()> {
+        Ok(())
+    }
 }
 
 // `desk_lead` is the brain-agnostic desk-lead resolver — it moved to

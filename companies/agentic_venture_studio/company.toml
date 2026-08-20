@@ -7,6 +7,13 @@ name = "Agentic Venture Studio"
 output = "A portfolio of startups"
 human_role = "Capital allocation and major strategic decisions"
 
+# The venture-launch desk keeps the founding, product, and market owners aligned on the new company.
+[[group_chat]]
+id = "venture_launch"
+name = "Venture launch desk"
+description = "Coordinate venture launch readiness and the next strategic decision."
+members = ["founder", "engineer", "marketer"]
+
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]

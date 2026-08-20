@@ -69,6 +69,10 @@ id = "done"
 kind = "output"
 name = "Report to operator"
 summary = "Report advances, passes, and the offer."
+# The hiring desk holds the candidate record and offer for the final decision.
+[node.destination]
+kind = "channel"
+target = "hiring"
 
 [[edge]]
 from = "role"

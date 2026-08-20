@@ -9,6 +9,8 @@
 //! `build` performs boot replay: it loads the runtime journal and rehydrates
 //! any parked approvals into the gate so an approval survives a restart.
 
+#[cfg(feature = "openhuman")]
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -29,7 +31,11 @@ use crate::feedback::tinyhumans::TinyHumansClient;
 use crate::feedback::tool::BuiltinToolProvider;
 use crate::feedback::types::ConsentMode;
 #[cfg(feature = "openhuman")]
+use crate::harness::built_in::run_turn::HarnessRunTurn;
+#[cfg(feature = "openhuman")]
 use crate::harness::provider::{HostedProviderConfig, TenantProvider};
+#[cfg(feature = "openhuman")]
+use crate::harness::router::HarnessRouter;
 #[cfg(feature = "openhuman")]
 use crate::harness::{HarnessBrain, HarnessDeps};
 use crate::openhuman::rpc::OpenHumanRpc;
@@ -46,6 +52,8 @@ use crate::ports::{
     SkillStateStore, TaskStore, ToolProvider, UsageMeter, UserStore, WorkflowRevisionStore,
     WorkspaceStore,
 };
+#[cfg(feature = "openhuman")]
+use crate::runtime::delegation::RunTurn;
 // Separate line (#241) so this addition is a pure append, not a reflow of the
 // grouped import that sibling store-seam branches (#274, #596) also edit.
 use crate::ports::ScheduleFireStore;
@@ -2163,9 +2171,21 @@ impl RuntimeBuilder {
                         // managed env default? A corrupt runtime config degrades
                         // to "unconfigured" (managed/echo brain) rather than
                         // bricking boot.
+                        //
+                        // The manifest layer is the *default harness's* effective
+                        // inference — `default_harness_inference()` falling back
+                        // to the company-level `[inference]` — the same resolution
+                        // `TenantProvider::new` applies a few lines down. A
+                        // company whose only inference lives in
+                        // `[harness.inference]` must count as configured here,
+                        // or it would never reach the provider it just declared.
+                        let effective_manifest = self
+                            .manifest
+                            .default_harness_inference()
+                            .unwrap_or_else(|| self.manifest.inference.clone());
                         let configured = inference::resolve_effective(
                             &id,
-                            &self.manifest.inference,
+                            &effective_manifest,
                             env_default.as_ref(),
                             secrets.as_ref(),
                         )
@@ -2343,23 +2363,31 @@ impl RuntimeBuilder {
                                     Vec::new()
                                 }),
                             );
-                            let deps = HarnessDeps {
+                            let mut deps = HarnessDeps {
                                 // Carried so live re-resolution merges the same
                                 // three layers boot did (issue #527).
                                 default_mcp_servers: self.default_mcp_servers.clone(),
                                 // A per-tenant provider that re-resolves the
                                 // effective inference config on every turn, so a
                                 // console BYOK switch takes effect next turn with
-                                // no rebuild.
+                                // no rebuild. The default harness's own
+                                // `[harness.inference]` beats the company-level
+                                // `[inference]` — the same precedence a named
+                                // harness gets — while the scope stays the
+                                // default one so the flat legacy secret keys keep
+                                // working for the company's default harness.
                                 provider: Arc::new(TenantProvider::new(
                                     id.clone(),
                                     secrets.clone(),
-                                    self.manifest.inference.clone(),
-                                    env_default,
+                                    self.manifest
+                                        .default_harness_inference()
+                                        .unwrap_or_else(|| self.manifest.inference.clone()),
+                                    env_default.clone(),
                                 )),
                                 // Static fallback only; `HarnessPool::run` reads
                                 // the live slug from the provider per turn.
                                 provider_slug: "managed".to_string(),
+                                serves: None,
                                 context: context.clone(),
                                 store: store.clone(),
                                 meter: Some(fs_ops.clone()),
@@ -2612,14 +2640,72 @@ impl RuntimeBuilder {
                                 template_provenance: template_provenance.clone(),
                                 setup: setup.clone(),
                             };
-                            // Workflow agent nodes execute on the same pool as the
-                            // brain — clone before both moves into `HarnessBrain`.
-                            let runner: Arc<dyn WorkflowRunner> =
-                                Arc::new(HarnessWorkflowRunner::new(
-                                    pool.clone(),
-                                    deps.clone(),
-                                    record.clone(),
-                                ));
+                            // The company's other declared harnesses, each on
+                            // its own pool and its own provider. Empty unless
+                            // `[[harness]]` names more than one, so a company
+                            // that declares none keeps exactly the single-pool
+                            // path it always had.
+                            //
+                            // Built first so `deps.serves` is set before any
+                            // dependency clones it — otherwise the runner (which
+                            // holds `deps.clone()`) would carry `serves: None`,
+                            // and `HarnessPool::ensure` (which does not fingerprint
+                            // `serves`) could build the whole roster on the
+                            // default provider regardless of which agents it
+                            // actually serves.
+                            let lanes = crate::harness::lanes::build(
+                                &record,
+                                &deps,
+                                secrets.clone(),
+                                env_default,
+                            );
+                            if !lanes.lanes.is_empty() || !lanes.unavailable.is_empty() {
+                                tracing::info!(
+                                    company = %id,
+                                    lanes = lanes.lanes.len(),
+                                    unavailable = lanes.unavailable.len(),
+                                    "wired named harnesses"
+                                );
+                            }
+                            // Narrow the default pool to the agents it actually
+                            // serves once other lanes exist; `None` (the
+                            // single-harness case) keeps the whole roster.
+                            deps.serves = lanes.default_serves;
+
+                            // The router every dispatch goes through: the default
+                            // lane plus each named lane, indexed by agent. Shared
+                            // by the brain and the workflow runner so they cannot
+                            // disagree about which agent lands on which engine.
+                            let default_lane: Arc<dyn RunTurn> =
+                                Arc::new(HarnessRunTurn::new(pool.clone(), Arc::new(deps.clone())));
+                            let turn: Arc<dyn RunTurn> = if lanes.lanes.is_empty()
+                                && lanes.unavailable.is_empty()
+                            {
+                                default_lane
+                            } else {
+                                let default_harness = record.manifest.default_harness_id();
+                                let bindings: HashMap<String, String> = record
+                                    .manifest
+                                    .agents
+                                    .iter()
+                                    .filter_map(|a| a.harness.clone().map(|h| (a.id.clone(), h)))
+                                    .collect();
+                                Arc::new(HarnessRouter::from_lanes(
+                                    &default_harness,
+                                    default_lane,
+                                    &lanes.lanes,
+                                    &lanes.unavailable,
+                                    &bindings,
+                                ))
+                            };
+
+                            // Workflow agent nodes route through the shared
+                            // router, so a workflow node addressing a named-lane
+                            // agent lands on that lane's engine instead of the
+                            // default pool.
+                            let runner: Arc<dyn WorkflowRunner> = Arc::new(
+                                HarnessWorkflowRunner::new(turn, deps.clone(), record.clone()),
+                            );
                             // Issue #67: fill the shared handle on `deps` (a clone
                             // of which the runner holds, and which moves into the
                             // brain below) so the orchestrator's `run_workflow` tool
@@ -2653,7 +2739,10 @@ impl RuntimeBuilder {
                                 // choke point mints into and the boot reaper
                                 // sweeps, so an attempt's trace, cost and
                                 // status all land on the row it opened.
-                                HarnessBrain::new(pool, deps, record).with_runs(ops.runs.clone()),
+                                HarnessBrain::new(pool, deps, record)
+                                    .with_lanes(lanes.lanes)
+                                    .with_unavailable_lanes(lanes.unavailable)
+                                    .with_runs(ops.runs.clone()),
                             ) as Arc<dyn Brain>)
                         } else {
                             // Do not degrade silently (issue #174): an openhuman

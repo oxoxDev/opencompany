@@ -24,6 +24,13 @@ human_role = "Approving filings"
 # setting it to `0` pauses search without editing this list.
 allow = ["*", "media", "composio", "search"]
 
+# The matter-review desk aligns research, drafting, and compliance before legal approval.
+[[group_chat]]
+id = "matter_review"
+name = "Matter review desk"
+description = "Coordinate legal research, draft review, and compliance checks."
+members = ["legal_researcher", "contract_drafter", "compliance_agent"]
+
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]

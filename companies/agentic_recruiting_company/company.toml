@@ -7,6 +7,13 @@ name = "Agentic Recruiting Company"
 output = "Sourced, screened, and scheduled candidates"
 human_role = "Final hiring decisions"
 
+# The hiring desk keeps sourcing, interviews, and offer preparation connected for final decisions.
+[[group_chat]]
+id = "hiring"
+name = "Hiring desk"
+description = "Coordinate candidate assessment, interview feedback, and offers."
+members = ["candidate_sourcer", "interviewer", "offer_generator"]
+
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]

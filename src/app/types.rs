@@ -1204,6 +1204,10 @@ mod tests {
     }
 
     /// A host with nothing to open is the only one the wizard is for.
+    ///
+    /// The registered-company half of this lives in `server::setup::test`,
+    /// beside the helper that can build a real runtime:
+    /// `spec_reports_setup_complete_once_a_company_is_registered`.
     #[test]
     fn spec_reports_setup_incomplete_for_an_empty_unstamped_host() {
         let spec = AppState::new(AppConfig::default()).spec();
@@ -1213,10 +1217,6 @@ mod tests {
             "no stamp and no companies is exactly the first-run case"
         );
     }
-
-    /// The registered-company half of this lives in `server::setup::test`,
-    /// beside the helper that can build a real runtime:
-    /// `spec_reports_setup_complete_once_a_company_is_registered`.
 
     #[cfg(feature = "mcp")]
     #[test]

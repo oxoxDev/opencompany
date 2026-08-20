@@ -59,18 +59,21 @@ pub fn triage_sample(usage: &TokenUsage, provider: &str) -> Option<UsageSample> 
 }
 
 /// Records one completed triage escalation: the Finances ledger entry (when it
-/// cost USD) and the usage sample (when it moved tokens or money).
+/// cost USD) and, when a usage meter is wired, the usage sample.
 ///
 /// The ledger entry goes through the same [`inference_ledger_entry`] the cycle's
 /// inference spend uses, under the same `inference.spend` kind — triage spend is
 /// inference spend as far as the money is concerned, and only the *usage*
-/// breakdown cares about the distinction.
+/// breakdown cares about the distinction. The meter is deliberately optional:
+/// a host with no usage meter still records the spend it can prove, exactly as
+/// [`record_turn_cost`](crate::harness::cost::record_turn_cost) preserves its
+/// ledger write without a meter.
 pub async fn record_triage_usage(
     usage: &TokenUsage,
     provider: &str,
     company: &CompanyId,
     store: &dyn CompanyStore,
-    meter: &dyn UsageMeter,
+    meter: Option<&dyn UsageMeter>,
 ) {
     if usage.is_zero() {
         return;
@@ -94,6 +97,7 @@ pub async fn record_triage_usage(
         );
     }
     if let Some(sample) = triage_sample(usage, provider)
+        && let Some(meter) = meter
         && let Err(err) = meter.record(company, &sample).await
     {
         tracing::warn!(
@@ -106,7 +110,12 @@ pub async fn record_triage_usage(
 
 #[cfg(test)]
 mod test {
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+
     use super::*;
+    use crate::ports::types::{CompanyRecord, CompanySummary, LedgerEntry};
 
     fn usage() -> TokenUsage {
         TokenUsage {
@@ -115,6 +124,109 @@ mod test {
             cached_input: 0,
             cost_usd: 0.0004,
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingStore {
+        ledger: Mutex<Vec<LedgerEntry>>,
+    }
+
+    #[async_trait]
+    impl CompanyStore for RecordingStore {
+        async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+            Ok(None)
+        }
+        async fn save(&self, _record: &CompanyRecord) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+            Ok(Vec::new())
+        }
+        async fn append_ledger(&self, _id: &CompanyId, entry: LedgerEntry) -> crate::Result<()> {
+            self.ledger.lock().unwrap().push(entry);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingMeter {
+        samples: Mutex<Vec<UsageSample>>,
+    }
+
+    #[async_trait]
+    impl UsageMeter for RecordingMeter {
+        async fn record(&self, _company: &CompanyId, sample: &UsageSample) -> crate::Result<()> {
+            self.samples.lock().unwrap().push(sample.clone());
+            Ok(())
+        }
+        async fn query(
+            &self,
+            _company: &CompanyId,
+            _since: u64,
+        ) -> crate::Result<Vec<UsageSample>> {
+            Ok(self.samples.lock().unwrap().clone())
+        }
+    }
+
+    /// The meter is optional, the ledger is not: a host with no usage meter must
+    /// still record the spend it can prove (same contract as
+    /// [`record_turn_cost`](crate::harness::cost::record_turn_cost)).
+    #[tokio::test]
+    async fn meter_none_still_records_the_ledger_row() {
+        let store = RecordingStore::default();
+        let company = CompanyId::new("acme");
+        record_triage_usage(&usage(), "openrouter", &company, &store, None).await;
+
+        let ledger = store.ledger.lock().unwrap();
+        assert_eq!(
+            ledger.len(),
+            1,
+            "the spend row must survive without a meter"
+        );
+        let entry = &ledger[0];
+        assert_eq!(entry.kind, super::super::inference::INFERENCE_SPEND_KIND);
+        assert_eq!(entry.memo, UNATTRIBUTED_AGENT);
+        assert!(
+            (entry.amount_usd - (-0.0004)).abs() < 1e-9,
+            "an outflow posts negative (issue #1047)"
+        );
+    }
+
+    /// A wired meter receives the same sample `triage_sample` builds — the
+    /// `record` call and the shape the aggregation reads are one contract.
+    #[tokio::test]
+    async fn a_wired_meter_records_the_sample_and_the_ledger() {
+        let store = RecordingStore::default();
+        let meter = RecordingMeter::default();
+        let company = CompanyId::new("acme");
+        record_triage_usage(&usage(), "openrouter", &company, &store, Some(&meter)).await;
+
+        let samples = meter.samples.lock().unwrap();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].kind, SampleKind::TriageCall);
+        assert_eq!(samples[0].agent, UNATTRIBUTED_AGENT);
+        assert_eq!(samples[0].provider, "openrouter");
+        assert_eq!(samples[0].input_tokens, 120);
+        assert_eq!(store.ledger.lock().unwrap().len(), 1);
+    }
+
+    /// The offline path is a no-op at the record level too — nothing to charge
+    /// and nothing to meter.
+    #[tokio::test]
+    async fn a_zero_usage_escalation_records_nothing() {
+        let store = RecordingStore::default();
+        let meter = RecordingMeter::default();
+        let company = CompanyId::new("acme");
+        record_triage_usage(
+            &TokenUsage::default(),
+            "managed",
+            &company,
+            &store,
+            Some(&meter),
+        )
+        .await;
+        assert!(store.ledger.lock().unwrap().is_empty());
+        assert!(meter.samples.lock().unwrap().is_empty());
     }
 
     #[test]

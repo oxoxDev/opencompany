@@ -24,6 +24,13 @@ human_role = "Editorial standards"
 # setting it to `0` pauses search without editing this list.
 allow = ["*", "media", "composio", "search"]
 
+# The newsroom desk pairs the reported story with its verification and publication owners.
+[[group_chat]]
+id = "newsroom"
+name = "Newsroom desk"
+description = "Coordinate story verification, editorial delivery, and publication."
+members = ["source_verifier", "writer", "publisher"]
+
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]

@@ -76,6 +76,10 @@ id = "done"
 kind = "output"
 name = "Deliver to workshop"
 summary = "Hand the deck and plan to the operator."
+# The engagement-delivery desk keeps the workshop materials together for review.
+[node.destination]
+kind = "channel"
+target = "engagement_delivery"
 
 [[edge]]
 from = "brief"

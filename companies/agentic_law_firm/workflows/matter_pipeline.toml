@@ -55,6 +55,10 @@ id = "review"
 kind = "output"
 name = "Park for approval"
 summary = "Send the draft to the operator for sign-off."
+# The matter-review desk holds the research, draft, and compliance result for approval.
+[node.destination]
+kind = "channel"
+target = "matter_review"
 
 [[edge]]
 from = "intake"

@@ -7,6 +7,13 @@ name = "Agentic Influencer Business"
 output = "A creator brand that never sleeps"
 human_role = "Occasional appearance or AI avatar"
 
+# The content desk keeps creation, publishing, and community response aligned around each release.
+[[group_chat]]
+id = "content"
+name = "Content desk"
+description = "Coordinate published content, audience response, and performance learnings."
+members = ["scriptwriter", "publisher", "community_manager"]
+
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]

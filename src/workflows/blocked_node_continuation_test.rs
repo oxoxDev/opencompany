@@ -206,8 +206,14 @@ async fn runtime(
 
     let pool = Arc::new(HarnessPool::new());
     pool.ensure(&record(), &deps).await.expect("roster builds");
+    // Single-harness fixture: the default lane over the pool is the turn
+    // (mirrors `run_workflow`'s single-pool entrypoint).
+    let turn = Arc::new(crate::harness::built_in::run_turn::HarnessRunTurn::new(
+        pool,
+        Arc::new(deps.clone()),
+    ));
     let runner = Arc::new(RecordingRunner {
-        inner: super::runner::HarnessWorkflowRunner::new(pool, deps, record()),
+        inner: super::runner::HarnessWorkflowRunner::new(turn, deps, record()),
         started: Mutex::new(Vec::new()),
     });
     rt.set_workflow_runner(runner.clone());

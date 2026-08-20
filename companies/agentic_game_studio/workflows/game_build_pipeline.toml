@@ -82,6 +82,10 @@ id = "done"
 kind = "output"
 name = "Ship and report"
 summary = "Release behind approval and report back."
+# The release desk needs the build, quality result, and launch plan before shipping.
+[node.destination]
+kind = "channel"
+target = "release"
 
 [[edge]]
 from = "concept"

@@ -16,9 +16,82 @@
         };
       </script>
     -->
+    <style>
+      /* Styles for the boot placeholder in <body>. In <head> so they are
+         guaranteed parsed before the markup they target. Only keyframes and
+         state live here — the first paint is carried by inline styles, so the
+         placeholder still renders if this block is ever dropped. */
+      @keyframes boot-spin { to { transform: rotate(360deg) } }
+      /* After a wake budget's worth of waiting, stop claiming this is normal.
+         Done in CSS rather than script so the placeholder stays inert: a
+         message that says "waking" forever would be a worse lie than the blank
+         page it replaces. 35s is comfortably past both the measured 8-13s wake
+         and the manager's 30s startup timeout. */
+      @keyframes boot-reveal { to { opacity:1 } }
+      @keyframes boot-fade   { to { opacity:0 } }
+      #boot-slow { animation: boot-reveal .4s ease 35s forwards }
+      #boot-hint { animation: boot-fade .4s ease 35s forwards }
+      @media (prefers-reduced-motion: reduce) {
+        /* The spinner is decorative, so it stops entirely. The status swap is
+           not — it carries the "may have failed" message — so it keeps its 35s
+           delay and loses only the fade. `animation: none` here would suppress
+           the reveal and leave the misleading copy up forever. */
+        #boot-spinner { animation: none !important }
+        #boot-slow, #boot-hint { animation-duration: 0s !important }
+      }
+      @media (prefers-color-scheme: dark) {
+        #boot { background:#08090B !important; color:#8A8A9A !important }
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <!--
+      Boot placeholder, replaced by React on mount.
+
+      Covers the window between the HTML arriving and React mounting, when the
+      browser has a document but no bundle, no React and not even the theme —
+      so it would otherwise paint plain white.
+
+      It does NOT cover a cold start, and that limit is worth stating here so
+      nobody assumes otherwise. A hosted company scales to zero when idle and the
+      platform *holds* the request while its pod boots: measured TTFB on a parked
+      tenant is 8.2s, and this markup lives inside the HTML that has not arrived
+      yet. Fixing that needs a holding response from something that is always up
+      — the edge, or the manager's proxy — not the console (#1241).
+
+      This is deliberately inert: inline styles and markup only, no script and no
+      stylesheet link, so it paints on the first byte of HTML rather than waiting
+      for anything else to load. It matches the app's own `--surface-*-bg`
+      primitives and follows `prefers-color-scheme`, which is what the app itself
+      defaults to (`main.tsx`: `defaultTheme="system" enableSystem`). A reader who
+      has explicitly overridden the theme has that choice persisted in
+      `localStorage`, which only a script could read — so for them the handover
+      can still flash. Matching the majority case without a script is the trade.
+
+      The copy says "waking" rather than "loading" because that is the true
+      claim: nothing is broken and nothing is slow, a machine is being started.
+    -->
+    <div id="root">
+      <div id="boot" style="
+        position:fixed; inset:0; display:flex; flex-direction:column;
+        align-items:center; justify-content:center; gap:14px;
+        background:#F7F7FC; color:#6B6B7B;
+        font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+        font-size:14px; letter-spacing:.01em;
+      ">
+        <div id="boot-spinner" style="
+          width:22px; height:22px; border-radius:50%;
+          border:2px solid currentColor; border-top-color:transparent;
+          animation:boot-spin .8s linear infinite; opacity:.55;
+        "></div>
+        <div>Waking this company&hellip;</div>
+        <div id="boot-hint" style="font-size:12px;">Idle companies start on demand, which takes a few seconds.</div>
+        <div id="boot-slow" style="font-size:12px; opacity:0; max-width:34ch; text-align:center;">
+          This is taking longer than a normal wake. If it does not finish, the
+          company may have failed to start rather than be starting.
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

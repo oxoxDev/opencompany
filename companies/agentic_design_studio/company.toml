@@ -24,6 +24,13 @@ human_role = "Creative direction sign-off"
 # setting it to `0` pauses search without editing this list.
 allow = ["*", "media", "composio", "search"]
 
+# The creative-direction desk brings research, brand, and product-design decisions to one review.
+[[group_chat]]
+id = "creative_direction"
+name = "Creative direction desk"
+description = "Coordinate the design system before creative sign-off."
+members = ["user_researcher", "brand_designer", "ui_designer"]
+
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]

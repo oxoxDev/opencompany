@@ -7,6 +7,13 @@ name = "Agentic Customer Support Company"
 output = "Resolved tickets and current documentation"
 human_role = "Escalation and policy"
 
+# The support-operations desk owns customer outcomes and the guidance that supports them.
+[[group_chat]]
+id = "support_operations"
+name = "Support operations desk"
+description = "Coordinate ticket resolution, escalations, and support documentation."
+members = ["support_agent", "escalation_manager", "docs_writer"]
+
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]

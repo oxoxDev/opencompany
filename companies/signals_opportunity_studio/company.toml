@@ -59,6 +59,13 @@ skills = [
   { id = "opportunity.brief", price_usd = "49.00", description = "A ranked, evidence-backed weekly opportunity brief for a chosen market." },
 ]
 
+# The opportunity-review desk validates the weekly signal synthesis before it reaches the operator.
+[[group_chat]]
+id = "opportunity_review"
+name = "Opportunity review desk"
+description = "Coordinate signal evidence, opportunity ranking, and the weekly brief."
+members = ["signal_scout", "opportunity_analyst", "research_agent"]
+
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]

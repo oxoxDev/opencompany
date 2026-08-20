@@ -18,7 +18,7 @@
 //! real [`HostedProvider`], real pool, real brain — and scripts exactly one
 //! thing: the model's choices, over a loopback OpenAI-compatible endpoint. The
 //! shape [`cap_turn_test`](super::cap_turn_test) and
-//! [`iteration_cap_turn_test`](super::iteration_cap_turn_test) established.
+//! `built_in::iteration_cap_turn_test` established.
 //!
 //! The lever that makes the brake fire is `prompt_tokens`: the stop-hook
 //! middleware folds the usage the *provider* reports into openhuman's turn cost,
@@ -309,6 +309,7 @@ fn deps_for(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<FsOps>
             extra_headers: Vec::new(),
         })),
         provider_slug: "managed".to_string(),
+        serves: None,
         context: Arc::new(FsContextStore::new(dir)),
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: Some(ops.clone()),

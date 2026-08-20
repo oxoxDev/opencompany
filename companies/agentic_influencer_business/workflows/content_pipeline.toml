@@ -83,6 +83,10 @@ id = "done"
 kind = "output"
 name = "Report back"
 summary = "Summarize performance and learnings."
+# The content desk turns the published piece and audience response into the next decision.
+[node.destination]
+kind = "channel"
+target = "content"
 
 [[edge]]
 from = "cadence"

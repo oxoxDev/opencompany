@@ -46,7 +46,8 @@ Supporting docs:
 - [artifacts.md](artifacts.md) — what makes something a deliverable: the
   explicit-publish rule, `(task, source)` identity, body caps and reference
   bodies, and the single follow-up nudge
-- [manifest.md](manifest.md) — `company.toml` schema
+- [manifest.md](manifest.md) — `company.toml` schema,
+  with [manifest-semantics.md](manifest-semantics.md) for each key's behaviour
 - [globals.md](globals.md) — the global baseline: the agents, workflows, skills
   and starting tool belt every company gets whichever vertical it started from,
   how a company supersedes or disables one, and why provenance is persisted

@@ -1060,6 +1060,36 @@ const MAX_BLOCKING_THREADS: usize = openhuman_core::core::runtime::MAX_BLOCKING_
 #[cfg(not(feature = "openhuman"))]
 const MAX_BLOCKING_THREADS: usize = 512;
 
+/// The log filter used when `RUST_LOG` says nothing.
+///
+/// The bare `error` is exactly what `EnvFilter::from_default_env()` fell back to,
+/// so no target in this binary becomes chattier than it was. The one added
+/// directive is the exception the default cannot express, and it is not cosmetic.
+///
+/// `tinyagents::observability` is the target the vendored durable-append writer
+/// (`AppendWorker`, in
+/// `vendor/openhuman/vendor/tinyagents/src/harness/observability/worker.rs`)
+/// reports on — the writer behind the embedded runtime's durable agent journal.
+/// It reports only the *first* failure of a failure run at `error`; every line
+/// after that is `warn`:
+///
+/// - "still failing after N consecutive observations" — the run is ongoing,
+/// - "recovered; N observation(s) lost" — the run ended, and how much it cost,
+/// - "never recovered before shutdown, N observation(s) lost" — the run outlived
+///   the process.
+///
+/// Those `warn` lines are the only signal that the durable log is losing data and
+/// how much of it. Under a bare `error` filter an operator sees one line when a
+/// degraded run begins and then nothing — no reminder that it is still degraded,
+/// no recovery, no loss count — which is the visibility gap issue #450 is about.
+/// The writer's own subscriber-independent fallback, `AppendWorker::append_failures()`,
+/// is `pub(crate)` in tinyagents and cannot be read from here, so the subscriber
+/// is the only channel we have (see `docs/spec/runtime/workspace-layout.md`).
+///
+/// Setting `RUST_LOG` replaces this string wholesale — the operator keeps full
+/// control, and behaviour with `RUST_LOG` set is unchanged.
+const DEFAULT_LOG_FILTER: &str = "error,tinyagents::observability=warn";
+
 fn main() -> Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -1069,9 +1099,34 @@ fn main() -> Result<()> {
         .block_on(async_main())
 }
 
+/// The filter to install, given whatever `RUST_LOG` holds.
+///
+/// Split out from [`async_main`] and taking the variable as an argument so the
+/// choice can be tested without mutating process-global environment state,
+/// which no test can do without racing every other test in the binary.
+///
+/// `Some` — the operator set the variable, so it is parsed exactly the way it
+/// was before [`DEFAULT_LOG_FILTER`] existed: **lossily**. A single malformed
+/// directive drops itself and the valid ones around it still apply. Parsing it
+/// strictly and falling back on error would silently discard an operator's
+/// entire working configuration over one typo, which is a worse failure than
+/// the one this constant was added to fix.
+///
+/// `None` — the variable is unset, so [`DEFAULT_LOG_FILTER`] applies.
+fn log_filter(rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
+    // `EnvFilter::new` is `parse_lossy` over the same `ERROR` default directive
+    // that `from_default_env` uses, so passing the variable's value through it
+    // is exactly what the old code did with it — just reachable from a test.
+    match rust_log {
+        Some(directives) => tracing_subscriber::EnvFilter::new(directives),
+        None => tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER),
+    }
+}
+
 async fn async_main() -> Result<()> {
+    let rust_log = std::env::var(tracing_subscriber::EnvFilter::DEFAULT_ENV).ok();
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(log_filter(rust_log.as_deref()))
         .init();
 
     match Cli::parse().command {
@@ -1907,6 +1962,154 @@ mod test {
             "path is the template basename, not the absolute host path"
         );
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Records the target and level of every event a subscriber was actually
+    /// asked to record, so a filter can be tested on behaviour rather than on
+    /// the contents of its own string.
+    #[derive(Clone)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<(String, tracing::Level)>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Captured {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let meta = event.metadata();
+            self.0
+                .lock()
+                .expect("capture lock")
+                .push((meta.target().to_string(), *meta.level()));
+        }
+    }
+
+    #[test]
+    fn the_default_filter_passes_durable_append_warnings_and_still_drops_other_ones() {
+        // The point of `DEFAULT_LOG_FILTER` is the vendored append worker's
+        // warn-level reports — "still failing after N", "recovered, N lost",
+        // "never recovered before shutdown, N lost". They are the only account
+        // of how much of the durable agent journal was lost, and a bare `error`
+        // filter drops all three (issue #450).
+        //
+        // Asserted by running the filter, not by reading it: this builds the
+        // real `EnvFilter` from the real constant, installs it over a capturing
+        // layer exactly as `async_main` installs it over `fmt`, and emits the
+        // four events that matter. Revert the constant to `"error"` and the
+        // first assertion fails.
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry()
+            .with(Captured(std::sync::Arc::clone(&captured)))
+            .with(log_filter(None));
+
+        tracing::subscriber::with_default(subscriber, || {
+            // The worker's recovery summary — the line the operator needs.
+            tracing::warn!(
+                target: "tinyagents::observability",
+                sink = "journal",
+                lost = 3_u64,
+                "durable append recovered"
+            );
+            // An unrelated warning stays dropped: the default is still `error`
+            // for everything the exception does not name.
+            tracing::warn!(target: "opencompany::unrelated", "ordinary warning");
+            // And a real error still gets through, unchanged from before.
+            tracing::error!(target: "opencompany::unrelated", "ordinary error");
+            // The exception is scoped to `warn`, not opened wide.
+            tracing::info!(target: "tinyagents::observability", "chatter");
+        });
+
+        let events = captured.lock().expect("capture lock").clone();
+        let seen = |target: &str, level: tracing::Level| {
+            events.iter().any(|(t, l)| t == target && *l == level)
+        };
+
+        assert!(
+            seen("tinyagents::observability", tracing::Level::WARN),
+            "the durable-append recovery/reminder/shutdown reports must survive \
+             the default filter; captured {events:?}"
+        );
+        assert!(
+            !seen("opencompany::unrelated", tracing::Level::WARN),
+            "the exception is one target, not a global level bump; captured {events:?}"
+        );
+        assert!(
+            seen("opencompany::unrelated", tracing::Level::ERROR),
+            "errors kept passing exactly as they did before; captured {events:?}"
+        );
+        assert!(
+            !seen("tinyagents::observability", tracing::Level::INFO),
+            "the exception stops at `warn`; captured {events:?}"
+        );
+    }
+
+    /// A `RUST_LOG` the operator set is theirs, even when part of it is junk.
+    ///
+    /// `try_from_default_env` rejects the whole variable over one malformed
+    /// directive, so falling back to [`DEFAULT_LOG_FILTER`] on that error would
+    /// throw away every valid directive the operator wrote — turning a typo into
+    /// a silent, total loss of their logging configuration. [`log_filter`] parses
+    /// it lossily instead, which is what this binary did before the constant
+    /// existed. Flagged by review on PR #1186.
+    #[test]
+    fn a_malformed_directive_does_not_discard_the_rest_of_rust_log() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // One good directive, one that cannot parse.
+        let subscriber = tracing_subscriber::registry()
+            .with(Captured(std::sync::Arc::clone(&captured)))
+            .with(log_filter(Some(
+                "opencompany::kept=info,@@@not a directive@@@",
+            )));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "opencompany::kept", "the operator asked for this");
+        });
+
+        let events = captured.lock().expect("capture lock").clone();
+        assert!(
+            events
+                .iter()
+                .any(|(t, l)| t == "opencompany::kept" && *l == tracing::Level::INFO),
+            "the valid directive must survive the invalid one beside it; captured {events:?}"
+        );
+    }
+
+    /// `RUST_LOG=` — set, but empty — must not silence the binary.
+    ///
+    /// This is the sharper half of the same mistake as
+    /// `a_malformed_directive_does_not_discard_the_rest_of_rust_log`, and it is
+    /// worth its own test because it fails in the opposite direction from the
+    /// bug this file's constant exists to fix. `from_default_env` carries an
+    /// `ERROR` default directive; `try_from_default_env` carries none, so an
+    /// empty value parsed strictly yields a filter with no directives at all
+    /// and drops **everything** — errors included. That is worse than the
+    /// silence issue #450 is about, and it is reachable from an empty
+    /// environment variable in a compose file or a shell export.
+    #[test]
+    fn an_empty_rust_log_still_reports_errors() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry()
+            .with(Captured(std::sync::Arc::clone(&captured)))
+            .with(log_filter(Some("")));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!(target: "opencompany::anything", "something broke");
+        });
+
+        let events = captured.lock().expect("capture lock").clone();
+        assert!(
+            events
+                .iter()
+                .any(|(t, l)| t == "opencompany::anything" && *l == tracing::Level::ERROR),
+            "an empty RUST_LOG must keep the ERROR default, not silence the binary; \
+             captured {events:?}"
+        );
     }
 
     /// Issue #1077: the `orphans` command refuses to run without a tenant

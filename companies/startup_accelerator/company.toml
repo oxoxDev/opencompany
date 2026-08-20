@@ -7,6 +7,13 @@ name = "Startup Accelerator"
 output = "A funded, mentored startup cohort"
 human_role = "Investment and demo-day decisions"
 
+# The cohort-review desk brings admissions, mentorship, and investor readiness into one decision.
+[[group_chat]]
+id = "cohort_review"
+name = "Cohort review desk"
+description = "Coordinate cohort outcomes and decisions for the accelerator operator."
+members = ["application_screener", "mentor_matcher", "investor_liaison"]
+
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]

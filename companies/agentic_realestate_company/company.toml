@@ -7,6 +7,13 @@ name = "Agentic Real Estate Company"
 output = "Underwritten deals and managed properties"
 human_role = "Purchase approvals"
 
+# The investment committee reviews the deal, underwriting, and rehabilitation plan together.
+[[group_chat]]
+id = "investment_committee"
+name = "Investment committee"
+description = "Coordinate acquisition diligence, underwriting, and property plans."
+members = ["property_scout", "deal_underwriter", "contractor_coordinator"]
+
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]

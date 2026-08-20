@@ -3651,6 +3651,7 @@ mode = "full"
             run_supervisor: crate::runtime::RunSupervisor::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
+            serves: None,
             context: Arc::new(FsContextStore::new(home.to_path_buf())),
             store: Arc::new(FsCompanyStore::new(home.to_path_buf())),
             meter: Some(Arc::new(FsOps::new(home.to_path_buf()))),

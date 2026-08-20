@@ -69,6 +69,10 @@ id = "done"
 kind = "output"
 name = "Launch and report"
 summary = "Go live behind approval and report back."
+# The liveops desk owns the release decision and its player-facing follow-through.
+[node.destination]
+kind = "channel"
+target = "liveops"
 
 [[edge]]
 from = "cadence"

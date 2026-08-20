@@ -7,6 +7,13 @@ name = "Agentic Venture Capital Firm"
 output = "Investment memos and a managed portfolio"
 human_role = "Investment decisions"
 
+# The investment committee brings market, deck, and technical diligence into one recommendation.
+[[group_chat]]
+id = "investment_committee"
+name = "Investment committee"
+description = "Coordinate diligence findings before an investment decision."
+members = ["market_sizer", "deck_evaluator", "code_analyst"]
+
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]

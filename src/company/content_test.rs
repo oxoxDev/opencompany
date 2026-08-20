@@ -602,9 +602,9 @@ fn the_marketing_campaign_preset_is_runnable() {
     assert_eq!(node("publish").config["agent_ref"], "copywriter");
 }
 
-/// Every seeded `output` node either names a destination its own manifest can
-/// resolve, or names none at all — and the ones that name none are exactly the
-/// templates that declare no desk (issue #947).
+/// Every seeded `output` node names a destination its own manifest can resolve,
+/// except the research lab, which deliberately proves that workflows can
+/// coordinate without desks (issue #963).
 ///
 /// Two failures this catches, and they are opposite:
 ///
@@ -614,38 +614,17 @@ fn the_marketing_campaign_preset_is_runnable() {
 ///     that manifest does not declare parses fine, ships, and fails at run time
 ///     on a freshly provisioned tenant — which is the class of bug #947 is about,
 ///     one step further along.
-///  2. **A desk-bearing template that quietly loses its destination.** The
-///     allowlist below is the 18 templates that declare no desk and therefore
-///     have nothing to address. It is an allowlist rather than a `!is_empty()`
-///     check so that removing a destination from one of the three that *can*
-///     deliver fails here instead of passing as "well, some have none".
+///  2. **A template that quietly loses its destination.** All shipped
+///     templates except the research lab now declare a desk for their terminal
+///     output. The single exception is named below so removing any other
+///     destination fails rather than passing as "well, some have none".
 ///
-/// The 18 are tracked in #963: they need desks before they can have
-/// destinations, which is a content judgement per company rather than a stanza,
-/// and `agentic_research_lab` declares no desk deliberately.
+/// `agentic_research_lab` explains in its own manifest why it has no desk: its
+/// workflow is the proving ground for collapsing desk coordination into the
+/// graph itself.
 #[test]
 fn every_seeded_output_destination_resolves_against_its_own_manifest() {
-    /// Templates with an `output` node and no desk to deliver it to (#963).
-    const NO_DESK_YET: &[&str] = &[
-        "agentic_accounting_firm",
-        "agentic_consultation_firm",
-        "agentic_customer_support",
-        "agentic_design_studio",
-        "agentic_enterprise_sales",
-        "agentic_game_business",
-        "agentic_game_studio",
-        "agentic_influencer_business",
-        "agentic_law_firm",
-        "agentic_media_company",
-        "agentic_pharma_startup",
-        "agentic_realestate_company",
-        "agentic_recruiting_company",
-        "agentic_research_lab",
-        "agentic_venture_capital",
-        "agentic_venture_studio",
-        "signals_opportunity_studio",
-        "startup_accelerator",
-    ];
+    const DESKLESS_WORKFLOW_TEMPLATE: &str = "agentic_research_lab";
 
     let mut checked = 0;
     let mut with_destination = 0;
@@ -682,17 +661,15 @@ fn every_seeded_output_destination_resolves_against_its_own_manifest() {
                 checked += 1;
                 let Some(destination) = node.destination.as_ref() else {
                     assert!(
-                        NO_DESK_YET.contains(&company.as_str()),
+                        company == DESKLESS_WORKFLOW_TEMPLATE,
                         "{label} has an output node with no destination, so a run of it \
-                         delivers nothing. Give it a destination, or — if this template \
-                         declares no desk to deliver to — add it to `NO_DESK_YET` and to \
-                         issue #963."
+                         delivers nothing. Give it a channel destination backed by a \
+                         manifest desk. The research lab is the only intentional exception."
                     );
                     assert!(
                         desks.is_empty(),
-                        "{label} is listed in `NO_DESK_YET` but its manifest declares \
-                         desks {desks:?}, so it has somewhere to deliver. Give its output \
-                         node a destination and drop it from the list."
+                        "{label} is the deskless-workflow exception but its manifest \
+                         declares desks {desks:?}. Give its output node a destination."
                     );
                     continue;
                 };
@@ -721,7 +698,8 @@ fn every_seeded_output_destination_resolves_against_its_own_manifest() {
         "the seeded output-node count changed; this test and #963's list describe 21"
     );
     assert_eq!(
-        with_destination, 3,
-        "exactly the three desk-bearing templates carry a destination today"
+        with_destination, 20,
+        "every seeded output except the research lab's deliberate deskless workflow \
+         carries a destination"
     );
 }

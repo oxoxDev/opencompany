@@ -897,7 +897,7 @@ jobs:
       - name: Test the ACP surface
         run: |
           scripts/ci/run-scoped-suite.sh "acp server" acp,runner,tinymemory server::acp
-          scripts/ci/run-scoped-suite.sh "acp run turn" acp,runner,tinymemory harness::acp_run_turn
+          scripts/ci/run-scoped-suite.sh "acp run turn" acp,runner,tinymemory harness::acp::run_turn
 
       # Issue #788: Chargebee billing — the REST layer (`chargebee::`) and the
       # toolbelt bridge (`harness::chargebee`) in one filter, which selects both.
@@ -1013,13 +1013,13 @@ jobs:
       # entry that decides whether an agent can reach them at all. An unrun
       # namespace pin is the wrong thing to have never executed.
       - name: Test tool-belt contract (openhuman, mcp, telegram, media)
-        run: scripts/ci/run-scoped-suite.sh "tool-belt contract" openhuman,mcp,telegram,media harness::build::tests
+        run: scripts/ci/run-scoped-suite.sh "tool-belt contract" openhuman,mcp,telegram,media harness::built_in::build::tests
 
       # The `media` toolbelt's other half: the three tool names and their single
       # `media` namespace. Same feature set as the step above, so this costs a
       # filtered re-run of an already-compiled tree and no fourth resolution.
       - name: Test the media toolbelt
-        run: scripts/ci/run-scoped-suite.sh "media toolbelt" openhuman,mcp,telegram,media harness::toolbelt
+        run: scripts/ci/run-scoped-suite.sh "media toolbelt" openhuman,mcp,telegram,media harness::built_in::toolbelt
 
       # The `mcp` OAuth-flow state, which the belt filter above never reached.
       # `app::types` holds two gated tests — a parked flow is SINGLE-USE (a
@@ -1079,10 +1079,10 @@ jobs:
       # the ACP step above states: the first bare argument is the filter and a
       # second would narrow the selection to nothing.
       - name: Test Composio tenant isolation
-        run: scripts/ci/run-scoped-suite.sh "composio isolation" openhuman,tinycortex,chargebee,paypal,composio harness::composio::isolation_tests
+        run: scripts/ci/run-scoped-suite.sh "composio isolation" openhuman,tinycortex,chargebee,paypal,composio harness::built_in::composio::isolation_tests
 
       - name: Test the Composio ops helpers
-        run: scripts/ci/run-scoped-suite.sh "composio ops helpers" openhuman,tinycortex,chargebee,paypal,composio harness::composio::ops_helper_tests
+        run: scripts/ci/run-scoped-suite.sh "composio ops helpers" openhuman,tinycortex,chargebee,paypal,composio harness::built_in::composio::ops_helper_tests
 
       # Issue #820 — which connected account an agent acts as. A third narrow
       # filter for the same reason the two above are narrow, and the same reason
@@ -1093,7 +1093,7 @@ jobs:
       # the negative half is the one protecting every existing single-account
       # company from having its account resolution changed.
       - name: Test which Composio account an execute acts as
-        run: scripts/ci/run-scoped-suite.sh "composio account choice" openhuman,tinycortex,chargebee,paypal,composio harness::composio::live::live_tests
+        run: scripts/ci/run-scoped-suite.sh "composio account choice" openhuman,tinycortex,chargebee,paypal,composio harness::built_in::composio::live::live_tests
 
       # Issue #820 — a fourth narrow filter, and the first outside `harness::`.
       # The console-plane half of the same decision: the grouping the choice is

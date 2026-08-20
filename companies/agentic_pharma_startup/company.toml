@@ -7,6 +7,13 @@ name = "Agentic Pharma Startup"
 output = "Candidate molecules and trial plans"
 human_role = "Laboratory work"
 
+# The research-review desk pairs candidate evidence with the trial plan before lab work begins.
+[[group_chat]]
+id = "research_review"
+name = "Research review desk"
+description = "Coordinate candidate evidence and trial planning for laboratory review."
+members = ["molecule_discovery", "simulation_agent", "trial_planner"]
+
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]

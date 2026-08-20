@@ -1335,7 +1335,7 @@ export class ApiError extends Error {
 
   /**
    * The per-node, per-field breakdown behind `message`, when the host sent one
-   * (issue #836).
+   * (issues #1016, #836).
    *
    * The host already computes this and puts it on the wire; before this field
    * existed the console parsed the envelope's `error` and `code` and dropped

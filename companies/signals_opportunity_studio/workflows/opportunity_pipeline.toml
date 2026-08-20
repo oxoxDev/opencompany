@@ -48,6 +48,10 @@ id = "brief"
 kind = "output"
 name = "Ranked brief"
 summary = "Deliver the ranked brief to the operator."
+# The opportunity-review desk validates the evidence and ranking before the operator sees it.
+[node.destination]
+kind = "channel"
+target = "opportunity_review"
 
 [[edge]]
 from = "cadence"
