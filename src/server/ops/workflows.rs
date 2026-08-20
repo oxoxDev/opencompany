@@ -2378,13 +2378,30 @@ struct RunsQuery {
     /// default rather than returning an empty page, which is never what a
     /// caller means.
     limit: Option<usize>,
-    /// Page cursor (issue #1012): return only runs whose `seq` is strictly less
-    /// than this. The `seq` is the run's journal position — unique, monotonic,
-    /// and the same total order the newest-first sort keys on — so paging on it
-    /// cannot skip or double-count a run the way an `at_millis` cursor could
-    /// when two runs finish in the same millisecond. Absent = the first (newest)
-    /// page. Callers take the value from a previous page's `nextBeforeSeq`.
+    /// Page cursor (issue #1012), paired with [`Self::before_at_millis`]:
+    /// return only runs strictly older than the previous page's tail *in
+    /// display order* — the same `(at_millis, seq)` pair the newest-first sort
+    /// keys on (see the `sort_by` in `list_runs`), compared the same way.
+    ///
+    /// `seq` alone is NOT equivalent to the sort's total order despite being
+    /// itself unique and monotonic: `at_millis` is wall-clock time
+    /// (`now_millis()`, `src/ports/ids.rs`), which carries no nondecreasing
+    /// guarantee, so a clock regression between two appends can produce a
+    /// later `seq` with an *earlier* `at_millis` than the row before it. A
+    /// `seq`-only cursor then disagrees with the sort at that boundary and
+    /// either skips or repeats a row across the page break (PR #1090 review).
+    /// Absent = the first (newest) page. Callers take both values from a
+    /// previous page's `nextBeforeSeq` / `nextBeforeAtMillis`.
     before_seq: Option<u64>,
+    /// The `at_millis` half of the cursor — see [`Self::before_seq`].
+    ///
+    /// Optional independently of `before_seq` for callers who have not been
+    /// updated to send it (there are none in this codebase as of #1012/#1090,
+    /// but the route predates a hard requirement): when absent, the retain
+    /// below degrades to the old `seq`-only comparison, which is exactly
+    /// right on an unregressed clock and only wrong on the same rare boundary
+    /// this field exists to close.
+    before_at_millis: Option<u64>,
 }
 
 /// One page of run history (issue #1012): the rows, plus whether older runs
@@ -2407,6 +2424,11 @@ struct RunsPage {
     /// stop as soon as it is absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     next_before_seq: Option<u64>,
+    /// The `?before_at_millis=` half of the cursor — this page's last row's
+    /// `at_millis`, to send back alongside `next_before_seq` (PR #1090
+    /// review). `None` under the same condition as `next_before_seq`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_before_at_millis: Option<u64>,
 }
 
 /// One finished run as the console's history panel renders it (camelCase).
@@ -3084,20 +3106,40 @@ async fn list_runs(
     // runs, which is the number the caller was asking about all along.
     runs.sort_by(|a, b| b.at_millis.cmp(&a.at_millis).then(b.seq.cmp(&a.seq)));
 
-    // Cursor (issue #1012): drop everything at or newer than the caller's
-    // cursor, so `?before_seq=<last row of the previous page>` returns strictly
-    // the runs after it. Applied AFTER the sort so the cursor means "older than
-    // this in the display order", which — because `seq` is monotonic and the
-    // sort's final tiebreak — is the same as "earlier journal position".
-    if let Some(cursor) = query.before_seq {
-        runs.retain(|r| r.seq < cursor);
+    // Cursor (issue #1012, composite as of PR #1090 review): drop everything at
+    // or newer than the caller's cursor, so the previous page's tail returns
+    // strictly the runs after it. Applied AFTER the sort so the cursor means
+    // "older than this in the display order" — which the retain predicate now
+    // tests with the SAME `(at_millis, seq)` comparison the sort above uses,
+    // rather than `seq` alone. `seq` is monotonic on its own, but `at_millis` is
+    // wall-clock time with no such guarantee (see `RunsQuery::before_at_millis`),
+    // so a `seq`-only cursor can disagree with the sort across a clock
+    // regression and skip or repeat a row at the page boundary. Rust tuple `Ord`
+    // compares lexicographically, so `(r.at_millis, r.seq) < (cursor_millis,
+    // cursor_seq)` is exactly "strictly earlier in the sort's tiebreak order".
+    //
+    // `before_at_millis` is optional (a caller that has not adopted it yet):
+    // falls back to the old `seq`-only comparison, which agrees with the
+    // composite one on every unregressed clock and only reintroduces the
+    // boundary bug this exists to close.
+    if let Some(cursor_seq) = query.before_seq {
+        match query.before_at_millis {
+            Some(cursor_millis) => {
+                runs.retain(|r| (r.at_millis, r.seq) < (cursor_millis, cursor_seq));
+            }
+            None => {
+                runs.retain(|r| r.seq < cursor_seq);
+            }
+        }
     }
 
     // One past the page tells us an older run exists without a second read. Cut
-    // to `limit` after computing it, and hand back the tail's `seq` as the next
-    // cursor — `None` when nothing remains, so the caller stops paging.
+    // to `limit` after computing it, and hand back the tail's `seq` AND
+    // `at_millis` as the next cursor — `None` when nothing remains, so the
+    // caller stops paging.
     let has_more = runs.len() > limit;
     let next_before_seq = has_more.then(|| runs[limit - 1].seq);
+    let next_before_at_millis = has_more.then(|| runs[limit - 1].at_millis);
     runs.truncate(limit);
 
     // Issue #1143. A blocked node's `approval_ids` is a receipt of what the run
@@ -3142,6 +3184,7 @@ async fn list_runs(
         runs,
         has_more,
         next_before_seq,
+        next_before_at_millis,
     }))
 }
 
@@ -6698,6 +6741,127 @@ mod tests {
             assert_eq!(whole["runs"].as_array().unwrap().len(), 3, "{whole}");
             assert_eq!(whole["hasMore"], false, "all three fit: {whole}");
             assert!(whole["nextBeforeSeq"].is_null(), "{whole}");
+        }
+
+        /// **PR #1090 review, `src/server/ops/workflows.rs:3101`.** `at_millis`
+        /// is wall-clock time (`now_millis()`, `src/ports/ids.rs`) with no
+        /// nondecreasing guarantee — a clock regression between two appends can
+        /// leave a LATER-`seq` event with an EARLIER `at_millis` than the row
+        /// before it. The newest-first sort orders by `(at_millis, seq)`; a
+        /// `?before_seq=` cursor that only compares `seq` disagrees with that
+        /// sort at exactly this boundary and silently drops the older row
+        /// instead of paging to it.
+        ///
+        /// `r0` finishes first in real time; `r1` finishes second (so its
+        /// journal `seq` is higher), but its finish event's `at_millis` is
+        /// rewritten on disk to sit strictly BEFORE `r0`'s — simulating the
+        /// regression, since nothing in this process can move the real wall
+        /// clock backward between two `append()` calls. Display order is then
+        /// `[r0, r1]` (by `at_millis` desc), the OPPOSITE of journal order.
+        #[tokio::test]
+        async fn run_history_composite_cursor_survives_a_clock_regression() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_start(&state, &id, "digest", "r0", false).await;
+            journal_finish(&state, &id, "digest", "r0", false, None).await;
+            journal_start(&state, &id, "digest", "r1", false).await;
+            journal_finish(&state, &id, "digest", "r1", false, None).await;
+
+            // Rewrite r1's finish event's `at_millis` to sit strictly before
+            // r0's — the only way to construct the regression this fix defends
+            // against, since `now_millis()` cannot be told to run backward.
+            let events_path = crate::store::Bundle::new(&home, &id).events_jsonl();
+            let raw = std::fs::read_to_string(&events_path).expect("read events.jsonl");
+            let mut r0_finish_millis = None;
+            let mut lines: Vec<String> = Vec::new();
+            for line in raw.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let mut value: serde_json::Value =
+                    serde_json::from_str(line).expect("parse event line");
+                let kind = value["event"]["kind"].as_str().unwrap_or_default();
+                let run_id = value["event"]["run_id"].as_str().unwrap_or_default();
+                if kind == "WorkflowRunFinished" && run_id == "r0" {
+                    r0_finish_millis = value["at_millis"].as_u64();
+                }
+                if kind == "WorkflowRunFinished" && run_id == "r1" {
+                    let regressed = r0_finish_millis.expect("r0 finished first") - 1;
+                    value["at_millis"] = serde_json::json!(regressed);
+                }
+                lines.push(value.to_string());
+            }
+            std::fs::write(&events_path, lines.join("\n") + "\n").expect("rewrite events.jsonl");
+            let r0_finish_millis = r0_finish_millis.expect("r0's finish was rewritten past");
+
+            let page = |uri: String| {
+                let state = state.clone();
+                async move {
+                    json_body(
+                        router(state)
+                            .oneshot(request("GET", &uri, None))
+                            .await
+                            .unwrap(),
+                    )
+                    .await
+                }
+            };
+            let ids = |body: &serde_json::Value| -> Vec<String> {
+                body["runs"]
+                    .as_array()
+                    .expect("array")
+                    .iter()
+                    .map(|r| r["runId"].as_str().expect("runId").to_string())
+                    .collect()
+            };
+
+            // Page one: r0 leads despite finishing first in journal order — its
+            // rewritten `at_millis` is now the larger of the two.
+            let first = page("/api/v1/company/workflows/runs?limit=1".to_string()).await;
+            assert_eq!(
+                ids(&first),
+                ["r0"],
+                "r0 sorts newest after the rewrite: {first}"
+            );
+            assert_eq!(first["hasMore"], true, "{first}");
+            let cursor_seq = first["nextBeforeSeq"].as_u64().expect("a cursor");
+            assert_eq!(
+                cursor_seq,
+                first["runs"][0]["seq"].as_u64().unwrap(),
+                "cursor is the tail row's own seq: {first}"
+            );
+
+            // The composite cursor (both halves) correctly walks to r1 next —
+            // this is the request the console now always sends.
+            let older = page(format!(
+                "/api/v1/company/workflows/runs?limit=1&before_seq={cursor_seq}&before_at_millis={r0_finish_millis}"
+            ))
+            .await;
+            assert_eq!(
+                ids(&older),
+                ["r1"],
+                "the composite cursor finds r1 despite its higher seq: {older}"
+            );
+            assert_eq!(older["hasMore"], false, "{older}");
+
+            // A caller that has not adopted `before_at_millis` (or pre-fix code,
+            // which has no such field at all — an extra query param it does not
+            // know about is simply ignored): the same cursor degrades to the OLD
+            // seq-only comparison, which disagrees with the sort at this
+            // boundary — r1's real journal `seq` is HIGHER than r0's, so
+            // `seq < cursor_seq` excludes it. The older page comes back empty
+            // instead of holding r1: the run is silently dropped, not paged to.
+            let seq_only = page(format!(
+                "/api/v1/company/workflows/runs?limit=1&before_seq={cursor_seq}"
+            ))
+            .await;
+            assert_eq!(
+                ids(&seq_only),
+                Vec::<String>::new(),
+                "seq-only cursor drops r1 across the regression boundary: {seq_only}"
+            );
         }
 
         /// `?workflow=` narrows to one graph, and does so BEFORE the limit cut —
