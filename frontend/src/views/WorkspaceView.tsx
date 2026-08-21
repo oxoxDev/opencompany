@@ -119,6 +119,7 @@ import {
   isDerivedNode,
   legacyImportDeclined,
   nodeById,
+  pathOf,
   readLegacyLocalNodes,
   subtreeCounts,
   subtreeIds,
@@ -1889,9 +1890,16 @@ export function WorkspaceView({
       />
       <RepairDialog
         state={repair}
+        nodes={nodes}
         busy={repairing}
         onClose={() => setRepair(null)}
         onConfirm={() => void confirmRepair()}
+        onReveal={(id) => {
+          setRepair(null);
+          const node = nodeById(nodes, id);
+          if (node?.kind === "folder") revealFolder(id);
+          else void open(id);
+        }}
       />
       <DiscardConfirm
         target={confirmDiscard}
@@ -2950,33 +2958,53 @@ interface RepairState {
 
 function RepairDialog({
   state,
+  nodes,
   busy,
   onClose,
   onConfirm,
+  onReveal,
 }: {
   state: RepairState | null;
+  /** The tree, so a residual can be given its path and its real kind (issue #1469). */
+  nodes: FsNode[];
   busy: boolean;
   onClose: () => void;
   onConfirm: () => void;
+  /** Show a residual in the tree. Never writes — it expands and scrolls. */
+  onReveal: (id: string) => void;
 }) {
   const done = state?.stage === "done";
   const folds = state?.outcome.folders ?? [];
   const residuals = state?.outcome.residuals ?? [];
   const relocations = folds.reduce((n, folder) => n + folder.moved.length, 0);
+  // The outcome the host returns most often, and the one this dialog used to
+  // render as a no-op (issue #1469): a group holding a *file* is left entirely
+  // alone and every member comes back as a residual, so a note and a folder
+  // both called `Specs` yields zero folds and two residuals. The old copy then
+  // announced "0 folders share a name" above an empty list, under a permanently
+  // disabled "Merge 0" — a dialog whose every element denied the thing it had
+  // just been opened to report.
+  const residualOnly = folds.length === 0 && residuals.length > 0;
 
   return (
     <Dialog open={Boolean(state)} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>
-            {done ? "Repaired" : "Repair duplicate folders"}
+            {residualOnly
+              ? "Two things share a name"
+              : done
+                ? "Repaired"
+                : "Repair duplicate folders"}
           </DialogTitle>
           <DialogDescription>
-            {done
-              ? folds.length === 0
-                ? "Nothing was merged — the tree changed before the repair ran."
-                : `Merged ${folds.length} duplicate folder${folds.length === 1 ? "" : "s"} and moved ${relocations} item${relocations === 1 ? "" : "s"}.`
-              : `${folds.length} folder${folds.length === 1 ? "" : "s"} share a name with another folder beside them, which is why publishing there fails. Their contents move into the copy that was there first. Nothing is renamed, nothing is overwritten, and no folder is removed until it is empty.`}
+            {residualOnly
+              ? `Nothing here can be merged automatically. ${residuals.length} ${residuals.length === 1 ? "item shares its name" : "items share their names"} with something the repair must not choose between — merging would have to discard one of them. Each one below says what it needs from you.`
+              : done
+                ? folds.length === 0
+                  ? "Nothing was merged — the tree changed before the repair ran."
+                  : `Merged ${folds.length} duplicate folder${folds.length === 1 ? "" : "s"} and moved ${relocations} item${relocations === 1 ? "" : "s"}.`
+                : `${folds.length} folder${folds.length === 1 ? "" : "s"} share a name with another folder beside them, which is why publishing there fails. Their contents move into the copy that was there first. Nothing is renamed, nothing is overwritten, and no folder is removed until it is empty.`}
           </DialogDescription>
         </DialogHeader>
 
@@ -3008,30 +3036,57 @@ function RepairDialog({
 
         {residuals.length > 0 && (
           <div className="space-y-1" data-testid="workspace-repair-residuals">
-            <p className="text-xs font-medium">
-              {done ? "Still needs you" : "These will be left for you"}
-            </p>
+            {!residualOnly && (
+              <p className="text-xs font-medium">
+                {done ? "Still needs you" : "These will be left for you"}
+              </p>
+            )}
             <ul className="max-h-40 space-y-1 overflow-y-auto">
-              {residuals.map((residual) => (
-                <li
-                  key={residual.id}
-                  className="rounded-lg px-2.5 py-1.5 text-sm"
-                >
-                  <div className="flex items-center gap-2">
-                    <FileText className="size-4 shrink-0 text-tone-2" />
-                    <span className="truncate">{residual.name}</span>
-                  </div>
-                  <p className="mt-0.5 pl-6 text-xs text-muted-foreground">
-                    {residualReason(residual.cause)}
-                  </p>
-                </li>
-              ))}
+              {residuals.map((residual) => {
+                // The kind comes from the tree rather than the wire, which
+                // carries only id/name/parentId/cause. Drawing every residual as
+                // a note was actively misleading for the commonest cause of all:
+                // `fileSharesTheName` means one of the pair is a *folder*, and
+                // "rename or remove one of them" read under two identical
+                // note-looking rows.
+                const node = nodeById(nodes, residual.id);
+                const Icon = node?.kind === "folder" ? Folder : FileText;
+                const where = pathOf(nodes, residual.parentId ?? null)
+                  .map((p) => p.name)
+                  .join(" / ");
+                return (
+                  <li key={residual.id}>
+                    <button
+                      type="button"
+                      onClick={() => onReveal(residual.id)}
+                      data-testid="workspace-repair-residual"
+                      className="w-full rounded-lg px-2.5 py-1.5 text-left text-sm hover:bg-accent"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Icon className="size-4 shrink-0 text-tone-2" />
+                        <span className="truncate">{residual.name}</span>
+                        {where && (
+                          <span className="ml-auto shrink-0 truncate text-xs text-muted-foreground">
+                            in {where}
+                          </span>
+                        )}
+                      </span>
+                      <span className="mt-0.5 block pl-6 text-xs text-muted-foreground">
+                        {residualReason(residual.cause)}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           </div>
         )}
 
         <DialogFooter>
-          {done ? (
+          {/* A residual-only outcome has nothing to confirm, so it gets the one
+              action that is true — the same `Done` a finished repair gets —
+              rather than a "Merge 0" that can never be pressed (issue #1469). */}
+          {done || residualOnly ? (
             <Button onClick={onClose}>Done</Button>
           ) : (
             <>
