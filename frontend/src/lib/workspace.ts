@@ -13,7 +13,11 @@
 
 export type { FsNode } from "@/api/workspace";
 
-import { type LocalScope, scopedKeyAdoptingLegacy } from "@/connections/types";
+import {
+  type LocalScope,
+  scopedKey,
+  scopedKeyAdoptingLegacy,
+} from "@/connections/types";
 
 import type { FsNode, RepairOutcome } from "@/api/workspace";
 
@@ -28,7 +32,10 @@ export function childrenOf(nodes: FsNode[], parentId: string | null): FsNode[] {
     });
 }
 
-export function nodeById(nodes: FsNode[], id: string | null): FsNode | undefined {
+export function nodeById(
+  nodes: FsNode[],
+  id: string | null,
+): FsNode | undefined {
   return id ? nodes.find((x) => x.id === id) : undefined;
 }
 
@@ -46,9 +53,14 @@ export function titleOf(node: FsNode): string {
 }
 
 /** Resolve an Obsidian-style `[[wiki link]]` target to a file, by title. */
-export function fileByTitle(nodes: FsNode[], target: string): FsNode | undefined {
+export function fileByTitle(
+  nodes: FsNode[],
+  target: string,
+): FsNode | undefined {
   const want = target.trim().toLowerCase();
-  return nodes.find((x) => x.kind === "file" && titleOf(x).toLowerCase() === want);
+  return nodes.find(
+    (x) => x.kind === "file" && titleOf(x).toLowerCase() === want,
+  );
 }
 
 /**
@@ -80,7 +92,9 @@ export function isDerivedNode(nodes: FsNode[], id: string | null): boolean {
   const ancestry = pathOf(nodes, id);
   const head = ancestry[0];
   if (!head) return false;
-  return head.kind === "folder" && head.name.trim().toLowerCase() === DERIVED_DIR;
+  return (
+    head.kind === "folder" && head.name.trim().toLowerCase() === DERIVED_DIR
+  );
 }
 
 /**
@@ -159,11 +173,19 @@ export type Crumb = FsNode | null;
  * — ellipsises the *tail*, so every note under `Standards/Engineering/…` renders
  * the identical prefix and the discriminating end is exactly what is thrown away.
  */
-export function breadcrumbOf(nodes: FsNode[], id: string | null, max = 3): Crumb[] {
+export function breadcrumbOf(
+  nodes: FsNode[],
+  id: string | null,
+  max = 3,
+): Crumb[] {
   const folders = pathOf(nodes, id).slice(0, -1);
   if (folders.length <= max) return folders;
   // `max - 2` leading crumbs, the ellipsis, then the final two.
-  return [...folders.slice(0, Math.max(max - 2, 1)), null, ...folders.slice(-2)];
+  return [
+    ...folders.slice(0, Math.max(max - 2, 1)),
+    null,
+    ...folders.slice(-2),
+  ];
 }
 
 /**
@@ -173,7 +195,10 @@ export function breadcrumbOf(nodes: FsNode[], id: string | null, max = 3): Crumb
  * Excludes the node itself even when it is a folder: revealing a folder means
  * showing its row, not opening it.
  */
-export function ancestorFolderIds(nodes: FsNode[], id: string | null): string[] {
+export function ancestorFolderIds(
+  nodes: FsNode[],
+  id: string | null,
+): string[] {
   return pathOf(nodes, id)
     .slice(0, -1)
     .filter((node) => node.kind === "folder")
@@ -202,7 +227,10 @@ export function subtreeIds(nodes: FsNode[], id: string): Set<string> {
  * "everything inside it" (issue #1255). Built on {@link subtreeIds}, which
  * includes `id` itself; this one deliberately does not.
  */
-export function subtreeCounts(nodes: FsNode[], id: string): { files: number; folders: number } {
+export function subtreeCounts(
+  nodes: FsNode[],
+  id: string,
+): { files: number; folders: number } {
   const ids = subtreeIds(nodes, id);
   ids.delete(id);
   let files = 0;
@@ -242,7 +270,8 @@ export function applyRepair(nodes: FsNode[], outcome: RepairOutcome): FsNode[] {
 
   const gone = new Set<string>();
   for (const folder of outcome.folders) {
-    if (folder.removed) for (const id of subtreeIds(moved, folder.id)) gone.add(id);
+    if (folder.removed)
+      for (const id of subtreeIds(moved, folder.id)) gone.add(id);
   }
   return moved.filter((node) => !gone.has(node.id));
 }
@@ -255,7 +284,8 @@ export function ensureMdExt(name: string): string {
 /* ---- migration off the retired localStorage scratchpad ---- */
 
 /** Where the pre-connection console kept this company's scratchpad. */
-const legacyWorkspaceKey = (scope: LocalScope) => `oc-workspace:${scope.company ?? "single"}`;
+const legacyWorkspaceKey = (scope: LocalScope) =>
+  `oc-workspace:${scope.company ?? "single"}`;
 
 const KEY = (scope: LocalScope) =>
   scopedKeyAdoptingLegacy("oc-workspace", scope, legacyWorkspaceKey(scope));
@@ -297,7 +327,8 @@ export function readLegacyLocalNodes(scope: LocalScope): FsNode[] {
       Boolean(node) &&
       typeof (node as FsNode).id === "string" &&
       typeof (node as FsNode).name === "string" &&
-      ((node as FsNode).kind === "file" || (node as FsNode).kind === "folder") &&
+      ((node as FsNode).kind === "file" ||
+        (node as FsNode).kind === "folder") &&
       !(node as FsNode).id.startsWith(SEED_ID_PREFIX),
   );
 }
@@ -306,6 +337,39 @@ export function readLegacyLocalNodes(scope: LocalScope): FsNode[] {
 export function hasLegacyLocal(scope: LocalScope): boolean {
   try {
     return localStorage.getItem(KEY(scope)) !== null;
+  } catch {
+    return false;
+  }
+}
+
+/** Where a declined migration offer is remembered, per connection. */
+const DECLINED_KEY = (scope: LocalScope) =>
+  scopedKey("oc-workspace-migration-declined", scope);
+
+/**
+ * Remember that the operator said "not now" to the migration offer.
+ *
+ * A decline is deliberately *not* a discard. The banner used to offer exactly
+ * two exits — import, or destroy the notes — so an operator who wanted neither
+ * met the same offer on every mount, and the quietest way to make it stop was
+ * the button that deleted the only copy. This is the third exit: the notes stay
+ * in the browser, untouched, and the offer stops asking.
+ *
+ * Scoped per connection like every other console key, so declining on one host
+ * cannot hide the offer on another that has never made it.
+ */
+export function declineLegacyImport(scope: LocalScope): void {
+  try {
+    localStorage.setItem(DECLINED_KEY(scope), "1");
+  } catch {
+    /* storage unavailable — the offer will simply be made again */
+  }
+}
+
+/** Whether this connection has already declined the migration offer. */
+export function legacyImportDeclined(scope: LocalScope): boolean {
+  try {
+    return localStorage.getItem(DECLINED_KEY(scope)) !== null;
   } catch {
     return false;
   }
