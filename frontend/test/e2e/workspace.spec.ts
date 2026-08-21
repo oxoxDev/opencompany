@@ -247,9 +247,11 @@ test("the retired local scratchpad is offered for import, its seed discarded", a
 
   // The receipt names what was actually imported, per kind (#500). Two notes
   // and one folder — not the flat list's length, and not the import folder the
-  // console creates to hold them, which is packaging rather than content.
+  // console creates to hold them, which is packaging rather than content and
+  // so stays out of the tally even though the receipt now names it as the
+  // destination (#1472).
   await expect(page.locator("[data-sonner-toast] [data-title]").first()).toHaveText(
-    "Imported 2 notes and 1 folder.",
+    "Imported 2 notes and 1 folder into “Imported from this browser”.",
     { timeout: 30_000 },
   );
 
