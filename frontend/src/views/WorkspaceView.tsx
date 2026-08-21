@@ -85,6 +85,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   rosterDisplayName,
@@ -1427,6 +1432,14 @@ export function WorkspaceView({
           <IconBtn label="Upload" onClick={() => uploadRef.current?.click()}>
             <Upload className="size-4" />
           </IconBtn>
+          {/* The two controls after this line repair the tree rather than adding
+              to it, and both can remove folders. Kept visually apart from the
+              make-something group so the row is not six identical glyphs with
+              two mines in it (issue #1378). */}
+          <span
+            aria-hidden
+            className="mx-0.5 h-4 w-px shrink-0 self-center bg-border"
+          />
           {/* Issue #700. A company provisioned before the tree went lazy carries
               one empty folder per teammate, and nothing else will ever remove
               them. Deliberately a button rather than something boot does: the
@@ -2529,6 +2542,18 @@ function EmptyNote({
   );
 }
 
+/**
+ * An icon-only control in the explorer header, labelled on hover (issue #1378).
+ *
+ * The header is six of these in a row — two of which delete things — and the
+ * label existed only as `aria-label`, which is to say only for a screen reader.
+ * A sighted operator had six identical grey glyphs and no way to learn what any
+ * of them did short of pressing it, in a row where two presses are destructive.
+ *
+ * The tooltip renders the same string the `aria-label` carries rather than a
+ * second, longer explanation: one label, two ways of meeting it. `TooltipProvider`
+ * is mounted globally (`main.tsx`), so this costs nothing at each site.
+ */
 function IconBtn({
   label,
   onClick,
@@ -2540,16 +2565,23 @@ function IconBtn({
   children: React.ReactNode;
 } & Omit<React.ComponentProps<typeof Button>, "onClick" | "children">) {
   return (
-    <Button
-      variant="ghost"
-      size="icon"
-      className="size-7 text-muted-foreground"
-      aria-label={label}
-      onClick={onClick}
-      {...rest}
-    >
-      {children}
-    </Button>
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7 text-muted-foreground"
+            aria-label={label}
+            onClick={onClick}
+            {...rest}
+          />
+        }
+      >
+        {children}
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -2854,7 +2886,16 @@ function SweepDialog({
               <Button variant="ghost" onClick={onClose}>
                 Cancel
               </Button>
-              <Button variant="destructive" disabled={busy} onClick={onConfirm}>
+              {/* The solid override, not the tinted `destructive` variant: this
+                  is the codebase's confirm-and-destroy weight, the one
+                  `DeleteDialog` wears (issue #1378). */}
+              <Button
+                variant="destructive"
+                className="bg-destructive text-white hover:bg-destructive/90"
+                disabled={busy}
+                onClick={onConfirm}
+                data-testid="workspace-sweep-confirm"
+              >
                 {busy && <Loader2 className="mr-1 size-4 animate-spin" />}
                 Remove {count}
               </Button>
