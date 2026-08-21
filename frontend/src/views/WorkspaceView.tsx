@@ -1882,6 +1882,7 @@ export function WorkspaceView({
       />
       <SweepDialog
         state={sweep}
+        rosterNames={rosterNames}
         busy={sweeping}
         onClose={() => setSweep(null)}
         onConfirm={() => void confirmSweep()}
@@ -2837,17 +2838,31 @@ interface SweepState {
 
 function SweepDialog({
   state,
+  rosterNames,
   busy,
   onClose,
   onConfirm,
 }: {
   state: SweepState | null;
+  /** The roster the swept folder names are ids in (issue #1479). */
+  rosterNames: RosterNames;
   busy: boolean;
   onClose: () => void;
   onConfirm: () => void;
 }) {
   const done = state?.stage === "done";
   const count = state?.folders.length ?? 0;
+  // Resolve, then sort by what is on screen (issue #1479). A swept folder's
+  // `name` *is* a roster id — that is what `Agents/<id>/` folders are called —
+  // so the dialog asking an operator to approve seven removals was showing
+  // seven ULIDs, in whatever order the host's tree() happened to return, in the
+  // one view that already resolves those ids in the tree behind the modal.
+  const rows = (state?.folders ?? [])
+    .map((folder) => {
+      const display = rosterDisplayName(folder.name, rosterNames);
+      return { ...folder, display, resolved: display !== folder.name };
+    })
+    .sort((a, b) => a.display.localeCompare(b.display));
 
   return (
     <Dialog open={Boolean(state)} onOpenChange={(o) => !o && onClose()}>
@@ -2868,13 +2883,24 @@ function SweepDialog({
           className="max-h-64 space-y-1 overflow-y-auto"
           data-testid="workspace-sweep-folders"
         >
-          {state?.folders.map((folder) => (
+          {rows.map((folder) => (
             <li
               key={folder.id}
               className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm"
             >
               <Folder className="size-4 shrink-0 text-tone-2" />
-              <span className="truncate">{folder.name}</span>
+              <span className="truncate" title={folder.name}>
+                {folder.display}
+              </span>
+              {/* An id the roster cannot resolve is the clearest case of all
+                  for sweeping: that teammate is no longer on the roster. Said
+                  plainly rather than left as a bare ULID the operator is asked
+                  to recognise. */}
+              {!folder.resolved && (
+                <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                  no longer on the roster
+                </span>
+              )}
             </li>
           ))}
         </ul>
