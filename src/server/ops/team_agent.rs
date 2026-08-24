@@ -667,7 +667,8 @@ async fn edit_agent(
         return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
             "no harness named `{id}` is available for this company."
         )))
-        .into_response());
+        .into_response()
+        .into());
     }
 
     // A model override only means anything on an `acp` harness — the same
@@ -693,7 +694,8 @@ async fn edit_agent(
                  transport to forward it to. Bind it to an ACP harness first, or clear \
                  the model."
             )))
-            .into_response());
+            .into_response()
+            .into());
         }
         // `kind = "acp"` is not sufficient: a `runner` transport is ACP and
         // still cannot carry a model, because the runner wire protocol has no
@@ -713,7 +715,8 @@ async fn edit_agent(
                  `transport = \"runner\"`. Model overrides aren't supported for a runner \
                  yet — the runner wire protocol doesn't carry them."
             )))
-            .into_response());
+            .into_response()
+            .into());
         }
     }
 
