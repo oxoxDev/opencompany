@@ -800,7 +800,9 @@ fn owned_folder_name(
         let mut cursor = nodes.iter().find(|node| node.id.as_str() == id.as_str())?;
         while cursor.parent_id.as_deref() != Some(agent_folder) {
             let parent_id = cursor.parent_id.as_ref()?;
-            cursor = nodes.iter().find(|node| node.id.as_str() == parent_id.as_str())?;
+            cursor = nodes
+                .iter()
+                .find(|node| node.id.as_str() == parent_id.as_str())?;
         }
         Some(cursor.name.clone())
     })
