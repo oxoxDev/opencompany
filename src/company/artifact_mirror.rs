@@ -731,13 +731,17 @@ fn split_source(source: &str) -> Result<Vec<String>> {
 /// folder — and a re-publish never consults this name at all, because its
 /// `existing_node_id` revises the node directly. The cost is honest and
 /// narrow: a task whose bare title folder is claimed by a same-titled sibling
-/// files its *later* new sources under the suffixed folder beside its first,
-/// rather than guessing that the shared name is its own — ambiguity is refused,
-/// never guessed, exactly as it is everywhere else in this module. The occupied
-/// check reads the tree snapshot; the store's
+/// files its later new sources under the suffixed folder, rather than guessing
+/// that the shared name is its own — ambiguity is refused, never guessed,
+/// exactly as it is everywhere else in this module. The occupied check reads
+/// the tree snapshot; the store's
 /// [`adopt_or_create_folder`](WorkspaceStore::adopt_or_create_folder) remains
 /// the arbiter of who actually owns a name when two publishes race to mint it.
-fn task_folder_name(nodes: &[WorkspaceNode], agent_folder: &str, target: PublishTarget<'_>) -> String {
+fn task_folder_name(
+    nodes: &[WorkspaceNode],
+    agent_folder: &str,
+    target: PublishTarget<'_>,
+) -> String {
     let base = kebab_name_or(target.title.unwrap_or(target.task_id), target.task_id);
     let titled = target
         .title
