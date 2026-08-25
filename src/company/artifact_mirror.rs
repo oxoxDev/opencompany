@@ -708,6 +708,49 @@ fn split_source(source: &str) -> Result<Vec<String>> {
 /// The node pushed back into the snapshot is the one the **store** returned, so
 /// a publisher that adopted somebody else's folder walks on with the winner's
 /// id rather than one it invented.
+///
+/// # The task folder is named by the card's title, disambiguated by task id
+///
+/// The name a publish uses for the task folder is the card's title when it has
+/// a usable one, and the stable task id otherwise (issue #1687). A title is a
+/// spelling choice, not identity — the `(task_id, source)` pairing owns
+/// identity, and the title only chooses how the folder is spelled. That would
+/// be a lie if two cards of one agent shared a title (or two titles normalized
+/// to the same slug): both would walk to the same folder, and the second task's
+/// first publish — which carries no
+/// [`existing_node_id`](PublishTarget::existing_node_id) — would resolve to the
+/// first task's node and overwrite it, pointing two artifact chains at one
+/// workspace node.
+///
+/// So when a folder already answers to the bare title beneath the agent's
+/// artifacts root, the stable task id is appended: the first card lands in
+/// `launch-plan/`, the second in `launch-plan--t-2/`. The suffix is
+/// deterministic — the same `(agent, task_id, title)` always derives the same
+/// folder — and a re-publish never consults this name at all, because its
+/// `existing_node_id` revises the node directly. The cost is honest and
+/// narrow: a task whose bare title folder is claimed by a same-titled sibling
+/// files its *later* new sources under the suffixed folder beside its first,
+/// rather than guessing that the shared name is its own — ambiguity is refused,
+/// never guessed, exactly as it is everywhere else in this module. The occupied
+/// check reads the tree snapshot; the store's
+/// [`adopt_or_create_folder`](WorkspaceStore::adopt_or_create_folder) remains
+/// the arbiter of who actually owns a name when two publishes race to mint it.
+fn task_folder_name(nodes: &[WorkspaceNode], agent_folder: &str, target: PublishTarget<'_>) -> String {
+    let base = kebab_name_or(target.title.unwrap_or(target.task_id), target.task_id);
+    let titled = target
+        .title
+        .is_some_and(|title| kebab_name(title) != FALLBACK_NAME);
+    if titled
+        && children_named(nodes, agent_folder, &base)
+            .iter()
+            .any(|node| node.kind == NodeKind::Folder)
+    {
+        format!("{base}--{}", target.task_id)
+    } else {
+        base
+    }
+}
+
 async fn resolve_folder(
     workspace: &dyn WorkspaceStore,
     company: &CompanyId,
