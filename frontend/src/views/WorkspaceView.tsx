@@ -97,6 +97,7 @@ import { fromDto } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import { createSaveBuffer, createUnloadGuard, type SaveBuffer } from "@/lib/workspace-save-buffer";
 import {
+  agentBadge,
   ancestorFolderIds,
   applyRepair,
   breadcrumbOf,
@@ -2222,6 +2223,13 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
   const displayName = isRosterFolder ? rosterDisplayName(node.name, rosterNames) : node.name;
   /** What this row is actually called on screen. */
   const label = isFolder ? displayName : titleOf(node);
+  // The agent-provenance badge is named by the same roster lookup the row
+  // label already uses (issue #1723): an operator recognizes "Analytics
+  // Analyst", not the raw `analytics_analyst` handle the id carries. The raw
+  // handle stays on the badge's `title` tooltip for disambiguation, and the
+  // badge is dropped when its resolved name would only repeat the row's own
+  // resolved label. See `agentBadge` for the rule.
+  const badge = agentBadge(node, label, rosterNames);
   /**
    * Whether the name is being cut off (issue #1459).
    *
@@ -2372,14 +2380,14 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
               the company been writing" is answerable by scanning rather than by
               opening each note. Only the agent case — badging the operator's
               own notes back at them says nothing. */}
-          {node.createdBy.kind === "agent" && (
+          {badge && (
             <Badge
               variant="outline"
               className={cn("shrink-0 px-1 py-0 text-3xs", ORIGIN_STYLES.agent)}
-              title={`Created by teammate ${node.createdBy.id}`}
+              title={`Created by teammate ${badge.handle}`}
               data-testid="workspace-tree-agent-badge"
             >
-              {node.createdBy.id}
+              {badge.label}
             </Badge>
           )}
         </button>
