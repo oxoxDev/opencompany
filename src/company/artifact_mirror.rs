@@ -116,6 +116,13 @@ pub struct PublishTarget<'a> {
     /// The node the previous version of this artifact was mirrored into, when
     /// there was one. Reused if it still resolves; see [`materialize`].
     pub existing_node_id: Option<&'a str>,
+    /// The workspace node ids every artifact record of this card already owns
+    /// — the file nodes its earlier sources were mirrored into, from prior
+    /// runs and from earlier publishes in this same run. They let
+    /// [`task_folder_name`] find the folder this task already files under and
+    /// keep a second source beside the first, rather than re-deriving the name
+    /// from a tree snapshot and splitting one task across two folders.
+    pub prior_node_ids: &'a [String],
 }
 
 /// What [`materialize`] is being asked to put in the tree.
