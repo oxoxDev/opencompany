@@ -831,6 +831,15 @@ fn task_folder_name(
 /// node at `artifacts/<agent>/<task>/specs/launch.md` names `specs`'s parent,
 /// the `<task>` folder itself. A node the operator deleted is skipped, and a
 /// card that owns nothing has no folder to reuse.
+///
+/// The walk can end on a **file**, not a folder: an operator is free to move a
+/// published file so it sits directly under `agent_folder`, with no task
+/// folder between them at all. Returning that file's own name here would hand
+/// `resolve_folder` a filename to resolve as a folder, and it would refuse —
+/// the file "already exists as a note, not a folder" — so a card whose
+/// deliverable the operator relocated could never publish another source.
+/// Only a folder counts as a home to reuse; a node parented straight to
+/// `agent_folder` has none, and later prior ids are tried instead.
 fn owned_folder_name(
     nodes: &[WorkspaceNode],
     agent_folder: &str,
@@ -844,7 +853,7 @@ fn owned_folder_name(
                 .iter()
                 .find(|node| node.id.as_str() == parent_id.as_str())?;
         }
-        Some(cursor.name.clone())
+        (cursor.kind == NodeKind::Folder).then(|| cursor.name.clone())
     })
 }
 
@@ -1503,6 +1512,91 @@ mod test {
             format!("{ARTIFACTS_ROOT}/cmo/launch-plan/summary.md"),
             "the card's second source files beside its first, not under a \
              title--task-id split"
+        );
+    }
+
+    /// A card whose deliverable the operator moved to sit directly under the
+    /// agent folder — no task folder in between — still lets its card publish
+    /// a second source (issue #1687 follow-up).
+    ///
+    /// `owned_folder_name`'s walk-up stops as soon as a node's parent is the
+    /// agent folder, which a **file** moved there satisfies immediately: the
+    /// walk never reaches a folder at all. Returning that file's own name
+    /// (`report.md`) as the task folder would have `resolve_folder` refuse it
+    /// — a note, not a folder — and the card could never publish again. The
+    /// fix derives a fresh task folder from the title instead, exactly as if
+    /// the card owned nothing yet. The empty `launch-plan/` folder the move
+    /// left behind still occupies that name, so the ordinary same-title
+    /// disambiguation applies on top and the second source is suffixed — the
+    /// win here is that the publish succeeds at all, not which exact name it
+    /// lands under.
+    #[tokio::test]
+    async fn a_prior_node_moved_directly_under_the_agent_folder_is_not_read_as_a_task_folder() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        let first = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                title: Some("Launch Plan"),
+                ..target("report.md", "launch v1")
+            },
+        )
+        .await
+        .expect("first source")
+        .node_id;
+
+        let nodes = ws.tree(&co).await.unwrap();
+        let agent_folder_id = nodes
+            .iter()
+            .find(|n| n.id == first)
+            .and_then(|file| file.parent_id.clone())
+            .and_then(|task_folder_id| {
+                nodes
+                    .iter()
+                    .find(|n| n.id == task_folder_id)
+                    .and_then(|task_folder| task_folder.parent_id.clone())
+            })
+            .expect("the file sits two levels under the agent folder");
+
+        // The operator moves the deliverable straight under the agent folder,
+        // dissolving the task folder around it.
+        ws.rename_move(&co, &first, None, Some(Some(&agent_folder_id)))
+            .await
+            .expect("operator move");
+        assert_eq!(
+            path_of(ws, &co, &first).await,
+            format!("{ARTIFACTS_ROOT}/cmo/report.md"),
+            "the move landed the file directly under the agent folder"
+        );
+
+        // A second source of the same card must still be able to publish.
+        let second = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                agent_id: "cmo",
+                task_id: "t-1",
+                title: Some("Launch Plan"),
+                source: "summary.md",
+                payload: MirrorPayload::Text("summary"),
+                existing_node_id: None,
+                prior_node_ids: std::slice::from_ref(&first),
+                recorded_before: false,
+            },
+        )
+        .await
+        .expect("second source still publishes after the operator's move");
+
+        // The empty `launch-plan/` folder the move left behind still occupies
+        // that name, so the ordinary same-title disambiguation suffixes the
+        // second source rather than mis-resolving `report.md` as a folder.
+        assert_eq!(
+            path_of(ws, &co, &second.node_id).await,
+            format!("{ARTIFACTS_ROOT}/cmo/launch-plan--t-1/summary.md"),
+            "falls back to deriving the task folder from the title, not the \
+             moved file's own name, and the publish succeeds"
         );
     }
 
