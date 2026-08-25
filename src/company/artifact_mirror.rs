@@ -1429,6 +1429,7 @@ mod test {
                 payload: MirrorPayload::Text("summary"),
                 existing_node_id: None,
                 prior_node_ids: &[first.clone()],
+                recorded_before: false,
             },
         )
         .await
