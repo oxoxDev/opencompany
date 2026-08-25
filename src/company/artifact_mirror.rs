@@ -1134,8 +1134,8 @@ mod test {
     /// rather than minting a rival (issue #1687).
     ///
     /// Distinct titles yield distinct folders, so a common filename cannot
-    /// collide across tasks; a second publish of the same source into the same
-    /// title folder resolves to the one node already there.
+    /// collide across tasks; a re-publish carries its `existing_node_id` (as
+    /// the brain's publish path does) and revises the one node it already has.
     #[tokio::test]
     async fn title_folders_keep_the_task_source_identity() {
         let (_dir, ops, co) = stores();
@@ -1179,13 +1179,15 @@ mod test {
             format!("{ARTIFACTS_ROOT}/cmo/retro-notes/report.md")
         );
 
-        // Same card, same source, published again: one node, revised in place.
+        // Same card, same source, published again: the inherited node id
+        // revises it in place — one node, never a rival.
         let launch_again = materialize(
             ws,
             &co,
             PublishTarget {
                 task_id: "t-1",
                 title: Some("Launch Plan"),
+                existing_node_id: Some(&launch),
                 ..target("report.md", "launch v2")
             },
         )
@@ -1199,6 +1201,103 @@ mod test {
             .unwrap()
             .expect("the node");
         assert_eq!(body, "launch v2");
+    }
+
+    /// Two cards of one agent with the **same** title cannot share a folder
+    /// (issue #1687): the title is a spelling choice, not identity, and two
+    /// tasks whose titles normalize to the same slug would otherwise resolve
+    /// the second task's first publish to the first task's node and overwrite
+    /// it — pointing two artifact chains at one workspace node.
+    ///
+    /// The first card claims the bare title folder; the second files under
+    /// `launch-plan--t-2`, and each card's re-publish still revises its own
+    /// node rather than the other's.
+    #[tokio::test]
+    async fn same_titled_cards_keep_their_deliverables_apart() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        let first = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                task_id: "t-1",
+                title: Some("Launch Plan"),
+                ..target("report.md", "launch v1")
+            },
+        )
+        .await
+        .expect("first card")
+        .node_id;
+        let second = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                task_id: "t-2",
+                title: Some("Launch Plan"),
+                ..target("report.md", "launch v2")
+            },
+        )
+        .await
+        .expect("second card")
+        .node_id;
+
+        assert_ne!(
+            first, second,
+            "two same-titled cards keep their like-named files apart"
+        );
+        assert_eq!(
+            path_of(ws, &co, &first).await,
+            format!("{ARTIFACTS_ROOT}/cmo/launch-plan/report.md")
+        );
+        assert_eq!(
+            path_of(ws, &co, &second).await,
+            format!("{ARTIFACTS_ROOT}/cmo/launch-plan--t-2/report.md"),
+            "the second card's folder appends the stable task id to the title"
+        );
+
+        // Each card re-publishes its own node, never the other's.
+        let first_again = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                task_id: "t-1",
+                title: Some("Launch Plan"),
+                existing_node_id: Some(&first),
+                ..target("report.md", "launch v3")
+            },
+        )
+        .await
+        .expect("first card again")
+        .node_id;
+        assert_eq!(first, first_again);
+        let (_, body) = ws
+            .read(&co, &first_again)
+            .await
+            .unwrap()
+            .expect("the node");
+        assert_eq!(body, "launch v3");
+
+        let second_again = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                task_id: "t-2",
+                title: Some("Launch Plan"),
+                existing_node_id: Some(&second),
+                ..target("report.md", "launch v4")
+            },
+        )
+        .await
+        .expect("second card again")
+        .node_id;
+        assert_eq!(second, second_again);
+        let (_, body) = ws
+            .read(&co, &second_again)
+            .await
+            .unwrap()
+            .expect("the node");
+        assert_eq!(body, "launch v4");
     }
 
     /// A **binary** publish lands real bytes in the tree (issue #553).
