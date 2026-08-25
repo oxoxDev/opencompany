@@ -1030,6 +1030,7 @@ mod test {
             source,
             payload: MirrorPayload::Text(body),
             existing_node_id: None,
+            prior_node_ids: &[],
         }
     }
 
