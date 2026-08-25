@@ -232,8 +232,8 @@ pub async fn materialize(
     // its second segment against the first segment it just minted rather than
     // against a snapshot that predates it.
     let mut nodes = workspace.tree(company).await?;
+    let task_folder = task_folder_name(&nodes, &agent_folder, target);
     let mut parent = agent_folder;
-    let task_folder = kebab_name_or(target.title.unwrap_or(target.task_id), target.task_id);
     for name in std::iter::once(task_folder.as_str()).chain(dirs.iter().map(String::as_str)) {
         parent = resolve_folder(
             workspace,
