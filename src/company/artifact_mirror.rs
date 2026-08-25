@@ -1384,11 +1384,13 @@ mod test {
             ws,
             &co,
             PublishTarget {
+                agent_id: "cmo",
+                task_id: "t-1",
                 title: Some("Launch Plan"),
                 source: "summary.md",
                 payload: MirrorPayload::Text("summary"),
+                existing_node_id: None,
                 prior_node_ids: &[first.clone()],
-                ..target("", "")
             },
         )
         .await
