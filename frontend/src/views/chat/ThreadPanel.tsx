@@ -21,6 +21,13 @@ interface Props {
    * agent up by id (issue #1185).
    */
   members: TeamMember[];
+  /**
+   * Your own avatar reference, so a reply *you* wrote wears your face here the
+   * same way it does in the main timeline (issue #1729). Without it a "you"
+   * line resolves through `senderOf` with no avatar and `TeammateAvatar` seeds
+   * a mascot off the literal string "You" — a wrong (agent-looking) face.
+   */
+  youAvatar?: string;
   /** The message the thread hangs off. */
   parent: ChatMessage;
   replies: ChatMessage[];
@@ -77,6 +84,7 @@ interface Props {
 export function ThreadPanel({
   channel,
   members,
+  youAvatar,
   parent,
   replies,
   sending,
@@ -104,6 +112,7 @@ export function ThreadPanel({
         <Line
           channel={channel}
           members={members}
+          youAvatar={youAvatar}
           message={parent}
           resolveAttachmentUrl={resolveAttachmentUrl}
         />
@@ -118,6 +127,7 @@ export function ThreadPanel({
             key={r.id}
             channel={channel}
             members={members}
+            youAvatar={youAvatar}
             message={r}
             resolveAttachmentUrl={resolveAttachmentUrl}
           />
@@ -141,15 +151,17 @@ export function ThreadPanel({
 function Line({
   channel,
   members,
+  youAvatar,
   message,
   resolveAttachmentUrl,
 }: {
   channel: Channel;
   members: TeamMember[];
+  youAvatar?: string;
   message: ChatMessage;
   resolveAttachmentUrl?: (nodeId: string) => Promise<string>;
 }) {
-  const sender = senderOf(message, channel, members);
+  const sender = senderOf(message, channel, members, youAvatar);
 
   if (sender.kind === "system") {
     return (

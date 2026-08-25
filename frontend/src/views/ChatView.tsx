@@ -1669,6 +1669,7 @@ export function ChatView({
             <ThreadPanel
               channel={channel}
               members={members}
+              youAvatar={youAvatar}
               parent={parent}
               replies={threadReplies}
               sending={sending}
