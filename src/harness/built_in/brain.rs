@@ -1954,6 +1954,7 @@ impl HarnessBrain {
                         }
                     },
                     existing_node_id: prior_node.as_deref(),
+                    prior_node_ids: &prior_node_ids,
                 };
                 match artifact_mirror::materialize(workspace.as_ref(), &self.record().id, target)
                     .await
