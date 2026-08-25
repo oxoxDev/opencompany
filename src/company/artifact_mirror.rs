@@ -1350,6 +1350,64 @@ mod test {
         assert_eq!(body, "launch v4");
     }
 
+    /// One titled card publishing two different sources keeps both in the same
+    /// folder.
+    ///
+    /// The second source carries no `existing_node_id` (its record is new), so
+    /// a folder name re-derived from the tree snapshot alone would see
+    /// `launch-plan/` occupied and mis-file the card under `launch-plan--t-1`,
+    /// splitting one task's deliverables across two folders. The card's
+    /// `prior_node_ids` — the node its first source established — name the
+    /// folder it already files under, so the second source lands beside the
+    /// first.
+    #[tokio::test]
+    async fn one_card_publishing_two_sources_keeps_both_in_the_same_folder() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        let first = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                title: Some("Launch Plan"),
+                ..target("report.md", "launch v1")
+            },
+        )
+        .await
+        .expect("first source")
+        .node_id;
+
+        // A second source of the SAME card, filed in a later run: its record
+        // has no node yet, but the first source's node says where this card
+        // lives.
+        let second = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                title: Some("Launch Plan"),
+                source: "summary.md",
+                payload: MirrorPayload::Text("summary"),
+                prior_node_ids: &[first.clone()],
+                ..target("", "")
+            },
+        )
+        .await
+        .expect("second source")
+        .node_id;
+
+        assert_ne!(first, second, "two sources are two nodes");
+        assert_eq!(
+            path_of(ws, &co, &first).await,
+            format!("{ARTIFACTS_ROOT}/cmo/launch-plan/report.md")
+        );
+        assert_eq!(
+            path_of(ws, &co, &second).await,
+            format!("{ARTIFACTS_ROOT}/cmo/launch-plan/summary.md"),
+            "the card's second source files beside its first, not under a \
+             title--task-id split"
+        );
+    }
+
     /// A **binary** publish lands real bytes in the tree (issue #553).
     ///
     /// This is the payoff of the whole issue: before it, a generated image
