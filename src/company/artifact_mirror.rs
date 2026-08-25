@@ -80,6 +80,7 @@ use crate::ports::types::CompanyId;
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 
 use super::workspace_names::{has_usable_name, kebab_name, kebab_name_or};
+use super::workspace_paths::MAX_PATH_DEPTH;
 use super::workspace_scaffold::ensure_artifact_folder;
 
 /// One publish, as [`materialize`] needs it.
@@ -840,6 +841,13 @@ fn task_folder_name(
 /// deliverable the operator relocated could never publish another source.
 /// Only a folder counts as a home to reuse; a node parented straight to
 /// `agent_folder` has none, and later prior ids are tried instead.
+///
+/// Bounded by [`MAX_PATH_DEPTH`], the same guard
+/// [`workspace_paths::render_path`](super::workspace_paths::render_path) uses:
+/// normal moves reject a parent cycle, but a hand-edited or corrupted backing
+/// row could still present one, and without the bound a cycle that never
+/// reaches `agent_folder` would spin this walk forever. A prior id whose chain
+/// runs past the bound is skipped, same as one that dangles.
 fn owned_folder_name(
     nodes: &[WorkspaceNode],
     agent_folder: &str,
@@ -847,7 +855,12 @@ fn owned_folder_name(
 ) -> Option<String> {
     prior_node_ids.iter().find_map(|id| {
         let mut cursor = nodes.iter().find(|node| node.id.as_str() == id.as_str())?;
+        let mut depth = 0;
         while cursor.parent_id.as_deref() != Some(agent_folder) {
+            depth += 1;
+            if depth > MAX_PATH_DEPTH {
+                return None;
+            }
             let parent_id = cursor.parent_id.as_ref()?;
             cursor = nodes
                 .iter()
@@ -1653,6 +1666,44 @@ mod test {
         );
         let (_, body) = ws.read(&co, &healed).await.unwrap().expect("the node");
         assert_eq!(body, "v2");
+    }
+
+    /// A parent cycle that never reaches `agent_folder` — the shape a
+    /// hand-edited or corrupted backing row could present, per
+    /// `workspace_paths::render_path`'s own guard — must not spin
+    /// [`owned_folder_name`]'s walk forever. It bails past
+    /// [`MAX_PATH_DEPTH`] and is skipped, same as a dangling prior id.
+    #[test]
+    fn owned_folder_name_bails_on_a_parent_cycle_instead_of_spinning() {
+        fn node(id: &str, name: &str, kind: NodeKind, parent: Option<&str>) -> WorkspaceNode {
+            WorkspaceNode {
+                id: id.to_string(),
+                name: name.to_string(),
+                kind,
+                parent_id: parent.map(str::to_string),
+                updated_at_millis: 1,
+                created_by: WorkspaceOrigin::Operator,
+                updated_by: WorkspaceOrigin::Operator,
+                mime: None,
+                size: None,
+                sha256: None,
+            }
+        }
+
+        // `a` and `b` are each other's parent, and neither chain ever reaches
+        // `agent-folder`.
+        let nodes = vec![
+            node("a", "A", NodeKind::Folder, Some("b")),
+            node("b", "B", NodeKind::Folder, Some("a")),
+            node("file", "report.md", NodeKind::File, Some("a")),
+        ];
+        let prior_node_ids = vec!["file".to_string()];
+
+        assert_eq!(
+            owned_folder_name(&nodes, "agent-folder", &prior_node_ids),
+            None,
+            "a cycle that never reaches the agent folder is skipped, not looped on forever"
+        );
     }
 
     /// A **binary** publish lands real bytes in the tree (issue #553).
