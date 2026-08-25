@@ -1428,7 +1428,7 @@ mod test {
                 source: "summary.md",
                 payload: MirrorPayload::Text("summary"),
                 existing_node_id: None,
-                prior_node_ids: &[first.clone()],
+                prior_node_ids: std::slice::from_ref(&first),
                 recorded_before: false,
             },
         )
