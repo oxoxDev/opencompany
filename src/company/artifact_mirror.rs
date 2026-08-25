@@ -104,7 +104,8 @@ pub struct PublishTarget<'a> {
     /// identity — the `(task_id, source)` pairing above still owns that — it
     /// only chooses how the folder is spelled. When two cards of one agent
     /// share a title, the second is spelled `title--task-id` so the two tasks
-    /// stay apart (see [`task_folder_name`]).
+    /// stay apart, and a card's later sources keep the folder its first one
+    /// established (see [`task_folder_name`]).
     pub title: Option<&'a str>,
     /// The normalized workspace-relative path the agent published, e.g.
     /// `specs/launch.md`. Interior segments become folders.
