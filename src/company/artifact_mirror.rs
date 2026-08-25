@@ -736,19 +736,38 @@ fn split_source(source: &str) -> Result<Vec<String>> {
 /// `launch-plan/`, the second in `launch-plan--t-2/`. The suffix is
 /// deterministic — the same `(agent, task_id, title)` always derives the same
 /// folder — and a re-publish never consults this name at all, because its
-/// `existing_node_id` revises the node directly. The cost is honest and
-/// narrow: a task whose bare title folder is claimed by a same-titled sibling
-/// files its later new sources under the suffixed folder, rather than guessing
-/// that the shared name is its own — ambiguity is refused, never guessed,
-/// exactly as it is everywhere else in this module. The occupied check reads
-/// the tree snapshot; the store's
+/// `existing_node_id` revises the node directly.
+///
+/// Two rules keep that spelling from splitting a task. First, a card that
+/// already owns nodes in the tree keeps the folder those nodes live in,
+/// whatever it is currently called: the second source of a "Launch Plan" card
+/// files into the same `launch-plan/` (or `launch-plan--t-2/`) the first did,
+/// because its `prior_node_ids` name the folder it already uses. Re-deriving
+/// from the title alone would see `launch-plan/` occupied and mis-suffix it,
+/// pointing one task's deliverables at two folders. Second, the occupied check
+/// reads the tree snapshot, so two same-titled cards first-publishing at the
+/// same instant can both pick the bare name; the store's
 /// [`adopt_or_create_folder`](WorkspaceStore::adopt_or_create_folder) remains
-/// the arbiter of who actually owns a name when two publishes race to mint it.
+/// the arbiter of who actually owns the folder, and a task that loses that race
+/// simply files its sources beside the winner's — the folder is shared, never
+/// one task's chain overwriting the other's node. The cost of the rule is
+/// honest and narrow: a task whose bare title folder is claimed by a
+/// same-titled sibling files its later new sources under the suffixed folder,
+/// rather than guessing that the shared name is its own — ambiguity is refused,
+/// never guessed, exactly as it is everywhere else in this module.
 fn task_folder_name(
     nodes: &[WorkspaceNode],
     agent_folder: &str,
     target: PublishTarget<'_>,
 ) -> String {
+    // A task that already has nodes in the tree keeps the folder holding them.
+    // That folder may carry the bare title, a `--task-id` suffix a sibling
+    // forced, or a name the operator renamed it to; whichever it is, it is the
+    // stable home this task files under, and re-deriving from the title would
+    // split one card's deliverables across two folders.
+    if let Some(owned) = owned_folder_name(nodes, agent_folder, target.prior_node_ids) {
+        return owned;
+    }
     let base = kebab_name_or(target.title.unwrap_or(target.task_id), target.task_id);
     let titled = target
         .title
@@ -762,6 +781,28 @@ fn task_folder_name(
     } else {
         base
     }
+}
+
+/// The name of the folder directly beneath `agent_folder` that holds the first
+/// of `prior_node_ids` still present in the tree, if any.
+///
+/// Walks each owned node up to its immediate child of `agent_folder` — so a
+/// node at `artifacts/<agent>/<task>/specs/launch.md` names `specs`'s parent,
+/// the `<task>` folder itself. A node the operator deleted is skipped, and a
+/// card that owns nothing has no folder to reuse.
+fn owned_folder_name(
+    nodes: &[WorkspaceNode],
+    agent_folder: &str,
+    prior_node_ids: &[String],
+) -> Option<String> {
+    prior_node_ids.iter().find_map(|id| {
+        let mut cursor = nodes.iter().find(|node| node.id.as_str() == id.as_str())?;
+        while cursor.parent_id.as_deref() != Some(agent_folder) {
+            let parent_id = cursor.parent_id.as_ref()?;
+            cursor = nodes.iter().find(|node| node.id.as_str() == parent_id.as_str())?;
+        }
+        Some(cursor.name.clone())
+    })
 }
 
 async fn resolve_folder(
