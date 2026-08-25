@@ -1961,6 +1961,9 @@ impl HarnessBrain {
                 {
                     Ok(mirrored) => {
                         let node_id = mirrored.node_id;
+                        // A later source in this same run files beside this
+                        // one, so the card's folder stays one folder.
+                        prior_node_ids.push(node_id.clone());
                         // Issue #663/#668: the version body was composed before
                         // the store was asked, so it describes an outcome that
                         // had not happened. Now it has — say what it was, and
