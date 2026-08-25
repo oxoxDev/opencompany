@@ -79,7 +79,7 @@ use crate::ports::now_millis;
 use crate::ports::types::CompanyId;
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 
-use super::workspace_names::{kebab_name, kebab_name_or, FALLBACK_NAME};
+use super::workspace_names::{FALLBACK_NAME, kebab_name, kebab_name_or};
 use super::workspace_scaffold::ensure_artifact_folder;
 
 /// One publish, as [`materialize`] needs it.
@@ -1275,11 +1275,7 @@ mod test {
         .expect("first card again")
         .node_id;
         assert_eq!(first, first_again);
-        let (_, body) = ws
-            .read(&co, &first_again)
-            .await
-            .unwrap()
-            .expect("the node");
+        let (_, body) = ws.read(&co, &first_again).await.unwrap().expect("the node");
         assert_eq!(body, "launch v3");
 
         let second_again = materialize(
