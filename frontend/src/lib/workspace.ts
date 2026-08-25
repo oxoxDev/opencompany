@@ -479,6 +479,33 @@ export function folderPathLabel(
 }
 
 /**
+ * The agent-provenance badge for a tree row, or `null` when none is shown
+ * (issue #1723).
+ *
+ * The tree marks agent-authored nodes with a chip so "what have the company's
+ * agents been writing?" is answerable by scanning. The chip used to print the
+ * raw roster handle (`analytics_analyst`) — the node's real folder name, but
+ * not what an operator recognizes the teammate by. Resolved through the same
+ * roster lookup the row label uses, it reads as "Analytics Analyst" instead,
+ * with the raw handle kept on the tooltip for disambiguation.
+ *
+ * Returns `null` — no badge — for a node not authored by an agent, and for one
+ * whose resolved name would only repeat `rowLabel`: an agent's own root folder
+ * badging itself with its own name says nothing new.
+ */
+export function agentBadge(
+  node: Pick<FsNode, "createdBy">,
+  rowLabel: string,
+  names: RosterNames,
+): { readonly label: string; readonly handle: string } | null {
+  if (node.createdBy.kind !== "agent") return null;
+  const handle = node.createdBy.id;
+  const label = rosterDisplayName(handle, names);
+  if (label === rowLabel) return null;
+  return { label, handle };
+}
+
+/**
  * Every folder in the tree, in the order the explorer draws them (issue #1381).
  *
  * `fetchTree` returns the host's order unmodified, and the host calls its own
