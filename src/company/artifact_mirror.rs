@@ -1499,11 +1499,7 @@ mod test {
             path_of(ws, &co, &healed).await,
             format!("{ARTIFACTS_ROOT}/cmo/launch-plan/report.md")
         );
-        let (_, body) = ws
-            .read(&co, &healed)
-            .await
-            .unwrap()
-            .expect("the node");
+        let (_, body) = ws.read(&co, &healed).await.unwrap().expect("the node");
         assert_eq!(body, "v2");
     }
 
