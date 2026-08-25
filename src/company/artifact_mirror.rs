@@ -93,9 +93,17 @@ pub struct PublishTarget<'a> {
     /// folder it lands under, and the authorship stamped on every node created
     /// or written along the way.
     pub agent_id: &'a str,
-    /// The card the publish belongs to. Names the folder beneath the agent's,
-    /// so two tasks by one agent cannot collide on a common filename.
+    /// The card the publish belongs to. Its id is the stable identity of the
+    /// folder beneath the agent's — so two tasks by one agent cannot collide on
+    /// a common filename — and its fallback name when the card has no title.
     pub task_id: &'a str,
+    /// The card's human title, used to *name* the task folder so the tree reads
+    /// as "Launch Plan" rather than a raw ULID. `None` (or a title that
+    /// normalizes to nothing) falls back to [`task_id`](Self::task_id), which
+    /// keeps the folder identifiable. The title never changes the folder's
+    /// identity — the `(task_id, source)` pairing above still owns that — it
+    /// only chooses how the folder is spelled.
+    pub title: Option<&'a str>,
     /// The normalized workspace-relative path the agent published, e.g.
     /// `specs/launch.md`. Interior segments become folders.
     pub source: &'a str,
@@ -225,7 +233,7 @@ pub async fn materialize(
     // against a snapshot that predates it.
     let mut nodes = workspace.tree(company).await?;
     let mut parent = agent_folder;
-    let task_folder = kebab_name_or(target.task_id, target.task_id);
+    let task_folder = kebab_name_or(target.title.unwrap_or(target.task_id), target.task_id);
     for name in std::iter::once(task_folder.as_str()).chain(dirs.iter().map(String::as_str)) {
         parent = resolve_folder(
             workspace,
@@ -920,6 +928,7 @@ mod test {
         PublishTarget {
             agent_id: "cmo",
             task_id: "t-1",
+            title: None,
             source,
             payload: MirrorPayload::Text(body),
             existing_node_id: None,
@@ -1008,6 +1017,143 @@ mod test {
         assert_eq!(first, second, "one deliverable, one node");
         let (_, body) = ws.read(&co, &second).await.unwrap().expect("the node");
         assert_eq!(body, "v2");
+    }
+
+    /// The task folder is named by the card's **title**, not its raw id
+    /// (issue #1687).
+    ///
+    /// The tree is what the operator reads, and a column of ULIDs answers
+    /// "which task produced this?" with a lookup rather than at a glance. The
+    /// title carries that meaning; the id only has to be there when a title
+    /// does not. Red against the id-named folder this replaced
+    /// (`kebab_name_or(task_id, task_id)`), which would file this under `t-1/`.
+    #[tokio::test]
+    async fn the_task_folder_is_named_by_the_card_title() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        let id = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                title: Some("Launch Plan"),
+                ..target("brief.md", "# Brief")
+            },
+        )
+        .await
+        .expect("materialize")
+        .node_id;
+
+        assert_eq!(
+            path_of(ws, &co, &id).await,
+            format!("{ARTIFACTS_ROOT}/cmo/launch-plan/brief.md"),
+            "the folder reads as the kebab-cased title, not the task id"
+        );
+    }
+
+    /// A title that normalizes to nothing — whitespace, punctuation, an emoji,
+    /// or simply absent — falls back to the task id, so the folder stays
+    /// identifiable rather than joining every other unnameable task at
+    /// `untitled` (issue #1687).
+    ///
+    /// This is the pre-#1687 behaviour, kept as the floor: a publish with no
+    /// usable title lands exactly where it always did.
+    #[tokio::test]
+    async fn an_unusable_title_falls_back_to_the_task_id() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        let id = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                task_id: "01h8xgjabcdef",
+                title: Some("   "),
+                ..target("brief.md", "# Brief")
+            },
+        )
+        .await
+        .expect("materialize")
+        .node_id;
+
+        assert_eq!(
+            path_of(ws, &co, &id).await,
+            format!("{ARTIFACTS_ROOT}/cmo/01h8xgjabcdef/brief.md"),
+            "an empty title leaves the id-named folder in place, never `untitled`"
+        );
+    }
+
+    /// Naming the folder by title does not weaken the `(task_id, source)`
+    /// identity the struct's own doc promises: two different cards keep their
+    /// like-named files apart, and a re-publish of one source revises its node
+    /// rather than minting a rival (issue #1687).
+    ///
+    /// Distinct titles yield distinct folders, so a common filename cannot
+    /// collide across tasks; a second publish of the same source into the same
+    /// title folder resolves to the one node already there.
+    #[tokio::test]
+    async fn title_folders_keep_the_task_source_identity() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        let launch = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                task_id: "t-1",
+                title: Some("Launch Plan"),
+                ..target("report.md", "launch v1")
+            },
+        )
+        .await
+        .expect("launch")
+        .node_id;
+        let retro = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                task_id: "t-2",
+                title: Some("Retro Notes"),
+                ..target("report.md", "retro v1")
+            },
+        )
+        .await
+        .expect("retro")
+        .node_id;
+
+        assert_ne!(
+            launch, retro,
+            "two cards' like-named files stay in separate title folders"
+        );
+        assert_eq!(
+            path_of(ws, &co, &launch).await,
+            format!("{ARTIFACTS_ROOT}/cmo/launch-plan/report.md")
+        );
+        assert_eq!(
+            path_of(ws, &co, &retro).await,
+            format!("{ARTIFACTS_ROOT}/cmo/retro-notes/report.md")
+        );
+
+        // Same card, same source, published again: one node, revised in place.
+        let launch_again = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                task_id: "t-1",
+                title: Some("Launch Plan"),
+                ..target("report.md", "launch v2")
+            },
+        )
+        .await
+        .expect("launch again")
+        .node_id;
+        assert_eq!(launch, launch_again, "one source in one task, one node");
+        let (_, body) = ws
+            .read(&co, &launch_again)
+            .await
+            .unwrap()
+            .expect("the node");
+        assert_eq!(body, "launch v2");
     }
 
     /// A **binary** publish lands real bytes in the tree (issue #553).

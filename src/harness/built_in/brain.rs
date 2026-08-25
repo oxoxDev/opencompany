@@ -1933,6 +1933,7 @@ impl HarnessBrain {
                 let target = artifact_mirror::PublishTarget {
                     agent_id: author,
                     task_id: &card.id,
+                    title: Some(&card.title),
                     source: &pending.source,
                     payload: match &pending.payload {
                         crate::harness::publish::PublishPayload::Text(text) => {
@@ -4136,7 +4137,10 @@ members = ["engineer"]
             .expect("records");
 
         // Agent B knows nothing about the artifact. It walks the shared tree by
-        // path, exactly as `workspace_list` / `workspace_read` do.
+        // path, exactly as `workspace_list` / `workspace_read` do. The task
+        // folder is named by the card's title, not its raw id (issue #1687):
+        // `card("t-1", …)` carries the title "Ship the thing", so the folder
+        // reads as `ship-the-thing` rather than the ULID-like `t-1`.
         let nodes = WorkspaceStore::tree(&*ops, &company).await.unwrap();
         let name_of = |id: &str| nodes.iter().find(|n| n.id == id).map(|n| n.name.clone());
         let found = nodes
@@ -4146,7 +4150,7 @@ members = ["engineer"]
                     && n.parent_id
                         .as_deref()
                         .and_then(name_of)
-                        .is_some_and(|parent| parent == "t-1")
+                        .is_some_and(|parent| parent == "ship-the-thing")
             })
             .expect("agent B finds the deliverable by browsing the shared tree");
 
