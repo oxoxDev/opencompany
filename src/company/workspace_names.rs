@@ -100,6 +100,19 @@ pub fn kebab_name_or(raw: &str, fallback: &str) -> String {
     }
 }
 
+/// Whether `raw` normalizes to something at all, as opposed to falling back to
+/// [`FALLBACK_NAME`] (or a caller's own fallback).
+///
+/// This is the distinction a caller needs when deciding whether a name was
+/// actually *given*, not just whether the normalized result happens to read as
+/// the fallback word — a card titled literally "Untitled" normalizes to the
+/// same string [`FALLBACK_NAME`] is, but it is a real, disambiguation-worthy
+/// title, not the absence of one. Comparing the normalized value to
+/// `FALLBACK_NAME` cannot tell those two cases apart; this can.
+pub fn has_usable_name(raw: &str) -> bool {
+    normalize(raw).is_some()
+}
+
 /// Whether `name` is already in the canonical form — i.e. whether
 /// [`kebab_name`] would leave it alone.
 ///

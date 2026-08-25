@@ -79,7 +79,7 @@ use crate::ports::now_millis;
 use crate::ports::types::CompanyId;
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 
-use super::workspace_names::{FALLBACK_NAME, kebab_name, kebab_name_or};
+use super::workspace_names::{has_usable_name, kebab_name, kebab_name_or};
 use super::workspace_scaffold::ensure_artifact_folder;
 
 /// One publish, as [`materialize`] needs it.
@@ -783,9 +783,14 @@ fn task_folder_name(
         return owned;
     }
     let base = kebab_name_or(target.title.unwrap_or(target.task_id), target.task_id);
-    let titled = target
-        .title
-        .is_some_and(|title| kebab_name(title) != FALLBACK_NAME);
+    // Whether a title was actually *given* and normalizes to something, not
+    // whether the normalized result happens to read as the fallback word: a
+    // card literally titled "Untitled" normalizes to the same string
+    // `FALLBACK_NAME` is, but it is a real title that can collide with a
+    // same-titled sibling and needs the same disambiguation protection —
+    // comparing the normalized value to `FALLBACK_NAME` would wrongly treat it
+    // as if no title had been given at all.
+    let titled = target.title.is_some_and(has_usable_name);
     // An orphan-repair has no node id to name its folder, but the prior
     // publish chose one of the two deterministic spellings. The suffixed one
     // is uniquely this task's (`task_id` is unique) — adopt it when present —
@@ -1386,6 +1391,58 @@ mod test {
             .unwrap()
             .expect("the node");
         assert_eq!(body, "launch v4");
+    }
+
+    /// A card literally titled "Untitled" normalizes to the same string the
+    /// fallback name is, but it is a real title, not the absence of one —
+    /// so two such cards need the same same-title disambiguation as any other
+    /// matching pair (issue #1687). Comparing the normalized title to the
+    /// fallback sentinel used to conflate the two, skipping the occupied-folder
+    /// guard and letting the second card's first publish resolve to the
+    /// first's node and overwrite it.
+    #[tokio::test]
+    async fn cards_literally_titled_untitled_keep_their_deliverables_apart() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        let first = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                task_id: "t-1",
+                title: Some("Untitled"),
+                ..target("report.md", "first")
+            },
+        )
+        .await
+        .expect("first card")
+        .node_id;
+        let second = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                task_id: "t-2",
+                title: Some("Untitled"),
+                ..target("report.md", "second")
+            },
+        )
+        .await
+        .expect("second card")
+        .node_id;
+
+        assert_ne!(
+            first, second,
+            "two cards literally titled Untitled keep their like-named files apart"
+        );
+        assert_eq!(
+            path_of(ws, &co, &first).await,
+            format!("{ARTIFACTS_ROOT}/cmo/untitled/report.md")
+        );
+        assert_eq!(
+            path_of(ws, &co, &second).await,
+            format!("{ARTIFACTS_ROOT}/cmo/untitled--t-2/report.md"),
+            "the second card's folder appends the stable task id, same as any other same-titled pair"
+        );
     }
 
     /// One titled card publishing two different sources keeps both in the same
