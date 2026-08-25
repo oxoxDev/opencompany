@@ -124,6 +124,14 @@ pub struct PublishTarget<'a> {
     /// keep a second source beside the first, rather than re-deriving the name
     /// from a tree snapshot and splitting one task across two folders.
     pub prior_node_ids: &'a [String],
+    /// Whether an artifact record for this exact source already exists. A
+    /// re-publish normally passes [`existing_node_id`](Self::existing_node_id),
+    /// but a record whose link was never stamped — an orphan — has no node id
+    /// to pass. This flag tells the mirror the publish is a repair, so the
+    /// task's own folder is treated as its own rather than a same-titled
+    /// sibling's: an orphan is re-adopted, never rivaled, and never suffixed
+    /// into a second folder (see [`task_folder_name`]).
+    pub recorded_before: bool,
 }
 
 /// What [`materialize`] is being asked to put in the tree.
