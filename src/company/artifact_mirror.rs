@@ -79,7 +79,7 @@ use crate::ports::now_millis;
 use crate::ports::types::CompanyId;
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 
-use super::workspace_names::{kebab_name, kebab_name_or};
+use super::workspace_names::{kebab_name, kebab_name_or, FALLBACK_NAME};
 use super::workspace_scaffold::ensure_artifact_folder;
 
 /// One publish, as [`materialize`] needs it.
