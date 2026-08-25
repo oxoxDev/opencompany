@@ -1448,6 +1448,65 @@ mod test {
         );
     }
 
+    /// An orphan is re-adopted, not rivaled: a re-publish whose record lost its
+    /// link has no node id to name its folder, but the bare title folder it
+    /// minted is its own, so the repair lands beside the orphan and revises it
+    /// rather than suffixing into a `launch-plan--t-1` rival.
+    #[tokio::test]
+    async fn an_unlinked_republish_re_adopts_its_orphan_instead_of_suffixing() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        // The first publish mints the bare title folder; its record then loses
+        // the link, leaving the node an orphan.
+        let orphan = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                title: Some("Launch Plan"),
+                ..target("report.md", "v1")
+            },
+        )
+        .await
+        .expect("first publish")
+        .node_id;
+
+        // The repair: the record exists (`recorded_before`) but holds no node
+        // id, exactly the state brain.rs reaches after a failed link stamp.
+        let healed = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                agent_id: "cmo",
+                task_id: "t-1",
+                title: Some("Launch Plan"),
+                source: "report.md",
+                payload: MirrorPayload::Text("v2"),
+                existing_node_id: None,
+                prior_node_ids: &[],
+                recorded_before: true,
+            },
+        )
+        .await
+        .expect("repairing publish")
+        .node_id;
+
+        assert_eq!(
+            healed, orphan,
+            "the very same note is re-adopted, which is what makes the orphan self-healing"
+        );
+        assert_eq!(
+            path_of(ws, &co, &healed).await,
+            format!("{ARTIFACTS_ROOT}/cmo/launch-plan/report.md")
+        );
+        let (_, body) = ws
+            .read(&co, &healed)
+            .await
+            .unwrap()
+            .expect("the node");
+        assert_eq!(body, "v2");
+    }
+
     /// A **binary** publish lands real bytes in the tree (issue #553).
     ///
     /// This is the payoff of the whole issue: before it, a generated image
