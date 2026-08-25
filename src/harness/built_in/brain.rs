@@ -1831,9 +1831,10 @@ impl HarnessBrain {
         // The workspace nodes this card already owns, from every source it has
         // published before. The mirror uses them to keep the card's folders
         // stable: a fresh source files beside its predecessors, and a node is
-        // only ever treated as the card's own if one of these ids says so. The
-        // list also grows as this loop mints nodes, so a run publishing two
-        // new sources names the first's folder for the second.
+        // only ever revised as the card's own if one of these ids (or the
+        // source's own link) says so. The list also grows as this loop mints
+        // nodes, so a run publishing two new sources names the first's folder
+        // for the second.
         let mut prior_node_ids: Vec<String> = on_card
             .iter()
             .filter_map(|record| record.workspace_node_id().map(str::to_string))
