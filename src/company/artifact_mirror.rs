@@ -753,9 +753,14 @@ fn split_source(source: &str) -> Result<Vec<String>> {
 /// files into the same `launch-plan/` (or `launch-plan--t-2/`) the first did,
 /// because its `prior_node_ids` name the folder it already uses. Re-deriving
 /// from the title alone would see `launch-plan/` occupied and mis-suffix it,
-/// pointing one task's deliverables at two folders. Second, the occupied check
-/// reads the tree snapshot, so two same-titled cards first-publishing at the
-/// same instant can both pick the bare name; the store's
+/// pointing one task's deliverables at two folders. Second, a re-publish of a
+/// source whose record lost its link — an orphan — has no node id to name its
+/// folder, but the folder is one of the two deterministic spellings the prior
+/// publish could have chosen; the suffixed one is uniquely this task's, so it
+/// is adopted when present, and a bare title folder the task minted itself is
+/// treated as its own rather than a same-titled sibling's. Third, the occupied
+/// check reads the tree snapshot, so two same-titled cards first-publishing at
+/// the same instant can both pick the bare name; the store's
 /// [`adopt_or_create_folder`](WorkspaceStore::adopt_or_create_folder) remains
 /// the arbiter of who actually owns the folder, and a task that loses that race
 /// simply files its sources beside the winner's — the folder is shared, never
@@ -781,6 +786,28 @@ fn task_folder_name(
     let titled = target
         .title
         .is_some_and(|title| kebab_name(title) != FALLBACK_NAME);
+    // An orphan-repair has no node id to name its folder, but the prior
+    // publish chose one of the two deterministic spellings. The suffixed one
+    // is uniquely this task's (`task_id` is unique) — adopt it when present —
+    // and a bare title folder reached only when the suffixed one is absent was
+    // minted by this task itself, since a same-titled sibling would have forced
+    // the suffix on the prior publish too. Reaching for the sibling's bare
+    // folder here would re-link this task's chain to a foreign node.
+    if target.recorded_before && titled {
+        let suffixed = format!("{base}--{}", target.task_id);
+        if children_named(nodes, agent_folder, &suffixed)
+            .iter()
+            .any(|node| node.kind == NodeKind::Folder)
+        {
+            return suffixed;
+        }
+        if children_named(nodes, agent_folder, &base)
+            .iter()
+            .any(|node| node.kind == NodeKind::Folder)
+        {
+            return base;
+        }
+    }
     if titled
         && children_named(nodes, agent_folder, &base)
             .iter()
