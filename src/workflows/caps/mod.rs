@@ -1840,10 +1840,23 @@ impl HarnessAgentRunner {
         // A capped turn is a real, partial checkpoint rather than a completed
         // answer. Keep the engine's typed `LimitStop` outcome below, but do not
         // let the durable attempt claim that this node finished successfully.
+        //
+        // `token_limited` (PR #1880 review, second round) gets the identical
+        // treatment for the identical reason, just a different budget: an ACP
+        // response cut off by its token limit is also a real, partial
+        // checkpoint — unlike `abnormal_stop` above, there IS a partial-but-
+        // real claim to make about it — so it settles `Failed`/`LimitStop`
+        // here rather than the hard `Err` `abnormal_stop` takes, mirroring
+        // `hit_iteration_cap` rather than joining `abnormal_stop`.
         let (status, error) = if outcome.hit_iteration_cap {
             (
                 crate::ports::RunStatus::Failed,
                 Some("agent stopped at the max_tool_iterations cap before finishing".to_string()),
+            )
+        } else if outcome.token_limited {
+            (
+                crate::ports::RunStatus::Failed,
+                Some("agent stopped at the token limit before finishing".to_string()),
             )
         } else {
             (crate::ports::RunStatus::Succeeded, None)
@@ -1888,6 +1901,15 @@ impl AgentRunner for HarnessAgentRunner {
         let stop = if outcome.hit_iteration_cap {
             StopReason::LimitStop {
                 limit: "max_tool_iterations".to_string(),
+            }
+        } else if outcome.token_limited {
+            // PR #1880 review (second round): same `LimitStop` shape, its own
+            // `limit` name so a workflow branching on it — or an operator
+            // reading `meta.limit` — can tell a token-budget truncation from
+            // a tool-iteration cap, which is the whole reason these are two
+            // fields rather than one.
+            StopReason::LimitStop {
+                limit: "max_tokens".to_string(),
             }
         } else {
             StopReason::Finished
@@ -2602,6 +2624,94 @@ mod tests {
         assert!(
             message.contains("the agent declined to continue"),
             "the error must carry the abnormal-stop reason, not a generic failure: {message}"
+        );
+    }
+
+    /// PR #1880 review, second-round finding: "Propagate token-limited turns
+    /// as incomplete." An ACP `max_tokens` stop leaves `hit_iteration_cap`
+    /// `false` (deliberately — it is a different budget than the tool cap)
+    /// and used to be visible only as a `Note` step, which
+    /// `HarnessAgentRunner`'s `AgentRunner::run` never read — so it reported
+    /// `StopReason::Finished` for a possibly mid-sentence truncation,
+    /// indistinguishable from the agent actually finishing.
+    ///
+    /// Unlike `abnormal_stop`, a token-limited turn IS a real, partial
+    /// checkpoint (the same shape as `hit_iteration_cap`, just cut from a
+    /// different budget), so this asserts the `LimitStop`-with-its-own-`limit`
+    /// shape rather than a hard `Err` — exercised through the actual
+    /// `AgentRunner::run` trait method (not `run_turn` directly), because
+    /// that is where the observable difference lives: `run_turn` still
+    /// returns `Ok` either way, and only `run`'s `StopReason` computation
+    /// tells `max_tool_iterations` and `max_tokens` apart from a clean
+    /// finish.
+    #[tokio::test]
+    async fn a_token_limited_acp_stop_reports_its_own_limit_stop() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1880-tok-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "here is as much as I could say before running out of".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            token_limited: true,
+            abnormal_stop: None,
+            halted_for_spend: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1880-tok"));
+        let publish_refusal_claim = Arc::new(
+            deps.pending_publishes
+                .claim_refusals_for_run("run-1880-tok"),
+        );
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1".to_string(),
+            "run-1880-tok".to_string(),
+            None,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let request = AgentRunRequest {
+            agent: tinyflows::model::AgentDefinition {
+                id: "responder".to_string(),
+                ..Default::default()
+            },
+            model: Default::default(),
+            input: Default::default(),
+            context: Vec::new(),
+            tools: Vec::new(),
+            connection_ref: None,
+            working_dir: None,
+            identity: Default::default(),
+            metadata: Default::default(),
+            output_schema: None,
+            config: json!({ "prompt": "do the thing" }),
+        };
+
+        let outcome = runner
+            .run(request)
+            .await
+            .expect("a token-limited turn still reports an outcome, not an error");
+        assert_eq!(
+            outcome.stop,
+            StopReason::LimitStop {
+                limit: "max_tokens".to_string()
+            },
+            "a token-limited stop must report its own distinct limit, not Finished \
+             and not max_tool_iterations: {:?}",
+            outcome.stop
         );
     }
 

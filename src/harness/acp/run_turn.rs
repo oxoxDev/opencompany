@@ -310,6 +310,14 @@ pub fn fold(turn: AcpTurn) -> TurnOutcome {
         // `Refusal`/`Cancelled`/`Other` are surfaced as a step note instead,
         // and `EndTurn` needs no flag at all.
         hit_iteration_cap: matches!(kind, StopKind::MaxTurnRequests),
+        // PR #1880 review (second round): `max_tokens` is excluded from
+        // `hit_iteration_cap` above for a real reason (a different budget,
+        // a different downstream message), but that exclusion used to leave
+        // it with NO cap signal at all — only the step note, which
+        // `HarnessAgentRunner` never read. Same shape as `hit_iteration_cap`,
+        // a distinct field rather than another reading of it, because the
+        // two need different `limit` names downstream.
+        token_limited: matches!(kind, StopKind::MaxTokens),
         // PR #1880 review: `Refusal`/`Cancelled`/`Other` are not a resumable
         // cap either — there is no checkpoint to continue from, unlike
         // `hit_iteration_cap` above — so `HarnessAgentRunner` must not settle
@@ -538,6 +546,38 @@ mod test {
             !outcome.reply.trim().is_empty(),
             "a capped turn must say so, not fold to a blank reply"
         );
+        // PR #1880 review, second round: excluding max_tokens from
+        // hit_iteration_cap must not leave it with NO cap signal at all —
+        // it gets its own, distinct field instead.
+        assert!(
+            outcome.token_limited,
+            "a max_tokens stop must set token_limited even though hit_iteration_cap stays false"
+        );
+        assert_eq!(
+            outcome.abnormal_stop, None,
+            "a token-limited stop is a real, partial checkpoint like the tool cap — not the \
+             hard-fail abnormal_stop path"
+        );
+    }
+
+    #[test]
+    fn only_max_tokens_sets_token_limited() {
+        // token_limited must not leak onto any other StopKind — in particular
+        // not onto max_turn_requests (which has its own hit_iteration_cap
+        // signal) or a clean end_turn.
+        assert!(fold(turn_with_stop_reason(vec![], "max_tokens")).token_limited);
+        for other in [
+            "end_turn",
+            "max_turn_requests",
+            "refusal",
+            "cancelled",
+            "unknown_reason",
+        ] {
+            assert!(
+                !fold(turn_with_stop_reason(vec![], other)).token_limited,
+                "stop_reason {other:?} must not set token_limited"
+            );
+        }
     }
 
     #[test]
