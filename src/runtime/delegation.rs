@@ -411,6 +411,20 @@ pub(crate) struct DeskReply {
     /// folded INTO this member's answer rather than surfacing on its own, so a
     /// cap two levels down is a cap on what the operator reads here.
     pub(crate) hit_iteration_cap: bool,
+    /// This teammate's [`TurnOutcome::abnormal_stop`](crate::harness::TurnOutcome::abnormal_stop)
+    /// — this teammate's own turn, or any turn nested beneath it (PR #1880
+    /// review) — when an ACP-backed hand-off stopped abnormally rather than
+    /// pausing at a cap or finishing cleanly.
+    ///
+    /// Folded exactly as `hit_iteration_cap` is, and read the same way at the
+    /// call site: `run_hand_off` used to settle this hand-off's own board
+    /// card `TaskRunEnd::Completed` unconditionally and fold `reply` into the
+    /// CEO-relay prompt untouched, so a desk lead's `refusal` or `cancelled`
+    /// stop was recorded as done and relayed to the operator as a real
+    /// answer. **First stop wins**, the same trade `halted_for_spend` beside
+    /// it takes, for the same reason: this carries a message rather than a
+    /// bare flag, and one bubble can name one reason.
+    pub(crate) abnormal_stop: Option<String>,
     /// The in-turn spend halt behind this answer, if one stopped it — this
     /// teammate's own turn or any turn nested beneath it (issue #1032).
     ///
@@ -564,6 +578,19 @@ pub(crate) struct OperatorTurn {
     /// delegate hit — the operator would read a relayed answer that quietly
     /// omits that a branch of it stopped half-done.
     pub(crate) hit_iteration_cap: bool,
+    /// **Any** turn behind this bubble's [`TurnOutcome::abnormal_stop`](crate::harness::TurnOutcome::abnormal_stop)
+    /// (PR #1880 review) — the responder's, a desk lead's, or the CEO
+    /// relay's — when one stopped abnormally rather than pausing at a cap or
+    /// finishing cleanly.
+    ///
+    /// Folded the same sticky-first-wins way `halted_for_spend` beside it is,
+    /// for the identical reason the doc there gives. The direct-answer card
+    /// this turn opened is already settled by the time this struct is built
+    /// (see `handle_operator_message`), using the responder's OWN
+    /// `abnormal_stop` before any relay can replace it — this field is what
+    /// lets a caller (a future consumer, or a test) see the same signal
+    /// without re-deriving it from the folded reply text.
+    pub(crate) abnormal_stop: Option<String>,
     /// The in-turn spend halt behind **any** turn on this bubble (issue #1032)
     /// — the responder's, a desk lead's, or the CEO relay's.
     ///
@@ -1328,20 +1355,28 @@ impl<'a> DelegationRunner<'a> {
         // overwritten, only filled when still empty — so a spend halt the
         // responder hit survives the relay turn replacing the reply text.
         let mut halted_for_spend = outcome.halted_for_spend;
+        // PR #1880 review: folded the same sticky way, and read below BEFORE
+        // the relay can replace `operator_reply` — an ACP responder's
+        // `refusal`/`cancelled`/unrecognized stop must not settle the direct
+        // card `Completed` just because `hit_iteration_cap` stayed `false`.
+        let mut abnormal_stop = outcome.abnormal_stop;
         // Settle the direct-answer card from the turn that just ran. Done before
         // the delegation drain because a direct responder queues nothing — it
         // has no delegation tools — so there is no relay turn coming that could
         // change the answer this card records.
         let mut direct_card_id = None;
         if let Some(card) = direct_card.as_mut() {
-            self.settle_work_card(
-                card,
-                responder,
-                TaskRunEnd::Completed,
-                parked,
-                &operator_reply,
-            )
-            .await?;
+            // PR #1880 review: an abnormal stop is not a completed answer —
+            // `TaskRunEnd::Failed` is the ending this crate already uses for
+            // "the turn itself errored" (`lifecycle::TaskRunEnd::Failed`
+            // doc), and the note names why rather than presenting whatever
+            // text came back as the deliverable.
+            let (end, note): (TaskRunEnd, String) = match &abnormal_stop {
+                Some(reason) => (TaskRunEnd::Failed, format!("{reason}\n\n{operator_reply}")),
+                None => (TaskRunEnd::Completed, operator_reply.clone()),
+            };
+            self.settle_work_card(card, responder, end, parked, &note)
+                .await?;
             direct_card_id = Some(card.id.clone());
         }
         // A `spawn_task` opens a card silently; a `delegate_to_desk` runs the desk
@@ -1376,7 +1411,18 @@ impl<'a> DelegationRunner<'a> {
             operator_steps.extend(desk.steps);
             hit_iteration_cap |= desk.hit_iteration_cap;
             halted_for_spend = halted_for_spend.or(desk.halted_for_spend);
-            desk_replies.push((desk.member, desk.reply));
+            abnormal_stop = abnormal_stop.or_else(|| desk.abnormal_stop.clone());
+            // PR #1880 review: flag an abnormal desk reply IN the text handed
+            // to the relay turn, not just on the operator's own timeline —
+            // `build_relay_prompt` only ever sees `(member, reply)` text, no
+            // steps, so without this the CEO-relay model reads a refused or
+            // cancelled desk lead's output exactly like a real answer and
+            // may synthesize on top of it as if the work actually happened.
+            let relayed = match &desk.abnormal_stop {
+                Some(reason) => format!("({reason}) {}", desk.reply),
+                None => desk.reply,
+            };
+            desk_replies.push((desk.member, relayed));
         }
         // CEO-relay hand-back: when a synchronous desk delegation answered, run
         // exactly ONE more responder turn whose prompt is the original message
@@ -1446,6 +1492,7 @@ impl<'a> DelegationRunner<'a> {
             operator_steps.extend(relay.steps);
             hit_iteration_cap |= relay.hit_iteration_cap;
             halted_for_spend = halted_for_spend.or(relay.halted_for_spend);
+            abnormal_stop = abnormal_stop.or(relay.abnormal_stop);
         }
         // Drained after the relay, not before it: a relay turn carries the same
         // inline `create_workflow` tool, so draining at the responder's turn
@@ -1470,6 +1517,7 @@ impl<'a> DelegationRunner<'a> {
             bubbles,
             spawned_task,
             hit_iteration_cap,
+            abnormal_stop,
             halted_for_spend,
         })
     }
@@ -2033,14 +2081,27 @@ impl<'a> DelegationRunner<'a> {
         // is told nothing. First-wins, so the shallower halt (the one nearest
         // the answer the operator reads) is the one named.
         let mut halted_for_spend = outcome.halted_for_spend;
+        // PR #1880 review: folded the same way, and read below BEFORE this
+        // hand-off's own card is settled — an ACP-backed member's
+        // `refusal`/`cancelled`/unrecognized stop must not settle `Completed`
+        // just because `hit_iteration_cap` stayed `false`.
+        let mut abnormal_stop = outcome.abnormal_stop;
         for deeper in nested.desk_replies {
+            // PR #1880 review: same flag as the top-level relay fold — a
+            // deeper delegate's abnormal stop must not read as an ordinary
+            // reply once it is folded into THIS member's answer.
+            let deeper_reply = match &deeper.abnormal_stop {
+                Some(reason) => format!("({reason}) {}", deeper.reply),
+                None => deeper.reply,
+            };
             reply.push_str(&format!(
                 "\n\n{} (delegated by {member}) replied:\n{}",
-                deeper.member, deeper.reply
+                deeper.member, deeper_reply
             ));
             steps.extend(deeper.steps);
             hit_iteration_cap |= deeper.hit_iteration_cap;
             halted_for_spend = halted_for_spend.or(deeper.halted_for_spend);
+            abnormal_stop = abnormal_stop.or(deeper.abnormal_stop);
         }
         // A cancelled nested run folds in as a cancellation, NEVER as a
         // reply: the member said it was handing that slice on, and an
@@ -2066,7 +2127,15 @@ impl<'a> DelegationRunner<'a> {
             ));
         }
         if let Some(card) = card.as_mut() {
-            self.settle_work_card(card, &member, TaskRunEnd::Completed, parked, &reply)
+            // PR #1880 review: same reasoning as the direct-answer card in
+            // `handle_operator_message` — an abnormal stop anywhere in this
+            // hand-off's own turn or its nested delegates is not a completed
+            // answer.
+            let (end, note): (TaskRunEnd, String) = match &abnormal_stop {
+                Some(reason) => (TaskRunEnd::Failed, format!("{reason}\n\n{reply}")),
+                None => (TaskRunEnd::Completed, reply.clone()),
+            };
+            self.settle_work_card(card, &member, end, parked, &note)
                 .await?;
         }
         // Hand the teammate's answer back to RELAY through a second
@@ -2081,6 +2150,7 @@ impl<'a> DelegationRunner<'a> {
                 reply,
                 steps,
                 hit_iteration_cap,
+                abnormal_stop,
                 halted_for_spend,
             }),
             cancelled: false,
@@ -3704,6 +3774,12 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
         /// run no model — so this is how a test scripts "this teammate ran out
         /// of money mid-turn" and then asserts where that fact ends up.
         spend_halt: Option<crate::harness::SpendHalt>,
+        /// The [`TurnOutcome::abnormal_stop`](crate::harness::TurnOutcome::abnormal_stop)
+        /// this turn reports (PR #1880 review), standing in for an ACP fold's
+        /// `refusal`/`cancelled`/unrecognized `stopReason` — there is no ACP
+        /// agent here either, so this is how a test scripts "this turn stopped
+        /// abnormally" and asserts where that fact ends up.
+        abnormal_stop: Option<String>,
     }
 
     impl Turn {
@@ -3782,6 +3858,19 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
             Self {
                 reply: reply.to_string(),
                 parks: vec![tool.to_string()],
+                ..Self::default()
+            }
+        }
+
+        /// A turn that stopped abnormally (PR #1880 review) — an ACP
+        /// `refusal`, `cancelled`, or unrecognized `stopReason`, standing in
+        /// for `harness::acp::run_turn::fold`'s `abnormal_stop` field. `reply`
+        /// is whatever text came back alongside it (may be non-empty, the
+        /// same as a real refusal turn).
+        fn abnormal_stop(reply: &str, reason: &str) -> Self {
+            Self {
+                reply: reply.to_string(),
+                abnormal_stop: Some(reason.to_string()),
                 ..Self::default()
             }
         }
@@ -3975,9 +4064,8 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
                 // These fixtures script delegation shapes, not cap behaviour;
                 // the cap path is proved end-to-end in `cap_turn_test`.
                 hit_iteration_cap: false,
-                // Scripted delegation fixture, not the ACP fold — the only
-                // path that produces an abnormal stop (PR #1880 review).
-                abnormal_stop: None,
+                token_limited: false,
+                abnormal_stop: turn.abnormal_stop,
                 // Issue #1032: scripted, for the same reason — the real hook
                 // needs a real model turn to fire, which is proved end-to-end
                 // in `spend_halt_turn_test`. What these fixtures can prove, and
@@ -4495,6 +4583,65 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         assert_eq!(cards[0].column, COLUMN_IN_REVIEW);
     }
 
+    /// PR #1880 review: "Propagate abnormal stops through delegation." A
+    /// hand-off whose delegate stopped abnormally (an ACP `refusal`,
+    /// `cancelled`, or unrecognized `stopReason`) used to be indistinguishable
+    /// here from one that genuinely finished — `run_hand_off` read only
+    /// `hit_iteration_cap` (`false` on every one of these) and settled the
+    /// card `TaskRunEnd::Completed` unconditionally, then folded the raw
+    /// reply into the `DeskReply` the CEO-relay reads as a real answer.
+    ///
+    /// Distinct from the cancellation case below on purpose: a mid-flight
+    /// operator cancel is caught earlier, before this settle is even reached
+    /// (`control.take()`), and already had its own `TaskRunEnd::Cancelled`
+    /// note. This is the case that slipped through — the DELEGATE's own turn
+    /// reporting an abnormal stop, not the operator cancelling it.
+    #[tokio::test]
+    async fn a_hand_off_that_stops_abnormally_does_not_settle_completed() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::abnormal_stop(
+                "I can't help with that.",
+                "[stopped: the agent declined to continue]",
+            )],
+        );
+        let outcome = fx
+            .runner(&turns)
+            .run_delegation(
+                handoff("draft the launch plan"),
+                None,
+                MessageContext::default(),
+            )
+            .await
+            .expect("delegation runs");
+
+        // The signal reaches the returned `DeskReply` (what the CEO-relay
+        // reads), not just the card.
+        let desk_reply = outcome.desk_reply.as_ref().expect("a hand-off replies");
+        assert_eq!(
+            desk_reply.abnormal_stop.as_deref(),
+            Some("[stopped: the agent declined to continue]"),
+        );
+
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            cards[0].column, COLUMN_TODO,
+            "an abnormal stop is TaskRunEnd::Failed, which lands back in To-do — \
+             not COLUMN_IN_REVIEW, which would read as a completed answer: {:?}",
+            cards[0]
+        );
+        assert!(
+            cards[0]
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("[stopped: the agent declined to continue]")),
+            "the card note must name why, not just show the raw reply: {:?}",
+            cards[0].note
+        );
+    }
+
     /// A hand-off an operator cancels mid-flight keeps its card and returns it
     /// to To-do. The alternative — no card — would erase the fact that the work
     /// was ever asked for.
@@ -4943,6 +5090,57 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let cards = fx.cards().await;
         assert_eq!(cards[0].column, COLUMN_IN_REVIEW, "{cards:?}");
         assert_eq!(fx.approvals.queued(), 0, "nothing was parked");
+    }
+
+    /// PR #1880 review: the same finding as the hand-off test above, for the
+    /// OTHER site the finding named — the direct-answer card
+    /// `handle_operator_message` settles itself, before any delegation drain
+    /// even runs. Paired with the clean-finish test above so a fix that made
+    /// every card land off `COLUMN_IN_REVIEW` would fail there.
+    #[tokio::test]
+    async fn a_direct_answer_that_stops_abnormally_does_not_settle_completed() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::abnormal_stop(
+                "I can't help with that.",
+                "[stopped: the agent declined to continue]",
+            )],
+        );
+        let turn = fx
+            .runner(&turns)
+            .handle_operator_message(
+                "frontend_engineer",
+                "read the pricing repo and write modules.md",
+                Some("eng_desk"),
+            )
+            .await
+            .expect("operator message handled");
+
+        // The signal reaches the returned `OperatorTurn` too, not just the
+        // card (a future consumer, or a test, should not have to re-derive it
+        // from the reply text).
+        assert_eq!(
+            turn.abnormal_stop.as_deref(),
+            Some("[stopped: the agent declined to continue]")
+        );
+
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(
+            cards[0].column, COLUMN_TODO,
+            "an abnormal stop is TaskRunEnd::Failed, which lands back in To-do — \
+             not COLUMN_IN_REVIEW, which would read as a completed answer: {:?}",
+            cards[0]
+        );
+        assert!(
+            cards[0]
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("[stopped: the agent declined to continue]")),
+            "the card note must name why, not just show the raw reply: {:?}",
+            cards[0].note
+        );
     }
 
     /// An approval left over from an *earlier* turn must not park this card.
