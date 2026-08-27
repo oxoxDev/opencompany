@@ -350,6 +350,7 @@ mod tests {
                 reply: self.label.clone(),
                 steps: Vec::new(),
                 hit_iteration_cap: false,
+                token_limited: false,
                 // Test fixture, not the ACP fold (PR #1880 review).
                 abnormal_stop: None,
                 halted_for_spend: None,
@@ -422,6 +423,7 @@ mod tests {
                 reply: self.label.clone(),
                 steps: Vec::new(),
                 hit_iteration_cap: false,
+                token_limited: false,
                 // Test fixture, not the ACP fold (PR #1880 review).
                 abnormal_stop: None,
                 halted_for_spend: None,

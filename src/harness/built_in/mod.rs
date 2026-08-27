@@ -699,6 +699,24 @@ pub struct TurnOutcome {
     /// ACP fold) — a refusal is not a pause, and labelling one as a cap hit
     /// would tell the operator to reply "continue" to a turn that never ran.
     pub hit_iteration_cap: bool,
+    /// Whether this turn **stopped at a token-generation budget** on a single
+    /// response, distinct from [`hit_iteration_cap`](Self::hit_iteration_cap)
+    /// (PR #1880 review — the second-round finding, not the split that kept
+    /// `hit_iteration_cap` itself `max_turn_requests`-only).
+    ///
+    /// Set on the ACP fold's `StopKind::MaxTokens`, which used to leave
+    /// `hit_iteration_cap == false` and surface the truncation only as a
+    /// `Note` step — metadata `HarnessAgentRunner` never read, so a
+    /// mid-response, possibly mid-sentence truncation settled a workflow node
+    /// `Succeeded`/`StopReason::Finished`, indistinguishable from a complete
+    /// answer. `false` on every other path, including `hit_iteration_cap`
+    /// itself: the two caps are cut from different budgets (this is a single
+    /// response's token limit; that is the number of tool round trips) and
+    /// `workflows/caps` reports each with its own `limit` name, so folding
+    /// them together would misreport which one actually stopped the turn —
+    /// the exact conflation issue #1853's split (PR #1880, first round)
+    /// already ruled out for `hit_iteration_cap` and `MaxTurnRequests`.
+    pub token_limited: bool,
     /// A fixed, host-authored notice when this turn stopped for a reason that
     /// is neither a clean finish nor a resumable cap (PR #1880 review) — on
     /// the ACP fold, an agent-issued `refusal`, a `cancelled` turn, or a
@@ -1288,6 +1306,9 @@ impl CompanyAgent {
                 reply,
                 steps,
                 hit_iteration_cap,
+                // This is the built_in harness, not the ACP fold — the only
+                // path that produces a token-limited stop (PR #1880 review).
+                token_limited: false,
                 // This is the built_in harness, not the ACP fold — the only
                 // path that produces an abnormal stop (PR #1880 review).
                 abnormal_stop: None,
@@ -3017,6 +3038,9 @@ impl HarnessPool {
                                 // No model call ran, so no cap was reached
                                 // (issue #926). A refusal is not a pause.
                                 hit_iteration_cap: false,
+                                // No model call ran, so there is no response
+                                // to have been token-limited either.
+                                token_limited: false,
                                 // This pre-turn refusal is its own, older
                                 // signal (the reply text itself names the
                                 // cap) — not the PR #1880 `abnormal_stop`,
@@ -3278,6 +3302,9 @@ impl HarnessPool {
                                     // No model call ran, so no cap was reached
                                     // (issue #926). A refusal is not a pause.
                                     hit_iteration_cap: false,
+                                    // No model call ran, so there is no
+                                    // response to have been token-limited.
+                                    token_limited: false,
                                     // Same reasoning as the total-ceiling
                                     // refusal above: this is its own signal,
                                     // not the PR #1880 ACP-only field.

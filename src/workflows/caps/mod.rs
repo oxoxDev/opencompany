@@ -2357,6 +2357,7 @@ mod tests {
             reply: "ok".to_string(),
             steps: Vec::new(),
             hit_iteration_cap: false,
+            token_limited: false,
             abnormal_stop: None,
             halted_for_spend: None,
         }
@@ -2565,6 +2566,7 @@ mod tests {
             reply: "I can't help with that.".to_string(),
             steps: Vec::new(),
             hit_iteration_cap: false,
+            token_limited: false,
             abnormal_stop: Some("[stopped: the agent declined to continue]".to_string()),
             halted_for_spend: None,
         }));
