@@ -2950,6 +2950,27 @@ impl HarnessBrain {
                     let mut operator_steps = turn.steps;
                     let mut operator_reply = turn.reply;
 
+                    // PR #1880 review: `handle_operator_message`/`run_hand_off`
+                    // already settle any card this turn opened `Failed` rather
+                    // than `Completed` when the responder, a desk lead, or the
+                    // CEO relay stopped abnormally — this is the operator-chat
+                    // side's own visibility into the same fact, the same way
+                    // `hit_iteration_cap` below gets its own handling. Logged
+                    // rather than folded into `operator_reply`: the reply is
+                    // already the agent's own words (possibly a real refusal
+                    // the agent explained), and this crate does not append
+                    // platform notices onto that text on the chat path any
+                    // more than the ACP fold does on its own.
+                    if let Some(reason) = &turn.abnormal_stop {
+                        tracing::warn!(
+                            company = %self.record().id,
+                            agent = %responder,
+                            reason = %reason,
+                            "[delegation] operator turn stopped abnormally; any card it opened \
+                             settled Failed rather than Completed"
+                        );
+                    }
+
                     // Drain what the conversation published (#445). Unconditional
                     // so nothing survives into the next turn, and only *recorded*
                     // when the claim was actually taken — an unclaimed queue can
