@@ -5088,6 +5088,7 @@ mod test {
         let id = company_id_from_name("Acme");
         FsCompanyStore::new(home.path())
             .save(&CompanyRecord {
+                created_at_millis: None,
                 id: id.clone(),
                 manifest: reserved.clone(),
                 ledger: Vec::new(),
@@ -8807,6 +8808,7 @@ needs_reason = true
         let id = company_id_from_name("Acme");
         FsCompanyStore::new(dir.path())
             .save(&CompanyRecord {
+                created_at_millis: None,
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
