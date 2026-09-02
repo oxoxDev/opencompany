@@ -13,7 +13,7 @@
 // toolkit allowlist). Standalone functions over the shared client (mirrors
 // `api/inference.ts`), so no change to `OpenCompanyClient` is needed.
 
-import type { OpenCompanyClient } from "./client";
+import type { OpenCompanyClient, RequestOptions } from "./client";
 
 /**
  * Where this company's Composio credential comes from.
@@ -209,12 +209,41 @@ export interface ComposioConnection {
   defaultConnectionId?: string;
 }
 
-/** The company's Composio status. */
+/**
+ * The host's own budget for the upstream catalog fetch behind `GET …/composio`
+ * — `composio_toolkits::FETCH_TIMEOUT` in `src/server/ops/composio_toolkits.rs`.
+ *
+ * Declared here so {@link CATALOG_READ_TIMEOUT_MS} can be checked against it.
+ * A change on the host that is not mirrored here breaks the invariant test
+ * rather than the Apps page.
+ */
+export const SERVER_FETCH_TIMEOUT_MS = 5_000;
+
+/**
+ * How long the console waits on `GET …/composio` before giving up.
+ *
+ * Must strictly dominate {@link SERVER_FETCH_TIMEOUT_MS}: on a cold catalog the
+ * host spends up to that budget upstream and then answers with a flagged
+ * fallback, so a client deadline at or below it cancels the read at exactly the
+ * moment the host is about to explain itself, and the fallback can never be
+ * rendered. Below the client's default `GET` deadline, because this read blocks a
+ * view and wants a tighter bound than the shared default.
+ */
+export const CATALOG_READ_TIMEOUT_MS = 15_000;
+
+/**
+ * The company's Composio status.
+ *
+ * `options` reaches the client's own deadline and cancellation: this route
+ * fetches a live catalog from the platform, so a caller that blocks a view on
+ * it wants a bound of its own and a way to drop a superseded read.
+ */
 export function getComposioStatus(
   client: OpenCompanyClient,
   company: string | null,
+  options?: RequestOptions,
 ): Promise<ComposioStatus> {
-  return client.get<ComposioStatus>(`${client.scopeFor(company)}/composio`);
+  return client.get<ComposioStatus>(`${client.scopeFor(company)}/composio`, options);
 }
 
 /**
