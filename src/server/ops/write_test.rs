@@ -8464,10 +8464,11 @@ async fn a_mislabelled_text_upload_is_stored_as_bytes() {
     assert_eq!(node["size"], 3);
 }
 
-/// The two read routes are not interchangeable, and asking the wrong one says
-/// which is right instead of answering with an empty body.
+/// The text read is for prose and says so when handed a payload, rather than
+/// answering with an empty body. The blob read is the download of whatever the
+/// node holds, so a note downloads through it as its own bytes.
 #[tokio::test]
-async fn the_text_and_blob_reads_refuse_each_others_nodes() {
+async fn the_text_read_refuses_a_payload_and_the_blob_read_downloads_a_note() {
     let home_dir = home();
     let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
@@ -8497,8 +8498,8 @@ async fn the_text_and_blob_reads_refuse_each_others_nodes() {
         "the refusal must point at the route that serves it: {body}"
     );
 
-    // Blob read of a note: a plain 404, exactly as for an id that names
-    // nothing — the two are deliberately indistinguishable.
+    // Blob read of a note: the note downloads, neutralised the same way every
+    // payload this route serves is.
     let request = Request::builder()
         .method("GET")
         .uri(format!("/api/v1/company/workspace/blob/{note_id}"))
@@ -8506,7 +8507,13 @@ async fn the_text_and_blob_reads_refuse_each_others_nodes() {
         .body(Body::empty())
         .unwrap();
     let response = router(state.clone()).oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/octet-stream"
+    );
+    let got = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(String::from_utf8(got.to_vec()).unwrap(), "# Voice");
 }
 
 // ---------------------------------------------------------------------------
@@ -10095,5 +10102,365 @@ async fn chat_message_deduplicates_a_repeated_attachment_id() {
         mine["attachments"].as_array().map(Vec::len),
         Some(1),
         "a repeated id must resolve to one attachment, not three: {mine}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Prose attachments (issue #2029)
+// ---------------------------------------------------------------------------
+
+/// A markdown file uploaded through the console's own workspace upload — the
+/// route that stores a UTF-8 `text/*` payload as a prose note — attaches to a
+/// chat message and hydrates with the store's own name, mime and size.
+///
+/// The issue's case (a) verbatim: the upload endpoint accepted the file and
+/// returned its id, and the send route refused that id as "not a file in this
+/// company's workspace".
+#[tokio::test]
+async fn chat_message_attaches_a_note_uploaded_to_the_workspace() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let markdown = b"# Q3 notes\n\nRevenue grew 12% year over year.\n".to_vec();
+    let (status, uploaded) = upload_file(
+        &state,
+        "q3-notes.md",
+        Some("text/markdown"),
+        &markdown,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{uploaded}");
+    assert!(
+        uploaded["mime"].is_null(),
+        "the upload route stores a UTF-8 text payload as a prose note: {uploaded}"
+    );
+    let node_id = uploaded["id"].as_str().expect("a node id").to_string();
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({ "message": "notes attached", "attachments": [node_id.clone()] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, history) = send(&state, "GET", "/api/v1/company/chat/history", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let mine = history
+        .as_array()
+        .expect("history is a list")
+        .iter()
+        .find(|m| m["text"] == "notes attached")
+        .expect("the message survived");
+    let attachments = mine["attachments"]
+        .as_array()
+        .expect("the message carries its attachment on reload");
+    assert_eq!(attachments.len(), 1, "exactly one attachment: {mine}");
+    assert_eq!(attachments[0]["nodeId"], node_id.as_str());
+    assert_eq!(attachments[0]["name"], "q3-notes.md", "name is the store's");
+    assert_eq!(
+        attachments[0]["mime"], "text/markdown",
+        "a prose note's mime is guessed from the store's own name"
+    );
+    assert_eq!(
+        attachments[0]["size"],
+        markdown.len() as u64,
+        "size is the note's content length"
+    );
+}
+
+/// The issue's case (b): a note already sitting in the company workspace —
+/// seeded, agent-authored or created from the console — attaches on the same
+/// terms. Nothing about a chat attachment requires the file to have arrived
+/// through an upload.
+#[tokio::test]
+async fn chat_message_attaches_a_note_already_in_the_workspace() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, created) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({ "name": "roadmap.md", "kind": "file", "content": "Ship the thing." })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let node_id = created["id"].as_str().expect("a node id").to_string();
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({ "message": "roadmap attached", "attachments": [node_id.clone()] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, history) = send(&state, "GET", "/api/v1/company/chat/history", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let mine = history
+        .as_array()
+        .expect("history is a list")
+        .iter()
+        .find(|m| m["text"] == "roadmap attached")
+        .expect("the message survived");
+    let attachments = mine["attachments"].as_array().expect("attachments");
+    assert_eq!(attachments.len(), 1, "{mine}");
+    assert_eq!(attachments[0]["nodeId"], node_id.as_str());
+    assert_eq!(attachments[0]["name"], "roadmap.md");
+    assert_eq!(attachments[0]["size"], "Ship the thing.".len() as u64);
+}
+
+/// A prose attachment's own words reach the durable event, the same as an
+/// uploaded text blob's do — otherwise the brain is handed a filename and
+/// nothing to read.
+#[tokio::test]
+async fn chat_attachment_note_text_is_extracted_and_journaled() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, created) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({
+            "name": "brief.md",
+            "kind": "file",
+            "content": "Q3 revenue grew 12% year over year.",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let node_id = created["id"].as_str().unwrap().to_string();
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({ "message": "summarize the brief", "attachments": [node_id] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    let journaled = runtime
+        .events()
+        .read_from(runtime.id(), crate::ports::types::EventSeq::new(0), 10_000)
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|s| match s.event {
+            crate::ports::types::CompanyEvent::OperatorMessage { attachments, .. }
+                if !attachments.is_empty() =>
+            {
+                Some(attachments)
+            }
+            _ => None,
+        })
+        .expect("the message with an attachment is in the journal");
+
+    assert_eq!(journaled.len(), 1);
+    assert_eq!(
+        journaled[0].extracted_text.as_deref(),
+        Some("Q3 revenue grew 12% year over year."),
+        "a note's content must reach the durable event, not just its node id"
+    );
+}
+
+/// A folder is still refused — and now the refusal says so, rather than
+/// claiming a node the operator is looking at is absent from the workspace.
+#[tokio::test]
+async fn chat_message_rejects_a_folder_attachment() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, folder) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({ "name": "designs", "kind": "folder" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{folder}");
+    let node_id = folder["id"].as_str().unwrap().to_string();
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({ "message": "folder attached", "attachments": [node_id] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("folder"),
+        "the refusal must name the real reason, got: {error}"
+    );
+
+    let (status, history) = send(&state, "GET", "/api/v1/company/chat/history", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        history
+            .as_array()
+            .expect("history is a list")
+            .iter()
+            .all(|m| m["text"] != "folder attached"),
+        "a refused attachment message still reached the transcript: {history}"
+    );
+}
+
+/// The download half: the blob route serves a prose note's bytes exactly, as a
+/// neutralised download — never inline, never under a type a caller chose — so
+/// the chip an attached note renders has a working download behind it. A
+/// folder and an unknown id still 404 identically.
+#[tokio::test]
+async fn workspace_blob_serves_a_prose_note_as_a_download() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let content = "# Plan\n\nShip it.\n";
+    let (status, created) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({ "name": "plan.md", "kind": "file", "content": content })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let node_id = created["id"].as_str().unwrap().to_string();
+
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/company/workspace/blob/{node_id}"))
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .body(Body::empty())
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers().clone();
+    assert_eq!(
+        headers["content-type"], "application/octet-stream",
+        "a note is served under a neutral type, not one a caller influenced"
+    );
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    assert!(
+        headers["content-disposition"]
+            .to_str()
+            .unwrap()
+            .starts_with("attachment;"),
+        "a note must never be served inline on the console's origin"
+    );
+    assert_eq!(headers["content-length"], content.len().to_string());
+    assert!(
+        !headers.contains_key("etag"),
+        "a prose note has no stored digest to answer a conditional request with"
+    );
+    let got = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        String::from_utf8(got.to_vec()).unwrap(),
+        content,
+        "the note's bytes must survive the round trip"
+    );
+
+    // A folder and an id naming nothing still 404 identically.
+    let (status, folder) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({ "name": "archive", "kind": "folder" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{folder}");
+    for id in [folder["id"].as_str().unwrap(), "01JZZZNOTAREALNODE00000000"] {
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/api/v1/company/workspace/blob/{id}"))
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .body(Body::empty())
+            .unwrap();
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{id} must not be servable as a blob"
+        );
+    }
+}
+
+/// A note past the extraction cap still **attaches** — the reference is what
+/// the operator asked for — it simply carries no extracted text, the same
+/// answer an oversized binary gets.
+#[tokio::test]
+async fn chat_attachment_oversized_note_attaches_without_extracted_text() {
+    use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).expect("company");
+
+    // Written straight to the store: the JSON create route's body limit is far
+    // below the extraction cap, so this size cannot arrive through it.
+    let huge = "x".repeat(5 * 1024 * 1024);
+    WorkspaceStore::create(
+        runtime.workspace().as_ref(),
+        &company,
+        &WorkspaceNode {
+            id: "node-oversized-note".to_string(),
+            name: "huge.md".to_string(),
+            kind: NodeKind::File,
+            parent_id: None,
+            updated_at_millis: 1,
+            created_by: WorkspaceOrigin::Operator,
+            updated_by: WorkspaceOrigin::Operator,
+            mime: None,
+            size: None,
+            sha256: None,
+            adopted: false,
+        },
+        Some(&huge),
+    )
+    .await
+    .expect("seed the oversized note");
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({ "message": "big note", "attachments": ["node-oversized-note"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let journaled = runtime
+        .events()
+        .read_from(runtime.id(), crate::ports::types::EventSeq::new(0), 10_000)
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|s| match s.event {
+            crate::ports::types::CompanyEvent::OperatorMessage { attachments, .. }
+                if !attachments.is_empty() =>
+            {
+                Some(attachments)
+            }
+            _ => None,
+        })
+        .expect("the message with an attachment is in the journal");
+    assert_eq!(journaled.len(), 1);
+    assert_eq!(journaled[0].size, huge.len() as u64);
+    assert_eq!(
+        journaled[0].extracted_text, None,
+        "a note past the extraction cap attaches with no text, rather than not at all"
     );
 }
