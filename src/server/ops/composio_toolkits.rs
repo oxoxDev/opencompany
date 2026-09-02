@@ -39,6 +39,8 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use tokio::sync::broadcast;
+
 use serde::Serialize;
 
 use crate::company::composio::CatalogEntry;
@@ -225,12 +227,94 @@ impl CacheEntry {
 /// across tenants would let one company's outage mark another company's panel
 /// degraded. Entries are small (a hundred short strings) and bounded by the
 /// number of companies an instance hosts.
+/// What a catalog fetch produced: the entries, or a plain-language reason.
+type FetchOutcome = Result<Vec<CatalogEntry>, String>;
+
 #[derive(Default)]
 pub(crate) struct CatalogCache {
     entries: Mutex<HashMap<String, CacheEntry>>,
+    /// The fetches running right now, keyed the same way, so callers arriving
+    /// on a cold key wait on one rather than each starting their own.
+    in_flight: Mutex<HashMap<String, broadcast::Sender<FetchOutcome>>>,
+}
+
+/// Clears `key` from [`CatalogCache::in_flight`] however the leader's fetch
+/// ends. A panic or a dropped request future must not leave an entry behind
+/// that later callers would wait on forever.
+struct Flight<'a> {
+    cache: &'a CatalogCache,
+    key: &'a str,
+}
+
+impl Drop for Flight<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut flights) = self.cache.in_flight.lock() {
+            flights.remove(self.key);
+        }
+    }
 }
 
 impl CatalogCache {
+    /// The catalog for `key`: the cached outcome, the answer of a fetch already
+    /// running for the same key, or — for exactly one caller — `fetch`.
+    ///
+    /// The middle arm is what this adds. `GET …/composio` sits on a page-load
+    /// path the console asks more than once per paint, and on a cold key every
+    /// concurrent caller used to dial the backend for a list they were certain
+    /// to agree on, each paying the full [`FETCH_TIMEOUT`] before the page could
+    /// paint.
+    ///
+    /// Coalescing is an optimisation and never a correctness dependency: a
+    /// poisoned map, a leader that was cancelled, or a caller that arrives just
+    /// as one finishes all fall through to a fetch of their own.
+    pub(crate) async fn get_or_fetch<F, Fut>(
+        &self,
+        key: &str,
+        fetch: F,
+    ) -> Result<Vec<CatalogEntry>, String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<CatalogEntry>, String>>,
+    {
+        if let Some(cached) = self.lookup(key, Instant::now()) {
+            return cached;
+        }
+        let joined = {
+            let Ok(mut flights) = self.in_flight.lock() else {
+                return fetch().await;
+            };
+            match flights.get(key) {
+                Some(tx) => Err(tx.subscribe()),
+                None => {
+                    let (tx, _) = broadcast::channel(1);
+                    flights.insert(key.to_string(), tx.clone());
+                    Ok(tx)
+                }
+            }
+        };
+        let tx = match joined {
+            Ok(tx) => tx,
+            Err(mut rx) => {
+                return match rx.recv().await {
+                    Ok(outcome) => outcome,
+                    // The leader went away without answering, or answered just
+                    // before this caller subscribed. Its result is in the cache
+                    // in the second case; in the first there is nothing to wait
+                    // for any more.
+                    Err(_) => match self.lookup(key, Instant::now()) {
+                        Some(outcome) => outcome,
+                        None => fetch().await,
+                    },
+                };
+            }
+        };
+        let _flight = Flight { cache: self, key };
+        let outcome = fetch().await;
+        self.store(key, outcome.clone(), Instant::now());
+        let _ = tx.send(outcome.clone());
+        outcome
+    }
+
     /// The cached outcome for `key`, if one was recorded within its TTL of
     /// `now`. An expired entry reads as a miss and is left for the next
     /// [`Self::store`] to overwrite.
@@ -280,6 +364,7 @@ pub(crate) fn cache_key(company: &crate::ports::types::CompanyId, backend_url: &
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Slug-only catalog entries — what a manifest list, a fallback list, or a
     /// backend predating the dynamic catalog yields.
@@ -400,6 +485,139 @@ mod tests {
         cache.store("k", Ok(slugs(&["gmail"])), at);
         cache.evict("k");
         assert_eq!(cache.lookup("k", at), None);
+    }
+
+    /// Two callers arriving on a cold key perform exactly ONE fetch, and both
+    /// get its answer.
+    ///
+    /// This is the page-load case: the console asks `GET …/composio` more than
+    /// once per paint, and before coalescing each ask dialled the backend for a
+    /// list they were certain to agree on. `join!` polls the first future to its
+    /// first await point before starting the second, so the second is guaranteed
+    /// to arrive while the first is still fetching.
+    #[tokio::test]
+    async fn two_cold_callers_share_one_fetch() {
+        let cache = CatalogCache::default();
+        let fetches = AtomicUsize::new(0);
+        let fetch = || async {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            Ok(slugs(&["gmail"]))
+        };
+
+        let (first, second) = tokio::join!(
+            cache.get_or_fetch("k", fetch),
+            cache.get_or_fetch("k", fetch)
+        );
+
+        assert_eq!(
+            fetches.load(Ordering::SeqCst),
+            1,
+            "a second caller on a cold key must wait on the fetch in flight, not start another"
+        );
+        assert_eq!(first, Ok(slugs(&["gmail"])));
+        assert_eq!(second, first, "both callers get the same answer");
+        assert_eq!(
+            cache.lookup("k", Instant::now()),
+            Some(Ok(slugs(&["gmail"]))),
+            "the shared fetch still fills the cache"
+        );
+    }
+
+    /// A shared FAILURE is shared too — and cached under [`FAILURE_TTL`], so an
+    /// outage costs one fetch for every caller in the window rather than one
+    /// each.
+    #[tokio::test]
+    async fn two_cold_callers_share_one_failure() {
+        let cache = CatalogCache::default();
+        let fetches = AtomicUsize::new(0);
+        let fetch = || async {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            Err("the Composio backend did not answer".to_string())
+        };
+
+        let (first, second) = tokio::join!(
+            cache.get_or_fetch("k", fetch),
+            cache.get_or_fetch("k", fetch)
+        );
+
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            first,
+            Err("the Composio backend did not answer".to_string())
+        );
+        assert_eq!(second, first);
+    }
+
+    /// A cached key never reaches the fetch at all — coalescing is added in
+    /// front of the cache, not in place of it.
+    #[tokio::test]
+    async fn a_cached_key_is_served_without_a_fetch() {
+        let cache = CatalogCache::default();
+        cache.store("k", Ok(slugs(&["slack"])), Instant::now());
+        let fetches = AtomicUsize::new(0);
+
+        let served = cache
+            .get_or_fetch("k", || async {
+                fetches.fetch_add(1, Ordering::SeqCst);
+                Ok(slugs(&["gmail"]))
+            })
+            .await;
+
+        assert_eq!(served, Ok(slugs(&["slack"])));
+        assert_eq!(fetches.load(Ordering::SeqCst), 0);
+    }
+
+    /// Two companies fetching at once do not coalesce onto each other: the
+    /// in-flight map is keyed exactly like the cache, so one tenant can never be
+    /// served another's catalog.
+    #[tokio::test]
+    async fn different_keys_do_not_share_a_fetch() {
+        let cache = CatalogCache::default();
+        let fetches = AtomicUsize::new(0);
+        let acme = || async {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            Ok(slugs(&["gmail"]))
+        };
+        let globex = || async {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            Ok(slugs(&["slack"]))
+        };
+
+        let (a, g) = tokio::join!(
+            cache.get_or_fetch("acme", acme),
+            cache.get_or_fetch("globex", globex)
+        );
+
+        assert_eq!(fetches.load(Ordering::SeqCst), 2);
+        assert_eq!(a, Ok(slugs(&["gmail"])));
+        assert_eq!(g, Ok(slugs(&["slack"])));
+    }
+
+    /// A key is released once its fetch is done, so the NEXT cold caller after
+    /// an eviction fetches rather than waiting on a flight that already ended.
+    #[tokio::test]
+    async fn a_finished_flight_is_released() {
+        let cache = CatalogCache::default();
+        let fetches = AtomicUsize::new(0);
+        let fetch = || async {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            Ok(slugs(&["gmail"]))
+        };
+
+        assert_eq!(cache.get_or_fetch("k", fetch).await, Ok(slugs(&["gmail"])));
+        cache.evict("k");
+        assert_eq!(cache.get_or_fetch("k", fetch).await, Ok(slugs(&["gmail"])));
+
+        assert_eq!(
+            fetches.load(Ordering::SeqCst),
+            2,
+            "an evicted key must re-fetch, not join a flight that has finished"
+        );
     }
 
     /// Companies do not share an entry: one tenant's outage cannot mark another
