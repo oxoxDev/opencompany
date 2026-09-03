@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio::io::AsyncReadExt;
 
 use crate::Result;
 use crate::error::OpenCompanyError;
@@ -1639,17 +1640,26 @@ impl WorkspaceStore for FsOps {
             return Ok(Some((node, String::new(), 0)));
         }
         let path = self.physical_path(company, &index, id)?;
-        // The length comes from the directory entry, so a body over the cap
-        // costs a `stat` rather than a read of the file it names.
-        let len = match tokio::fs::metadata(&path).await {
-            Ok(meta) => meta.len(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
-            Err(e) => return Err(crate::store::fs::io_err(&path, e)),
+        // One open handle for both the length and the body. A concurrent
+        // replacement publishes via rename (`write_atomic`), which repoints
+        // the directory entry at a new inode rather than mutating this one,
+        // so a handle opened before that rename keeps reading the file it
+        // opened — `metadata` and the read below always agree.
+        let mut file = match tokio::fs::File::open(&path).await {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Some((node, String::new(), 0)));
+            }
+            Err(e) => return Err(io_err(&path, e)),
         };
+        let len = file.metadata().await.map_err(|e| io_err(&path, e))?.len();
         if len > max_bytes {
             return Ok(Some((node, String::new(), len)));
         }
-        let content = read_optional(&path).await?;
+        let mut content = String::new();
+        file.read_to_string(&mut content)
+            .await
+            .map_err(|e| io_err(&path, e))?;
         Ok(Some((node, content, len)))
     }
 
