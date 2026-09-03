@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { me as fetchMe } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
+import { ApiError } from "@/api/types";
 
 /**
  * Whether the signed-in viewer may administer this company.
@@ -40,6 +41,11 @@ import type { OpenCompanyClient } from "@/api/client";
  * hide a control the backend has already agreed to run. `resolve_principal`
  * prefers a session over the bearer when both are present, so a session that
  * resolves at all — even to a member — still decides the answer here too.
+ *
+ * The bearer default only stands in for a read that came back proving no
+ * session exists (`/auth/me`'s own 401). A timeout, a 5xx, or anything else
+ * that merely failed to answer stays closed — it hasn't shown the backend
+ * would refuse a session, only that this particular read didn't get one.
  */
 export function useCanManage(client: OpenCompanyClient, company: string | null): boolean {
   return useResolvedManage(client, company, client.carriesPlatformBearer);
@@ -59,7 +65,12 @@ export function useCanManagePolicy(client: OpenCompanyClient, company: string | 
   return useResolvedManage(client, company, false);
 }
 
-/** Shared resolution: a confirmed human admin session, or `bearerDefault` when none resolves. */
+/** Whether `err` is `/auth/me` answering its documented no-session 401, rather than a transport or server failure that merely didn't resolve one. */
+function provesNoSession(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 401 && err.fromHost;
+}
+
+/** Shared resolution: a confirmed human admin session, or `bearerDefault` only when the read proves no session exists. */
 function useResolvedManage(
   client: OpenCompanyClient,
   company: string | null,
@@ -77,9 +88,8 @@ function useResolvedManage(
       let manage = bearerDefault;
       try {
         manage = (await fetchMe(client, company)).role === "admin";
-      } catch {
-        // No session to resolve — `manage` keeps the bearer default above,
-        // which is what the backend itself falls back to for this route.
+      } catch (err) {
+        manage = provesNoSession(err) ? bearerDefault : false;
       }
       if (live) setCanManage(manage);
     })();
