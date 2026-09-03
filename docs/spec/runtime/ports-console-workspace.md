@@ -17,6 +17,8 @@ pub trait WorkspaceStore: Send + Sync {
     async fn tree(&self, company: &CompanyId) -> Result<Vec<WorkspaceNode>>;
     async fn read(&self, company: &CompanyId, id: &str)
         -> Result<Option<(WorkspaceNode, String)>>;
+    async fn read_capped(&self, company: &CompanyId, id: &str, max_bytes: u64)
+        -> Result<Option<(WorkspaceNode, String, u64)>>;
     async fn write(&self, company: &CompanyId, id: &str, content: &str,
                    author: WorkspaceOrigin) -> Result<WorkspaceNode>;
     async fn create(&self, /* parent, name, kind, content */) -> Result<WorkspaceNode>;
