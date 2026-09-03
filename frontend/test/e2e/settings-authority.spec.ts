@@ -225,15 +225,20 @@ test("a platform bearer with no human session gets what AdminScopedCompany alrea
     const me = await bearer.get("/api/v1/company/auth/me", { headers });
     expect(me.status()).toBe(401);
 
-    // `PUT .../hosting` is `AdminScopedCompany`, which admits the machine
-    // principal directly (`scope.rs`) — this is the control the console must
-    // offer instead of hiding, and the ground truth `useCanManage`'s answer has
-    // to agree with.
-    const saved = await bearer.put("/api/v1/company/hosting", {
+    // Proves the same authority `useCanManage` grants without writing a real
+    // credential: `AdminScopedCompany` (`scope.rs`) runs before the handler
+    // body, so an unsupported provider — refused by `put_hosting` itself,
+    // before it ever calls `write_all` — only reaches that refusal if the
+    // bearer already cleared the authority check. A principal `useCanManage`
+    // should have refused would 401/403 here instead, never 400. `PW_BASE_URL`
+    // can point this run at a real company, so nothing here may touch whatever
+    // hosting credential it actually has stored.
+    const probe = await bearer.put("/api/v1/company/hosting", {
       headers,
-      data: { provider: "vercel", apiKey: "e2e-platform-bearer-verify" },
+      data: { provider: "not-a-real-provider" },
     });
-    expect(saved.ok(), `bearer hosting save failed: ${await saved.text()}`).toBeTruthy();
+    expect(probe.status()).toBe(400);
+    expect((await probe.json()).code).toBe("invalid_request");
   } finally {
     await bearerContext.close();
   }
