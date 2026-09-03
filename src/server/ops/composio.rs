@@ -144,14 +144,13 @@ async fn effective_toolkits(
 ///
 /// The cache is consulted before the (cfg-split) fetch and records the outcome
 /// either way, so a status poll during an outage costs a map lookup rather than
-/// another fetch timeout of waiting.
+/// another fetch timeout of waiting. Concurrent callers on a cold key share one
+/// fetch rather than each starting their own.
 async fn open_mode_toolkits(runtime: &CompanyRuntime) -> OpenModeToolkits {
     let key = catalog_cache_key(runtime);
-    if let Some(cached) = composio_toolkits::cache().lookup(&key, std::time::Instant::now()) {
-        return OpenModeToolkits::from_outcome(cached);
-    }
-    let outcome = fetch_catalog(runtime).await;
-    composio_toolkits::cache().store(&key, outcome.clone(), std::time::Instant::now());
+    let outcome = composio_toolkits::cache()
+        .get_or_fetch(&key, || fetch_catalog(runtime))
+        .await;
     OpenModeToolkits::from_outcome(outcome)
 }
 
