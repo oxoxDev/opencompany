@@ -2549,13 +2549,13 @@ async fn resolve_attachments(
                 extracted_attachment_text(runtime, id, node).await,
             )
         } else {
-            let content = note_body(runtime, id, &node.id).await;
+            let (content, size) = note_within_extract_cap(runtime, id, &node.id).await;
             (
                 mime_guess::from_path(&node.name)
                     .first_raw()
                     .unwrap_or("text/plain")
                     .to_string(),
-                content.len() as u64,
+                size,
                 extracted_note_text(&content),
             )
         };
@@ -2599,26 +2599,39 @@ const MAX_ATTACHMENT_EXTRACT_BYTES: u64 = 4 * 1024 * 1024;
 /// to crowd out the rest of the turn.
 const MAX_ATTACHMENT_EXTRACT_CHARS: usize = 6_000;
 
-/// One prose node's body, empty when it cannot be read.
+/// One prose node's byte length, and its body only while that length stays
+/// within [`MAX_ATTACHMENT_EXTRACT_BYTES`].
+///
+/// [`WorkspaceStore::read_capped`](crate::ports::workspace::WorkspaceStore::read_capped)
+/// rather than a read and a length check, so the ceiling holds where the binary
+/// path's does — before the transfer, not after it. A plain `read` would
+/// materialise the whole note to discover it must be discarded, and a message
+/// may carry [`MAX_CHAT_ATTACHMENTS`] of them.
 ///
 /// Best-effort on the same terms as [`extracted_attachment_text`]: a read that
 /// races a delete or hits a transient store error leaves the reference itself
-/// intact rather than failing the send.
-async fn note_body(runtime: &Arc<CompanyRuntime>, id: &CompanyId, node_id: &str) -> String {
+/// intact rather than failing the send. The size is then `0`, which is what the
+/// caller can honestly say about a body it could not measure.
+async fn note_within_extract_cap(
+    runtime: &Arc<CompanyRuntime>,
+    id: &CompanyId,
+    node_id: &str,
+) -> (String, u64) {
     runtime
         .workspace()
-        .read(id, node_id)
+        .read_capped(id, node_id, MAX_ATTACHMENT_EXTRACT_BYTES)
         .await
         .ok()
         .flatten()
-        .map(|(_, body)| body)
+        .map(|(_, body, len)| (body, len))
         .unwrap_or_default()
 }
 
-/// A prose node's text under the same two caps a binary attachment's extraction
-/// answers to, `None` when it is empty or past the byte cap.
+/// A prose attachment's text for the brain, `None` when there is none to carry
+/// — an empty note, or one the store withheld for weighing more than the
+/// extraction cap.
 fn extracted_note_text(content: &str) -> Option<String> {
-    if content.is_empty() || content.len() as u64 > MAX_ATTACHMENT_EXTRACT_BYTES {
+    if content.is_empty() {
         return None;
     }
     Some(crate::ledger::budget::truncate(

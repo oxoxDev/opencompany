@@ -10464,3 +10464,315 @@ async fn chat_attachment_oversized_note_attaches_without_extracted_text() {
         "a note past the extraction cap attaches with no text, rather than not at all"
     );
 }
+
+/// A workspace that records how many bytes each unbounded [`WorkspaceStore::read`]
+/// handed back, per node.
+///
+/// Wraps the permissive in-memory double and sits **under** the runtime's own
+/// decorators, so what it records is what the request actually pulled through
+/// the whole production stack — including whether a decorator forwarded
+/// `read_capped` or let it fall back to reading.
+struct RecordingReads {
+    inner: std::sync::Arc<dyn crate::ports::workspace::WorkspaceStore>,
+    read_bytes: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+}
+
+impl RecordingReads {
+    fn new(inner: std::sync::Arc<dyn crate::ports::workspace::WorkspaceStore>) -> Self {
+        Self {
+            inner,
+            read_bytes: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn bytes_read(&self, id: &str) -> u64 {
+        self.read_bytes
+            .lock()
+            .unwrap()
+            .get(id)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::ports::workspace::WorkspaceStore for RecordingReads {
+    async fn admit_upload(&self, company: &CompanyId, name: &str, len: u64) -> crate::Result<()> {
+        self.inner.admit_upload(company, name, len).await
+    }
+
+    async fn tree(
+        &self,
+        company: &CompanyId,
+    ) -> crate::Result<Vec<crate::ports::workspace::WorkspaceNode>> {
+        self.inner.tree(company).await
+    }
+
+    async fn read(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> crate::Result<Option<(crate::ports::workspace::WorkspaceNode, String)>> {
+        let got = self.inner.read(company, id).await?;
+        if let Some((_, body)) = &got {
+            *self
+                .read_bytes
+                .lock()
+                .unwrap()
+                .entry(id.to_string())
+                .or_default() += body.len() as u64;
+        }
+        Ok(got)
+    }
+
+    async fn read_capped(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        max_bytes: u64,
+    ) -> crate::Result<Option<(crate::ports::workspace::WorkspaceNode, String, u64)>> {
+        self.inner.read_capped(company, id, max_bytes).await
+    }
+
+    async fn write(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        content: &str,
+        author: crate::ports::workspace::WorkspaceOrigin,
+    ) -> crate::Result<crate::ports::workspace::WorkspaceNode> {
+        self.inner.write(company, id, content, author).await
+    }
+
+    async fn create(
+        &self,
+        company: &CompanyId,
+        node: &crate::ports::workspace::WorkspaceNode,
+        content: Option<&str>,
+    ) -> crate::Result<()> {
+        self.inner.create(company, node, content).await
+    }
+
+    async fn adopt_or_create_folder(
+        &self,
+        company: &CompanyId,
+        parent: Option<&str>,
+        name: &str,
+        origin: crate::ports::workspace::WorkspaceOrigin,
+    ) -> crate::Result<crate::ports::workspace::FolderClaim> {
+        self.inner
+            .adopt_or_create_folder(company, parent, name, origin)
+            .await
+    }
+
+    async fn create_binary(
+        &self,
+        company: &CompanyId,
+        node: &crate::ports::workspace::WorkspaceNode,
+        bytes: &[u8],
+    ) -> crate::Result<crate::ports::workspace::WorkspaceNode> {
+        self.inner.create_binary(company, node, bytes).await
+    }
+
+    async fn write_binary(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        bytes: &[u8],
+        mime: Option<&str>,
+        author: crate::ports::workspace::WorkspaceOrigin,
+    ) -> crate::Result<crate::ports::workspace::WorkspaceNode> {
+        self.inner
+            .write_binary(company, id, bytes, mime, author)
+            .await
+    }
+
+    async fn read_bytes(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> crate::Result<
+        Option<(
+            crate::ports::workspace::WorkspaceNode,
+            crate::ports::workspace::BlobStream,
+        )>,
+    > {
+        self.inner.read_bytes(company, id).await
+    }
+
+    async fn rename_move(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        name: Option<&str>,
+        parent: Option<Option<&str>>,
+    ) -> crate::Result<crate::ports::workspace::WorkspaceNode> {
+        self.inner.rename_move(company, id, name, parent).await
+    }
+
+    async fn swap_files(
+        &self,
+        company: &CompanyId,
+        expected_id: Option<&str>,
+        replacement_id: &str,
+        name: &str,
+    ) -> crate::Result<Option<crate::ports::workspace::WorkspaceNode>> {
+        self.inner
+            .swap_files(company, expected_id, replacement_id, name)
+            .await
+    }
+
+    async fn delete(&self, company: &CompanyId, id: &str) -> crate::Result<bool> {
+        self.inner.delete(company, id).await
+    }
+
+    async fn is_empty(&self, company: &CompanyId) -> crate::Result<bool> {
+        self.inner.is_empty(company).await
+    }
+}
+
+/// The ceiling on a prose attachment holds at read time, not after.
+///
+/// The binary half of this path has never had to buffer what it will discard:
+/// `size` rides the node, so an over-cap payload is refused on metadata and
+/// `read_bytes` is never called. A note carries no `size`, so the same
+/// discipline needs the store to answer the length and withhold the body in one
+/// step — otherwise the cap is applied to a `String` that has already been
+/// allocated, which is the allocation the cap exists to prevent, and one
+/// message may carry twenty of them.
+///
+/// Recorded through the whole runtime stack, so a decorator that stopped
+/// forwarding `read_capped` fails here too.
+#[tokio::test]
+async fn an_over_cap_note_attachment_is_never_fully_read() {
+    use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let recorder = std::sync::Arc::new(RecordingReads::new(std::sync::Arc::new(
+        crate::company::workspace_repair::loose_store::LooseWorkspace::default(),
+    )));
+    let state = state_with_workspace(&home, recorder.clone()).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).expect("company");
+
+    let huge = "x".repeat(5 * 1024 * 1024);
+    WorkspaceStore::create(
+        runtime.workspace().as_ref(),
+        &company,
+        &WorkspaceNode {
+            id: "node-oversized".to_string(),
+            name: "huge.md".to_string(),
+            kind: NodeKind::File,
+            parent_id: None,
+            updated_at_millis: 1,
+            created_by: WorkspaceOrigin::Operator,
+            updated_by: WorkspaceOrigin::Operator,
+            mime: None,
+            size: None,
+            sha256: None,
+            adopted: false,
+        },
+        Some(&huge),
+    )
+    .await
+    .expect("seed the oversized note");
+    let seeded = recorder.bytes_read("node-oversized");
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({ "message": "big note", "attachments": ["node-oversized"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    assert_eq!(
+        recorder.bytes_read("node-oversized") - seeded,
+        0,
+        "resolving an over-cap attachment must not pull the note's body through \
+         the unbounded read"
+    );
+
+    // And it still attaches, with the length the store measured and no text.
+    let journaled = runtime
+        .events()
+        .read_from(runtime.id(), crate::ports::types::EventSeq::new(0), 10_000)
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|s| match s.event {
+            crate::ports::types::CompanyEvent::OperatorMessage { attachments, .. }
+                if !attachments.is_empty() =>
+            {
+                Some(attachments)
+            }
+            _ => None,
+        })
+        .expect("the message with an attachment is in the journal");
+    assert_eq!(journaled.len(), 1);
+    assert_eq!(journaled[0].size, huge.len() as u64);
+    assert_eq!(journaled[0].extracted_text, None);
+}
+
+/// A note under the cap is read once and reaches the brain whole — the bound
+/// above must not be paid for by an attachment that fits.
+#[tokio::test]
+async fn an_under_cap_note_attachment_still_carries_its_text() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let recorder = std::sync::Arc::new(RecordingReads::new(std::sync::Arc::new(
+        crate::company::workspace_repair::loose_store::LooseWorkspace::default(),
+    )));
+    let state = state_with_workspace(&home, recorder.clone()).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).expect("company");
+
+    let (status, created) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({
+            "name": "brief.md",
+            "kind": "file",
+            "content": "Q3 revenue grew 12% year over year.",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let node_id = created["id"].as_str().unwrap().to_string();
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({ "message": "small note", "attachments": [node_id] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let journaled = runtime
+        .events()
+        .read_from(runtime.id(), crate::ports::types::EventSeq::new(0), 10_000)
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|s| match s.event {
+            crate::ports::types::CompanyEvent::OperatorMessage { attachments, .. }
+                if !attachments.is_empty() =>
+            {
+                Some(attachments)
+            }
+            _ => None,
+        })
+        .expect("the message with an attachment is in the journal");
+    assert_eq!(
+        journaled[0].extracted_text.as_deref(),
+        Some("Q3 revenue grew 12% year over year."),
+    );
+    assert_eq!(
+        journaled[0].size,
+        "Q3 revenue grew 12% year over year.".len() as u64
+    );
+}
