@@ -3771,6 +3771,50 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         }
     }
 
+    async fn read_capped(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        max_bytes: u64,
+    ) -> Result<Option<(crate::ports::workspace::WorkspaceNode, String, u64)>> {
+        // Projected server-side, so an over-cap body stays in the server: the
+        // length is computed there and the content field is replaced with an
+        // empty string unless it fits. `$strLenBytes` is the same unit the cap
+        // is expressed in — `$strLenCP` would admit a body up to four times it.
+        let len_bytes = doc! {"$strLenBytes": {"$ifNull": ["$content", ""]}};
+        let mut cursor = self
+            .collection("workspace_nodes")
+            .aggregate(vec![
+                doc! {"$match": {"company_id": company.as_ref(), "node_id": id}},
+                doc! {"$limit": 1},
+                doc! {"$project": {
+                    "node_json": 1,
+                    "content_len": len_bytes.clone(),
+                    "content": {"$cond": [
+                        {"$lte": [len_bytes, max_bytes as i64]},
+                        {"$ifNull": ["$content", ""]},
+                        "",
+                    ]},
+                }},
+            ])
+            .await
+            .map_err(mongo_err)?;
+        let Some(doc) = cursor.try_next().await.map_err(mongo_err)? else {
+            return Ok(None);
+        };
+        let node: crate::ports::workspace::WorkspaceNode =
+            serde_json::from_str(&get_str(&doc, "node_json")?)?;
+        if node.kind != crate::ports::workspace::NodeKind::File || node.is_binary() {
+            return Ok(Some((node, String::new(), 0)));
+        }
+        let len = doc.get_i64("content_len").unwrap_or_else(|_| {
+            doc.get_i32("content_len")
+                .map(i64::from)
+                .unwrap_or_default()
+        });
+        Ok(Some((node, get_str(&doc, "content")?, len.max(0) as u64)))
+    }
+
     async fn write(
         &self,
         company: &CompanyId,
@@ -6210,6 +6254,13 @@ mod test {
     async fn conformance_workspace_binary_store() {
         let Some(s) = store().await else { return };
         conformance::assert_workspace_binary_store(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_read_capped() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workspace_read_capped(s.clone()).await;
         drop_db(&s).await;
     }
 

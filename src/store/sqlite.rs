@@ -3532,6 +3532,46 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         }
     }
 
+    async fn read_capped(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        max_bytes: u64,
+    ) -> Result<Option<(crate::ports::workspace::WorkspaceNode, String, u64)>> {
+        let conn = self.conn();
+        // One statement, so the length and the body it admits describe the same
+        // row: the cap is applied by SQLite, and an over-cap body is never
+        // carried across the boundary into a Rust `String`.
+        let row: Option<(String, i64, String)> = conn
+            .query_row(
+                "SELECT node_json, \
+                        length(CAST(content AS BLOB)), \
+                        CASE WHEN length(CAST(content AS BLOB)) <= ?3 THEN content ELSE '' END \
+                 FROM workspace_nodes WHERE company_id = ?1 AND id = ?2",
+                params![company.as_ref(), id, max_bytes as i64],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(sql_err)?;
+        match row {
+            Some((node_json, len, content)) => {
+                let node: crate::ports::workspace::WorkspaceNode =
+                    serde_json::from_str(&node_json)?;
+                if node.kind != crate::ports::workspace::NodeKind::File || node.is_binary() {
+                    return Ok(Some((node, String::new(), 0)));
+                }
+                Ok(Some((node, content, len.max(0) as u64)))
+            }
+            None => Ok(None),
+        }
+    }
+
     async fn write(
         &self,
         company: &CompanyId,
@@ -4754,6 +4794,11 @@ mod test {
     #[tokio::test]
     async fn conformance_workspace_binary_store() {
         conformance::assert_workspace_binary_store(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_read_capped() {
+        conformance::assert_workspace_read_capped(store()).await;
     }
 
     /// Issue #759: the folder-claim primitive, including the eight-way

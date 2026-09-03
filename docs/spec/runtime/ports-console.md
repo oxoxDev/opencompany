@@ -208,6 +208,19 @@ yields an **empty body**, the same answer a folder gives, and a text `write` to
 one is refused rather than allowed to leave the recorded digest describing
 bytes that are gone.
 
+`read` has no ceiling, which is fine for every caller that wants the whole note
+and wrong for one that will discard anything over a cap: it would have to
+materialise the body to learn it must throw it away. `read_capped` is that
+caller's read — it answers the body's true byte length and hands back the body
+only while it fits, so the store withholds what would be discarded instead of
+transferring it. Each backend measures in its own way (a `stat`, SQL
+`length(CAST(content AS BLOB))`, an aggregation's `$strLenBytes`) and
+`conformance::assert_workspace_read_capped` holds all three to the one contract.
+A decorator forwards it; falling back to `read` would spend exactly the
+allocation the cap exists to prevent. The binary half has never needed this —
+`size` rides the node, so a caller decides on metadata and `read_bytes` is never
+reached for an over-cap payload.
+
 Writes buffer and reads stream. The asymmetry is what makes the quota
 enforceable: `QuotaEnforcedWorkspace` (`src/runtime/workspace_quota.rs`) wraps
 the store at the single assembly site, inside the announcer, and sees the full

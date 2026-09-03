@@ -1625,6 +1625,34 @@ impl WorkspaceStore for FsOps {
         Ok(Some((node, content)))
     }
 
+    async fn read_capped(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        max_bytes: u64,
+    ) -> Result<Option<(WorkspaceNode, String, u64)>> {
+        let index = self.load_index(company).await?;
+        let Some(node) = index.get(id).cloned() else {
+            return Ok(None);
+        };
+        if node.kind != NodeKind::File || node.is_binary() {
+            return Ok(Some((node, String::new(), 0)));
+        }
+        let path = self.physical_path(company, &index, id)?;
+        // The length comes from the directory entry, so a body over the cap
+        // costs a `stat` rather than a read of the file it names.
+        let len = match tokio::fs::metadata(&path).await {
+            Ok(meta) => meta.len(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(e) => return Err(crate::store::fs::io_err(&path, e)),
+        };
+        if len > max_bytes {
+            return Ok(Some((node, String::new(), len)));
+        }
+        let content = read_optional(&path).await?;
+        Ok(Some((node, content, len)))
+    }
+
     async fn write(
         &self,
         company: &CompanyId,
@@ -2860,6 +2888,13 @@ mod test {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();
         conformance::assert_workspace_binary_store(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_read_capped() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_workspace_read_capped(Arc::new(FsOps::new(&root))).await;
     }
 
     #[tokio::test]

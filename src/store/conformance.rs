@@ -4415,6 +4415,153 @@ async fn drain(stream: crate::ports::workspace::BlobStream) -> Vec<u8> {
 /// this is a shared suite rather than a Mongo-only test: fs and sqlite run the
 /// identical assertion, so "the big file round-trips" is a property of the
 /// port, not a property of whichever backend somebody remembered to test.
+/// [`WorkspaceStore::read_capped`] answers the length of every text body, and
+/// hands back only the ones that fit.
+///
+/// The property that matters is what it does *not* return: a body over the cap
+/// comes back empty, with its true length beside it, so a caller that would
+/// discard it never receives it. Every backend has to be checked, because each
+/// one measures differently — a `stat`, a SQL `length()`, an aggregation stage —
+/// and only the contract is shared.
+pub async fn assert_workspace_read_capped(ws: Arc<dyn WorkspaceStore>) {
+    let company = CompanyId::new("capped-co");
+    let operator = WorkspaceOrigin::Operator;
+    let node = |id: &str, name: &str, kind: NodeKind, mime: Option<&str>| WorkspaceNode {
+        id: id.to_string(),
+        name: name.to_string(),
+        kind,
+        parent_id: None,
+        updated_at_millis: now_millis(),
+        created_by: operator.clone(),
+        updated_by: operator.clone(),
+        mime: mime.map(str::to_string),
+        size: None,
+        sha256: None,
+        adopted: false,
+    };
+
+    // Multi-byte on purpose: the cap is bytes, and a backend that measures
+    // characters would call this note shorter than it is.
+    let small = "héllo wörld";
+    let small_len = small.len() as u64;
+    assert!(small_len > small.chars().count() as u64);
+    ws.create(
+        &company,
+        &node("cap-small", "small.md", NodeKind::File, None),
+        Some(small),
+    )
+    .await
+    .expect("create the small note");
+
+    let big = "x".repeat(4096);
+    ws.create(
+        &company,
+        &node("cap-big", "big.md", NodeKind::File, None),
+        Some(&big),
+    )
+    .await
+    .expect("create the big note");
+
+    ws.create(
+        &company,
+        &node("cap-empty", "empty.md", NodeKind::File, None),
+        Some(""),
+    )
+    .await
+    .expect("create the empty note");
+
+    ws.create(
+        &company,
+        &node("cap-folder", "folder", NodeKind::Folder, None),
+        None,
+    )
+    .await
+    .expect("create the folder");
+
+    ws.create_binary(
+        &company,
+        &node(
+            "cap-blob",
+            "blob.bin",
+            NodeKind::File,
+            Some("application/octet-stream"),
+        ),
+        &[0xff, 0xfe, 0x00, 0x01],
+    )
+    .await
+    .expect("create the payload");
+
+    // Under the cap: the body comes back whole, measured in bytes.
+    let (_, body, len) = ws
+        .read_capped(&company, "cap-small", 1024)
+        .await
+        .expect("read the small note")
+        .expect("the small note exists");
+    assert_eq!(body, small, "a body under the cap is returned in full");
+    assert_eq!(len, small_len, "the length is bytes, not characters");
+
+    // Over the cap: the length is still exact, and the body is withheld.
+    let (_, body, len) = ws
+        .read_capped(&company, "cap-big", 1024)
+        .await
+        .expect("read the big note")
+        .expect("the big note exists");
+    assert_eq!(
+        len, 4096,
+        "the true length is reported even when the body is not"
+    );
+    assert!(
+        body.is_empty(),
+        "a body over the cap must not be transferred"
+    );
+
+    // Exactly at the cap is under it, not over it.
+    let (_, body, _) = ws
+        .read_capped(&company, "cap-big", 4096)
+        .await
+        .expect("read at the cap")
+        .expect("the big note exists");
+    assert_eq!(body.len(), 4096, "a body exactly at the cap still fits");
+
+    // An empty note and an over-cap note both answer an empty body; the length
+    // is what tells them apart.
+    let (_, body, len) = ws
+        .read_capped(&company, "cap-empty", 1024)
+        .await
+        .expect("read the empty note")
+        .expect("the empty note exists");
+    assert!(body.is_empty());
+    assert_eq!(len, 0);
+
+    // A folder and a payload answer the same empty body `read` gives them.
+    for id in ["cap-folder", "cap-blob"] {
+        let (_, body, len) = ws
+            .read_capped(&company, id, 1024)
+            .await
+            .expect("read")
+            .unwrap_or_else(|| panic!("{id} exists"));
+        assert!(body.is_empty(), "{id} must read as an empty body");
+        assert_eq!(len, 0, "{id} must report no text length");
+    }
+
+    assert!(
+        ws.read_capped(&company, "cap-missing", 1024)
+            .await
+            .expect("read a missing id")
+            .is_none(),
+        "an id naming nothing answers None, as `read` does"
+    );
+
+    // Company isolation, the same as every other read on this port.
+    assert!(
+        ws.read_capped(&CompanyId::new("capped-other"), "cap-small", 1024)
+            .await
+            .expect("read across companies")
+            .is_none(),
+        "another company's node must not be readable"
+    );
+}
+
 pub async fn assert_workspace_binary_store(ws: Arc<dyn WorkspaceStore>) {
     let alpha = CompanyId::new("bin-alpha");
     let beta = CompanyId::new("bin-beta");
