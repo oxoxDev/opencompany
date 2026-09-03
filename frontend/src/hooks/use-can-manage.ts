@@ -70,20 +70,23 @@ function provesNoSession(err: unknown): boolean {
   return err instanceof ApiError && err.status === 401 && err.fromHost;
 }
 
+interface Resolved {
+  client: OpenCompanyClient;
+  company: string | null;
+  bearerDefault: boolean;
+  manage: boolean;
+}
+
 /** Shared resolution: a confirmed human admin session, or `bearerDefault` only when the read proves no session exists. */
 function useResolvedManage(
   client: OpenCompanyClient,
   company: string | null,
   bearerDefault: boolean,
 ): boolean {
-  const [canManage, setCanManage] = useState(false);
+  const [resolved, setResolved] = useState<Resolved | null>(null);
 
   useEffect(() => {
     let live = true;
-    // Re-closed on every company change, not just on the first read: carrying a
-    // previous company's `true` across the switch would offer an admin's
-    // controls on a company this person may only be a member of.
-    setCanManage(false);
     void (async () => {
       let manage = bearerDefault;
       try {
@@ -91,12 +94,17 @@ function useResolvedManage(
       } catch (err) {
         manage = provesNoSession(err) ? bearerDefault : false;
       }
-      if (live) setCanManage(manage);
+      if (live) setResolved({ client, company, bearerDefault, manage });
     })();
     return () => {
       live = false;
     };
   }, [client, company, bearerDefault]);
 
-  return canManage;
+  const current =
+    resolved !== null &&
+    resolved.client === client &&
+    resolved.company === company &&
+    resolved.bearerDefault === bearerDefault;
+  return current ? resolved.manage : false;
 }
