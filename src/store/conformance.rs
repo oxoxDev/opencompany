@@ -5606,6 +5606,120 @@ pub async fn assert_workspace_read_never_tears(ws: Arc<dyn WorkspaceStore>) {
     assert!(final_body == whole_a || final_body == whole_b);
 }
 
+/// A stat-then-open [`WorkspaceStore::read_capped`] measures a file's length
+/// with one call and materializes its body with a second, so a concurrent
+/// replacement can land between them: the length describes one revision and
+/// the body handed back is another, larger, one — defeating the cap the
+/// method exists to enforce. The fix has to answer from a single snapshot.
+/// Every backend measures differently (a `stat`, a document field, ...), so
+/// only the contract is shared: whatever `read_capped` returns, the body
+/// never exceeds the cap, and when a body comes back, its length matches the
+/// one reported beside it.
+pub async fn assert_workspace_read_capped_race(ws: Arc<dyn WorkspaceStore>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// How many times the note is rewritten end to end.
+    const ROUNDS: usize = 60;
+    /// Concurrent readers. More than one, because a single reader spends much
+    /// of its time not inside the window.
+    const READERS: usize = 4;
+    const MAX_BYTES: u64 = 300_000;
+
+    let company = CompanyId::new("cap-race-co");
+    // One revision fits under the cap, the other is well past it, so a length
+    // measured against the wrong revision is caught either way: a stale
+    // "small" length paired with the big body still overruns the cap, and a
+    // stale "big" length paired with the small body still mismatches it.
+    let small = "y".repeat(1_000);
+    let big = "x".repeat(600_000);
+    assert!((small.len() as u64) <= MAX_BYTES, "small must fit the cap");
+    assert!((big.len() as u64) > MAX_BYTES, "big must exceed the cap");
+
+    let node = WorkspaceNode {
+        id: "race-note".to_string(),
+        name: "Race.md".to_string(),
+        kind: NodeKind::File,
+        parent_id: None,
+        updated_at_millis: now_millis(),
+        created_by: WorkspaceOrigin::Operator,
+        updated_by: WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
+        adopted: false,
+    };
+    ws.create(&company, &node, Some(&small))
+        .await
+        .expect("seed the note");
+
+    let done = Arc::new(AtomicBool::new(false));
+
+    let readers: Vec<_> = (0..READERS)
+        .map(|_| {
+            let ws = Arc::clone(&ws);
+            let company = company.clone();
+            let done = Arc::clone(&done);
+            tokio::spawn(async move {
+                let mut observed = 0usize;
+                while !done.load(Ordering::Relaxed) {
+                    let (_, body, len) =
+                        match ws.read_capped(&company, "race-note", MAX_BYTES).await {
+                            Ok(Some(hit)) => hit,
+                            Ok(None) => {
+                                return Err("the note vanished; nothing in this test deletes it"
+                                    .to_string());
+                            }
+                            Err(e) => {
+                                return Err(format!(
+                                    "a capped read concurrent with a write FAILED ({e})"
+                                ));
+                            }
+                        };
+                    if body.len() as u64 > MAX_BYTES {
+                        return Err(format!(
+                            "read_capped returned a {actual}-byte body against a {cap}-byte \
+                             cap (reported length {len}) — a concurrent write defeated the cap.",
+                            actual = body.len(),
+                            cap = MAX_BYTES,
+                        ));
+                    }
+                    if !body.is_empty() && body.len() as u64 != len {
+                        return Err(format!(
+                            "read_capped reported length {len} but returned a {actual}-byte \
+                             body — length and body must describe the same snapshot.",
+                            actual = body.len(),
+                        ));
+                    }
+                    observed += 1;
+                    // Yield so a current-thread runtime interleaves the writer.
+                    tokio::task::yield_now().await;
+                }
+                Ok(observed)
+            })
+        })
+        .collect();
+
+    for round in 0..ROUNDS {
+        let body = if round % 2 == 0 { &big } else { &small };
+        ws.write(&company, "race-note", body, WorkspaceOrigin::Operator)
+            .await
+            .expect("the writer itself must not fail");
+    }
+    done.store(true, Ordering::Relaxed);
+
+    let mut total = 0usize;
+    for reader in readers {
+        match reader.await.expect("a reader task panicked") {
+            Ok(observed) => total += observed,
+            Err(why) => panic!("{why}"),
+        }
+    }
+    assert!(
+        total > 0,
+        "no capped read ran while the note was being rewritten, so this case proved nothing"
+    );
+}
+
 /// A folder node for the binary suite.
 fn folder_node(id: &str, name: &str) -> WorkspaceNode {
     WorkspaceNode {

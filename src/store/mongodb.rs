@@ -6295,6 +6295,16 @@ mod test {
         drop_db(&s).await;
     }
 
+    /// The stat-then-open race fixed in the `fs` backend's `read_capped`.
+    /// This backend measures and reads under one aggregation and passes on
+    /// both sides of that fix — the contract is the port's, not one backend's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn conformance_workspace_read_capped_race() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workspace_read_capped_race(s.clone()).await;
+        drop_db(&s).await;
+    }
+
     /// The sqlite pin's mirror, on the other backend hosted tenants run
     /// (issue #700).
     ///

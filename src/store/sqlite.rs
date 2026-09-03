@@ -4925,6 +4925,14 @@ mod test {
         conformance::assert_workspace_read_never_tears(store()).await;
     }
 
+    /// The stat-then-open race fixed in the `fs` backend's `read_capped`.
+    /// This backend measures and reads under one query and passes on both
+    /// sides of that fix — the contract is the port's, not one backend's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn conformance_workspace_read_capped_race() {
+        conformance::assert_workspace_read_capped_race(store()).await;
+    }
+
     /// Issue #700's emptiness predicate, against the backend that can actually
     /// hold the shape it has to survive.
     ///
