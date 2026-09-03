@@ -22,7 +22,9 @@ use crate::{BUILD_COMMIT, VERSION, tiny::RuntimeModuleStatus};
 pub struct AppConfig {
     /// Address for the Axum HTTP server.
     pub bind: String,
-    /// Optional sibling OpenHuman checkout used by launcher commands.
+    /// Optional sibling OpenHuman checkout, recorded rather than used: `/spec`
+    /// reports whether one is set and nothing reads the path. `open-human`
+    /// launches a checkout, and takes its own `--root`.
     pub openhuman_root: Option<PathBuf>,
     /// TinyHumans orchestration API base URL.
     pub api_url: String,

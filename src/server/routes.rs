@@ -964,7 +964,13 @@ mod tests {
         })
         .with_home(dir.path().to_path_buf());
 
-        let rendered = spec_body(state).await.to_string();
+        let body = spec_body(state).await;
+        // The replacement contract, not just the absence: without this the test
+        // also passes on a host that dropped the field altogether, or that
+        // reports `false` while a checkout is configured.
+        assert_eq!(body["openhuman_configured"].as_bool(), Some(true));
+
+        let rendered = body.to_string();
         assert!(
             !rendered.contains("sentinel-openhuman-checkout"),
             "a configured checkout path must not appear in /spec: {rendered}"
@@ -973,6 +979,11 @@ mod tests {
             !rendered.contains(&dir.path().display().to_string()),
             "the home path must not appear in /spec: {rendered}"
         );
+
+        let unset =
+            spec_body(AppState::new(AppConfig::default()).with_home(dir.path().to_path_buf()))
+                .await;
+        assert_eq!(unset["openhuman_configured"].as_bool(), Some(false));
     }
 
     /// Catches the *next* such field rather than this one: whatever `/spec`
@@ -997,12 +1008,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn absolute_paths_are_recognised_on_both_platforms() {
+        for path in [
+            "/Users/someone/checkout",
+            "/data",
+            r"C:\checkout",
+            r"c:/checkout",
+            r"\\server\share",
+        ] {
+            assert!(is_absolute_path(path), "`{path}` is an absolute path");
+        }
+        for text in [
+            "vendor/openhuman",
+            "https://api.tinyhumans.ai",
+            "fs",
+            "prod-eu",
+            "",
+            "C:",
+            "Cx\\checkout",
+        ] {
+            assert!(!is_absolute_path(text), "`{text}` is not an absolute path");
+        }
+    }
+
+    /// Whether a string reads as an absolute filesystem path.
+    ///
+    /// Windows shapes as well as POSIX: this host builds for Windows, and a
+    /// guard that only knows `/` would pass while `/spec` served `C:\checkout`.
+    fn is_absolute_path(text: &str) -> bool {
+        if text.starts_with('/') || text.starts_with(r"\\") {
+            return true;
+        }
+        let mut chars = text.chars();
+        matches!(
+            (chars.next(), chars.next(), chars.next()),
+            (Some(drive), Some(':'), Some('\\' | '/')) if drive.is_ascii_alphabetic()
+        )
+    }
+
     /// Walks a JSON value and records the location of every string that reads
-    /// as an absolute POSIX path.
+    /// as an absolute filesystem path.
     fn collect_absolute_paths(value: &serde_json::Value, at: String, out: &mut Vec<String>) {
         match value {
             serde_json::Value::String(text) => {
-                if text.starts_with('/') {
+                if is_absolute_path(text) {
                     out.push(format!("{at} = {text}"));
                 }
             }
