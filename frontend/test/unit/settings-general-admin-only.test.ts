@@ -4,6 +4,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ApiError } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import { DomainSettings } from "@/components/domain-settings";
 import { PolicySettings } from "@/components/policy-settings";
@@ -81,7 +82,9 @@ function clientAs(
  */
 function bearerClient(): OpenCompanyClient {
   const get = (path: string) => {
-    if (path.endsWith("/auth/me")) return Promise.reject(new Error("401 unauthorized"));
+    if (path.endsWith("/auth/me")) {
+      return Promise.reject(new ApiError(401, "unauthorized", "not signed in", true));
+    }
     if (path.endsWith("/policy")) return Promise.resolve(POLICY);
     if (path.endsWith("/domain")) return Promise.resolve(DOMAIN);
     if (path.endsWith("/smtp")) return Promise.resolve(SMTP);

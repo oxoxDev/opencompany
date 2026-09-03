@@ -4,6 +4,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ApiError } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import { HostingView } from "@/views/HostingView";
 
@@ -12,7 +13,9 @@ import { HostingView } from "@/views/HostingView";
  * no session behind it — but `resolve_principal` prefers a session over the
  * bearer whenever one resolves. `useCanManage` has to land on the same
  * answer: grant the bearer-only case, and still refuse a member whose session
- * resolves, even on a client that also carries a bearer.
+ * resolves, even on a client that also carries a bearer. A read that merely
+ * failed to resolve a session — a timeout, a 5xx — is a third case: it must
+ * not be treated as proof there is none.
  */
 
 const HOSTING = {
@@ -26,22 +29,26 @@ const HOSTING = {
 
 function clientAs(opts: {
   platformBearer: boolean;
-  me: "admin" | "member" | "none";
+  me: "admin" | "member" | "none" | "unreachable";
 }): OpenCompanyClient {
   return {
     scopeFor: () => "/api/v1/companies/acme",
     carriesPlatformBearer: opts.platformBearer,
     get: (path: string) => {
       if (path.endsWith("/auth/me")) {
-        return opts.me === "none"
-          ? Promise.reject(new Error("401 unauthorized"))
-          : Promise.resolve({
-              id: "u1",
-              email: "a@b.c",
-              role: opts.me,
-              company: "acme",
-              hasPassword: true,
-            });
+        if (opts.me === "none") {
+          return Promise.reject(new ApiError(401, "unauthorized", "not signed in", true));
+        }
+        if (opts.me === "unreachable") {
+          return Promise.reject(new ApiError(0, "network_error", "cannot reach the company host"));
+        }
+        return Promise.resolve({
+          id: "u1",
+          email: "a@b.c",
+          role: opts.me,
+          company: "acme",
+          hasPassword: true,
+        });
       }
       return Promise.resolve(HOSTING);
     },
@@ -95,6 +102,15 @@ describe("useCanManage, platform bearer vs member session", () => {
 
   it("fails closed with no bearer and no session", async () => {
     const client = clientAs({ platformBearer: false, me: "none" });
+    await show(createElement(HostingView, { client, company: "acme" }));
+
+    expect(at("hosting-api-key")).toBeNull();
+    expect(at("hosting-save")).toBeNull();
+    expect(at("hosting-read-only")).not.toBeNull();
+  });
+
+  it("fails closed on a platform bearer when /auth/me merely couldn't be reached", async () => {
+    const client = clientAs({ platformBearer: true, me: "unreachable" });
     await show(createElement(HostingView, { client, company: "acme" }));
 
     expect(at("hosting-api-key")).toBeNull();
