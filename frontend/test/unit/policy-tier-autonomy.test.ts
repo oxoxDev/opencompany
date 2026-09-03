@@ -620,6 +620,50 @@ describe("changing the spend cap", () => {
   });
 });
 
+describe("the operator's role", () => {
+  it("disables every tier control for a member and states why", async () => {
+    const { client, put } = makeClient(status("supervised"));
+    await act(async () => {
+      root.render(
+        createElement(PolicySettings, { client, company: "acme", canManage: false }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain(
+      "Only an admin can change this company's approval policy",
+    );
+
+    const full = container.querySelector<HTMLButtonElement>(
+      "[data-testid=policy-tier-full]",
+    )!;
+    expect(full.disabled).toBe(true);
+
+    await act(async () => {
+      full.click();
+    });
+    expect(document.querySelector("[data-testid=policy-tier-confirm]")).toBeNull();
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it("withholds the manifest-reset control from a member even when overridden", async () => {
+    const { client, del } = makeClient(overridden("readonly", "full"));
+    await act(async () => {
+      root.render(
+        createElement(PolicySettings, { client, company: "acme", canManage: false }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(
+      [...container.querySelectorAll("button")].some((button) =>
+        button.textContent?.includes("manifest's policy"),
+      ),
+    ).toBe(false);
+    expect(del).not.toHaveBeenCalled();
+  });
+});
+
 describe("loading the policy", () => {
   it("clears the previous company's policy when a company-switch read fails", async () => {
     const { client } = makeClient(status("supervised"));
