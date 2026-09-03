@@ -4,8 +4,10 @@
 //! or `{ "manifest_toml", "id"? }` JSON), validates it, builds a
 //! [`CompanyRuntime`](crate::company::runtime::CompanyRuntime) over the data
 //! dir, registers it, and records its owning tenant. Provisioning and suspension
-//! require the `platform` scope; pause/resume/archive are owner-scoped and never
-//! cross tenants.
+//! require the `platform` scope; archive is owner-scoped; the pause, resume and
+//! emergency-stop routes additionally require authority over the company —
+//! [`AdminScopedCompany`] — because they decide something for the whole company
+//! rather than for the caller. None of them cross tenants.
 //!
 //! Lifecycle transitions persist the new [`CompanyRecord`](crate::ports::types::CompanyRecord)
 //! `lifecycle` and append a [`LifecycleChanged`](crate::ports::types::CompanyEvent::LifecycleChanged)
@@ -39,6 +41,7 @@ use crate::runtime::types::CycleReport;
 use crate::runtime::{RuntimeBuilder, company_id_from_name};
 use crate::server::error::ApiError;
 use crate::server::graphql::auth::GqlAuth;
+use crate::server::ops::AdminScopedCompany;
 use crate::server::platform_auth::{PlatformScope, acting_tenant, authorize_address};
 use crate::server::webhook::{WebhookEvent, WebhookKind};
 use crate::store::FsCompanyStore;
@@ -673,20 +676,15 @@ async fn transition(state: &AppState, auth: &GqlAuth, id: &CompanyId, to: &str) 
     }
 }
 
-/// `POST /api/v1/companies/{id}/pause` — stop accepting work (owner-scoped).
+/// `POST /api/v1/companies/{id}/pause` — stop accepting work (admin-scoped).
 async fn pause(
+    _admin: AdminScopedCompany,
     crate::server::platform_auth::CompanyAuth(auth): crate::server::platform_auth::CompanyAuth,
     State(state): State<AppState>,
     Path(id): Path<String>,
     uri: Uri,
 ) -> Response {
     let id = CompanyId::new(id);
-    if let Some(resp) = authorize_address(&state, &auth, &id) {
-        return resp;
-    }
-    if let Some(resp) = crate::server::platform_auth::refuse_until_password_changed(&auth) {
-        return resp;
-    }
     let response = transition(&state, &auth, &id, "paused").await;
     // A budget-triggered pause emits the `budget.exhausted` webhook.
     if response.status() == StatusCode::OK && reason_is_budget(&uri) {
@@ -695,19 +693,14 @@ async fn pause(
     response
 }
 
-/// `POST /api/v1/companies/{id}/resume` — resume accepting work (owner-scoped).
+/// `POST /api/v1/companies/{id}/resume` — resume accepting work (admin-scoped).
 async fn resume(
+    _admin: AdminScopedCompany,
     crate::server::platform_auth::CompanyAuth(auth): crate::server::platform_auth::CompanyAuth,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Response {
     let id = CompanyId::new(id);
-    if let Some(resp) = authorize_address(&state, &auth, &id) {
-        return resp;
-    }
-    if let Some(resp) = crate::server::platform_auth::refuse_until_password_changed(&auth) {
-        return resp;
-    }
     // `suspended` is a platform-forced pause (billing/abuse); only a
     // platform-scope caller may lift it. Neither an owner token nor a company's
     // own admin may resume a company the platform suspended.
@@ -770,7 +763,11 @@ fn confirmation_error(supplied: &str, expected: &str) -> Option<Response> {
 }
 
 /// `POST /api/v1/companies/{id}/emergency-pause` — the governance kill switch
-/// (owner-scoped, issue #86).
+/// (admin-scoped, issue #86).
+///
+/// The confirmation phrase below is a step-up against a stray click, not an
+/// authority check: it is a fixed, published string. Authority is
+/// [`AdminScopedCompany`] in the signature.
 ///
 /// Denies every new effect outside `EffectGroup::Other` until an operator
 /// deliberately releases it. Distinct from `/pause`, which stops the company
@@ -780,18 +777,10 @@ fn confirmation_error(supplied: &str, expected: &str) -> Option<Response> {
 /// Idempotent: pressing it twice returns `200` with `changed: false` rather than
 /// an error. A panic button that punishes a second press is a bad panic button.
 async fn emergency_pause(
+    admin: AdminScopedCompany,
     crate::server::platform_auth::CompanyAuth(auth): crate::server::platform_auth::CompanyAuth,
-    State(state): State<AppState>,
-    Path(id): Path<String>,
     body: Result<Json<EmergencyBody>, JsonRejection>,
 ) -> Response {
-    let id = CompanyId::new(id);
-    if let Some(resp) = authorize_address(&state, &auth, &id) {
-        return resp;
-    }
-    if let Some(resp) = crate::server::platform_auth::refuse_until_password_changed(&auth) {
-        return resp;
-    }
     // A missing, empty, or malformed JSON body all read as "no step-up was
     // supplied" and fall through to the same `confirmation_required` envelope a
     // request with an absent body already gets — a panic button has to tell the
@@ -803,17 +792,15 @@ async fn emergency_pause(
     if let Some(resp) = confirmation_error(&body.confirm, PAUSE_CONFIRMATION) {
         return resp;
     }
-    let Some(runtime) = state.registry().get(&id) else {
-        return not_found(id.as_ref());
-    };
+    let runtime = &admin.runtime;
     match runtime
         .emergency_pause(lifecycle_actor(&auth), body.reason)
         .await
     {
-        Ok(changed) => emergency_response(&runtime, changed, None).await,
+        Ok(changed) => emergency_response(runtime, changed, None).await,
         Err(err) => {
             emergency_response(
-                &runtime,
+                runtime,
                 false,
                 Some(format!(
                     "the emergency stop is active in memory but its journal \
@@ -826,7 +813,7 @@ async fn emergency_pause(
 }
 
 /// `POST /api/v1/companies/{id}/emergency-resume` — release the kill switch
-/// (owner-scoped, issue #86).
+/// (admin-scoped, issue #86).
 ///
 /// **The confirmation is the company's own id**, which is a deliberately
 /// stronger step-up than the fixed phrase `emergency-pause` takes. Releasing is
@@ -838,18 +825,10 @@ async fn emergency_pause(
 /// There is no timeout anywhere in this path. A stop persists until this
 /// endpoint is called by an identified operator, across restarts included.
 async fn emergency_resume(
+    admin: AdminScopedCompany,
     crate::server::platform_auth::CompanyAuth(auth): crate::server::platform_auth::CompanyAuth,
-    State(state): State<AppState>,
-    Path(id): Path<String>,
     body: Result<Json<EmergencyBody>, JsonRejection>,
 ) -> Response {
-    let id = CompanyId::new(id);
-    if let Some(resp) = authorize_address(&state, &auth, &id) {
-        return resp;
-    }
-    if let Some(resp) = crate::server::platform_auth::refuse_until_password_changed(&auth) {
-        return resp;
-    }
     // Same contract as `emergency_pause`: a missing, empty, or malformed body
     // reads as "no step-up was supplied" and answers with the documented
     // `confirmation_required` envelope rather than a bare `Json` rejection.
@@ -857,20 +836,18 @@ async fn emergency_resume(
         confirm: String::new(),
         reason: None,
     });
-    if let Some(resp) = confirmation_error(&body.confirm, id.as_ref()) {
+    if let Some(resp) = confirmation_error(&body.confirm, admin.id().as_ref()) {
         return resp;
     }
-    let Some(runtime) = state.registry().get(&id) else {
-        return not_found(id.as_ref());
-    };
+    let runtime = &admin.runtime;
     match runtime
         .emergency_resume(lifecycle_actor(&auth), body.reason)
         .await
     {
-        Ok(changed) => emergency_response(&runtime, changed, None).await,
+        Ok(changed) => emergency_response(runtime, changed, None).await,
         Err(err) => {
             emergency_response(
-                &runtime,
+                runtime,
                 false,
                 Some(format!(
                     "the emergency stop is still engaged in memory but its journal \
