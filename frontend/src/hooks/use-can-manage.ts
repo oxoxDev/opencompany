@@ -33,8 +33,13 @@ import type { OpenCompanyClient } from "@/api/client";
  * being wrong the other way is inviting someone to paste a live credential into
  * a form that can only refuse it.
  *
- * A host with no user plane, or a signed-out console, lands here too. Both are
- * non-admin for this purpose.
+ * A host with no user plane, or a signed-out console, lands here too — with one
+ * exception. `AdminScopedCompany` (`scope.rs`) admits the platform bearer
+ * ({@link OpenCompanyClient.carriesPlatformBearer}) directly, with no session
+ * behind it to resolve; failing this hook closed against that principal would
+ * hide a control the backend has already agreed to run. `resolve_principal`
+ * prefers a session over the bearer when both are present, so a session that
+ * resolves at all — even to a member — still decides the answer here too.
  */
 export function useCanManage(client: OpenCompanyClient, company: string | null): boolean {
   const [canManage, setCanManage] = useState(false);
@@ -46,13 +51,14 @@ export function useCanManage(client: OpenCompanyClient, company: string | null):
     // controls on a company this person may only be a member of.
     setCanManage(false);
     void (async () => {
-      let admin = false;
+      let manage = client.carriesPlatformBearer;
       try {
-        admin = (await fetchMe(client, company)).role === "admin";
+        manage = (await fetchMe(client, company)).role === "admin";
       } catch {
-        // No user plane on this host, or not signed in.
+        // No session to resolve — `manage` keeps the platform-bearer default
+        // above, which is what the backend itself falls back to.
       }
-      if (live) setCanManage(admin);
+      if (live) setCanManage(manage);
     })();
     return () => {
       live = false;
