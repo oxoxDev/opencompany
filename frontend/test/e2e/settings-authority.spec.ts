@@ -30,6 +30,22 @@ import { expect, test } from "@playwright/test";
  * The suite's shared storage state is the harness **admin**. The member half
  * signs in separately through the same magic-link flow the product uses, in its
  * own browser context, so both roles are exercised against one host.
+ *
+ * A third principal — the platform bearer (`?token=` / `VITE_OC_TOKEN`) with no
+ * human session behind it — is covered at the API layer by the test below
+ * rather than through the browser. `AdminScopedCompany` (`scope.rs`) admits
+ * that principal directly for exactly the mutations this page and Search gate,
+ * so `useCanManage` has to grant it the same controls a member never sees; but
+ * driving it through an actual page load hits an unrelated, pre-existing gap —
+ * `client.onUnauthorized` (`api/client.ts`) flips the *whole* connection to
+ * "unauthenticated" on the first 401 from any non-`/auth/` route, and several
+ * app-shell routes a bearer has no session to answer for (`/presence`,
+ * `/notifications`, `/chat/mentionables`) 401 within the first second of any
+ * page load — bouncing the console back to the login screen out from under
+ * whatever page was open, Settings included. That is a separate defect in the
+ * connection registry, not in `useCanManage`, and fixing it is a larger change
+ * than this file's scope; the case below asserts the same ground truth
+ * `useCanManage` reads without depending on a page surviving that race.
  */
 
 type Page = import("@playwright/test").Page;
@@ -175,4 +191,55 @@ test("an admin is still offered every Settings control", async ({ page }) => {
   await expect(page.getByTestId("domain-read-only")).toHaveCount(0);
   await expect(page.getByTestId("smtp-read-only")).toHaveCount(0);
   await expect(page.getByTestId("smtp-save")).toBeVisible();
+});
+
+/**
+ * `OPENCOMPANY_PLATFORM_TOKEN` this host was started with, if any — the
+ * shared-secret credential `AdminScopedCompany` admits directly, with no
+ * session behind it. Not configured by default: `host.sh` starts from an empty
+ * environment and only forwards names listed in `PW_HOST_PASSTHROUGH` (see its
+ * own header comment), so exercising this case needs both set on the run:
+ *
+ *   OPENCOMPANY_PLATFORM_TOKEN=<secret> PW_HOST_PASSTHROUGH=OPENCOMPANY_PLATFORM_TOKEN npm run e2e
+ *
+ * Skipped rather than failed when absent — the same way the suite treats every
+ * fixture it does not manage (`COMPOSIO`, `LIVE_BRAIN`). A run against a host
+ * nobody configured a bearer for has nothing to prove wrong.
+ */
+const PLATFORM_TOKEN = process.env.OPENCOMPANY_PLATFORM_TOKEN;
+
+test("a platform bearer with no human session gets what AdminScopedCompany already grants it", async ({
+  browser,
+}) => {
+  test.skip(
+    !PLATFORM_TOKEN,
+    "needs OPENCOMPANY_PLATFORM_TOKEN forwarded via PW_HOST_PASSTHROUGH — see the comment above.",
+  );
+  const bearerContext = await browser.newContext({ storageState: undefined });
+  try {
+    const bearer = bearerContext.request;
+    const headers = { authorization: `Bearer ${PLATFORM_TOKEN}` };
+
+    // The premise `useCanManage` now has to recognise: no session behind this
+    // bearer at all.
+    const me = await bearer.get("/api/v1/company/auth/me", { headers });
+    expect(me.status()).toBe(401);
+
+    // Proves the same authority `useCanManage` grants without writing a real
+    // credential: `AdminScopedCompany` (`scope.rs`) runs before the handler
+    // body, so an unsupported provider — refused by `put_hosting` itself,
+    // before it ever calls `write_all` — only reaches that refusal if the
+    // bearer already cleared the authority check. A principal `useCanManage`
+    // should have refused would 401/403 here instead, never 400. `PW_BASE_URL`
+    // can point this run at a real company, so nothing here may touch whatever
+    // hosting credential it actually has stored.
+    const probe = await bearer.put("/api/v1/company/hosting", {
+      headers,
+      data: { provider: "not-a-real-provider" },
+    });
+    expect(probe.status()).toBe(400);
+    expect((await probe.json()).code).toBe("invalid_request");
+  } finally {
+    await bearerContext.close();
+  }
 });
