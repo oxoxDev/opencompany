@@ -950,6 +950,81 @@ mod tests {
         assert!(!rendered.contains("mongodb://"), "no connection strings");
     }
 
+    /// Every string `/spec` serves must be a build fact. The previous test
+    /// pins the home path, but it builds its state from `AppConfig::default()`,
+    /// where every configurable path is `None` — so it asserts against fields
+    /// nothing populated. This one configures them.
+    #[tokio::test]
+    async fn spec_never_leaks_a_configured_host_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("sentinel-openhuman-checkout");
+        let state = AppState::new(AppConfig {
+            openhuman_root: Some(root.clone()),
+            ..AppConfig::default()
+        })
+        .with_home(dir.path().to_path_buf());
+
+        let rendered = spec_body(state).await.to_string();
+        assert!(
+            !rendered.contains("sentinel-openhuman-checkout"),
+            "a configured checkout path must not appear in /spec: {rendered}"
+        );
+        assert!(
+            !rendered.contains(&dir.path().display().to_string()),
+            "the home path must not appear in /spec: {rendered}"
+        );
+    }
+
+    /// Catches the *next* such field rather than this one: whatever `/spec`
+    /// grows, no value it serves may be an absolute filesystem path. The
+    /// fixture above can only assert about fields whoever wrote it knew to
+    /// populate; this holds for fields that do not exist yet.
+    #[tokio::test]
+    async fn spec_serves_no_absolute_path_in_any_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(AppConfig {
+            openhuman_root: Some(dir.path().join("checkout")),
+            instance_name: Some("prod-eu".to_string()),
+            ..AppConfig::default()
+        })
+        .with_home(dir.path().to_path_buf());
+
+        let mut offenders = Vec::new();
+        collect_absolute_paths(&spec_body(state).await, String::new(), &mut offenders);
+        assert!(
+            offenders.is_empty(),
+            "/spec serves deployment paths at {offenders:?}"
+        );
+    }
+
+    /// Walks a JSON value and records the location of every string that reads
+    /// as an absolute POSIX path.
+    fn collect_absolute_paths(value: &serde_json::Value, at: String, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(text) => {
+                if text.starts_with('/') {
+                    out.push(format!("{at} = {text}"));
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    collect_absolute_paths(item, format!("{at}[{index}]"), out);
+                }
+            }
+            serde_json::Value::Object(fields) => {
+                for (key, field) in fields {
+                    let at = if at.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{at}.{key}")
+                    };
+                    collect_absolute_paths(field, at, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
     #[tokio::test]
     async fn spec_does_not_disclose_memory_engine_details() {
         let dir = tempfile::tempdir().unwrap();

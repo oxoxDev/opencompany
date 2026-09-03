@@ -1142,11 +1142,7 @@ impl AppState {
                 "tiny",
             ],
             runtime_modules: RuntimeModuleStatus::all(),
-            openhuman_root: self
-                .config
-                .openhuman_root
-                .as_ref()
-                .map(|path| path.display().to_string()),
+            openhuman_configured: self.config.openhuman_root.is_some(),
             api_url: self.config.api_url.clone(),
             cycles_available: self.config.cycles_available(),
             instance_id: self.instance_id().to_string(),
@@ -1227,8 +1223,11 @@ pub struct AppSpec {
     pub modules: Vec<&'static str>,
     /// Runtime module integration status.
     pub runtime_modules: Vec<RuntimeModuleStatus>,
-    /// Configured OpenHuman checkout path, if any.
-    pub openhuman_root: Option<String>,
+    /// Whether an OpenHuman checkout is configured on this host.
+    ///
+    /// The bare fact, not the location: `/spec` is unauthenticated, so this
+    /// reports a checkout the same way [`Self::storage`] reports a backend.
+    pub openhuman_configured: bool,
     /// TinyHumans orchestration API base URL.
     pub api_url: String,
     /// Whether hosted cognition can run (hosted brain plus a credential this
