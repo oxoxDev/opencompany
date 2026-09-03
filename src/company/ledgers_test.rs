@@ -685,6 +685,90 @@ async fn closing_an_unknown_id_is_refused_rather_than_opening_a_closed_row() {
     assert!(after.entries.is_empty(), "no row was opened: {:?}", after);
 }
 
+/// `tasks` is the one built-in the runtime renders itself, and the only ledger
+/// that can be native at all — `define` refuses the source for anything a
+/// company declares — so this is the whole class, not one example of it.
+async fn tasks_spec(ctx: &Ledgers) -> crate::ledger::LedgerSpec {
+    registry(ctx)
+        .await
+        .expect("registry")
+        .require("tasks")
+        .expect("tasks is a built-in")
+        .clone()
+}
+
+/// Closing an id on a ledger this tool does not write must say so, rather than
+/// report on a row. "There is no such row" sends the caller looking for a row;
+/// the ledger's own `written_by` sends them to the tool that owns the write.
+#[tokio::test]
+async fn closing_a_native_ledger_names_the_owning_tool_not_a_missing_row() {
+    let (ctx, _runtime, _home) = ledgers().await;
+    let spec = tasks_spec(&ctx).await;
+
+    let error = close(&ctx, &spec, &agent(), "never-existed", "done", "finished")
+        .await
+        .expect_err("a native ledger is not written here");
+
+    let message = error.to_string();
+    assert!(
+        !message.contains("there is no"),
+        "must not report on a row the caller cannot write anyway: {message}"
+    );
+    assert!(
+        message.contains("record_entry"),
+        "names the tool that does not own this write: {message}"
+    );
+    assert!(
+        message.contains(spec.written_by.split_whitespace().next().unwrap_or("task")),
+        "keeps the ledger's own written_by guidance: {message}"
+    );
+}
+
+/// The same precedence one level down: a caller who may not write the ledger
+/// hears that, not that the status they chose does not close a row on it.
+#[tokio::test]
+async fn a_native_ledger_outranks_the_closing_status_check() {
+    let (ctx, _runtime, _home) = ledgers().await;
+    let spec = tasks_spec(&ctx).await;
+
+    let error = close(&ctx, &spec, &agent(), "any", "not-a-closing-status", "why")
+        .await
+        .expect_err("a native ledger is not written here");
+    assert!(
+        error.to_string().contains("record_entry"),
+        "the write guard outranks the status vocabulary: {error}"
+    );
+}
+
+/// A value the caller got wrong outranks one they left out: told only that a
+/// field is missing, a caller resends with the same rejected status and learns
+/// the second half on a further round trip.
+#[tokio::test]
+async fn a_status_the_ledger_rejects_is_named_before_the_rows_gaps() {
+    let (ctx, _runtime, _home) = ledgers().await;
+    let spec = define(&ctx, &decisions()).await.expect("declared");
+
+    let error = record(
+        &ctx,
+        &spec,
+        &agent(),
+        "palette",
+        fields(&[("status", "banana")]),
+    )
+    .await
+    .expect_err("refused");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("banana"),
+        "names the bad status: {message}"
+    );
+    assert!(
+        !message.contains("leaves"),
+        "the missing-field report must not shadow it: {message}"
+    );
+}
+
 #[tokio::test]
 async fn an_unknown_sort_is_refused_rather_than_defaulted() {
     let (ctx, _runtime, _home) = ledgers().await;
