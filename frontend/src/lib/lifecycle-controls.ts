@@ -6,9 +6,9 @@ import type { LifecycleAction } from "@/api/client";
  * The four buttons in `Settings → General → Lifecycle` do not share an
  * authorization story, and the console used to render them as if they did:
  *
- * - `pause` / `resume` are `CompanyAuth` routes. A person signed in with a
- *   magic link reaches them, which is the whole point — this is the operator's
- *   reversible stop.
+ * - `pause` / `resume` are `CompanyAuth` routes gated by `AdminScopedCompany`:
+ *   a person signed in with a magic link reaches them only when their role on
+ *   this company is `admin` — an ordinary member is refused with `403`.
  * - `suspend` / `archive` are `PlatformScope` routes. That extractor resolves
  *   through `resolve_claims`, which cannot return a human, so a session cookie
  *   can never reach them *whatever it contains*. The console only ever holds
@@ -49,15 +49,28 @@ export interface LifecycleAffordances {
    * `Resume` there is the same dishonesty as `Archive`, one layer deeper.
    */
   explainPlatformSuspended: boolean;
+  /**
+   * Whether to explain that pause and resume need admin authority here.
+   *
+   * A signed-in member reaches the same routes as an admin — `AdminScopedCompany`
+   * refuses them with `403`, it does not hide the route — so the console must
+   * withhold the button itself rather than let a click end in that toast.
+   */
+  explainAdminOnly: boolean;
   /** Whether the company is past the end of its lifecycle. */
   archived: boolean;
 }
 
 /**
  * @param lifecycle the host's `status.lifecycle` (or the optimistic pending one)
+ * @param admin whether the signed-in caller holds the `admin` role on this company
  * @param platform whether this client carries a platform bearer
  */
-export function lifecycleAffordances(lifecycle: string, platform: boolean): LifecycleAffordances {
+export function lifecycleAffordances(
+  lifecycle: string,
+  admin: boolean,
+  platform: boolean,
+): LifecycleAffordances {
   const archived = lifecycle === "archived";
   const suspended = lifecycle === "suspended";
   if (archived) {
@@ -65,20 +78,25 @@ export function lifecycleAffordances(lifecycle: string, platform: boolean): Life
       actions: [],
       explainPlatformOnly: false,
       explainPlatformSuspended: false,
+      explainAdminOnly: false,
       archived: true,
     };
   }
 
+  const authorized = admin || platform;
   const actions: LifecycleAction[] = [];
-  if (lifecycle === "running") actions.push("pause");
-  // A paused company is anyone's to restart; a suspended one is the platform's.
-  if (lifecycle === "paused" || (suspended && platform)) actions.push("resume");
+  if (authorized) {
+    if (lifecycle === "running") actions.push("pause");
+    // A paused company is any admin's to restart; a suspended one is the platform's.
+    if (lifecycle === "paused" || (suspended && platform)) actions.push("resume");
+  }
   if (platform) actions.push("suspend", "archive");
 
   return {
     actions,
-    explainPlatformOnly: !platform,
-    explainPlatformSuspended: suspended && !platform,
+    explainPlatformOnly: authorized && !platform,
+    explainPlatformSuspended: authorized && suspended && !platform,
+    explainAdminOnly: !authorized,
     archived: false,
   };
 }
