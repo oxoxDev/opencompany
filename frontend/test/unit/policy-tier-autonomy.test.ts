@@ -110,7 +110,7 @@ afterEach(async () => {
 
 async function mount(client: OpenCompanyClient) {
   await act(async () => {
-    root.render(createElement(PolicySettings, { client, company: "acme" }));
+    root.render(createElement(PolicySettings, { client, company: "acme", canManage: true }));
     await Promise.resolve();
   });
 }
@@ -290,7 +290,7 @@ describe("changing the autonomy tier", () => {
     // choice was reviewed against "acme"'s policy and must not apply to the
     // new one.
     await act(async () => {
-      root.render(createElement(PolicySettings, { client, company: "other" }));
+      root.render(createElement(PolicySettings, { client, company: "other", canManage: true }));
       await Promise.resolve();
     });
     expect(document.querySelector("[data-testid=policy-tier-confirm]")).toBeNull();
@@ -313,7 +313,7 @@ describe("changing the autonomy tier", () => {
 
     // The scope moves to another company while the PUT is in flight.
     await act(async () => {
-      root.render(createElement(PolicySettings, { client, company: "other" }));
+      root.render(createElement(PolicySettings, { client, company: "other", canManage: true }));
       await Promise.resolve();
     });
 
@@ -637,7 +637,7 @@ describe("loading the policy", () => {
       },
     } as unknown as OpenCompanyClient;
     await act(async () => {
-      root.render(createElement(PolicySettings, { client: failing, company: "other" }));
+      root.render(createElement(PolicySettings, { client: failing, company: "other", canManage: true }));
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -663,12 +663,12 @@ describe("loading the policy", () => {
     } as unknown as OpenCompanyClient;
 
     await act(async () => {
-      root.render(createElement(PolicySettings, { client, company: "acme" }));
+      root.render(createElement(PolicySettings, { client, company: "acme", canManage: true }));
       await Promise.resolve();
     });
     // Move to another company while "acme"'s read is still in flight.
     await act(async () => {
-      root.render(createElement(PolicySettings, { client, company: "other" }));
+      root.render(createElement(PolicySettings, { client, company: "other", canManage: true }));
       await Promise.resolve();
     });
 
@@ -712,7 +712,7 @@ describe("loading the policy", () => {
     } as unknown as OpenCompanyClient;
 
     await act(async () => {
-      root.render(createElement(PolicySettings, { client, company: "acme" }));
+      root.render(createElement(PolicySettings, { client, company: "acme", canManage: true }));
       await Promise.resolve();
     });
     await act(async () => {
@@ -725,7 +725,7 @@ describe("loading the policy", () => {
 
     // The operator switches companies while the save is still pending.
     await act(async () => {
-      root.render(createElement(PolicySettings, { client, company: "other" }));
+      root.render(createElement(PolicySettings, { client, company: "other", canManage: true }));
       await Promise.resolve();
     });
 
@@ -769,7 +769,7 @@ describe("loading the policy", () => {
     } as unknown as OpenCompanyClient;
 
     await act(async () => {
-      root.render(createElement(PolicySettings, { client, company: "acme" }));
+      root.render(createElement(PolicySettings, { client, company: "acme", canManage: true }));
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -782,7 +782,7 @@ describe("loading the policy", () => {
         .click();
     });
     await act(async () => {
-      root.render(createElement(PolicySettings, { client, company: "other" }));
+      root.render(createElement(PolicySettings, { client, company: "other", canManage: true }));
       await Promise.resolve();
     });
 

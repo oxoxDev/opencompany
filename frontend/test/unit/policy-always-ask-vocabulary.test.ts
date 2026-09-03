@@ -137,7 +137,7 @@ afterEach(async () => {
 
 async function mount(client: OpenCompanyClient) {
   await act(async () => {
-    root.render(createElement(PolicySettings, { client, company: "acme" }));
+    root.render(createElement(PolicySettings, { client, company: "acme", canManage: true }));
   });
 }
 
