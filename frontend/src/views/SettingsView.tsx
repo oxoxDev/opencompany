@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { me as fetchMe } from "@/api/auth";
+import { me as fetchMe, type UserRole } from "@/api/auth";
 import type { LifecycleAction, OpenCompanyClient } from "@/api/client";
 import { memoryEngine, type MemoryEngineState } from "@/api/memory";
 import { ApiError } from "@/api/types";
@@ -289,23 +289,26 @@ export function LifecycleControls({
   const state = pending ?? feed.status.lifecycle;
 
   /**
-   * Whether the signed-in caller holds the `admin` role on this company.
+   * The signed-in caller's role, or `null` when the console found no session.
    *
-   * Resolved the way every other admin-gated view resolves it (`HostingView`,
-   * `TeamView`, ...): defaults closed so an unresolved role never renders an
-   * enabled Pause/Resume, and a failed read is treated as non-admin.
+   * `null` is not "non-admin" — `resolve_principal` prefers a resolved
+   * session over a platform bearer whenever both are present, so whether a
+   * session exists at all changes which credential `pause` / `resume`
+   * actually authorize against. Defaults to `null` so an unresolved read
+   * never renders an enabled Pause/Resume, matching the closed-by-default
+   * pattern every other admin-gated view uses (`HostingView`, `TeamView`, ...).
    */
-  const [isAdmin, setIsAdmin] = useState(false);
+  const [session, setSession] = useState<UserRole | null>(null);
   useEffect(() => {
     let live = true;
     void (async () => {
-      let admin = false;
+      let role: UserRole | null = null;
       try {
-        admin = (await fetchMe(client, company)).role === "admin";
+        role = (await fetchMe(client, company)).role;
       } catch {
-        // No user plane on this host, or not signed in — treat as non-admin.
+        // No user plane on this host, or not signed in — no session.
       }
-      if (live) setIsAdmin(admin);
+      if (live) setSession(role);
     })();
     return () => {
       live = false;
@@ -336,7 +339,7 @@ export function LifecycleControls({
 
   const platform = client.carriesPlatformBearer;
   const { actions, explainPlatformOnly, explainPlatformSuspended, explainAdminOnly, archived } =
-    lifecycleAffordances(state, isAdmin, platform);
+    lifecycleAffordances(state, session, platform);
   const offers = (action: LifecycleAction) => actions.includes(action);
 
   return (

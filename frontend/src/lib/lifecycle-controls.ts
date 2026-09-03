@@ -1,3 +1,4 @@
+import type { UserRole } from "@/api/auth";
 import type { LifecycleAction } from "@/api/client";
 
 /**
@@ -27,6 +28,13 @@ import type { LifecycleAction } from "@/api/client";
  * That residue is deliberate: a wrong-scope token is a **configuration**
  * mistake an operator can fix, whereas a session cookie is refused **by
  * construction**, and only the second one is worth hiding a button over.
+ *
+ * `pause` / `resume` resolve through `resolve_principal`, which prefers a
+ * resolved session over a bearer whenever both are present — a console that
+ * sends both (`OpenCompanyClient` does) reaches those routes as the signed-in
+ * person, not the platform, and a bearer only decides them when no session
+ * was found at all. `suspend` / `archive` resolve through `resolve_claims`,
+ * which never looks at a session, so `platform` alone still governs them.
  */
 export interface LifecycleAffordances {
   /** The actions whose buttons may be rendered, in display order. */
@@ -63,12 +71,12 @@ export interface LifecycleAffordances {
 
 /**
  * @param lifecycle the host's `status.lifecycle` (or the optimistic pending one)
- * @param admin whether the signed-in caller holds the `admin` role on this company
+ * @param session the signed-in caller's role, or `null` when the console found no session
  * @param platform whether this client carries a platform bearer
  */
 export function lifecycleAffordances(
   lifecycle: string,
-  admin: boolean,
+  session: UserRole | null,
   platform: boolean,
 ): LifecycleAffordances {
   const archived = lifecycle === "archived";
@@ -83,19 +91,24 @@ export function lifecycleAffordances(
     };
   }
 
-  const authorized = admin || platform;
+  // Only decides `pause` / `resume` (and resume's own suspended-lift check),
+  // which mirror `resolve_principal`'s session-over-bearer precedence — a
+  // bearer counts there only once a session has been ruled out.
+  const effectivePlatform = platform && session === null;
+  const authorized = session === "admin" || effectivePlatform;
   const actions: LifecycleAction[] = [];
   if (authorized) {
     if (lifecycle === "running") actions.push("pause");
     // A paused company is any admin's to restart; a suspended one is the platform's.
-    if (lifecycle === "paused" || (suspended && platform)) actions.push("resume");
+    if (lifecycle === "paused" || (suspended && effectivePlatform)) actions.push("resume");
   }
+  // `suspend` / `archive` never look at a session, so the raw bearer decides.
   if (platform) actions.push("suspend", "archive");
 
   return {
     actions,
     explainPlatformOnly: authorized && !platform,
-    explainPlatformSuspended: authorized && suspended && !platform,
+    explainPlatformSuspended: authorized && suspended && !effectivePlatform,
     explainAdminOnly: !authorized,
     archived: false,
   };

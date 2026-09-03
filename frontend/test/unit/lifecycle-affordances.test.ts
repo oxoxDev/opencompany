@@ -68,7 +68,7 @@ describe("what the console knows about its own credential", () => {
 describe("a console without a platform bearer, held by a member", () => {
   it("never offers suspend or archive, in any lifecycle", () => {
     for (const state of ["running", "paused", "suspended"]) {
-      const { actions } = lifecycleAffordances(state, false, false);
+      const { actions } = lifecycleAffordances(state, "member", false);
       expect(actions).not.toContain("suspend");
       expect(actions).not.toContain("archive");
     }
@@ -78,15 +78,15 @@ describe("a console without a platform bearer, held by a member", () => {
     // The server-side fix: `pause` is `AdminScopedCompany`, so a member's
     // session reaches the route and is refused with `403`. A member must
     // never see a button whose only outcome is that toast.
-    expect(lifecycleAffordances("running", false, false).actions).toEqual([]);
+    expect(lifecycleAffordances("running", "member", false).actions).toEqual([]);
   });
 
   it("withholds resume on a paused company for the same reason", () => {
-    expect(lifecycleAffordances("paused", false, false).actions).toEqual([]);
+    expect(lifecycleAffordances("paused", "member", false).actions).toEqual([]);
   });
 
   it("explains that pause/resume need admin authority, not the platform-only reason", () => {
-    const shown = lifecycleAffordances("running", false, false);
+    const shown = lifecycleAffordances("running", "member", false);
     expect(shown.explainAdminOnly).toBe(true);
     expect(shown.explainPlatformOnly).toBe(false);
   });
@@ -97,46 +97,83 @@ describe("a console without a platform bearer, held by an admin", () => {
     // The point of the fix is not to empty the card for everyone. `pause` is
     // reachable by an admin's session and is the operator's real, reversible
     // stop.
-    expect(lifecycleAffordances("running", true, false).actions).toEqual(["pause"]);
+    expect(lifecycleAffordances("running", "admin", false).actions).toEqual(["pause"]);
   });
 
   it("still offers resume on a paused company", () => {
-    expect(lifecycleAffordances("paused", true, false).actions).toEqual(["resume"]);
+    expect(lifecycleAffordances("paused", "admin", false).actions).toEqual(["resume"]);
   });
 
   it("withholds resume on a platform-suspended company, and says why", () => {
     // `resume` is reachable by an admin session, but the handler refuses a
     // non-platform caller specifically when the lifecycle is `suspended`,
     // because that state is a platform-forced pause.
-    const { actions, explainPlatformSuspended } = lifecycleAffordances("suspended", true, false);
+    const { actions, explainPlatformSuspended } = lifecycleAffordances(
+      "suspended",
+      "admin",
+      false,
+    );
     expect(actions).toEqual([]);
     expect(explainPlatformSuspended).toBe(true);
   });
 
   it("explains suspend/archive are withheld rather than dropping them silently", () => {
-    const shown = lifecycleAffordances("running", true, false);
+    const shown = lifecycleAffordances("running", "admin", false);
     expect(shown.explainPlatformOnly).toBe(true);
     expect(shown.explainAdminOnly).toBe(false);
   });
 });
 
-describe("a console holding a platform bearer", () => {
-  it("offers suspend and archive regardless of the member/admin role", () => {
-    for (const admin of [false, true]) {
-      const { actions, explainPlatformOnly, explainAdminOnly } = lifecycleAffordances(
-        "running",
-        admin,
-        true,
-      );
-      expect(actions).toEqual(["pause", "suspend", "archive"]);
-      expect(explainPlatformOnly).toBe(false);
-      expect(explainAdminOnly).toBe(false);
-    }
+describe("a console holding only a platform bearer (no session at all)", () => {
+  it("offers pause plus suspend and archive", () => {
+    // With no session to prefer, `resolve_principal` falls through to the
+    // bearer, which reaches `AdminScopedCompany` as the machine principal.
+    const { actions, explainPlatformOnly, explainAdminOnly } = lifecycleAffordances(
+      "running",
+      null,
+      true,
+    );
+    expect(actions).toEqual(["pause", "suspend", "archive"]);
+    expect(explainPlatformOnly).toBe(false);
+    expect(explainAdminOnly).toBe(false);
   });
 
   it("offers resume on a suspended company, because it can lift one", () => {
-    expect(lifecycleAffordances("suspended", false, true).actions).toContain("resume");
-    expect(lifecycleAffordances("suspended", false, true).explainPlatformSuspended).toBe(false);
+    expect(lifecycleAffordances("suspended", null, true).actions).toContain("resume");
+    expect(lifecycleAffordances("suspended", null, true).explainPlatformSuspended).toBe(false);
+  });
+});
+
+describe("a console carrying both a platform bearer and a member session", () => {
+  // The console always sends both when it has them (`OpenCompanyClient`), and
+  // `resolve_principal` prefers the resolved session over the bearer whenever
+  // one exists — so this caller reaches `pause` / `resume` as the member, not
+  // the platform, and is refused exactly like the member-only case above.
+  it("withholds pause and resume, same as a member with no bearer at all", () => {
+    expect(lifecycleAffordances("running", "member", true).actions).toEqual([]);
+    expect(lifecycleAffordances("paused", "member", true).actions).toEqual([]);
+  });
+
+  it("explains the admin-authority reason, not the platform-only one", () => {
+    const shown = lifecycleAffordances("running", "member", true);
+    expect(shown.explainAdminOnly).toBe(true);
+    expect(shown.explainPlatformOnly).toBe(false);
+  });
+
+  it("still offers suspend and archive — those never look at the session", () => {
+    expect(lifecycleAffordances("running", "member", true).actions).toEqual([
+      "suspend",
+      "archive",
+    ]);
+  });
+
+  it("withholds resume on a platform-suspended company even for an admin session", () => {
+    // The session wins here too: `resume`'s own suspended-lift check
+    // re-resolves through the same `resolve_principal`, so an admin session
+    // alongside a bearer is still not the platform caller that check wants.
+    const { actions, explainPlatformSuspended } = lifecycleAffordances("suspended", "admin", true);
+    expect(actions).not.toContain("resume");
+    expect(explainPlatformSuspended).toBe(true);
   });
 });
 
@@ -145,9 +182,9 @@ describe("an archived company", () => {
     // Terminal: the host removes it from the registry. Even a platform bearer
     // has no transition left, and the banners would be noise next to the
     // "This company is archived." line the card already shows.
-    for (const admin of [false, true]) {
+    for (const session of ["admin", "member", null] as const) {
       for (const platform of [false, true]) {
-        const shown = lifecycleAffordances("archived", admin, platform);
+        const shown = lifecycleAffordances("archived", session, platform);
         expect(shown.actions).toEqual([]);
         expect(shown.archived).toBe(true);
         expect(shown.explainPlatformOnly).toBe(false);
@@ -162,11 +199,11 @@ describe("a lifecycle string the console does not know", () => {
   it("offers no transition rather than guessing one", () => {
     // A host newer than this bundle can report a state that is not in the set.
     // Showing nothing is recoverable; showing Archive is not.
-    expect(lifecycleAffordances("provisioning", true, true).actions).toEqual([
+    expect(lifecycleAffordances("provisioning", null, true).actions).toEqual([
       "suspend",
       "archive",
     ]);
-    expect(lifecycleAffordances("provisioning", true, false).actions).toEqual([]);
-    expect(lifecycleAffordances("provisioning", false, false).actions).toEqual([]);
+    expect(lifecycleAffordances("provisioning", "admin", false).actions).toEqual([]);
+    expect(lifecycleAffordances("provisioning", "member", false).actions).toEqual([]);
   });
 });
