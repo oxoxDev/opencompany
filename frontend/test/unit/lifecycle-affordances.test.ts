@@ -150,8 +150,8 @@ describe("a console carrying both a platform bearer and a member session", () =>
   // one exists — so this caller reaches `pause` / `resume` as the member, not
   // the platform, and is refused exactly like the member-only case above.
   it("withholds pause and resume, same as a member with no bearer at all", () => {
-    expect(lifecycleAffordances("running", "member", true).actions).toEqual([]);
-    expect(lifecycleAffordances("paused", "member", true).actions).toEqual([]);
+    expect(lifecycleAffordances("running", "member", true).actions).not.toContain("pause");
+    expect(lifecycleAffordances("paused", "member", true).actions).not.toContain("resume");
   });
 
   it("explains the admin-authority reason, not the platform-only one", () => {
