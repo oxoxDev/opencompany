@@ -26,7 +26,7 @@ opencompany serve --company companies/agentic_marketing_agency
 | `--company <DIR>` | A company to load at boot — a manifest file or a directory containing one. **Repeatable** for multi-company hosting. |
 | `--home <DIR>` | OpenCompany home holding company bundles (`<home>/companies/<slug>`). Falls back to `OPENCOMPANY_DATA_DIR`, then to `$HOME/.opencompany`. |
 | `--discoverable` | Opt every loaded company into going public on [tiny.place](../overview/tiny-place.md), regardless of each manifest's `[place].discoverable`. Needs the `tinyplace` feature to reach the network. |
-| `--openhuman-root <PATH>` | OpenHuman checkout to use. `/spec` reports whether one is configured, not where it is. |
+| `--openhuman-root <PATH>` | Records that an OpenHuman checkout is configured. Reporting only: `/spec` surfaces it as `openhuman_configured` (a boolean, never the path), and nothing else reads it — it does not choose a checkout to run. To launch one, see [`open-human`](#open-human), which takes its own `--root`. |
 
 ## `check`
 
@@ -52,8 +52,9 @@ opencompany doctor --json
 
 ## `spec`
 
-Print a JSON runtime specification. Accepts `--openhuman-root <PATH>`, reported as
-`openhuman_configured` rather than as a path.
+Print a JSON runtime specification. Accepts `--openhuman-root <PATH>`, which is
+reported as `openhuman_configured` — a boolean, never the path — and is not used
+to run anything.
 
 ## `issue-password`
 
