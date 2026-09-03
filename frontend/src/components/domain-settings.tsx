@@ -554,13 +554,11 @@ function SmtpCard({ client, company, canManage }: Props) {
             <Loader2 className="size-4 animate-spin" /> Loading email settings…
           </p>
         ) : !canManage ? (
-          /* The whole form is withheld, not disabled — every field on it is
-             part of one credential, and the last of them is a password. Both
-             writes behind it (`save` and even `test`, which sends through the
-             stored configuration) are `AdminScopedCompany`, so there is nothing
-             here a member could do with the boxes except fill them in and be
-             refused. What remains is the fact a member has a reason to want:
-             whether this company can send mail at all. */
+          // The mutations are withheld (`save`, `test`, and the password
+          // field), not the routing: `GET …/smtp` is member-readable and
+          // never carries a password by construction (`docs/modules/server/
+          // authority.md`), so a member keeps the same read the admin form
+          // shows them, just not editable.
           <>
             <AdminOnlyNotice
               testId="smtp-read-only"
@@ -569,11 +567,30 @@ function SmtpCard({ client, company, canManage }: Props) {
               These are the credentials for the company&rsquo;s own outbound mail
               server, so an admin holds them.
             </AdminOnlyNotice>
-            <p className="text-sm text-muted-foreground" data-testid="smtp-member-summary">
-              {status?.configured
-                ? "An outbound mail server is configured for this company."
-                : "No outbound mail server is configured, so this company sends on the host's default."}
-            </p>
+            {status?.configured ? (
+              <div className="grid gap-4 sm:grid-cols-2" data-testid="smtp-routing">
+                <ReadOnlyField label="SMTP host" id="smtp-host" value={status.host} />
+                <div className="grid grid-cols-2 gap-3">
+                  <ReadOnlyField
+                    label="Port"
+                    id="smtp-port"
+                    value={status.port === undefined ? undefined : String(status.port)}
+                  />
+                  <ReadOnlyField
+                    label="Security"
+                    id="smtp-security"
+                    value={status.security ? SECURITY_LABELS[status.security] : undefined}
+                  />
+                </div>
+                <ReadOnlyField label="Username" id="smtp-username" value={status.username} />
+                <ReadOnlyField label="From name" id="smtp-from-name" value={status.from_name} />
+                <ReadOnlyField label="From email" id="smtp-from-email" value={status.from_email} />
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground" data-testid="smtp-member-summary">
+                No outbound mail server is configured, so this company sends on the host's default.
+              </p>
+            )}
           </>
         ) : (
           <>
@@ -715,6 +732,18 @@ function Field({
       <Label htmlFor={id}>{label}</Label>
       {children}
       {hint ? <p className="text-xs text-muted-foreground">{hint}</p> : null}
+    </div>
+  );
+}
+
+/** A field a member reads but cannot edit. Same `id` an editable form uses for it. */
+function ReadOnlyField({ label, id, value }: { label: string; id: string; value?: string }) {
+  return (
+    <div className="grid gap-2">
+      <Label htmlFor={id}>{label}</Label>
+      <p id={id} data-testid={id} className="text-sm">
+        {value || <span className="text-muted-foreground">Not set</span>}
+      </p>
     </div>
   );
 }
