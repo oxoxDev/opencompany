@@ -304,6 +304,31 @@ pub async fn record(
     }
 
     let fields = normalize_fields(fields);
+    // Every check below judges the row the write produces, not the event that
+    // produces it: a ledger write is a merge, so an event supplying only the
+    // fields that changed is complete whenever the row already holds the rest.
+    let existing = entries(ctx, spec).await?;
+    let prospective = existing.preview(id, &fields);
+
+    let missing = engine::missing_required(&prospective, spec);
+    if !missing.is_empty() {
+        let declared: Vec<&str> = spec
+            .fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect();
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "recording `{id}` on `{}` leaves {} unset, which this ledger requires. The row would \
+             not be readable back — it would be reported under the ledger's unreadable rows \
+             instead of appearing in its section. Send {} in this same call. `{}` declares: {}.",
+            spec.slug,
+            name_list(&missing),
+            name_list(&missing),
+            spec.slug,
+            name_list(&declared),
+        )));
+    }
+
     if let Some(field) = spec.status_field()
         && let Some(Some(status)) = fields.get(&field.name)
     {
@@ -321,33 +346,19 @@ pub async fn record(
                     .join(", ")
             )));
         }
-        // The reason may arrive on this event or already be on the row, so the
-        // check runs against the merged result rather than against the event —
-        // otherwise closing a row that already explained itself would be
-        // refused for saying it twice.
+        // The reason may arrive on this event or already be on the row, which
+        // the merged row above already accounts for — otherwise closing a row
+        // that already explained itself would be refused for saying it twice.
         if spec
             .status(status)
             .is_some_and(|declared| declared.needs_reason)
+            && prospective.get(REASON_FIELD).trim().is_empty()
         {
-            let arriving = fields
-                .get(REASON_FIELD)
-                .and_then(|value| value.as_deref())
-                .unwrap_or_default();
-            if arriving.trim().is_empty() {
-                let existing = entries(ctx, spec).await?;
-                let held = existing
-                    .find(id)
-                    .map(|entry| entry.get(REASON_FIELD).to_string())
-                    .unwrap_or_default();
-                if held.trim().is_empty() {
-                    return Err(OpenCompanyError::InvalidRequest(format!(
-                        "closing `{id}` as `{status}` needs a `{REASON_FIELD}`. A row that does \
-                         not say why it closed is worth nothing to whoever reads it next — and \
-                         'did not work' costs the same to write as the reason that would have \
-                         saved them."
-                    )));
-                }
-            }
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "closing `{id}` as `{status}` needs a `{REASON_FIELD}`. A row that does not say \
+                 why it closed is worth nothing to whoever reads it next — and 'did not work' \
+                 costs the same to write as the reason that would have saved them."
+            )));
         }
     }
 
@@ -413,6 +424,17 @@ pub async fn close(
             spec.slug
         )));
     };
+    // Closing is an amendment to a row that exists: an id naming none would
+    // otherwise open one, carrying nothing but the status that closed it.
+    if entries(ctx, spec).await?.find(id).is_none() {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "there is no `{}` on `{}` to close. Check the id — closing a row that does not exist \
+             would open one, closed and empty.",
+            id.trim(),
+            spec.slug
+        )));
+    }
+
     let mut fields = BTreeMap::new();
     fields.insert(field.name.clone(), Some(status.trim().to_string()));
     if !reason.trim().is_empty() {
@@ -546,6 +568,15 @@ fn refuse_non_human(author: &LedgerAuthor, what: &str) -> Result<()> {
 }
 
 /// Trims and caps every value, dropping keys that are only whitespace.
+/// Backtick-quoted names, comma separated, for an error a caller has to act on.
+fn name_list(names: &[&str]) -> String {
+    names
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn normalize_fields(fields: BTreeMap<String, Option<String>>) -> BTreeMap<String, Option<String>> {
     fields
         .into_iter()
