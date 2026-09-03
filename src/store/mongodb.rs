@@ -118,6 +118,13 @@ fn find_limit(limit: usize) -> FindLimit {
     }
 }
 
+/// Saturates a `u64` byte cap to Mongo's bindable `i64` range, so a cap
+/// above `i64::MAX` compares as effectively unlimited instead of wrapping
+/// negative.
+fn clamp_max_bytes(max_bytes: u64) -> i64 {
+    max_bytes.min(i64::MAX as u64) as i64
+}
+
 fn get_str(doc: &Document, key: &str) -> Result<String> {
     doc.get_str(key)
         .map(str::to_owned)
@@ -3791,7 +3798,7 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
                     "node_json": 1,
                     "content_len": len_bytes.clone(),
                     "content": {"$cond": [
-                        {"$lte": [len_bytes, max_bytes as i64]},
+                        {"$lte": [len_bytes, clamp_max_bytes(max_bytes)]},
                         {"$ifNull": ["$content", ""]},
                         "",
                     ]},
