@@ -42,6 +42,29 @@ import type { OpenCompanyClient } from "@/api/client";
  * resolves at all — even to a member — still decides the answer here too.
  */
 export function useCanManage(client: OpenCompanyClient, company: string | null): boolean {
+  return useResolvedManage(client, company, client.carriesPlatformBearer);
+}
+
+/**
+ * Whether the signed-in viewer may set this company's policy — `PUT …/policy`
+ * (`set_policy`, `policy.rs`), which calls `require_admin` straight off the
+ * request headers rather than going through `AdminScopedCompany`. That
+ * resolves only a human session and refuses a bearer with no session behind
+ * it as unauthenticated, unlike the hosting/search/domain/SMTP writes
+ * {@link useCanManage} gates, which `AdminScopedCompany` admits the platform
+ * bearer for directly. Offering the policy controls to a bearer-only client
+ * would invite a request `require_admin` can only 401.
+ */
+export function useCanManagePolicy(client: OpenCompanyClient, company: string | null): boolean {
+  return useResolvedManage(client, company, false);
+}
+
+/** Shared resolution: a confirmed human admin session, or `bearerDefault` when none resolves. */
+function useResolvedManage(
+  client: OpenCompanyClient,
+  company: string | null,
+  bearerDefault: boolean,
+): boolean {
   const [canManage, setCanManage] = useState(false);
 
   useEffect(() => {
@@ -51,19 +74,19 @@ export function useCanManage(client: OpenCompanyClient, company: string | null):
     // controls on a company this person may only be a member of.
     setCanManage(false);
     void (async () => {
-      let manage = client.carriesPlatformBearer;
+      let manage = bearerDefault;
       try {
         manage = (await fetchMe(client, company)).role === "admin";
       } catch {
-        // No session to resolve — `manage` keeps the platform-bearer default
-        // above, which is what the backend itself falls back to.
+        // No session to resolve — `manage` keeps the bearer default above,
+        // which is what the backend itself falls back to for this route.
       }
       if (live) setCanManage(manage);
     })();
     return () => {
       live = false;
     };
-  }, [client, company]);
+  }, [client, company, bearerDefault]);
 
   return canManage;
 }
