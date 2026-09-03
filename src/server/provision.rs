@@ -662,11 +662,27 @@ fn reason_is_budget(uri: &Uri) -> bool {
         .unwrap_or(false)
 }
 
-/// Applies a lifecycle transition to `to`, returning the fresh status.
+/// Applies a lifecycle transition to the company registered under `id`,
+/// returning the fresh status.
 async fn transition(state: &AppState, auth: &GqlAuth, id: &CompanyId, to: &str) -> Response {
     let Some(runtime) = state.registry().get(id) else {
         return not_found(id.as_ref());
     };
+    transition_runtime(&runtime, auth, to).await
+}
+
+/// Applies a lifecycle transition directly to an already-resolved `runtime`,
+/// returning the fresh status.
+///
+/// A caller holding an authorized runtime (e.g. [`AdminScopedCompany`]) must
+/// use this rather than [`transition`]: looking `id` back up in the registry
+/// can return a different runtime than the one authorization approved, if a
+/// rebuild swap lands in between.
+async fn transition_runtime(
+    runtime: &crate::runtime::CompanyRuntime,
+    auth: &GqlAuth,
+    to: &str,
+) -> Response {
     if let Err(err) = runtime.set_lifecycle(to, lifecycle_actor(auth)).await {
         return ApiError(err).into_response();
     }
@@ -678,46 +694,38 @@ async fn transition(state: &AppState, auth: &GqlAuth, id: &CompanyId, to: &str) 
 
 /// `POST /api/v1/companies/{id}/pause` — stop accepting work (admin-scoped).
 async fn pause(
-    _admin: AdminScopedCompany,
+    admin: AdminScopedCompany,
     crate::server::platform_auth::CompanyAuth(auth): crate::server::platform_auth::CompanyAuth,
     State(state): State<AppState>,
-    Path(id): Path<String>,
     uri: Uri,
 ) -> Response {
-    let id = CompanyId::new(id);
-    let response = transition(&state, &auth, &id, "paused").await;
+    let response = transition_runtime(&admin.runtime, &auth, "paused").await;
     // A budget-triggered pause emits the `budget.exhausted` webhook.
     if response.status() == StatusCode::OK && reason_is_budget(&uri) {
-        emit_budget_exhausted(&state, &id).await;
+        emit_budget_exhausted(&state, admin.id()).await;
     }
     response
 }
 
 /// `POST /api/v1/companies/{id}/resume` — resume accepting work (admin-scoped).
 async fn resume(
-    _admin: AdminScopedCompany,
+    admin: AdminScopedCompany,
     crate::server::platform_auth::CompanyAuth(auth): crate::server::platform_auth::CompanyAuth,
-    State(state): State<AppState>,
-    Path(id): Path<String>,
 ) -> Response {
-    let id = CompanyId::new(id);
     // `suspended` is a platform-forced pause (billing/abuse); only a
     // platform-scope caller may lift it. Neither an owner token nor a company's
     // own admin may resume a company the platform suspended.
     let platform = matches!(&auth, GqlAuth::Platform(c) if c.has_platform_scope());
     if !platform {
-        match state.registry().get(&id) {
-            Some(runtime) => match runtime.status().await {
-                Ok(status) if status.lifecycle == "suspended" => {
-                    return crate::server::platform_auth::forbidden();
-                }
-                Ok(_) => {}
-                Err(err) => return ApiError(err).into_response(),
-            },
-            None => return not_found(id.as_ref()),
+        match admin.runtime.status().await {
+            Ok(status) if status.lifecycle == "suspended" => {
+                return crate::server::platform_auth::forbidden();
+            }
+            Ok(_) => {}
+            Err(err) => return ApiError(err).into_response(),
         }
     }
-    transition(&state, &auth, &id, "running").await
+    transition_runtime(&admin.runtime, &auth, "running").await
 }
 
 // ---------------------------------------------------------------------------
