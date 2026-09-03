@@ -301,6 +301,11 @@ including a 17 MiB case that proves the BSON cap is not in play. Over HTTP:
 decode as UTF-8 is stored as a note instead, so an uploaded `.md` keeps its
 editor and backlinks.
 
+The blob route is the download of any **file** in the tree, so a prose note is
+served from its body under the same neutralised headers — a note has no stored
+digest, so it carries no `ETag`, and its `Content-Length` is the body's byte
+length. A folder and an id naming nothing 404 identically.
+
 An upload is still bounded by the company's `max_blob_mb` before that
 text/binary choice (#665). The bound is a property of bytes entering through
 the upload route, not their eventual representation; ordinary text writes stay
