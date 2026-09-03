@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { me as fetchMe } from "@/api/auth";
 import type { LifecycleAction, OpenCompanyClient } from "@/api/client";
 import { memoryEngine, type MemoryEngineState } from "@/api/memory";
 import { ApiError } from "@/api/types";
@@ -287,6 +288,30 @@ export function LifecycleControls({
   const [pending, setPending] = useState<string | null>(null);
   const state = pending ?? feed.status.lifecycle;
 
+  /**
+   * Whether the signed-in caller holds the `admin` role on this company.
+   *
+   * Resolved the way every other admin-gated view resolves it (`HostingView`,
+   * `TeamView`, ...): defaults closed so an unresolved role never renders an
+   * enabled Pause/Resume, and a failed read is treated as non-admin.
+   */
+  const [isAdmin, setIsAdmin] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      let admin = false;
+      try {
+        admin = (await fetchMe(client, company)).role === "admin";
+      } catch {
+        // No user plane on this host, or not signed in — treat as non-admin.
+      }
+      if (live) setIsAdmin(admin);
+    })();
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
+
   async function run(action: LifecycleAction) {
     if (busy) return;
     setBusy(true);
@@ -310,8 +335,8 @@ export function LifecycleControls({
   }
 
   const platform = client.carriesPlatformBearer;
-  const { actions, explainPlatformOnly, explainPlatformSuspended, archived } =
-    lifecycleAffordances(state, platform);
+  const { actions, explainPlatformOnly, explainPlatformSuspended, explainAdminOnly, archived } =
+    lifecycleAffordances(state, isAdmin, platform);
   const offers = (action: LifecycleAction) => actions.includes(action);
 
   return (
@@ -348,6 +373,15 @@ export function LifecycleControls({
             <AlertDescription>
               The platform suspended this company. Only the platform can lift a suspension — an
               admin here cannot resume it, so there is no Resume button to offer.
+            </AlertDescription>
+          </Alert>
+        )}
+        {explainAdminOnly && (
+          <Alert data-testid="lifecycle-admin-only">
+            <TriangleAlert className="size-4" />
+            <AlertDescription>
+              Pausing and resuming a company need admin authority here — ask one of this
+              company&rsquo;s admins, since a member&rsquo;s session cannot reach these controls.
             </AlertDescription>
           </Alert>
         )}
