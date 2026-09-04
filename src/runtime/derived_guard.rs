@@ -245,6 +245,14 @@ impl WorkspaceStore for DerivedGuardWorkspace {
         self.inner.read_bytes(company, id).await
     }
 
+    async fn read_text_stream(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> Result<Option<(WorkspaceNode, BlobStream)>> {
+        self.inner.read_text_stream(company, id).await
+    }
+
     async fn rename_move(
         &self,
         company: &CompanyId,

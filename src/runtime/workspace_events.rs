@@ -252,6 +252,14 @@ impl WorkspaceStore for WorkspaceAnnouncer {
         self.inner.read_bytes(company, id).await
     }
 
+    async fn read_text_stream(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+        self.inner.read_text_stream(company, id).await
+    }
+
     /// Renames/moves through, then announces `updated` — unless nothing moved.
     ///
     /// **A rename that changes nothing says nothing.** The port takes `None` for
