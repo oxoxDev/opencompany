@@ -46,8 +46,9 @@ export async function runQuery<T>(
   client: OpenCompanyClient,
   document: string,
   variables?: Record<string, unknown>,
+  company?: string | null,
 ): Promise<T> {
-  const response = await client.graphqlRequest(document, variables);
+  const response = await client.graphqlRequest(document, variables, company);
   const errors = Array.isArray(response?.errors)
     ? (response.errors as GraphQLErrorEntry[])
     : [];
