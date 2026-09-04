@@ -27,6 +27,7 @@ const ME: Me = {
   role: "member",
   company: "alpha",
   hasPassword: false,
+  mustChangePassword: false,
 };
 
 /** A client whose `/auth/logout` resolves or rejects on demand. */
