@@ -3926,6 +3926,55 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         Ok(Some((node, crate::ports::workspace::one_chunk(blob))))
     }
 
+    /// Bounded, not streaming — one chunk, the whole body.
+    ///
+    /// The process holds a single [`rusqlite::Connection`] behind a
+    /// `std::sync::Mutex` for its whole lifetime (see [`Self::conn`]). A
+    /// `Blob` handle opened via `blob_open` borrows that connection, so a
+    /// stream built on it would not be [`Send`] and would have to hold the
+    /// mutex across every `.await` a slow client forces — stalling every
+    /// other query in the process for as long as the download takes. The
+    /// column is read out from under the lock instead, exactly as
+    /// [`Self::read_bytes`] already does for the binary side.
+    ///
+    /// Re-reading it in `substr` chunks was also rejected: SQLite is
+    /// in-process, so each call re-materializes the column from the page
+    /// cache anyway, making a chunked read O(n²) in the body's length for no
+    /// reduction in peak memory — the one thing chunking would need to buy to
+    /// be worth the extra round trips.
+    async fn read_text_stream(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> Result<
+        Option<(
+            crate::ports::workspace::WorkspaceNode,
+            crate::ports::workspace::BlobStream,
+        )>,
+    > {
+        let conn = self.conn();
+        let row: Option<(String, String)> = conn
+            .query_row(
+                "SELECT node_json, content FROM workspace_nodes WHERE company_id = ?1 AND id = ?2",
+                params![company.as_ref(), id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        drop(conn);
+        let Some((node_json, content)) = row else {
+            return Ok(None);
+        };
+        let node: crate::ports::workspace::WorkspaceNode = serde_json::from_str(&node_json)?;
+        if node.kind != crate::ports::workspace::NodeKind::File || node.is_binary() {
+            return Ok(None);
+        }
+        Ok(Some((
+            node,
+            crate::ports::workspace::one_chunk(content.into_bytes()),
+        )))
+    }
+
     async fn rename_move(
         &self,
         company: &CompanyId,
@@ -4806,6 +4855,16 @@ mod test {
     #[tokio::test]
     async fn conformance_workspace_read_capped() {
         conformance::assert_workspace_read_capped(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_read_text_stream() {
+        conformance::assert_workspace_read_text_stream(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_read_text_stream_utf8_boundaries() {
+        conformance::assert_workspace_read_text_stream_utf8_boundaries(store()).await;
     }
 
     /// Issue #759: the folder-claim primitive, including the eight-way
