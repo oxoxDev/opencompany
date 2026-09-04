@@ -527,9 +527,13 @@ async fn search(
 /// `GET …/workspace/blob/{node_id}` — download a file's payload.
 ///
 /// The counterpart of [`read_file`], and the only way a file leaves the tree as
-/// a download. A binary node's body is streamed rather than buffered, so serving
-/// a 200 MiB video costs the process a chunk at a time; a prose note is served
-/// from its body, under the same neutralised headers.
+/// a download. Both halves stream rather than buffer — a binary node through
+/// [`read_bytes`](crate::ports::workspace::WorkspaceStore::read_bytes), a prose
+/// note through
+/// [`read_text_stream`](crate::ports::workspace::WorkspaceStore::read_text_stream)
+/// — so serving a 200 MiB video, or a note nobody expected to grow this large,
+/// costs the process a chunk at a time rather than its whole body at once. Both
+/// answer under the same neutralised headers.
 ///
 /// A folder and an id that names nothing 404 identically: telling them apart
 /// would leak which node ids exist to a caller that cannot read them anyway.
@@ -573,20 +577,19 @@ async fn read_blob(
             (node, stream, size)
         }
         None => {
-            let Some((node, content)) = company
+            // A prose node carries no stored length. Re-measuring it here
+            // would race the stream this already opens, so a note is served
+            // chunked rather than with a `Content-Length` that could go stale
+            // mid-transfer.
+            let Some((node, stream)) = company
                 .runtime
                 .workspace()
-                .read(company.id(), &node_id)
+                .read_text_stream(company.id(), &node_id)
                 .await?
             else {
                 return Err(missing());
             };
-            if node.kind != NodeKind::File || node.is_binary() {
-                return Err(missing());
-            }
-            let bytes = content.into_bytes();
-            let size = Some(bytes.len() as u64);
-            (node, crate::ports::workspace::one_chunk(bytes), size)
+            (node, stream, None)
         }
     };
     let serving = serving_for(node.mime.as_deref());
