@@ -4562,6 +4562,235 @@ pub async fn assert_workspace_read_capped(ws: Arc<dyn WorkspaceStore>) {
     );
 }
 
+/// Asserts [`WorkspaceStore::read_text_stream`]'s round-trip: the streamed
+/// chunks concatenate to exactly the body [`read`](WorkspaceStore::read)
+/// would hand back, and the three non-prose id shapes all answer `None` — the
+/// mirror [`read_bytes`](WorkspaceStore::read_bytes) draws from the binary
+/// side.
+///
+/// Registered for all three backends: the property under test is the port
+/// contract, not how any one backend happens to chunk.
+pub async fn assert_workspace_read_text_stream(ws: Arc<dyn WorkspaceStore>) {
+    let company = CompanyId::new("stream-co");
+    let operator = WorkspaceOrigin::Operator;
+    let node = |id: &str, name: &str, kind: NodeKind, mime: Option<&str>| WorkspaceNode {
+        id: id.to_string(),
+        name: name.to_string(),
+        kind,
+        parent_id: None,
+        updated_at_millis: now_millis(),
+        created_by: operator.clone(),
+        updated_by: operator.clone(),
+        mime: mime.map(str::to_string),
+        size: None,
+        sha256: None,
+        adopted: false,
+    };
+
+    let body = "a streaming note with some déjà vu and 中文 mixed in";
+    ws.create(
+        &company,
+        &node("stream-note", "note.md", NodeKind::File, None),
+        Some(body),
+    )
+    .await
+    .expect("create the note");
+
+    ws.create(
+        &company,
+        &node("stream-empty", "empty.md", NodeKind::File, None),
+        Some(""),
+    )
+    .await
+    .expect("create the empty note");
+
+    ws.create(
+        &company,
+        &node("stream-folder", "folder", NodeKind::Folder, None),
+        None,
+    )
+    .await
+    .expect("create the folder");
+
+    ws.create_binary(
+        &company,
+        &node(
+            "stream-blob",
+            "blob.bin",
+            NodeKind::File,
+            Some("application/octet-stream"),
+        ),
+        &[0xff, 0xfe, 0x00, 0x01],
+    )
+    .await
+    .expect("create the payload");
+
+    let (meta, stream) = ws
+        .read_text_stream(&company, "stream-note")
+        .await
+        .expect("read the note")
+        .expect("the note exists");
+    assert_eq!(meta.id, "stream-note");
+    assert_eq!(
+        drain(stream).await,
+        body.as_bytes(),
+        "the streamed chunks must concatenate to the exact stored body"
+    );
+
+    let (_, stream) = ws
+        .read_text_stream(&company, "stream-empty")
+        .await
+        .expect("read the empty note")
+        .expect("the empty note exists");
+    assert!(
+        drain(stream).await.is_empty(),
+        "an empty note streams as zero bytes"
+    );
+
+    assert!(
+        ws.read_text_stream(&company, "stream-folder")
+            .await
+            .expect("read a folder id")
+            .is_none(),
+        "a folder id must answer None, the mirror of read_bytes' folder case"
+    );
+    assert!(
+        ws.read_text_stream(&company, "stream-blob")
+            .await
+            .expect("read a binary id")
+            .is_none(),
+        "a binary node's id must answer None; read_bytes is the way to it"
+    );
+    assert!(
+        ws.read_text_stream(&company, "stream-missing")
+            .await
+            .expect("read a missing id")
+            .is_none(),
+        "an id naming nothing must answer None"
+    );
+
+    assert!(
+        ws.read_text_stream(&CompanyId::new("stream-other"), "stream-note")
+            .await
+            .expect("read across companies")
+            .is_none(),
+        "another company's node must not be readable"
+    );
+}
+
+/// Asserts [`WorkspaceStore::read_text_stream`] never trims or realigns a
+/// chunk to a UTF-8 character boundary.
+///
+/// The body repeats a 2-, 3- and 4-byte UTF-8 sequence (`é`, `中`, `😀`) back
+/// to back — 9 bytes per repeat, which shares no factor with the 4 KiB a
+/// streaming backend's default read buffer fills — densely enough that
+/// whatever byte offset a real chunk boundary falls on, it lands inside one
+/// of these characters rather than between two of them. That is what makes
+/// this a test of "does a chunk boundary ever land mid-codepoint, and if it
+/// does, does anything mangle it" rather than a test that happened to get
+/// lucky once. The repo's excerpt-truncation helpers — which find the
+/// largest valid prefix and discard the trailing partial codepoint — are
+/// exactly the wrong tool applied per chunk: correct for a capped preview,
+/// they would silently drop 1-3 bytes at every boundary here and corrupt the
+/// reassembled body. `read_text_stream` must never reach for them.
+///
+/// Registered for all three backends. sqlite and MongoDB answer in a single
+/// chunk, so no split is even possible there — which is the point: this
+/// pins the *contract* (concatenation is exact), and a single-chunk backend
+/// satisfies it trivially, while `fs`'s real streaming is where a
+/// misalignment could actually happen.
+pub async fn assert_workspace_read_text_stream_utf8_boundaries(ws: Arc<dyn WorkspaceStore>) {
+    let company = CompanyId::new("stream-utf8-co");
+    let operator = WorkspaceOrigin::Operator;
+
+    let body: String = "é中😀".repeat(2000);
+    assert!(
+        body.len() > 8192,
+        "the body must span more than two 4 KiB read buffers to exercise the boundary"
+    );
+
+    let node = WorkspaceNode {
+        id: "stream-utf8".to_string(),
+        name: "utf8.md".to_string(),
+        kind: NodeKind::File,
+        parent_id: None,
+        updated_at_millis: now_millis(),
+        created_by: operator.clone(),
+        updated_by: operator,
+        mime: None,
+        size: None,
+        sha256: None,
+        adopted: false,
+    };
+    ws.create(&company, &node, Some(&body))
+        .await
+        .expect("create the multi-byte note");
+
+    let (_, stream) = ws
+        .read_text_stream(&company, "stream-utf8")
+        .await
+        .expect("read the note")
+        .expect("the note exists");
+    assert_eq!(
+        drain(stream).await,
+        body.as_bytes(),
+        "chunk boundaries must never trim or realign a partial UTF-8 codepoint; \
+         read_text_stream hands back raw bytes, not character-aligned ones"
+    );
+}
+
+/// Asserts [`WorkspaceStore::read_text_stream`] actually **streams** rather
+/// than buffering the whole body before ever yielding a chunk.
+///
+/// Registered for the `fs` backend only. sqlite and MongoDB legitimately
+/// answer in one chunk — see the port docs — so asserting "more than one
+/// chunk" against them would not be pinning a gap, it would be an assertion
+/// that can never pass honestly.
+pub async fn assert_workspace_read_text_stream_multi_chunk(ws: Arc<dyn WorkspaceStore>) {
+    let company = CompanyId::new("stream-multi-co");
+    let operator = WorkspaceOrigin::Operator;
+    let body = "x".repeat(200_000);
+    let node = WorkspaceNode {
+        id: "stream-multi".to_string(),
+        name: "multi.md".to_string(),
+        kind: NodeKind::File,
+        parent_id: None,
+        updated_at_millis: now_millis(),
+        created_by: operator.clone(),
+        updated_by: operator,
+        mime: None,
+        size: None,
+        sha256: None,
+        adopted: false,
+    };
+    ws.create(&company, &node, Some(&body))
+        .await
+        .expect("create the large note");
+
+    let (_, mut stream) = ws
+        .read_text_stream(&company, "stream-multi")
+        .await
+        .expect("read the note")
+        .expect("the note exists");
+
+    let mut chunk_count = 0usize;
+    let mut collected = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.expect("a blob chunk must not fail");
+        chunk_count += 1;
+        collected.extend_from_slice(&chunk);
+    }
+    assert_eq!(
+        collected,
+        body.as_bytes(),
+        "the concatenated chunks must still equal the body exactly"
+    );
+    assert!(
+        chunk_count > 1,
+        "a 200 KB body must not arrive as a single buffered chunk; got {chunk_count}"
+    );
+}
+
 pub async fn assert_workspace_binary_store(ws: Arc<dyn WorkspaceStore>) {
     let alpha = CompanyId::new("bin-alpha");
     let beta = CompanyId::new("bin-beta");
