@@ -4232,6 +4232,46 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         )))
     }
 
+    /// Bounded, not streaming — one chunk, the whole body.
+    ///
+    /// Prose lives in a `content` field on the node document, not in GridFS
+    /// (only binary payloads get a bucket entry — see [`Self::read_bytes`]),
+    /// so the bound here is the ~16 MiB BSON document ceiling rather than
+    /// anything this method enforces itself. `$substrBytes` in an aggregation
+    /// was rejected: it is a round trip per chunk with no cross-trip
+    /// snapshot, so a concurrent write between two chunk fetches would tear
+    /// the body — the exact hazard a single `find_one` avoids by reading it
+    /// whole.
+    async fn read_text_stream(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> Result<
+        Option<(
+            crate::ports::workspace::WorkspaceNode,
+            crate::ports::workspace::BlobStream,
+        )>,
+    > {
+        let Some(doc) = self
+            .collection("workspace_nodes")
+            .find_one(doc! {"company_id": company.as_ref(), "node_id": id})
+            .await
+            .map_err(mongo_err)?
+        else {
+            return Ok(None);
+        };
+        let node: crate::ports::workspace::WorkspaceNode =
+            serde_json::from_str(&get_str(&doc, "node_json")?)?;
+        if node.kind != crate::ports::workspace::NodeKind::File || node.is_binary() {
+            return Ok(None);
+        }
+        let content = get_str(&doc, "content")?;
+        Ok(Some((
+            node,
+            crate::ports::workspace::one_chunk(content.into_bytes()),
+        )))
+    }
+
     async fn rename_move(
         &self,
         company: &CompanyId,
@@ -6268,6 +6308,20 @@ mod test {
     async fn conformance_workspace_read_capped() {
         let Some(s) = store().await else { return };
         conformance::assert_workspace_read_capped(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_read_text_stream() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workspace_read_text_stream(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_read_text_stream_utf8_boundaries() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workspace_read_text_stream_utf8_boundaries(s.clone()).await;
         drop_db(&s).await;
     }
 

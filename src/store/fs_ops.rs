@@ -1934,6 +1934,41 @@ impl WorkspaceStore for FsOps {
         )))
     }
 
+    /// Streams the note straight off disk — the same file-handle shape
+    /// [`Self::read_bytes`] already uses for binary payloads, so a large note
+    /// is never resident.
+    async fn read_text_stream(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+        let index = self.load_index(company).await?;
+        let Some(node) = index.get(id).cloned() else {
+            return Ok(None);
+        };
+        if node.kind != NodeKind::File || node.is_binary() {
+            return Ok(None);
+        }
+        let path = self.physical_path(company, &index, id)?;
+        let file = match tokio::fs::File::open(&path).await {
+            Ok(file) => file,
+            // The index names it but the file is gone — reported as absent
+            // rather than as an I/O error, the same call this backend's
+            // `read_bytes` makes for the binary side.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(io_err(&path, e)),
+        };
+        let stream = tokio_util::io::ReaderStream::new(file);
+        Ok(Some((
+            node,
+            Box::pin(futures::StreamExt::map(stream, |chunk| {
+                chunk.map_err(|e| {
+                    OpenCompanyError::Store(format!("reading a workspace note failed: {e}"))
+                })
+            })),
+        )))
+    }
+
     async fn rename_move(
         &self,
         company: &CompanyId,
@@ -2905,6 +2940,29 @@ mod test {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();
         conformance::assert_workspace_read_capped(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_read_text_stream() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_workspace_read_text_stream(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_read_text_stream_utf8_boundaries() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_workspace_read_text_stream_utf8_boundaries(Arc::new(FsOps::new(&root)))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_read_text_stream_multi_chunk() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_workspace_read_text_stream_multi_chunk(Arc::new(FsOps::new(&root)))
+            .await;
     }
 
     #[tokio::test]

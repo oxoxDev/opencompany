@@ -397,6 +397,29 @@ pub fn one_chunk(bytes: Vec<u8>) -> BlobStream {
     Box::pin(futures::stream::once(async move { Ok(Bytes::from(bytes)) }))
 }
 
+/// Answers [`WorkspaceStore::read_text_stream`] by reading the whole body and
+/// wrapping it as a single chunk.
+///
+/// For a store that already holds every body in memory — the test doubles —
+/// where the read *is* the transfer and there is no ceiling to preserve.
+/// **Never for a decorator over a real store**: forwarding is what keeps a
+/// real backend's streaming (or its documented per-backend ceiling), and this
+/// would quietly spend the allocation [`read_text_stream`](WorkspaceStore::read_text_stream)
+/// exists to avoid.
+pub async fn read_text_stream_by_reading(
+    store: &(impl WorkspaceStore + ?Sized),
+    company: &CompanyId,
+    id: &str,
+) -> Result<Option<(WorkspaceNode, BlobStream)>> {
+    Ok(store.read(company, id).await?.and_then(|(node, body)| {
+        if node.kind != NodeKind::File || node.is_binary() {
+            None
+        } else {
+            Some((node, one_chunk(body.into_bytes())))
+        }
+    }))
+}
+
 /// Validates a node about to be created as binary and stamps its derived
 /// metadata.
 ///
@@ -715,6 +738,56 @@ pub trait WorkspaceStore: Send + Sync {
     /// "there is no payload here" and "there is no node here" lead to the same
     /// 404 and are deliberately not distinguished.
     async fn read_bytes(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> Result<Option<(WorkspaceNode, BlobStream)>>;
+    /// Streams a **prose** node's body without ever holding the whole thing
+    /// resident, mirroring what [`read_bytes`](Self::read_bytes) already does
+    /// for the binary half of the port.
+    ///
+    /// `None` when `id` names nothing, names a folder, or names a **binary**
+    /// node — the mirror of [`read_bytes`](Self::read_bytes), which answers
+    /// `None` for a missing id, a folder, and a prose note. A caller that
+    /// wants a binary payload uses [`read_bytes`](Self::read_bytes) instead;
+    /// neither method reaches across the kind it was not built for.
+    ///
+    /// # Chunks are byte boundaries, not character boundaries
+    ///
+    /// A chunk may end in the middle of a multi-byte UTF-8 codepoint. Nothing
+    /// about a body being prose lets a backend promise its chunk boundaries
+    /// land on character edges — the underlying transport (a filesystem read
+    /// buffer, a row fetched whole) has no notion of where those edges are.
+    /// A caller that needs a `str` must accumulate every chunk first. The
+    /// helpers this crate uses to build a length-capped *excerpt* (which find
+    /// the largest valid prefix and discard the trailing partial codepoint)
+    /// are wrong here: applied per chunk they would silently drop 1–3 bytes
+    /// at every boundary and corrupt the reassembled body. Chunks are handed
+    /// back as raw, unaligned [`Bytes`] on purpose.
+    ///
+    /// # Not every backend can stream this equally
+    ///
+    /// `FsOps` streams straight off disk, the same file handle shape
+    /// [`read_bytes`](Self::read_bytes) uses. MongoDB reads the node document
+    /// in one round trip and yields it as a single chunk, bounded by the
+    /// ~16 MiB BSON document ceiling rather than by anything this method
+    /// does — prose lives in a `content` field on the node document, not in
+    /// GridFS. SQLite also yields a single chunk, for a structural reason
+    /// rather than a size limit: the process holds one connection behind a
+    /// mutex for its whole lifetime, and a handle that borrowed it across an
+    /// `.await` would stall every other query for as long as a slow client
+    /// took to drain the download. See each backend's implementation for the
+    /// specifics.
+    ///
+    /// # No default implementation, deliberately
+    ///
+    /// A default of `read().map(one_chunk)` would compile on every backend
+    /// and silently *be* the unbounded-materialize bug this method exists to
+    /// close — indistinguishable from a real streaming implementation until
+    /// someone profiles memory under a large note. Required, so the compiler
+    /// names every implementor, the same reasoning
+    /// [`read_capped`](Self::read_capped) already documents for itself.
+    async fn read_text_stream(
         &self,
         company: &CompanyId,
         id: &str,

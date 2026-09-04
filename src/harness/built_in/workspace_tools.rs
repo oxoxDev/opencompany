@@ -2888,6 +2888,13 @@ mod tests {
         ) -> crate::Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
             unreachable!("the ownership gate only reads the tree")
         }
+        async fn read_text_stream(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+        ) -> crate::Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+            unreachable!("the ownership gate only reads the tree")
+        }
         async fn rename_move(
             &self,
             _company: &CompanyId,
@@ -4318,6 +4325,13 @@ mod tests {
         ) -> crate::Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
             unreachable!("the listing never reads a payload")
         }
+        async fn read_text_stream(
+            &self,
+            company: &CompanyId,
+            id: &str,
+        ) -> crate::Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+            crate::ports::workspace::read_text_stream_by_reading(self, company, id).await
+        }
         async fn is_empty(&self, _company: &CompanyId) -> crate::Result<bool> {
             Ok(self.nodes.is_empty())
         }
@@ -5130,6 +5144,13 @@ mod tests {
             id: &str,
         ) -> crate::Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
             self.inner.read_bytes(company, id).await
+        }
+        async fn read_text_stream(
+            &self,
+            company: &CompanyId,
+            id: &str,
+        ) -> crate::Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+            self.inner.read_text_stream(company, id).await
         }
         async fn rename_move(
             &self,

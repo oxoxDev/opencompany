@@ -10359,7 +10359,11 @@ async fn workspace_blob_serves_a_prose_note_as_a_download() {
             .starts_with("attachment;"),
         "a note must never be served inline on the console's origin"
     );
-    assert_eq!(headers["content-length"], content.len().to_string());
+    assert!(
+        !headers.contains_key("content-length"),
+        "a streamed note carries no Content-Length — re-measuring it would race \
+         the stream this route already opened"
+    );
     assert!(
         !headers.contains_key("etag"),
         "a prose note has no stored digest to answer a conditional request with"
@@ -10598,6 +10602,19 @@ impl crate::ports::workspace::WorkspaceStore for RecordingReads {
         )>,
     > {
         self.inner.read_bytes(company, id).await
+    }
+
+    async fn read_text_stream(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> crate::Result<
+        Option<(
+            crate::ports::workspace::WorkspaceNode,
+            crate::ports::workspace::BlobStream,
+        )>,
+    > {
+        self.inner.read_text_stream(company, id).await
     }
 
     async fn rename_move(

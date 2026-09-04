@@ -624,6 +624,13 @@ impl WorkspaceStore for FixedTree {
     ) -> crate::Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
         panic!("search must never read a payload — see the binary-node rule")
     }
+    async fn read_text_stream(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> crate::Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+        crate::ports::workspace::read_text_stream_by_reading(self, company, id).await
+    }
     async fn rename_move(
         &self,
         _company: &CompanyId,
