@@ -1934,20 +1934,38 @@ impl WorkspaceStore for FsOps {
         )))
     }
 
+    /// Streams the note straight off disk — the same file-handle shape
+    /// [`Self::read_bytes`] already uses for binary payloads, so a large note
+    /// is never resident.
     async fn read_text_stream(
         &self,
         company: &CompanyId,
         id: &str,
     ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
-        let Some((node, body)) = self.read(company, id).await? else {
+        let index = self.load_index(company).await?;
+        let Some(node) = index.get(id).cloned() else {
             return Ok(None);
         };
         if node.kind != NodeKind::File || node.is_binary() {
             return Ok(None);
         }
+        let path = self.physical_path(company, &index, id)?;
+        let file = match tokio::fs::File::open(&path).await {
+            Ok(file) => file,
+            // The index names it but the file is gone — reported as absent
+            // rather than as an I/O error, the same call this backend's
+            // `read_bytes` makes for the binary side.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(io_err(&path, e)),
+        };
+        let stream = tokio_util::io::ReaderStream::new(file);
         Ok(Some((
             node,
-            crate::ports::workspace::one_chunk(body.into_bytes()),
+            Box::pin(futures::StreamExt::map(stream, |chunk| {
+                chunk.map_err(|e| {
+                    OpenCompanyError::Store(format!("reading a workspace note failed: {e}"))
+                })
+            })),
         )))
     }
 
