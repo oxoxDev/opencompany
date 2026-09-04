@@ -134,6 +134,14 @@ impl WorkspaceStore for LooseWorkspace {
         crate::ports::workspace::read_capped_by_reading(self, company, id, max_bytes).await
     }
 
+    async fn read_text_stream(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> Result<Option<(WorkspaceNode, BlobStream)>> {
+        crate::ports::workspace::read_text_stream_by_reading(self, company, id).await
+    }
+
     async fn write(
         &self,
         company: &CompanyId,
