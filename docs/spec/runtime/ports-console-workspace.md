@@ -37,6 +37,8 @@ pub trait WorkspaceStore: Send + Sync {
         -> Result<WorkspaceNode>;
     async fn read_bytes(&self, company: &CompanyId, id: &str)
         -> Result<Option<(WorkspaceNode, BlobStream)>>;
+    async fn read_text_stream(&self, company: &CompanyId, id: &str)
+        -> Result<Option<(WorkspaceNode, BlobStream)>>;
 }
 ```
 
@@ -78,6 +80,48 @@ A decorator forwards it; falling back to `read` would spend exactly the
 allocation the cap exists to prevent. The binary half has never needed this —
 `size` rides the node, so a caller decides on metadata and `read_bytes` is never
 reached for an over-cap payload.
+
+**`read_text_stream` (#2071).** `read_blob`'s prose branch used to answer
+`read_capped`'s problem the wrong way round: it took the whole body through
+the unbounded `read`, then wrapped the result in `one_chunk` — chunking a body
+that is already fully resident does not lower the peak, it only changes the
+shape of what was already the worst case. `read_text_stream` is the binary
+side's `read_bytes` mirrored onto prose: `None` for a missing id, a folder, or
+a binary node, otherwise a `BlobStream` the caller never has to hold whole.
+Required rather than defaulted, for the same reason `read_capped` is — a
+`read().map(one_chunk)` default would compile everywhere and quietly become
+this port's version of the bug it exists to close.
+
+The guarantee is **partial by backend, and stated as such rather than
+papered over**. `FsOps` genuinely streams off disk, the same file handle
+`read_bytes` already opens. MongoDB answers in one round trip and one
+chunk — prose lives in a `content` field on the node document, not GridFS, so
+the ceiling is the ~16 MiB BSON document cap rather than anything this method
+enforces. SQLite also answers in one chunk, but for a structural reason
+rather than a size limit: the process holds one `rusqlite::Connection` behind
+a `std::sync::Mutex` for its lifetime, and a `Blob` handle borrows that
+connection, so a stream built on it would not be `Send` and would hold the
+mutex across every `.await` a slow client forces — stalling every other query
+in the process for as long as the download takes. Closing that gap needs a
+different connection model, not a bigger cap, and is out of scope here.
+Chunks are raw, byte-aligned `Bytes` with no character-boundary guarantee —
+the same contract `BlobStream` already carries for binary payloads — so a
+caller needing a `str` accumulates every chunk first; the excerpt truncation
+helpers that discard a trailing partial codepoint must never be applied per
+chunk, or they would silently corrupt the reassembled body.
+`conformance::assert_workspace_read_text_stream` (round-trip, all three
+backends) and its `_utf8_boundaries` sibling (a body sized so a chunk
+boundary provably lands mid-codepoint, all three backends) hold the contract;
+`_multi_chunk` is registered for `fs` only, since sqlite and MongoDB
+legitimately answer in one chunk and asserting otherwise against them would
+not be pinning a gap.
+
+`read_blob`'s prose branch now streams through this instead of materialising
+first. It also drops `Content-Length`: the length lived on the body this
+route no longer holds all at once, and re-measuring it with a second call
+would race the stream this one already opened. A note download is served
+chunked; a binary download still carries `Content-Length` from `node.size`,
+unaffected.
 
 Writes buffer and reads stream. The asymmetry is what makes the quota
 enforceable: `QuotaEnforcedWorkspace` (`src/runtime/workspace_quota.rs`) wraps
@@ -173,9 +217,9 @@ decode as UTF-8 is stored as a note instead, so an uploaded `.md` keeps its
 editor and backlinks.
 
 The blob route is the download of any **file** in the tree, so a prose note is
-served from its body under the same neutralised headers — a note has no stored
-digest, so it carries no `ETag`, and its `Content-Length` is the body's byte
-length. A folder and an id naming nothing 404 identically.
+streamed through `read_text_stream` under the same neutralised headers — a
+note has no stored digest, so it carries no `ETag`, and (see above) no
+`Content-Length` either. A folder and an id naming nothing 404 identically.
 
 An upload is still bounded by the company's `max_blob_mb` before that
 text/binary choice (#665). The bound is a property of bytes entering through
