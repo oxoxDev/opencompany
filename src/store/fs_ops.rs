@@ -1934,6 +1934,23 @@ impl WorkspaceStore for FsOps {
         )))
     }
 
+    async fn read_text_stream(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+        let Some((node, body)) = self.read(company, id).await? else {
+            return Ok(None);
+        };
+        if node.kind != NodeKind::File || node.is_binary() {
+            return Ok(None);
+        }
+        Ok(Some((
+            node,
+            crate::ports::workspace::one_chunk(body.into_bytes()),
+        )))
+    }
+
     async fn rename_move(
         &self,
         company: &CompanyId,
@@ -2905,6 +2922,29 @@ mod test {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();
         conformance::assert_workspace_read_capped(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_read_text_stream() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_workspace_read_text_stream(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_read_text_stream_utf8_boundaries() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_workspace_read_text_stream_utf8_boundaries(Arc::new(FsOps::new(&root)))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_read_text_stream_multi_chunk() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_workspace_read_text_stream_multi_chunk(Arc::new(FsOps::new(&root)))
+            .await;
     }
 
     #[tokio::test]
