@@ -10600,6 +10600,19 @@ impl crate::ports::workspace::WorkspaceStore for RecordingReads {
         self.inner.read_bytes(company, id).await
     }
 
+    async fn read_text_stream(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> crate::Result<
+        Option<(
+            crate::ports::workspace::WorkspaceNode,
+            crate::ports::workspace::BlobStream,
+        )>,
+    > {
+        self.inner.read_text_stream(company, id).await
+    }
+
     async fn rename_move(
         &self,
         company: &CompanyId,
