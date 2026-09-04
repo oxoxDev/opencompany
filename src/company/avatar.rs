@@ -1713,6 +1713,13 @@ mod test {
                 )
             }))
         }
+        async fn read_text_stream(
+            &self,
+            company: &crate::ports::types::CompanyId,
+            id: &str,
+        ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+            crate::ports::workspace::read_text_stream_by_reading(self, company, id).await
+        }
         async fn rename_move(
             &self,
             _company: &crate::ports::types::CompanyId,
