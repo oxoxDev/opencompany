@@ -1199,6 +1199,13 @@ mod test {
         ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
             WorkspaceStore::read_bytes(&*self.0, company, id).await
         }
+        async fn read_text_stream(
+            &self,
+            company: &CompanyId,
+            id: &str,
+        ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+            WorkspaceStore::read_text_stream(&*self.0, company, id).await
+        }
         async fn rename_move(
             &self,
             company: &CompanyId,
@@ -1326,6 +1333,13 @@ mod test {
             id: &str,
         ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
             WorkspaceStore::read_bytes(&*self.0, company, id).await
+        }
+        async fn read_text_stream(
+            &self,
+            company: &CompanyId,
+            id: &str,
+        ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+            WorkspaceStore::read_text_stream(&*self.0, company, id).await
         }
         async fn rename_move(
             &self,
@@ -1725,6 +1739,13 @@ mod test {
         ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
             WorkspaceStore::read_bytes(&*self.0, company, id).await
         }
+        async fn read_text_stream(
+            &self,
+            company: &CompanyId,
+            id: &str,
+        ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+            WorkspaceStore::read_text_stream(&*self.0, company, id).await
+        }
         async fn rename_move(
             &self,
             company: &CompanyId,
@@ -2032,6 +2053,13 @@ mod test {
             id: &str,
         ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
             WorkspaceStore::read_bytes(&*self.inner, company, id).await
+        }
+        async fn read_text_stream(
+            &self,
+            company: &CompanyId,
+            id: &str,
+        ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+            WorkspaceStore::read_text_stream(&*self.inner, company, id).await
         }
         async fn rename_move(
             &self,
