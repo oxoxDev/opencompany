@@ -97,11 +97,15 @@ interface Calls {
  * fixture convention: since issue #403 this page resolves the viewer's role to
  * decide whether to offer the write forms at all, and a client that fell
  * through to the SMTP branch for every unmatched path — as this one used to —
- * would resolve every test here as a non-admin by accident.
+ * would resolve every test here as a non-admin by accident. `session: "none"`
+ * makes `/auth/me` reject, the way it does for an unauthenticated or
+ * bearer-only caller. `carriesPlatformBearer` is independent of it — a hub
+ * console can carry a bearer alongside a real session (`authHeaders`'s own
+ * doc comment).
  */
 function fakeClient(
   overrides: { domain?: unknown; smtp?: unknown } = {},
-  role: "admin" | "member" = "admin",
+  session: "admin" | "member" | "none" = "admin",
   carriesPlatformBearer = false,
 ) {
   const calls: Calls = { put: [], post: [] };
@@ -110,13 +114,15 @@ function fakeClient(
     carriesPlatformBearer,
     get: (path: string) => {
       if (path.endsWith("/auth/me")) {
-        return Promise.resolve({
-          id: "u1",
-          email: "a@b.c",
-          role,
-          company: "acme",
-          hasPassword: true,
-        });
+        return session === "none"
+          ? Promise.reject(new Error("no session"))
+          : Promise.resolve({
+              id: "u1",
+              email: "a@b.c",
+              role: session,
+              company: "acme",
+              hasPassword: true,
+            });
       }
       const answer = path.endsWith("/domain")
         ? (overrides.domain ?? DOMAIN_STATUS)
@@ -471,20 +477,40 @@ describe("authority: the write forms, not the reads (issue #1785 audit)", () => 
     expect((at("smtp-save") as HTMLButtonElement | null)?.disabled).toBe(false);
   });
 
-  it("offers a platform bearer both write forms without calling /auth/me", async () => {
+  it("offers a bearer-only caller both write forms once /auth/me finds no session", async () => {
     // `PUT …/domain`, `PUT …/smtp` and `POST …/smtp/test` are all
     // `AdminScopedCompany`, which admits a bearer that has addressed this
-    // company unconditionally — it has no human session for `/auth/me` to
-    // return, so resolving canManage through that route alone would hide a
-    // write both cards' own backend would let through.
-    const { client } = fakeClient({}, "member", true);
-    const getSpy = vi.spyOn(client, "get");
+    // company unconditionally once `/auth/me` finds no human session to
+    // resolve instead.
+    const { client } = fakeClient({}, "none", true);
     await show(client);
 
     expect(at("domain-read-only")).toBeNull();
     expect(at("domain-remove")).not.toBeNull();
     expect(at("smtp-read-only")).toBeNull();
     expect(at("smtp-host")).not.toBeNull();
-    expect(getSpy.mock.calls.some(([path]) => String(path).endsWith("/auth/me"))).toBe(false);
+  });
+
+  it("defers to a member session on both cards even when a platform bearer is also present", async () => {
+    // A hub console can carry both credentials at once (`authHeaders`), and
+    // resolve_principal tries the session first — so a bearer must never
+    // paper over a member's own 403 (codex review).
+    const { client } = fakeClient({}, "member", true);
+    await show(client);
+
+    expect(at("domain-read-only")?.textContent).toContain("Only an admin");
+    expect(at("domain-remove")).toBeNull();
+    expect(at("smtp-read-only")?.textContent).toContain("Only an admin");
+    expect(at("smtp-host")).toBeNull();
+  });
+
+  it("defers to an admin session on both cards when a platform bearer is also present", async () => {
+    const { client } = fakeClient({}, "admin", true);
+    await show(client);
+
+    expect(at("domain-read-only")).toBeNull();
+    expect(at("domain-remove")).not.toBeNull();
+    expect(at("smtp-read-only")).toBeNull();
+    expect(at("smtp-host")).not.toBeNull();
   });
 });
