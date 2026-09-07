@@ -383,6 +383,18 @@ export function SearchView({ client, company }: Props) {
               </div>
             )}
 
+            {!canManage && provider === "searxng" && endpoint ? (
+              <div className="space-y-2">
+                <Label htmlFor="search-endpoint-readonly">Instance URL</Label>
+                <p id="search-endpoint-readonly" data-testid="search-endpoint-readonly" className="text-sm">
+                  {endpoint}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  The address your SearXNG instance answers on. Every teammate search goes there.
+                </p>
+              </div>
+            ) : null}
+
             {canManage && (
               <div className="flex items-center gap-2">
                 <Button onClick={() => void onSave()} disabled={busy} data-testid="search-save">

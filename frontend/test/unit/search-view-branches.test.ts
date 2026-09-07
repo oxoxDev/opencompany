@@ -145,7 +145,11 @@ describe("SearchView authority (issue #1785 copy-paste pair)", () => {
     expect(at("search-provider")).not.toBeNull();
   });
 
-  it("hides the SearXNG endpoint field from a member too, same as the API key", async () => {
+  it("hides the editable SearXNG endpoint field from a member, but shows it read-only", async () => {
+    // The endpoint is non-secret and identifies where every teammate search
+    // leaves the host — a member auditing that must not find only "SearXNG"
+    // with the actual address hidden alongside the write control (codex
+    // review).
     await show(
       clientWith(
         { ...SEARCH_OK, provider: "searxng", effectiveProvider: "searxng", endpoint: "https://searx.acme.com" },
@@ -154,8 +158,7 @@ describe("SearchView authority (issue #1785 copy-paste pair)", () => {
     );
 
     expect(at("search-endpoint")).toBeNull();
-    // The effective provider is still readable — a member is told what is
-    // configured, just not handed the field that would change it.
+    expect(at("search-endpoint-readonly")?.textContent).toBe("https://searx.acme.com");
     expect(at("search-view")?.textContent).toContain("SearXNG");
   });
 });
