@@ -49,7 +49,7 @@ use crate::server::chat_history::{
 use crate::server::error::ApiError;
 use crate::server::graphql::auth::GqlAuth;
 use crate::server::ops::language::{self, DEFAULT_DESK};
-use crate::server::ops::{ScopedCompany, scoped};
+use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 use crate::server::platform_auth::{CompanyAuth, authorize_address, refuse_until_password_changed};
 use crate::server::provision::{emit_cycle_webhooks, emit_feedback_webhook};
 
@@ -71,14 +71,6 @@ pub fn router() -> Router<AppState> {
             post(react_to_message_scoped),
         )
         .route("/api/v1/companies/{id}/approvals", get(list_approvals))
-        .route(
-            "/api/v1/companies/{id}/approvals/{aid}",
-            post(resolve_approval),
-        )
-        .route(
-            "/api/v1/companies/{id}/approvals/{aid}/extend",
-            post(extend_approval),
-        )
         // Single-company aliases (no id; resolved via the sole registered company).
         .route("/api/v1/company/chat", post(operator_chat_single))
         .route("/api/v1/company/chat/history", get(chat_history_single))
@@ -91,14 +83,12 @@ pub fn router() -> Router<AppState> {
             post(react_to_message_single),
         )
         .route("/api/v1/company/approvals", get(list_approvals_single))
-        .route(
-            "/api/v1/company/approvals/{aid}/extend",
-            post(extend_approval_single),
-        )
-        .route(
-            "/api/v1/company/approvals/{aid}",
-            post(resolve_approval_single),
-        )
+        // Deciding an approval, and extending the deadline that would otherwise
+        // decide it by default, settle an effect for the whole company, so both
+        // demand authority over it rather than membership in it. Registered
+        // through `scoped` so the two address forms cannot drift apart.
+        .merge(scoped("/approvals/{aid}", post(resolve_approval)))
+        .merge(scoped("/approvals/{aid}/extend", post(extend_approval)))
         // The company's desks (group chats), under both scope forms — the
         // console builds its chat threads from these (issue #53). `POST` creates
         // a desk through the operator overlay (the manifest is never rewritten).
@@ -4959,20 +4949,28 @@ async fn run_resolve(
     .into_response())
 }
 
-/// `POST /api/v1/companies/{id}/approvals/{aid}`.
+/// The approval a resolve or an extend addresses, under either scope form.
+///
+/// Named rather than positional because the two forms carry different path
+/// tuples — `{id}` plus `{aid}`, or `{aid}` alone — and a named capture
+/// deserializes identically from both. The company is not read here:
+/// [`AdminScopedCompany`] has already resolved and authorized it.
+#[derive(Debug, Deserialize)]
+struct ApprovalPath {
+    aid: String,
+}
+
+/// `POST {scope}/approvals/{aid}` — decide a parked approval.
 async fn resolve_approval(
+    admin: AdminScopedCompany,
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
-    Path((id, aid)): Path<(String, String)>,
+    Path(ApprovalPath { aid }): Path<ApprovalPath>,
     Json(body): Json<ResolveApproval>,
 ) -> Result<Response, crate::server::Rejection> {
-    let company = CompanyId::new(&id);
-    if let Some(resp) = authorize_address(&state, &auth, &company) {
-        return Err(resp.into());
-    }
-    let runtime = lookup(&state, &id)?;
+    let company = admin.id().clone();
     let actor = resolving_actor(auth);
-    run_resolve(&state, &company, runtime, aid, body, actor)
+    run_resolve(&state, &company, admin.runtime, aid, body, actor)
         .await
         .map_err(|error| IntoResponse::into_response(error).into())
 }
@@ -4994,27 +4992,6 @@ fn resolving_actor(auth: GqlAuth) -> Actor {
         },
         GqlAuth::Platform(_) => platform_actor(),
     }
-}
-
-/// `POST /api/v1/company/approvals/{aid}` (single-company alias).
-async fn resolve_approval_single(
-    CompanyAuth(auth): CompanyAuth,
-    State(state): State<AppState>,
-    Path(aid): Path<String>,
-    Json(body): Json<ResolveApproval>,
-) -> Result<Response, crate::server::Rejection> {
-    let runtime = sole(&state)?;
-    let id = runtime.id().clone();
-    if let Some(resp) = authorize_address(&state, &auth, &id) {
-        return Err(resp.into());
-    }
-    if let Some(resp) = refuse_until_password_changed(&auth) {
-        return Err(resp.into());
-    }
-    let actor = resolving_actor(auth);
-    run_resolve(&state, &id, runtime, aid, body, actor)
-        .await
-        .map_err(|error| IntoResponse::into_response(error).into())
 }
 
 /// The answer to an extend: the approval's new deadline, so the console can
@@ -5048,39 +5025,15 @@ async fn run_extend(
     .into_response())
 }
 
-/// `POST /api/v1/companies/{id}/approvals/{aid}/extend` (issue #1805).
+/// `POST {scope}/approvals/{aid}/extend` — push the default-deny deadline out
+/// (issue #1805).
 async fn extend_approval(
+    admin: AdminScopedCompany,
     CompanyAuth(auth): CompanyAuth,
-    State(state): State<AppState>,
-    Path((id, aid)): Path<(String, String)>,
+    Path(ApprovalPath { aid }): Path<ApprovalPath>,
 ) -> Result<Response, crate::server::Rejection> {
-    let company = CompanyId::new(&id);
-    if let Some(resp) = authorize_address(&state, &auth, &company) {
-        return Err(resp.into());
-    }
-    let runtime = lookup(&state, &id)?;
     let actor = resolving_actor(auth);
-    run_extend(runtime, aid, actor)
-        .await
-        .map_err(|error| IntoResponse::into_response(error).into())
-}
-
-/// `POST /api/v1/company/approvals/{aid}/extend` (single-company alias).
-async fn extend_approval_single(
-    CompanyAuth(auth): CompanyAuth,
-    State(state): State<AppState>,
-    Path(aid): Path<String>,
-) -> Result<Response, crate::server::Rejection> {
-    let runtime = sole(&state)?;
-    let id = runtime.id().clone();
-    if let Some(resp) = authorize_address(&state, &auth, &id) {
-        return Err(resp.into());
-    }
-    if let Some(resp) = refuse_until_password_changed(&auth) {
-        return Err(resp.into());
-    }
-    let actor = resolving_actor(auth);
-    run_extend(runtime, aid, actor)
+    run_extend(admin.runtime, aid, actor)
         .await
         .map_err(|error| IntoResponse::into_response(error).into())
 }
