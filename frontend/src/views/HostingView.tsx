@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Check, Loader2, TriangleAlert } from "lucide-react";
+import { Check, Info, Loader2, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -13,7 +13,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { PageHeader } from "@/components/page-header";
 import { cn } from "@/lib/utils";
 import { SETTINGS_FIELD_COLUMN } from "@/views/settings-pages";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { GrantNamespace } from "@/components/grant-namespace";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -246,6 +246,17 @@ export function HostingView({ client, company }: Props) {
           />
         ) : null}
 
+        {!canManage && (
+          <Alert data-testid="hosting-read-only">
+            <Info className="size-4" />
+            <AlertTitle>Only an admin can change this company&apos;s hosting connection</AlertTitle>
+            <AlertDescription>
+              A deployment publishes files under this account and a database is a bill it pays,
+              so an admin connects it. You can see what is configured.
+            </AlertDescription>
+          </Alert>
+        )}
+
         <Card>
           <CardContent className="space-y-4">
             <div className="flex items-center justify-between">
@@ -266,74 +277,78 @@ export function HostingView({ client, company }: Props) {
               ) : null}
             </div>
 
-            <div className={cn("grid gap-4 sm:grid-cols-2", SETTINGS_FIELD_COLUMN)}>
-              <div className="space-y-2">
-                <Label htmlFor="hosting-key">API token</Label>
-                <Input
-                  id="hosting-key"
-                  data-testid="hosting-api-key"
-                  type="password"
-                  autoComplete="off"
-                  placeholder={
-                    status.apiKeyConfigured ? "Configured — type to replace" : "vercel_…"
-                  }
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Create one at vercel.com → Account Settings → Tokens. Stored
-                  write-only: it is never shown again, here or anywhere else.
-                </p>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="hosting-team">Team (optional)</Label>
-                <Input
-                  id="hosting-team"
-                  data-testid="hosting-team"
-                  placeholder="team_…"
-                  value={team}
-                  onChange={(e) => setTeam(e.target.value)}
-                />
-                <p className="text-xs text-muted-foreground">
-                  The team or organization to deploy under. Leave empty for a
-                  personal account.
-                </p>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <Button onClick={() => void onSave()} disabled={busy} data-testid="hosting-save">
-                {busy ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
-                Save
-              </Button>
-              {status.apiKeyConfigured ? (
-                <AlertDialog>
-                  <AlertDialogTrigger
-                    render={
-                      <Button variant="outline" disabled={busy} data-testid="hosting-clear">
-                        Disconnect
-                      </Button>
+            {canManage && (
+              <div className={cn("grid gap-4 sm:grid-cols-2", SETTINGS_FIELD_COLUMN)}>
+                <div className="space-y-2">
+                  <Label htmlFor="hosting-key">API token</Label>
+                  <Input
+                    id="hosting-key"
+                    data-testid="hosting-api-key"
+                    type="password"
+                    autoComplete="off"
+                    placeholder={
+                      status.apiKeyConfigured ? "Configured — type to replace" : "vercel_…"
                     }
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
                   />
-                  <AlertDialogContent>
-                    <AlertDialogHeader>
-                      <AlertDialogTitle>Disconnect {status.provider}?</AlertDialogTitle>
-                      <AlertDialogDescription>
-                        This clears the write-only hosting token and team setting. They cannot be
-                        recovered; reconnect with a new token before teammates can deploy again.
-                      </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel>Cancel</AlertDialogCancel>
-                      <AlertDialogAction variant="destructive" onClick={() => void onClear()}>
-                        Disconnect hosting
-                      </AlertDialogAction>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
-              ) : null}
-            </div>
+                  <p className="text-xs text-muted-foreground">
+                    Create one at vercel.com → Account Settings → Tokens. Stored
+                    write-only: it is never shown again, here or anywhere else.
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="hosting-team">Team (optional)</Label>
+                  <Input
+                    id="hosting-team"
+                    data-testid="hosting-team"
+                    placeholder="team_…"
+                    value={team}
+                    onChange={(e) => setTeam(e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    The team or organization to deploy under. Leave empty for a
+                    personal account.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {canManage && (
+              <div className="flex items-center gap-2">
+                <Button onClick={() => void onSave()} disabled={busy} data-testid="hosting-save">
+                  {busy ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
+                  Save
+                </Button>
+                {status.apiKeyConfigured ? (
+                  <AlertDialog>
+                    <AlertDialogTrigger
+                      render={
+                        <Button variant="outline" disabled={busy} data-testid="hosting-clear">
+                          Disconnect
+                        </Button>
+                      }
+                    />
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>Disconnect {status.provider}?</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          This clears the write-only hosting token and team setting. They cannot be
+                          recovered; reconnect with a new token before teammates can deploy again.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                        <AlertDialogAction variant="destructive" onClick={() => void onClear()}>
+                          Disconnect hosting
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                ) : null}
+              </div>
+            )}
           </CardContent>
         </Card>
 
