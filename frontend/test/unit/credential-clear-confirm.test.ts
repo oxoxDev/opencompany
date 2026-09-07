@@ -33,8 +33,20 @@ const { HostingView } = await import("@/views/HostingView");
 let container: HTMLDivElement;
 let root: Root;
 
+/**
+ * `get` answers `/auth/me` as an admin: since issue #403 `HostingView` resolves
+ * the viewer's role before offering its write controls at all, and a client
+ * with no `get` left every call rejecting, which resolved as a non-admin and
+ * hid the very Disconnect button this suite exists to click.
+ */
 function client(): OpenCompanyClient {
-  return { scopeFor: () => "/api/v1/company" } as unknown as OpenCompanyClient;
+  return {
+    scopeFor: () => "/api/v1/company",
+    get: (path: string) =>
+      path.endsWith("/auth/me")
+        ? Promise.resolve({ id: "u1", email: "a@b.c", role: "admin", company: "acme" })
+        : Promise.reject(new Error(`unexpected get ${path}`)),
+  } as unknown as OpenCompanyClient;
 }
 
 function button(label: string): HTMLButtonElement {
