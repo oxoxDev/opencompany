@@ -28,6 +28,16 @@ use crate::server::users::token::{OsTokens, mint_session_token, sha256_hex};
 /// tests exercise the same resolution path production does — the only shortcut
 /// is skipping the magic-link round trip.
 pub(crate) async fn seed_session(state: &AppState, company: &str, role: UserRole) -> String {
+    seed_session_with(state, company, role, false).await
+}
+
+/// [`seed_session`], plus whether the account is still on a temporary password.
+pub(crate) async fn seed_session_with(
+    state: &AppState,
+    company: &str,
+    role: UserRole,
+    must_change_password: bool,
+) -> String {
     let id = CompanyId::new(company);
     let runtime = state
         .registry()
@@ -47,7 +57,7 @@ pub(crate) async fn seed_session(state: &AppState, company: &str, role: UserRole
                 role,
                 status: UserStatus::Active,
                 password_hash: None,
-                must_change_password: false,
+                must_change_password,
                 created_at_millis: now,
                 last_seen_at_millis: None,
                 updated_at_millis: now,
@@ -84,6 +94,16 @@ pub(crate) async fn seed_session(state: &AppState, company: &str, role: UserRole
 /// Seeds an admin session — the common case for tests that drive write routes.
 pub(crate) async fn seed_admin(state: &AppState, company: &str) -> String {
     seed_session(state, company, UserRole::Admin).await
+}
+
+/// Seeds an admin still on the temporary password they were issued.
+///
+/// The account that clears every role check and is still refused: proving a
+/// route honours the password-change boundary needs a principal whose *only*
+/// disqualification is that boundary, so a passing assertion cannot be the role
+/// gate answering instead.
+pub(crate) async fn seed_temp_password_admin(state: &AppState, company: &str) -> String {
+    seed_session_with(state, company, UserRole::Admin, true).await
 }
 
 /// A fixed session token for the harnesses whose request helpers do not thread
