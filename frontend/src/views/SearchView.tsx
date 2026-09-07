@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Check, Loader2, TriangleAlert } from "lucide-react";
+import { Check, Info, Loader2, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 
 import { clearSearch, getSearch, saveSearch, type SearchStatus } from "@/api/search";
@@ -8,7 +8,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { PageHeader } from "@/components/page-header";
 import { cn } from "@/lib/utils";
 import { SETTINGS_FIELD_COLUMN } from "@/views/settings-pages";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { GrantNamespace } from "@/components/grant-namespace";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -275,6 +275,17 @@ export function SearchView({ client, company }: Props) {
           />
         ) : null}
 
+        {!canManage && (
+          <Alert data-testid="search-read-only">
+            <Info className="size-4" />
+            <AlertTitle>Only an admin can change this company&apos;s search provider</AlertTitle>
+            <AlertDescription>
+              Search queries leave this host under whichever provider is selected, so an admin
+              chooses it. You can see what is configured.
+            </AlertDescription>
+          </Alert>
+        )}
+
         <Card>
           <CardContent className="space-y-4">
             <div className="flex items-center justify-between">
@@ -297,85 +308,89 @@ export function SearchView({ client, company }: Props) {
               ) : null}
             </div>
 
-            <div className={cn("grid gap-4 sm:grid-cols-2", SETTINGS_FIELD_COLUMN)}>
-              <div className="space-y-2">
-                <Label htmlFor="search-provider">Provider</Label>
-                <Select
-                  value={provider}
-                  onValueChange={(v) => v && setProvider(String(v))}
-                  items={labels}
-                >
-                  <SelectTrigger id="search-provider" data-testid="search-provider">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {status.supportedProviders.map((slug) => (
-                      <SelectItem key={slug} value={slug}>
-                        {PROVIDERS[slug]?.label ?? slug}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  {PROVIDERS[provider]?.help ?? ""}
-                </p>
+            {canManage && (
+              <div className={cn("grid gap-4 sm:grid-cols-2", SETTINGS_FIELD_COLUMN)}>
+                <div className="space-y-2">
+                  <Label htmlFor="search-provider">Provider</Label>
+                  <Select
+                    value={provider}
+                    onValueChange={(v) => v && setProvider(String(v))}
+                    items={labels}
+                  >
+                    <SelectTrigger id="search-provider" data-testid="search-provider">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {status.supportedProviders.map((slug) => (
+                        <SelectItem key={slug} value={slug}>
+                          {PROVIDERS[slug]?.label ?? slug}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {PROVIDERS[provider]?.help ?? ""}
+                  </p>
+                </div>
+
+                {byo && provider !== "searxng" ? (
+                  <div className="space-y-2">
+                    <Label htmlFor="search-key">API key</Label>
+                    <Input
+                      id="search-key"
+                      data-testid="search-api-key"
+                      type="password"
+                      autoComplete="off"
+                      placeholder={
+                        status.apiKeyConfigured ? "Configured — type to replace" : "sk_…"
+                      }
+                      value={apiKey}
+                      onChange={(e) => setApiKey(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Stored write-only: it is never shown again, here or anywhere
+                      else. Searches are billed to this account, not to us.
+                    </p>
+                  </div>
+                ) : null}
+
+                {provider === "searxng" ? (
+                  <div className="space-y-2">
+                    <Label htmlFor="search-endpoint">Instance URL</Label>
+                    <Input
+                      id="search-endpoint"
+                      data-testid="search-endpoint"
+                      placeholder="https://searx.example.com"
+                      value={endpoint}
+                      onChange={(e) => setEndpoint(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      The address your SearXNG instance answers on. Every teammate
+                      search goes there, so it has to be reachable from this host.
+                    </p>
+                  </div>
+                ) : null}
               </div>
+            )}
 
-              {byo && provider !== "searxng" ? (
-                <div className="space-y-2">
-                  <Label htmlFor="search-key">API key</Label>
-                  <Input
-                    id="search-key"
-                    data-testid="search-api-key"
-                    type="password"
-                    autoComplete="off"
-                    placeholder={
-                      status.apiKeyConfigured ? "Configured — type to replace" : "sk_…"
-                    }
-                    value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Stored write-only: it is never shown again, here or anywhere
-                    else. Searches are billed to this account, not to us.
-                  </p>
-                </div>
-              ) : null}
-
-              {provider === "searxng" ? (
-                <div className="space-y-2">
-                  <Label htmlFor="search-endpoint">Instance URL</Label>
-                  <Input
-                    id="search-endpoint"
-                    data-testid="search-endpoint"
-                    placeholder="https://searx.example.com"
-                    value={endpoint}
-                    onChange={(e) => setEndpoint(e.target.value)}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    The address your SearXNG instance answers on. Every teammate
-                    search goes there, so it has to be reachable from this host.
-                  </p>
-                </div>
-              ) : null}
-            </div>
-
-            <div className="flex items-center gap-2">
-              <Button onClick={() => void onSave()} disabled={busy} data-testid="search-save">
-                {busy ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
-                Save
-              </Button>
-              {status.provider !== "managed" ? (
-                <Button
-                  variant="outline"
-                  onClick={() => void onClear()}
-                  disabled={busy}
-                  data-testid="search-clear"
-                >
-                  Use managed search
+            {canManage && (
+              <div className="flex items-center gap-2">
+                <Button onClick={() => void onSave()} disabled={busy} data-testid="search-save">
+                  {busy ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
+                  Save
                 </Button>
-              ) : null}
-            </div>
+                {status.provider !== "managed" ? (
+                  <Button
+                    variant="outline"
+                    onClick={() => void onClear()}
+                    disabled={busy}
+                    data-testid="search-clear"
+                  >
+                    Use managed search
+                  </Button>
+                ) : null}
+              </div>
+            )}
           </CardContent>
         </Card>
 
