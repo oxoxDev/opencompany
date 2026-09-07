@@ -172,3 +172,33 @@ describe("HostingView status surfaces", () => {
     expect(at("hosting-save")).not.toBeNull();
   });
 });
+
+describe("HostingView authority (issue #1785 copy-paste pair)", () => {
+  it("offers a member the credential fields, and no way to submit them", async () => {
+    // The provider picker's sibling defect: the API token field, the team
+    // field and Save were rendered enabled for a member, and the host refuses
+    // `PUT …/hosting` with a 403 whatever the console shows. Presence, not
+    // enabledness — matching `connections-authority.spec.ts`.
+    await show(clientWith(HOSTING_OK, "member"));
+
+    expect(at("hosting-read-only")?.textContent).toContain("Only an admin");
+    expect(at("hosting-api-key")).toBeNull();
+    expect(at("hosting-team")).toBeNull();
+    expect(at("hosting-save")).toBeNull();
+    expect(at("hosting-clear")).toBeNull();
+
+    // A member is not shown a blank page: the current connection state is
+    // still on screen.
+    expect(at("hosting-connected")).not.toBeNull();
+    expect(at("hosting-view")?.textContent).toContain("vercel");
+  });
+
+  it("offers an admin every control, with no read-only notice", async () => {
+    await show(clientWith(HOSTING_OK, "admin"));
+
+    expect(at("hosting-read-only")).toBeNull();
+    expect(at("hosting-api-key")).not.toBeNull();
+    expect(at("hosting-team")).not.toBeNull();
+    expect((at("hosting-save") as HTMLButtonElement | null)?.disabled).toBe(false);
+  });
+});

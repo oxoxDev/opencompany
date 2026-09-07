@@ -92,12 +92,30 @@ interface Calls {
  *
  * Routed on the path rather than on call order: the two cards mount
  * independently and nothing guarantees which read resolves first.
+ *
+ * `/auth/me` answers as an admin by default, matching `HostingView`'s own
+ * fixture convention: since issue #403 this page resolves the viewer's role to
+ * decide whether to offer the write forms at all, and a client that fell
+ * through to the SMTP branch for every unmatched path — as this one used to —
+ * would resolve every test here as a non-admin by accident.
  */
-function fakeClient(overrides: { domain?: unknown; smtp?: unknown } = {}) {
+function fakeClient(
+  overrides: { domain?: unknown; smtp?: unknown } = {},
+  role: "admin" | "member" = "admin",
+) {
   const calls: Calls = { put: [], post: [] };
   const client = {
     scopeFor: () => "/api/v1/companies/acme",
     get: (path: string) => {
+      if (path.endsWith("/auth/me")) {
+        return Promise.resolve({
+          id: "u1",
+          email: "a@b.c",
+          role,
+          company: "acme",
+          hasPassword: true,
+        });
+      }
       const answer = path.endsWith("/domain")
         ? (overrides.domain ?? DOMAIN_STATUS)
         : (overrides.smtp ?? SMTP_STATUS);
@@ -370,5 +388,84 @@ describe("the domain card's writes", () => {
 
     expect(calls.put).toHaveLength(1);
     expect(calls.put[0].body).toEqual({ domain: "" });
+  });
+});
+
+/**
+ * `PUT …/domain`, `PUT …/smtp` and `POST …/smtp/test` all take
+ * `AdminScopedCompany` on the host — neither card read that before this fix,
+ * so a member saw both forms enabled and learned only after a 403 toast that
+ * pasting a credential was never going to work. `POST …/domain/verify` stays
+ * `ScopedCompany` deliberately: it re-checks DNS for a domain only an admin
+ * could have set, so Verify is asserted open to a member, not gated.
+ */
+describe("authority: the write forms, not the reads (issue #1785 audit)", () => {
+  it("hides the domain add/remove controls from a member, and still lets them verify", async () => {
+    const { client, calls } = fakeClient({}, "member");
+    await show(client);
+
+    expect(at("domain-read-only")?.textContent).toContain("Only an admin");
+    expect(at("domain-remove")).toBeNull();
+
+    // The read stays intact: the domain and its pending state are still on
+    // screen, not a blank card.
+    expect(container.textContent).toContain("mail.acme.com");
+
+    // Verify is deliberately open to a member — it changes nothing an admin
+    // did not already set, and re-checks DNS the member could already read.
+    await click("domain-verify");
+    expect(calls.post).toHaveLength(1);
+    expect(calls.post[0].path).toContain("/domain/verify");
+  });
+
+  it("offers no add form to a member on an unconfigured domain, but still names the reason", async () => {
+    const { client } = fakeClient(
+      { domain: { domain: "", verified: false, records: [] } },
+      "member",
+    );
+    await show(client);
+
+    expect(at("domain-input")).toBeNull();
+    expect(at("domain-read-only")?.textContent).toContain("Only an admin");
+    expect(container.textContent).toContain("No custom domain configured");
+  });
+
+  it("offers an admin the domain add/remove controls, with no read-only notice", async () => {
+    const { client } = fakeClient({}, "admin");
+    await show(client);
+
+    expect(at("domain-read-only")).toBeNull();
+    expect(at("domain-remove")).not.toBeNull();
+  });
+
+  it("hides the SMTP credential form and Test from a member, and shows the read summary instead", async () => {
+    const { client, calls } = fakeClient({}, "member");
+    await show(client);
+
+    expect(at("smtp-read-only")?.textContent).toContain("Only an admin");
+    expect(at("smtp-host")).toBeNull();
+    expect(at("smtp-password")).toBeNull();
+    expect(at("smtp-save")).toBeNull();
+    expect(at("smtp-test")).toBeNull();
+
+    // Not a blank card: the non-secret configuration is still readable.
+    const summary = at("smtp-summary");
+    expect(summary?.textContent).toContain("smtp.postmarkapp.com");
+    expect(summary?.textContent).toContain("hello@mail.acme.com");
+    // And never the password — there is no field on the host response that
+    // could carry it, so there is nothing here to leak either.
+    expect(summary?.textContent).not.toContain("SECRET");
+
+    expect(calls.put).toHaveLength(0);
+    expect(calls.post).toHaveLength(0);
+  });
+
+  it("offers an admin the SMTP form and Test, with no read-only notice", async () => {
+    const { client } = fakeClient({}, "admin");
+    await show(client);
+
+    expect(at("smtp-read-only")).toBeNull();
+    expect(at("smtp-host")).not.toBeNull();
+    expect((at("smtp-save") as HTMLButtonElement | null)?.disabled).toBe(false);
   });
 });
