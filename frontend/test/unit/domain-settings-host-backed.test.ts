@@ -4,6 +4,7 @@ import { act, createElement, Fragment } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ApiError } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 
 /**
@@ -98,14 +99,16 @@ interface Calls {
  * decide whether to offer the write forms at all, and a client that fell
  * through to the SMTP branch for every unmatched path — as this one used to —
  * would resolve every test here as a non-admin by accident. `session: "none"`
- * makes `/auth/me` reject, the way it does for an unauthenticated or
- * bearer-only caller. `carriesPlatformBearer` is independent of it — a hub
- * console can carry a bearer alongside a real session (`authHeaders`'s own
- * doc comment).
+ * rejects the way the host's own `no_session()` does — a real `ApiError` from
+ * its `{error, code}` envelope — for an unauthenticated or bearer-only caller.
+ * `session: "error"` rejects with a plain network-style error: not a
+ * confirmed absence of a session, so it must not be read as one.
+ * `carriesPlatformBearer` is independent of it — a hub console can carry a
+ * bearer alongside a real session (`authHeaders`'s own doc comment).
  */
 function fakeClient(
   overrides: { domain?: unknown; smtp?: unknown } = {},
-  session: "admin" | "member" | "none" = "admin",
+  session: "admin" | "member" | "none" | "error" = "admin",
   carriesPlatformBearer = false,
 ) {
   const calls: Calls = { put: [], post: [] };
@@ -114,15 +117,15 @@ function fakeClient(
     carriesPlatformBearer,
     get: (path: string) => {
       if (path.endsWith("/auth/me")) {
-        return session === "none"
-          ? Promise.reject(new Error("no session"))
-          : Promise.resolve({
-              id: "u1",
-              email: "a@b.c",
-              role: session,
-              company: "acme",
-              hasPassword: true,
-            });
+        if (session === "none") return Promise.reject(new ApiError(401, "unauthorized", "not signed in", true));
+        if (session === "error") return Promise.reject(new Error("network down"));
+        return Promise.resolve({
+          id: "u1",
+          email: "a@b.c",
+          role: session,
+          company: "acme",
+          hasPassword: true,
+        });
       }
       const answer = path.endsWith("/domain")
         ? (overrides.domain ?? DOMAIN_STATUS)
@@ -489,6 +492,19 @@ describe("authority: the write forms, not the reads (issue #1785 audit)", () => 
     expect(at("domain-remove")).not.toBeNull();
     expect(at("smtp-read-only")).toBeNull();
     expect(at("smtp-host")).not.toBeNull();
+  });
+
+  it("stays read-only on both cards on an ambiguous /auth/me failure, even with a bearer present", async () => {
+    // A network error, a timeout, or a 5xx is not a confirmed absence of a
+    // session — a member's session could still be live and would still take
+    // precedence on the host (coderabbit review).
+    const { client } = fakeClient({}, "error", true);
+    await show(client);
+
+    expect(at("domain-read-only")?.textContent).toContain("Only an admin");
+    expect(at("domain-remove")).toBeNull();
+    expect(at("smtp-read-only")?.textContent).toContain("Only an admin");
+    expect(at("smtp-host")).toBeNull();
   });
 
   it("defers to a member session on both cards even when a platform bearer is also present", async () => {

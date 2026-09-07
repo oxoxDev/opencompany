@@ -4,6 +4,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ApiError } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import { HostingView } from "@/views/HostingView";
 
@@ -34,14 +35,17 @@ const HOSTING_OK = {
  * `/auth/me` is answered separately, and as an admin by default: since #1796
  * this page resolves the viewer's role to decide whether to offer the grant
  * control, and a client that rejected every `GET` alike would leave every test
- * here asserting a non-admin's view by accident. `session: "none"` makes
- * `/auth/me` reject, the way it does for an unauthenticated or bearer-only
- * caller. `carriesPlatformBearer` is independent of it — a hub console can
- * carry a bearer alongside a real session (`authHeaders`'s own doc comment).
+ * here asserting a non-admin's view by accident. `session: "none"` rejects the
+ * way the host's own `no_session()` does — a real `ApiError` from its
+ * `{error, code}` envelope — for an unauthenticated or bearer-only caller.
+ * `session: "error"` rejects with a plain network-style error: not a
+ * confirmed absence of a session, so it must not be read as one.
+ * `carriesPlatformBearer` is independent of it — a hub console can carry a
+ * bearer alongside a real session (`authHeaders`'s own doc comment).
  */
 function clientWith(
   answer: unknown,
-  session: "admin" | "member" | "none" = "admin",
+  session: "admin" | "member" | "none" | "error" = "admin",
   carriesPlatformBearer = false,
 ): OpenCompanyClient {
   return {
@@ -49,9 +53,9 @@ function clientWith(
     carriesPlatformBearer,
     get: (path: string) => {
       if (path.endsWith("/auth/me")) {
-        return session === "none"
-          ? Promise.reject(new Error("no session"))
-          : Promise.resolve({ id: "u1", email: "a@b.c", role: session, company: "acme", hasPassword: true });
+        if (session === "none") return Promise.reject(new ApiError(401, "unauthorized", "not signed in", true));
+        if (session === "error") return Promise.reject(new Error("network down"));
+        return Promise.resolve({ id: "u1", email: "a@b.c", role: session, company: "acme", hasPassword: true });
       }
       return answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer ?? HOSTING_OK);
     },
@@ -217,6 +221,16 @@ describe("HostingView authority (issue #1785 copy-paste pair)", () => {
 
     expect(at("hosting-read-only")).toBeNull();
     expect(at("hosting-api-key")).not.toBeNull();
+  });
+
+  it("stays read-only on an ambiguous /auth/me failure, even with a bearer present", async () => {
+    // A network error, a timeout, or a 5xx is not a confirmed absence of a
+    // session — a member's session could still be live and would still take
+    // precedence on the host (coderabbit review).
+    await show(clientWith(HOSTING_OK, "error", true));
+
+    expect(at("hosting-read-only")?.textContent).toContain("Only an admin");
+    expect(at("hosting-api-key")).toBeNull();
   });
 
   it("defers to a member session even when a platform bearer is also present", async () => {

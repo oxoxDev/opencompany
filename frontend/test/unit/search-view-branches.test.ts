@@ -4,6 +4,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ApiError } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import { SearchView } from "@/views/SearchView";
 
@@ -33,15 +34,18 @@ const SEARCH_OK = {
  *
  * `/auth/me` is answered separately, and as an admin by default — matching
  * `HostingView`'s own fixture — since this page resolves the viewer's role to
- * decide whether to offer the write form. `session: "none"` makes `/auth/me`
- * reject, the way it does for an unauthenticated or bearer-only caller.
+ * decide whether to offer the write form. `session: "none"` rejects the way
+ * the host's own `no_session()` does — a real `ApiError` from its
+ * `{error, code}` envelope — for an unauthenticated or bearer-only caller.
+ * `session: "error"` rejects with a plain network-style error: not a
+ * confirmed absence of a session, so it must not be read as one.
  * `carriesPlatformBearer` defaults to `false`, matching a browser session
  * authenticating by cookie; a hub console can carry it alongside a real
  * session (`authHeaders`'s own doc comment), so the two are independent here.
  */
 function clientWith(
   answer: unknown,
-  session: "admin" | "member" | "none" = "admin",
+  session: "admin" | "member" | "none" | "error" = "admin",
   carriesPlatformBearer = false,
 ): OpenCompanyClient {
   return {
@@ -49,9 +53,9 @@ function clientWith(
     carriesPlatformBearer,
     get: (path: string) => {
       if (path.endsWith("/auth/me")) {
-        return session === "none"
-          ? Promise.reject(new Error("no session"))
-          : Promise.resolve({ id: "u1", email: "a@b.c", role: session, company: "acme", hasPassword: true });
+        if (session === "none") return Promise.reject(new ApiError(401, "unauthorized", "not signed in", true));
+        if (session === "error") return Promise.reject(new Error("network down"));
+        return Promise.resolve({ id: "u1", email: "a@b.c", role: session, company: "acme", hasPassword: true });
       }
       return answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer ?? SEARCH_OK);
     },
@@ -112,6 +116,16 @@ describe("SearchView authority (issue #1785 copy-paste pair)", () => {
 
     expect(at("search-read-only")).toBeNull();
     expect(at("search-provider")).not.toBeNull();
+  });
+
+  it("stays read-only on an ambiguous /auth/me failure, even with a bearer present", async () => {
+    // A network error, a timeout, or a 5xx is not a confirmed absence of a
+    // session — a member's session could still be live and would still take
+    // precedence on the host (coderabbit review).
+    await show(clientWith(SEARCH_OK, "error", true));
+
+    expect(at("search-read-only")?.textContent).toContain("Only an admin");
+    expect(at("search-provider")).toBeNull();
   });
 
   it("defers to a member session even when a platform bearer is also present", async () => {

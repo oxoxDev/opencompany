@@ -3,7 +3,7 @@ import { Check, Info, Loader2, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 
 import { clearSearch, getSearch, saveSearch, type SearchStatus } from "@/api/search";
-import { me as fetchMe } from "@/api/auth";
+import { hasNoSession, me as fetchMe } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { PageHeader } from "@/components/page-header";
 import { cn } from "@/lib/utils";
@@ -130,18 +130,18 @@ export function SearchView({ client, company }: Props) {
       let admin = false;
       try {
         admin = (await fetchMe(client, company)).role === "admin";
-      } catch {
+      } catch (err) {
         // `resolve_principal` on the host tries a human session first and
         // only falls back to the platform/tenant bearer when none is
         // present — a hub console can carry both, and `PUT …/search` is
         // AdminScopedCompany, which admits that machine principal
-        // unconditionally once it has addressed this company. So `/auth/me`
-        // failing outright (no session at all) means the bearer is what the
-        // host will actually authorize on; `/auth/me` succeeding with a
-        // member role — even with a bearer also present — means the host
-        // resolved that member and will 403 the same as with no bearer,
-        // which the `try` above already handles correctly.
-        admin = client.carriesPlatformBearer;
+        // unconditionally once it has addressed this company. So a
+        // *confirmed* absence of any session means the bearer is what the
+        // host will actually authorize on. A network error, a timeout, or a
+        // `5xx` is not that confirmation — a member's session could still be
+        // live and still take precedence on the host — so those stay
+        // non-admin rather than assuming the bearer wins (codeRabbit review).
+        admin = client.carriesPlatformBearer && hasNoSession(err);
       }
       if (live) setCanManage(admin);
     })();
