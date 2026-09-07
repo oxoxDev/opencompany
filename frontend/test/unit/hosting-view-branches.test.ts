@@ -207,6 +207,23 @@ describe("HostingView authority (issue #1785 copy-paste pair)", () => {
     expect(at("hosting-view")?.textContent).toContain("vercel");
   });
 
+  it("tells a member a token is stored even when connected collapses that with a build/grant gap", async () => {
+    // `connected` folds apiKeyConfigured, granted and inBuild into one flag,
+    // so a stored token with the manifest not yet granting `hosting` reads as
+    // "Not connected yet" — indistinguishable, for a member reading only that
+    // summary, from no token ever having been saved (codex review).
+    await show(clientWith({ ...HOSTING_OK, granted: false }, "member"));
+
+    expect(at("hosting-connected")).toBeNull();
+    expect(at("hosting-credential-status")?.textContent).toContain("An API token is stored");
+  });
+
+  it("names the team scope in the member's credential-status line when one is set", async () => {
+    await show(clientWith({ ...HOSTING_OK, granted: false, team: "team_abc" }, "member"));
+
+    expect(at("hosting-credential-status")?.textContent).toContain("team_abc");
+  });
+
   it("offers an admin every control, with no read-only notice", async () => {
     await show(clientWith(HOSTING_OK, "admin"));
 

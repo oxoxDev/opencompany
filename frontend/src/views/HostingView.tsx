@@ -287,6 +287,17 @@ export function HostingView({ client, company }: Props) {
               ) : null}
             </div>
 
+            {/* `connected` folds three independent flags into one boolean, so
+                "Not connected yet" above can be true even with a token
+                already stored — a build without the tools, or a manifest that
+                has not granted `hosting` yet. A member gets that distinction
+                back here rather than reading a stored credential as absent. */}
+            {!canManage && status.apiKeyConfigured ? (
+              <p className="text-xs text-muted-foreground" data-testid="hosting-credential-status">
+                An API token is stored{status.team ? `, scoped to ${status.team}` : ""}.
+              </p>
+            ) : null}
+
             {canManage && (
               <div className={cn("grid gap-4 sm:grid-cols-2", SETTINGS_FIELD_COLUMN)}>
                 <div className="space-y-2">
