@@ -1,7 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
-import { Check, Copy, Globe, Loader2, Mail, ShieldAlert, TriangleAlert, X } from "lucide-react";
+import {
+  Check,
+  Copy,
+  Globe,
+  Info,
+  Loader2,
+  Mail,
+  ShieldAlert,
+  TriangleAlert,
+  X,
+} from "lucide-react";
 import { toast } from "sonner";
 
+import { me as fetchMe } from "@/api/auth";
 import { ApiError } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import {
@@ -14,7 +25,7 @@ import {
   verifyDomain,
 } from "@/api/domain";
 import { getSmtp, saveSmtp, type SmtpSecurity, type SmtpStatus, testSmtp } from "@/api/smtp";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -92,10 +103,16 @@ function isUnwired(err: unknown): boolean {
  *
  * Neither feature is ready, so `DomainSettings` renders `ComingSoon` previews
  * and mounts neither card. `DomainCard` and `SmtpCard` below are exported and
- * otherwise unchanged: their host-backed guarantees are still covered by
- * `test/unit/domain-settings-host-backed.test.ts`, which renders them
- * directly, so switching the feature on is putting them back into the two
- * slots below rather than rebuilding them out of the git history.
+ * otherwise unchanged except for the admin gate on their own write controls
+ * (`PUT …/domain`, `PUT …/smtp` and `POST …/smtp/test` all take
+ * `AdminScopedCompany` on the host, `POST …/domain/verify` stays open to a
+ * member on purpose): their host-backed guarantees, gate included, are still
+ * covered by `test/unit/domain-settings-host-backed.test.ts`, which renders
+ * them directly, so switching the feature on is putting them back into the
+ * two slots below rather than rebuilding them out of the git history. Each
+ * card resolves its own `canManage`, the way `HostingView` and `SearchView`
+ * resolve the same question, since neither has a mounted parent to resolve it
+ * once and pass down while this gate stands.
  */
 export function DomainSettings(_props: Props) {
   return (
@@ -296,6 +313,7 @@ function SmtpPreview() {
  * from and written to the host, and none of it is cached in the browser.
  */
 export function DomainCard({ client, company }: Props) {
+  const [canManage, setCanManage] = useState(false);
   const [status, setStatus] = useState<DomainStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -305,6 +323,22 @@ export function DomainCard({ client, company }: Props) {
   // the operator is looking at the Verify button when they learn this, and a
   // notice that vanishes leaves them clicking a button that cannot work.
   const [verifyUnwired, setVerifyUnwired] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      let admin = false;
+      try {
+        admin = (await fetchMe(client, company)).role === "admin";
+      } catch {
+        // No user plane on this host, or not signed in — treat as non-admin.
+      }
+      if (live) setCanManage(admin);
+    })();
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -397,30 +431,55 @@ export function DomainCard({ client, company }: Props) {
             <Loader2 className="size-4 animate-spin" /> Loading domain…
           </p>
         ) : !configured ? (
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <Input
-              value={draft}
-              data-testid="domain-input"
-              // The card title is the only thing naming this field, and a
-              // screen reader does not read it as the input's name. The
-              // placeholder is an example, not a label — it disappears on the
-              // first keystroke, which is exactly when it would be needed.
-              aria-label="Custom domain"
-              onChange={(e) => setDraft(e.target.value)}
-              placeholder="mail.acme.com"
-              onKeyDown={(e) => e.key === "Enter" && void connect()}
-            />
-            <Button
-              className="shrink-0"
-              disabled={busy}
-              onClick={() => void connect()}
-              data-testid="domain-add"
-            >
-              Add domain
-            </Button>
-          </div>
+          canManage ? (
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Input
+                value={draft}
+                data-testid="domain-input"
+                // The card title is the only thing naming this field, and a
+                // screen reader does not read it as the input's name. The
+                // placeholder is an example, not a label — it disappears on the
+                // first keystroke, which is exactly when it would be needed.
+                aria-label="Custom domain"
+                onChange={(e) => setDraft(e.target.value)}
+                placeholder="mail.acme.com"
+                onKeyDown={(e) => e.key === "Enter" && void connect()}
+              />
+              <Button
+                className="shrink-0"
+                disabled={busy}
+                onClick={() => void connect()}
+                data-testid="domain-add"
+              >
+                Add domain
+              </Button>
+            </div>
+          ) : (
+            <>
+              <Alert data-testid="domain-read-only">
+                <Info className="size-4" />
+                <AlertTitle>Only an admin can add this company&apos;s domain</AlertTitle>
+                <AlertDescription>
+                  A domain is the company&rsquo;s mail identity, so an admin sets it.
+                </AlertDescription>
+              </Alert>
+              <p className="text-sm text-muted-foreground">No custom domain configured.</p>
+            </>
+          )
         ) : (
           <>
+            {!canManage && (
+              <Alert data-testid="domain-read-only">
+                <Info className="size-4" />
+                <AlertTitle>Only an admin can change this company&apos;s domain</AlertTitle>
+                <AlertDescription>
+                  A domain is the company&rsquo;s mail identity, so an admin sets and removes it.
+                  You can see what is configured, and verifying its DNS records is open to
+                  everyone.
+                </AlertDescription>
+              </Alert>
+            )}
+
             <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3">
               <span className="inline-flex items-center gap-2 font-mono text-sm">
                 <Globe className="size-4 text-muted-foreground" />
@@ -439,15 +498,17 @@ export function DomainCard({ client, company }: Props) {
                     <span className="size-1.5 rounded-full bg-status-blocked" /> Pending
                   </Badge>
                 )}
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={busy}
-                  onClick={() => void remove()}
-                  data-testid="domain-remove"
-                >
-                  Remove
-                </Button>
+                {canManage && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => void remove()}
+                    data-testid="domain-remove"
+                  >
+                    Remove
+                  </Button>
+                )}
               </div>
             </div>
 
@@ -600,11 +661,28 @@ function CopyCell({ value }: { value: string }) {
  * is what holds that property while nothing renders the card.
  */
 export function SmtpCard({ client, company }: Props) {
+  const [canManage, setCanManage] = useState(false);
   const [status, setStatus] = useState<SmtpStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [testUnwired, setTestUnwired] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      let admin = false;
+      try {
+        admin = (await fetchMe(client, company)).role === "admin";
+      } catch {
+        // No user plane on this host, or not signed in — treat as non-admin.
+      }
+      if (live) setCanManage(admin);
+    })();
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
 
   const [host, setHost] = useState("");
   const [port, setPort] = useState("587");
@@ -733,6 +811,32 @@ export function SmtpCard({ client, company }: Props) {
           <p className="flex items-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="size-4 animate-spin" /> Loading email settings…
           </p>
+        ) : !canManage ? (
+          <>
+            <Alert data-testid="smtp-read-only">
+              <Info className="size-4" />
+              <AlertTitle>Only an admin can change this company&apos;s email settings</AlertTitle>
+              <AlertDescription>
+                These credentials are the address the company sends mail as, so an admin sets
+                them. You can see what is configured.
+              </AlertDescription>
+            </Alert>
+            {status?.configured ? (
+              <dl className="grid gap-2 text-sm sm:grid-cols-2" data-testid="smtp-summary">
+                <SummaryRow label="SMTP host" value={status.host} />
+                <SummaryRow label="Port" value={status.port !== undefined ? String(status.port) : undefined} />
+                <SummaryRow
+                  label="Security"
+                  value={status.security ? SECURITY_LABELS[status.security] : undefined}
+                />
+                <SummaryRow label="Username" value={status.username} />
+                <SummaryRow label="From name" value={status.from_name} />
+                <SummaryRow label="From email" value={status.from_email} />
+              </dl>
+            ) : (
+              <p className="text-sm text-muted-foreground">No email settings configured.</p>
+            )}
+          </>
         ) : (
           <>
             <div className="grid gap-4 sm:grid-cols-2">
@@ -873,6 +977,16 @@ function Field({
       <Label htmlFor={id}>{label}</Label>
       {children}
       {hint ? <p className="text-xs text-muted-foreground">{hint}</p> : null}
+    </div>
+  );
+}
+
+/** One read-only field in the SMTP summary a non-admin sees instead of the form. */
+function SummaryRow({ label, value }: { label: string; value: string | undefined }) {
+  return (
+    <div>
+      <dt className="text-xs text-muted-foreground">{label}</dt>
+      <dd className="font-mono">{value || "—"}</dd>
     </div>
   );
 }
