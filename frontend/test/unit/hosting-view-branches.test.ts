@@ -224,6 +224,19 @@ describe("HostingView authority", () => {
     expect(at("hosting-credential-status")?.textContent).toContain("team_abc");
   });
 
+  it("shows the saved team scope to a member even before a token is ever stored", async () => {
+    // An admin can save the team field on its own — `put_hosting` persists it
+    // independently of the API key — so `apiKeyConfigured` can be false while
+    // `team` is already set. Gating the status line on the token alone would
+    // hide the only team display from a member in that state.
+    await show(clientWith({ ...HOSTING_OK, apiKeyConfigured: false, team: "team_abc" }, "member"));
+
+    expect(at("hosting-connected")).toBeNull();
+    const status = at("hosting-credential-status")?.textContent ?? "";
+    expect(status).toContain("team_abc");
+    expect(status).not.toContain("An API token is stored");
+  });
+
   it("offers an admin every control, with no read-only notice", async () => {
     await show(clientWith(HOSTING_OK, "admin"));
 

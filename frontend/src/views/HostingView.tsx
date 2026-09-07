@@ -292,9 +292,11 @@ export function HostingView({ client, company }: Props) {
                 already stored — a build without the tools, or a manifest that
                 has not granted `hosting` yet. A member gets that distinction
                 back here rather than reading a stored credential as absent. */}
-            {!canManage && status.apiKeyConfigured ? (
+            {!canManage && (status.apiKeyConfigured || status.team) ? (
               <p className="text-xs text-muted-foreground" data-testid="hosting-credential-status">
-                An API token is stored{status.team ? `, scoped to ${status.team}` : ""}.
+                {status.apiKeyConfigured
+                  ? `An API token is stored${status.team ? `, scoped to ${status.team}` : ""}.`
+                  : `Scoped to ${status.team}, but no API token is stored yet.`}
               </p>
             ) : null}
 
