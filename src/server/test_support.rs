@@ -5,9 +5,19 @@
 //! the one place that mints it, so the shape of "an authenticated request" is
 //! stated once rather than in every test module.
 
+// Integration targets include this source directly, so the library-test crate
+// cannot see every helper consumer when it performs dead-code analysis.
+#![allow(dead_code)]
+
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use crate::AppState;
 use crate::ports::types::CompanyId;
 use crate::ports::{SessionRecord, UserRecord, UserRole, UserStatus, generate_id, now_millis};
+use crate::server::platform_auth::{
+    PlatformAuthConfig, PlatformClaims, PlatformVerifier, StaticPlatformVerifier,
+};
 use crate::server::users::cookie::session_cookie_name;
 use crate::server::users::token::{OsTokens, mint_session_token, sha256_hex};
 
@@ -139,6 +149,62 @@ pub(crate) async fn seed_fixed_admin(state: &AppState, company: &str) {
 /// Same safety property as [`FIXED_TEST_TOKEN`]: only its hash is stored.
 pub(crate) const FIXED_MEMBER_TEST_TOKEN: &str = "fixed-test-member-session-token-not-a-secret";
 
+/// A fixed session token for a test principal that must replace its password.
+///
+/// Only the hash is stored, with the same safety boundary as
+/// [`FIXED_TEST_TOKEN`]: it authenticates solely against the disposable store
+/// a test has just seeded.
+pub(crate) const FIXED_TEMP_PASSWORD_TEST_TOKEN: &str =
+    "fixed-test-temp-password-session-token-not-a-secret";
+
+/// Fixed bearer literals for tests that need both tenant ownership outcomes and
+/// the platform-wide machine principal.
+pub(crate) const FIXED_TENANT_OWNER_TEST_TOKEN: &str = "fixed-test-tenant-owner-token-not-a-secret";
+pub(crate) const FIXED_TENANT_NON_OWNER_TEST_TOKEN: &str =
+    "fixed-test-tenant-non-owner-token-not-a-secret";
+pub(crate) const FIXED_PLATFORM_TEST_TOKEN: &str = "fixed-test-platform-token-not-a-secret";
+
+/// A verifier for the three fixed machine principals above.
+///
+/// Tenant literals stand in only for claims that a production verifier has
+/// already authenticated. The platform literal still passes through the real
+/// exact-secret verifier. This object belongs only in an AppState whose
+/// companies and ownership rows were created inside a disposable test root.
+struct FixedPrincipalVerifier {
+    platform: StaticPlatformVerifier,
+}
+
+impl FixedPrincipalVerifier {
+    fn new() -> Self {
+        Self {
+            platform: StaticPlatformVerifier::new(FIXED_PLATFORM_TEST_TOKEN),
+        }
+    }
+
+    fn tenant_claims(tenant: &str) -> PlatformClaims {
+        PlatformClaims {
+            tenant: tenant.to_string(),
+            scopes: HashSet::from(["operator".to_string()]),
+            companies: None,
+        }
+    }
+}
+
+impl PlatformVerifier for FixedPrincipalVerifier {
+    fn verify(&self, bearer: &str) -> std::result::Result<PlatformClaims, crate::OpenCompanyError> {
+        match bearer {
+            FIXED_TENANT_OWNER_TEST_TOKEN => Ok(Self::tenant_claims("tenant:matrix-owner")),
+            FIXED_TENANT_NON_OWNER_TEST_TOKEN => Ok(Self::tenant_claims("tenant:matrix-outsider")),
+            _ => self.platform.verify(bearer),
+        }
+    }
+}
+
+/// Platform-auth configuration carrying the fixed machine principals.
+pub(crate) fn fixed_principal_platform_auth() -> PlatformAuthConfig {
+    PlatformAuthConfig::new(Arc::new(FixedPrincipalVerifier::new()))
+}
+
 /// Seeds a non-admin user whose session uses [`FIXED_MEMBER_TEST_TOKEN`].
 ///
 /// Exists because the harness signs every request in as an admin
@@ -191,6 +257,67 @@ pub(crate) async fn seed_fixed_member(state: &AppState, company: &str) {
         )
         .await
         .expect("seed_fixed_member: create session");
+}
+
+/// Seeds an admin whose otherwise-live session is behind the temporary-password
+/// boundary.
+///
+/// This mirrors the record shape produced by the admin password-reset route,
+/// while avoiding a password hashing round trip in route-authority tests. The
+/// caller must provide an [`AppState`] backed by disposable test storage.
+pub(crate) async fn seed_fixed_temp_password_admin(state: &AppState, company: &str) {
+    let id = CompanyId::new(company);
+    let runtime = state
+        .registry()
+        .get(&id)
+        .expect("seed_fixed_temp_password_admin: company is not registered");
+    let now = now_millis();
+    let user_id = generate_id();
+    runtime
+        .users()
+        .upsert_user(
+            &id,
+            &UserRecord {
+                id: user_id.clone(),
+                email: "harness-temp-password-admin@example.test".to_string(),
+                display_name: None,
+                avatar: None,
+                role: UserRole::Admin,
+                status: UserStatus::Active,
+                password_hash: None,
+                must_change_password: true,
+                created_at_millis: now,
+                last_seen_at_millis: None,
+                updated_at_millis: now,
+            },
+        )
+        .await
+        .expect("seed_fixed_temp_password_admin: upsert user");
+    runtime
+        .sessions()
+        .create(
+            &id,
+            &SessionRecord {
+                id: generate_id(),
+                token_hash: sha256_hex(FIXED_TEMP_PASSWORD_TEST_TOKEN),
+                user_id,
+                created_at_millis: now,
+                expires_at_millis: now + 60 * 60 * 1000,
+                user_agent: None,
+                kind: crate::ports::SessionKind::Browser,
+                label: None,
+            },
+        )
+        .await
+        .expect("seed_fixed_temp_password_admin: create session");
+}
+
+/// The `Cookie` header for [`seed_fixed_temp_password_admin`]'s session.
+pub(crate) fn temp_password_cookie(company: &str) -> String {
+    format!(
+        "{}={FIXED_TEMP_PASSWORD_TEST_TOKEN}",
+        session_cookie_name(&CompanyId::new(company)).expect("cookie-safe company id")
+    )
 }
 
 /// The `Cookie` header for [`seed_fixed_member`]'s session in `company`.
