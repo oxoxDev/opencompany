@@ -340,7 +340,7 @@ export function DomainCard({ client, company }: Props) {
         // host will actually authorize on. A network error, a timeout, or a
         // `5xx` is not that confirmation — a member's session could still be
         // live and still take precedence on the host — so those stay
-        // non-admin rather than assuming the bearer wins (codeRabbit review).
+        // non-admin rather than assuming the bearer wins.
         admin = client.carriesPlatformBearer && hasNoSession(err);
       }
       if (live) setCanManage(admin);
@@ -695,7 +695,7 @@ export function SmtpCard({ client, company }: Props) {
         // error, a timeout, or a `5xx` is not that confirmation — a
         // member's session could still be live and still take precedence
         // on the host — so those stay non-admin rather than assuming the
-        // bearer wins (codeRabbit review).
+        // bearer wins.
         admin = client.carriesPlatformBearer && hasNoSession(err);
       }
       if (live) setCanManage(admin);

@@ -124,7 +124,7 @@ export function HostingView({ client, company }: Props) {
         // host will actually authorize on. A network error, a timeout, or a
         // `5xx` is not that confirmation — a member's session could still be
         // live and still take precedence on the host — so those stay
-        // non-admin rather than assuming the bearer wins (codeRabbit review).
+        // non-admin rather than assuming the bearer wins.
         admin = client.carriesPlatformBearer && hasNoSession(err);
       }
       if (live) setCanManage(admin);
@@ -181,9 +181,9 @@ export function HostingView({ client, company }: Props) {
   }
 
   /*
-    Hoisted above the state conditionals for the same reason as `SearchView`'s
-    (codex review, #1785) — this page is the other half of that copy-paste
-    pair, and had the same two unnamed states.
+    Hoisted above the state conditionals for the same reason as `SearchView`'s —
+    this page is the other half of that copy-paste pair, and had the same two
+    unnamed states.
   */
   const header = (
     <PageHeader

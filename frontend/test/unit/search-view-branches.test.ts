@@ -9,7 +9,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { SearchView } from "@/views/SearchView";
 
 /**
- * `SearchView` is `HostingView`'s copy-paste sibling (codex review, #1785),
+ * `SearchView` is `HostingView`'s copy-paste sibling,
  * and carried the same authority gap: the provider picker, the API key field
  * and Save rendered enabled for a member, with nothing that read `canManage`
  * — the page's own footer sentence names the reason the choice is an
@@ -88,7 +88,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("SearchView authority (issue #1785 copy-paste pair)", () => {
+describe("SearchView authority", () => {
   it("offers a member the current provider, and no way to change it", async () => {
     await show(clientWith(SEARCH_OK, "member"));
 
@@ -121,7 +121,7 @@ describe("SearchView authority (issue #1785 copy-paste pair)", () => {
   it("stays read-only on an ambiguous /auth/me failure, even with a bearer present", async () => {
     // A network error, a timeout, or a 5xx is not a confirmed absence of a
     // session — a member's session could still be live and would still take
-    // precedence on the host (coderabbit review).
+    // precedence on the host.
     await show(clientWith(SEARCH_OK, "error", true));
 
     expect(at("search-read-only")?.textContent).toContain("Only an admin");
@@ -131,7 +131,7 @@ describe("SearchView authority (issue #1785 copy-paste pair)", () => {
   it("defers to a member session even when a platform bearer is also present", async () => {
     // A hub console can carry both credentials at once (`authHeaders`), and
     // resolve_principal tries the session first — so a bearer must never
-    // paper over a member's own 403 (codex review).
+    // paper over a member's own 403.
     await show(clientWith(SEARCH_OK, "member", true));
 
     expect(at("search-read-only")?.textContent).toContain("Only an admin");
@@ -148,8 +148,7 @@ describe("SearchView authority (issue #1785 copy-paste pair)", () => {
   it("hides the editable SearXNG endpoint field from a member, but shows it read-only", async () => {
     // The endpoint is non-secret and identifies where every teammate search
     // leaves the host — a member auditing that must not find only "SearXNG"
-    // with the actual address hidden alongside the write control (codex
-    // review).
+    // with the actual address hidden alongside the write control.
     await show(
       clientWith(
         { ...SEARCH_OK, provider: "searxng", effectiveProvider: "searxng", endpoint: "https://searx.acme.com" },

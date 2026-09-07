@@ -248,7 +248,7 @@ export async function me(client: OpenCompanyClient, company: string | null): Pro
  * than for some other reason.
  *
  * A caller falling back to a platform bearer's own authority on *any* {@link
- * me} failure (codex review) would also fall back on a network error, a
+ * me} failure would also fall back on a network error, a
  * timeout, or a `5xx` — none of which mean "no session"; a member's session
  * could still be live and would still take precedence on the host. The
  * host's own `no_session()` answers `401` with `code: "unauthorized"` from

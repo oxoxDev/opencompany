@@ -95,7 +95,7 @@ interface Calls {
  * independently and nothing guarantees which read resolves first.
  *
  * `/auth/me` answers as an admin by default, matching `HostingView`'s own
- * fixture convention: since issue #403 this page resolves the viewer's role to
+ * fixture convention: this page resolves the viewer's role to
  * decide whether to offer the write forms at all, and a client that fell
  * through to the SMTP branch for every unmatched path — as this one used to —
  * would resolve every test here as a non-admin by accident. `session: "none"`
@@ -410,7 +410,7 @@ describe("the domain card's writes", () => {
  * `ScopedCompany` deliberately: it re-checks DNS for a domain only an admin
  * could have set, so Verify is asserted open to a member, not gated.
  */
-describe("authority: the write forms, not the reads (issue #1785 audit)", () => {
+describe("authority: the write forms, not the reads", () => {
   it("hides the domain add/remove controls from a member, and still lets them verify", async () => {
     const { client, calls } = fakeClient({}, "member");
     await show(client);
@@ -497,7 +497,7 @@ describe("authority: the write forms, not the reads (issue #1785 audit)", () => 
   it("stays read-only on both cards on an ambiguous /auth/me failure, even with a bearer present", async () => {
     // A network error, a timeout, or a 5xx is not a confirmed absence of a
     // session — a member's session could still be live and would still take
-    // precedence on the host (coderabbit review).
+    // precedence on the host.
     const { client } = fakeClient({}, "error", true);
     await show(client);
 
@@ -510,7 +510,7 @@ describe("authority: the write forms, not the reads (issue #1785 audit)", () => 
   it("defers to a member session on both cards even when a platform bearer is also present", async () => {
     // A hub console can carry both credentials at once (`authHeaders`), and
     // resolve_principal tries the session first — so a bearer must never
-    // paper over a member's own 403 (codex review).
+    // paper over a member's own 403.
     const { client } = fakeClient({}, "member", true);
     await show(client);
 

@@ -34,7 +34,7 @@ let container: HTMLDivElement;
 let root: Root;
 
 /**
- * `get` answers `/auth/me` as an admin: since issue #403 `HostingView` resolves
+ * `get` answers `/auth/me` as an admin: `HostingView` resolves
  * the viewer's role before offering its write controls at all, and a client
  * with no `get` left every call rejecting, which resolved as a non-admin and
  * hid the very Disconnect button this suite exists to click.

@@ -187,7 +187,7 @@ describe("HostingView status surfaces", () => {
   });
 });
 
-describe("HostingView authority (issue #1785 copy-paste pair)", () => {
+describe("HostingView authority", () => {
   it("offers a member the credential fields, and no way to submit them", async () => {
     // The provider picker's sibling defect: the API token field, the team
     // field and Save were rendered enabled for a member, and the host refuses
@@ -211,7 +211,7 @@ describe("HostingView authority (issue #1785 copy-paste pair)", () => {
     // `connected` folds apiKeyConfigured, granted and inBuild into one flag,
     // so a stored token with the manifest not yet granting `hosting` reads as
     // "Not connected yet" — indistinguishable, for a member reading only that
-    // summary, from no token ever having been saved (codex review).
+    // summary, from no token ever having been saved.
     await show(clientWith({ ...HOSTING_OK, granted: false }, "member"));
 
     expect(at("hosting-connected")).toBeNull();
@@ -243,7 +243,7 @@ describe("HostingView authority (issue #1785 copy-paste pair)", () => {
   it("stays read-only on an ambiguous /auth/me failure, even with a bearer present", async () => {
     // A network error, a timeout, or a 5xx is not a confirmed absence of a
     // session — a member's session could still be live and would still take
-    // precedence on the host (coderabbit review).
+    // precedence on the host.
     await show(clientWith(HOSTING_OK, "error", true));
 
     expect(at("hosting-read-only")?.textContent).toContain("Only an admin");
@@ -253,7 +253,7 @@ describe("HostingView authority (issue #1785 copy-paste pair)", () => {
   it("defers to a member session even when a platform bearer is also present", async () => {
     // A hub console can carry both credentials at once (`authHeaders`), and
     // resolve_principal tries the session first — so a bearer must never
-    // paper over a member's own 403 (codex review).
+    // paper over a member's own 403.
     await show(clientWith(HOSTING_OK, "member", true));
 
     expect(at("hosting-read-only")?.textContent).toContain("Only an admin");

@@ -140,7 +140,7 @@ export function SearchView({ client, company }: Props) {
         // host will actually authorize on. A network error, a timeout, or a
         // `5xx` is not that confirmation — a member's session could still be
         // live and still take precedence on the host — so those stay
-        // non-admin rather than assuming the bearer wins (codeRabbit review).
+        // non-admin rather than assuming the bearer wins.
         admin = client.carriesPlatformBearer && hasNoSession(err);
       }
       if (live) setCanManage(admin);
@@ -203,7 +203,7 @@ export function SearchView({ client, company }: Props) {
   }
 
   /*
-    Hoisted above the state conditionals (codex review, #1785). Both early
+    Hoisted above the state conditionals. Both early
     returns used to run before the header, so the page had no `h1` while it
     loaded and — because the read is not retried — none at all once it failed.
     The error state is the one that matters: it is terminal, so a screen reader
