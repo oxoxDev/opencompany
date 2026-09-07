@@ -325,6 +325,15 @@ export function DomainCard({ client, company }: Props) {
   const [verifyUnwired, setVerifyUnwired] = useState(false);
 
   useEffect(() => {
+    // A platform or tenant bearer has no human session for `/auth/me` to
+    // return, but `PUT …/domain` is `AdminScopedCompany` on the host, which
+    // admits that machine principal unconditionally once it has addressed
+    // this company. Asking `/auth/me` anyway would read the missing session
+    // as "not an admin" and hide a form whose write would in fact succeed.
+    if (client.carriesPlatformBearer) {
+      setCanManage(true);
+      return;
+    }
     let live = true;
     void (async () => {
       let admin = false;
@@ -669,6 +678,16 @@ export function SmtpCard({ client, company }: Props) {
   const [testUnwired, setTestUnwired] = useState(false);
 
   useEffect(() => {
+    // A platform or tenant bearer has no human session for `/auth/me` to
+    // return, but `PUT …/smtp` and `POST …/smtp/test` are `AdminScopedCompany`
+    // on the host, which admits that machine principal unconditionally once it
+    // has addressed this company. Asking `/auth/me` anyway would read the
+    // missing session as "not an admin" and hide a form whose write would in
+    // fact succeed.
+    if (client.carriesPlatformBearer) {
+      setCanManage(true);
+      return;
+    }
     let live = true;
     void (async () => {
       let admin = false;

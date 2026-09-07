@@ -36,9 +36,14 @@ const HOSTING_OK = {
  * control, and a client that rejected every `GET` alike would leave every test
  * here asserting a non-admin's view by accident. `role` makes that explicit.
  */
-function clientWith(answer: unknown, role: "admin" | "member" = "admin"): OpenCompanyClient {
+function clientWith(
+  answer: unknown,
+  role: "admin" | "member" = "admin",
+  carriesPlatformBearer = false,
+): OpenCompanyClient {
   return {
     scopeFor: () => "/api/v1/companies/acme",
+    carriesPlatformBearer,
     get: (path: string) =>
       path.endsWith("/auth/me")
         ? Promise.resolve({ id: "u1", email: "a@b.c", role, company: "acme", hasPassword: true })
@@ -200,5 +205,15 @@ describe("HostingView authority (issue #1785 copy-paste pair)", () => {
     expect(at("hosting-api-key")).not.toBeNull();
     expect(at("hosting-team")).not.toBeNull();
     expect((at("hosting-save") as HTMLButtonElement | null)?.disabled).toBe(false);
+  });
+
+  it("offers a platform bearer every control without calling /auth/me", async () => {
+    const client = clientWith(HOSTING_OK, "member", true);
+    const getSpy = vi.spyOn(client, "get");
+    await show(client);
+
+    expect(at("hosting-read-only")).toBeNull();
+    expect(at("hosting-api-key")).not.toBeNull();
+    expect(getSpy.mock.calls.some(([path]) => String(path).endsWith("/auth/me"))).toBe(false);
   });
 });

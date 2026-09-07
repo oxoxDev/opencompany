@@ -33,11 +33,17 @@ const SEARCH_OK = {
  *
  * `/auth/me` is answered separately, and as an admin by default — matching
  * `HostingView`'s own fixture — since this page resolves the viewer's role to
- * decide whether to offer the write form.
+ * decide whether to offer the write form. `carriesPlatformBearer` defaults to
+ * `false`, matching a browser session authenticating by cookie.
  */
-function clientWith(answer: unknown, role: "admin" | "member" = "admin"): OpenCompanyClient {
+function clientWith(
+  answer: unknown,
+  role: "admin" | "member" = "admin",
+  carriesPlatformBearer = false,
+): OpenCompanyClient {
   return {
     scopeFor: () => "/api/v1/companies/acme",
+    carriesPlatformBearer,
     get: (path: string) =>
       path.endsWith("/auth/me")
         ? Promise.resolve({ id: "u1", email: "a@b.c", role, company: "acme", hasPassword: true })
@@ -94,6 +100,16 @@ describe("SearchView authority (issue #1785 copy-paste pair)", () => {
     expect(at("search-read-only")).toBeNull();
     expect(at("search-provider")).not.toBeNull();
     expect((at("search-save") as HTMLButtonElement | null)?.disabled).toBe(false);
+  });
+
+  it("offers a platform bearer every control without calling /auth/me", async () => {
+    const client = clientWith(SEARCH_OK, "member", true);
+    const getSpy = vi.spyOn(client, "get");
+    await show(client);
+
+    expect(at("search-read-only")).toBeNull();
+    expect(at("search-provider")).not.toBeNull();
+    expect(getSpy.mock.calls.some(([path]) => String(path).endsWith("/auth/me"))).toBe(false);
   });
 
   it("hides the SearXNG endpoint field from a member too, same as the API key", async () => {

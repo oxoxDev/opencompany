@@ -102,10 +102,12 @@ interface Calls {
 function fakeClient(
   overrides: { domain?: unknown; smtp?: unknown } = {},
   role: "admin" | "member" = "admin",
+  carriesPlatformBearer = false,
 ) {
   const calls: Calls = { put: [], post: [] };
   const client = {
     scopeFor: () => "/api/v1/companies/acme",
+    carriesPlatformBearer,
     get: (path: string) => {
       if (path.endsWith("/auth/me")) {
         return Promise.resolve({
@@ -467,5 +469,22 @@ describe("authority: the write forms, not the reads (issue #1785 audit)", () => 
     expect(at("smtp-read-only")).toBeNull();
     expect(at("smtp-host")).not.toBeNull();
     expect((at("smtp-save") as HTMLButtonElement | null)?.disabled).toBe(false);
+  });
+
+  it("offers a platform bearer both write forms without calling /auth/me", async () => {
+    // `PUT …/domain`, `PUT …/smtp` and `POST …/smtp/test` are all
+    // `AdminScopedCompany`, which admits a bearer that has addressed this
+    // company unconditionally — it has no human session for `/auth/me` to
+    // return, so resolving canManage through that route alone would hide a
+    // write both cards' own backend would let through.
+    const { client } = fakeClient({}, "member", true);
+    const getSpy = vi.spyOn(client, "get");
+    await show(client);
+
+    expect(at("domain-read-only")).toBeNull();
+    expect(at("domain-remove")).not.toBeNull();
+    expect(at("smtp-read-only")).toBeNull();
+    expect(at("smtp-host")).not.toBeNull();
+    expect(getSpy.mock.calls.some(([path]) => String(path).endsWith("/auth/me"))).toBe(false);
   });
 });

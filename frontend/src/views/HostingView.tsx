@@ -109,6 +109,15 @@ export function HostingView({ client, company }: Props) {
   }, [client, company]);
 
   useEffect(() => {
+    // A platform or tenant bearer has no human session for `/auth/me` to
+    // return, but `PUT …/hosting` is `AdminScopedCompany` on the host, which
+    // admits that machine principal unconditionally once it has addressed
+    // this company. Asking `/auth/me` anyway would read the missing session
+    // as "not an admin" and hide a form whose write would in fact succeed.
+    if (client.carriesPlatformBearer) {
+      setCanManage(true);
+      return;
+    }
     let live = true;
     void (async () => {
       let admin = false;
