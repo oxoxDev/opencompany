@@ -10716,28 +10716,6 @@ mode = "full"
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
-    /// The route is guarded by the same company auth as resolve: a member — an
-    /// authenticated user of the company — may extend a deadline, exactly as
-    /// they may resolve. Keeping a stalled run alive is not an admin-only lever.
-    #[tokio::test]
-    async fn a_member_may_extend_an_approval_deadline() {
-        let home_dir = home();
-        let state = state_with_company(home_dir.path(), "running").await;
-        crate::server::test_support::seed_fixed_member(&state, "acme").await;
-        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
-        let id = park_for_extend(&runtime, "appr-member-ext", 1_000).await;
-
-        let app = router(state);
-        let response = app
-            .oneshot(extend_request_with_cookie(
-                &id,
-                crate::server::test_support::member_cookie("acme"),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
     /// Whether the stalled brain's follow-up turn has journaled its marker yet.
     fn continued(runtime: &Arc<CompanyRuntime>) -> bool {
         runtime
@@ -15267,5 +15245,206 @@ mode = "full"
         assert_eq!(after.column, crate::ports::tasks::COLUMN_IN_PROGRESS);
         let note = after.note.expect("note");
         assert!(note.contains("send it back"), "{note}");
+    }
+
+    // -- Approval authority: deciding for the company, not addressing it -----
+
+    /// Both address forms. Every ops route is registered under two, and this
+    /// pair had already drifted apart: only the alias carried the
+    /// temporary-password refusal, so every assertion below runs against both.
+    const APPROVAL_SCOPES: [&str; 2] = ["/api/v1/companies/acme", "/api/v1/company"];
+
+    fn resolve_as(scope: &str, approval_id: &str, cookie: Option<&str>) -> Request<Body> {
+        let builder = Request::builder()
+            .method("POST")
+            .uri(format!("{scope}/approvals/{approval_id}"))
+            .header("content-type", "application/json");
+        let builder = match cookie {
+            Some(cookie) => builder.header("cookie", cookie),
+            None => builder,
+        };
+        builder
+            .body(Body::from(
+                serde_json::json!({ "verdict": "deny" }).to_string(),
+            ))
+            .unwrap()
+    }
+
+    fn extend_as(scope: &str, approval_id: &str, cookie: Option<&str>) -> Request<Body> {
+        let builder = Request::builder()
+            .method("POST")
+            .uri(format!("{scope}/approvals/{approval_id}/extend"));
+        let builder = match cookie {
+            Some(cookie) => builder.header("cookie", cookie),
+            None => builder,
+        };
+        builder.body(Body::empty()).unwrap()
+    }
+
+    /// The sharpest case in this file. `may_read_approval_contents` already
+    /// refuses a member the payload and the amount an approval carries, so
+    /// before this guard a member could approve a payment they were forbidden
+    /// to look at.
+    ///
+    /// The approval id is deliberately one that does not exist: authority is
+    /// settled before the approval is resolved, so the answer must be `403` and
+    /// not the `404` a permitted caller would get.
+    #[tokio::test]
+    async fn a_member_may_not_resolve_an_approval() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let cookie = crate::server::test_support::member_cookie("acme");
+        let app = router(state);
+
+        for scope in APPROVAL_SCOPES {
+            let denied = app
+                .clone()
+                .oneshot(resolve_as(scope, "appr-nobody-parked", Some(&cookie)))
+                .await
+                .unwrap();
+            assert_eq!(
+                denied.status(),
+                StatusCode::FORBIDDEN,
+                "{scope} let a member decide an approval"
+            );
+        }
+    }
+
+    /// Extending is the deadline's other side: an approval nobody decides
+    /// default-denies when its window runs out, so being able to push that
+    /// window out indefinitely is a decision about the effect, made for the
+    /// company. It is held to the same authority as deciding it outright.
+    #[tokio::test]
+    async fn a_member_may_not_extend_an_approval_deadline() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let id = park_for_extend(&runtime, "appr-member-ext", 1_000).await;
+        let cookie = crate::server::test_support::member_cookie("acme");
+        let app = router(state);
+
+        for scope in APPROVAL_SCOPES {
+            let denied = app
+                .clone()
+                .oneshot(extend_as(scope, id.as_ref(), Some(&cookie)))
+                .await
+                .unwrap();
+            assert_eq!(
+                denied.status(),
+                StatusCode::FORBIDDEN,
+                "{scope} let a member extend an approval deadline"
+            );
+        }
+    }
+
+    /// The other half of the guard: refusing a member must not also refuse the
+    /// admin the routes exist for, under either address form.
+    #[tokio::test]
+    async fn an_admin_may_still_resolve_an_approval() {
+        for scope in APPROVAL_SCOPES {
+            let home_dir = home();
+            let state = state_with_company(home_dir.path(), "running").await;
+            crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+            let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+            let id = park_for_extend(&runtime, "appr-admin-resolve", 1_000).await;
+            let cookie = crate::server::test_support::fixed_cookie("acme");
+            let app = router(state);
+
+            let allowed = app
+                .oneshot(resolve_as(scope, id.as_ref(), Some(&cookie)))
+                .await
+                .unwrap();
+            assert_eq!(
+                allowed.status(),
+                StatusCode::OK,
+                "{scope} refused an admin the decision"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_admin_may_still_extend_an_approval_deadline() {
+        for scope in APPROVAL_SCOPES {
+            let home_dir = home();
+            let state = state_with_company(home_dir.path(), "running").await;
+            crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+            let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+            let id = park_for_extend(&runtime, "appr-admin-ext", 1_000).await;
+            let cookie = crate::server::test_support::fixed_cookie("acme");
+            let app = router(state);
+
+            let allowed = app
+                .oneshot(extend_as(scope, id.as_ref(), Some(&cookie)))
+                .await
+                .unwrap();
+            assert_eq!(
+                allowed.status(),
+                StatusCode::OK,
+                "{scope} refused an admin the extension"
+            );
+        }
+    }
+
+    /// No credential at all is `401`, not `403` — the authority guard must not
+    /// turn an anonymous request into a role decision.
+    #[tokio::test]
+    async fn an_unauthenticated_caller_cannot_decide_or_extend_an_approval() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let app = router(state);
+
+        for scope in APPROVAL_SCOPES {
+            for request in [
+                resolve_as(scope, "appr-anon", None),
+                extend_as(scope, "appr-anon", None),
+            ] {
+                let uri = request.uri().to_string();
+                let denied = app.clone().oneshot(request).await.unwrap();
+                assert_eq!(
+                    denied.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{uri} answered an anonymous caller with {}",
+                    denied.status()
+                );
+            }
+        }
+    }
+
+    /// The second defect these routes carried: the temporary-password boundary
+    /// lived only on the single-company alias, so an admin who had never set a
+    /// password could decide and extend every approval through the `{id}` form.
+    ///
+    /// An admin is the right principal to prove it with — the role check passes,
+    /// so a refusal here can only be the password boundary.
+    #[tokio::test]
+    async fn an_admin_on_a_temporary_password_may_not_decide_or_extend() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let cookie = crate::server::test_support::seed_temp_password_admin(&state, "acme").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let id = park_for_extend(&runtime, "appr-temp-pass", 1_000).await;
+        let app = router(state);
+
+        for scope in APPROVAL_SCOPES {
+            for request in [
+                resolve_as(scope, id.as_ref(), Some(&cookie)),
+                extend_as(scope, id.as_ref(), Some(&cookie)),
+            ] {
+                let uri = request.uri().to_string();
+                let denied = app.clone().oneshot(request).await.unwrap();
+                assert_eq!(
+                    denied.status(),
+                    StatusCode::FORBIDDEN,
+                    "{uri} served an admin who has not set a password"
+                );
+                assert_eq!(
+                    body_json(denied).await["code"],
+                    "password_change_required",
+                    "{uri} refused for the wrong reason"
+                );
+            }
+        }
     }
 }
