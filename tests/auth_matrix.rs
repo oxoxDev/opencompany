@@ -894,25 +894,25 @@ const EXTERNAL_AUTHORITY_ROUTES: &[Route] = &[
         Verb::Post,
         "/api/v1/companies/{id}/approvals/{aid}",
         Probe::Json(r#"{"verdict":"deny","amended_payload":{}}"#),
-        RedCells::MemberAndTempPassword,
+        RedCells::TempPassword,
     ),
     external_admin(
         Verb::Post,
         "/api/v1/company/approvals/{aid}",
         Probe::Json(r#"{"verdict":"deny","amended_payload":{}}"#),
-        RedCells::Member,
+        RedCells::None,
     ),
     external_admin(
         Verb::Post,
         "/api/v1/companies/{id}/approvals/{aid}/extend",
         Probe::Empty,
-        RedCells::MemberAndTempPassword,
+        RedCells::TempPassword,
     ),
     external_admin(
         Verb::Post,
         "/api/v1/company/approvals/{aid}/extend",
         Probe::Empty,
-        RedCells::Member,
+        RedCells::None,
     ),
 ];
 
@@ -1289,7 +1289,7 @@ fn table_counts_and_intentional_widenings_are_explicit() {
                         .count()
             })
             .sum::<usize>(),
-        55,
+        51,
         "ignored red principal cells",
     );
     assert_eq!(
@@ -1445,21 +1445,19 @@ fn external_authority_router_files_have_no_unclassified_paths() {
             "/api/v1/companies/{id}/chat/attribution-audit",
             "/api/v1/companies/{id}/chat/messages/{seq}/reactions",
             "/api/v1/companies/{id}/approvals",
-            "/api/v1/companies/{id}/approvals/{aid}",
-            "/api/v1/companies/{id}/approvals/{aid}/extend",
             "/api/v1/company/chat",
             "/api/v1/company/chat/history",
             "/api/v1/company/chat/attribution-audit",
             "/api/v1/company/chat/messages/{seq}/reactions",
             "/api/v1/company/approvals",
-            "/api/v1/company/approvals/{aid}",
-            "/api/v1/company/approvals/{aid}/extend",
         ]),
         &operator.direct,
     );
     assert_set_eq(
         "operator scoped suffix",
         &string_set(&[
+            "/approvals/{aid}",
+            "/approvals/{aid}/extend",
             "/desks",
             "/desks/{desk_id}",
             "/desks/{desk_id}/members",
