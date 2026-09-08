@@ -15346,7 +15346,6 @@ mode = "full"
         for scope in APPROVAL_SCOPES {
             let home_dir = home();
             let state = state_with_company(home_dir.path(), "running").await;
-            crate::server::test_support::seed_fixed_admin(&state, "acme").await;
             let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
             let id = park_for_extend(&runtime, "appr-admin-resolve", 1_000).await;
             let cookie = crate::server::test_support::fixed_cookie("acme");
@@ -15369,7 +15368,6 @@ mode = "full"
         for scope in APPROVAL_SCOPES {
             let home_dir = home();
             let state = state_with_company(home_dir.path(), "running").await;
-            crate::server::test_support::seed_fixed_admin(&state, "acme").await;
             let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
             let id = park_for_extend(&runtime, "appr-admin-ext", 1_000).await;
             let cookie = crate::server::test_support::fixed_cookie("acme");
