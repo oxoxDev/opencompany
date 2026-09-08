@@ -1431,6 +1431,34 @@ fn external_authority_router_files_have_no_unclassified_paths() {
         ]),
         &provision.direct,
     );
+
+    // Knowing a path exists is not the same as exercising it. These four are
+    // `PlatformScope` and the matrix has no platform access class to express
+    // them, so they carry no row and no principal ever probes them. Naming
+    // them here is what stops that being silent: a ninth provisioning route,
+    // or a fix that gives these rows, fails this assertion rather than
+    // quietly joining a set nobody checks.
+    let unexercised: BTreeSet<String> = provision
+        .direct
+        .iter()
+        .filter(|path| {
+            !EXTERNAL_AUTHORITY_ROUTES
+                .iter()
+                .any(|route| route.path == path.as_str())
+        })
+        .cloned()
+        .collect();
+    assert_set_eq(
+        "provisioning paths no principal probes",
+        &string_set(&[
+            "/api/v1/companies",
+            "/api/v1/companies/provisioning",
+            "/api/v1/companies/{id}/suspend",
+            "/api/v1/companies/{id}/archive",
+        ]),
+        &unexercised,
+    );
+
     assert!(provision.scoped.is_empty());
 
     let operator = scan_file_route_literals(&root.join("operator.rs"))
