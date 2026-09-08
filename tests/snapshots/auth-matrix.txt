@@ -1790,6 +1790,13 @@ POST /api/v1/companies/{id}/team must-change-password-admin refused:403:password
 POST /api/v1/companies/{id}/team platform permitted source=ops access=scoped features=openhuman blast=authority note="Members may add teammates unless privileged budget or tool fields are requested." wait=-
 POST /api/v1/companies/{id}/team tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=authority note="Members may add teammates unless privileged budget or tool fields are requested." wait=-
 POST /api/v1/companies/{id}/team tenant-owner permitted source=ops access=scoped features=openhuman blast=authority note="Members may add teammates unless privileged budget or tool fields are requested." wait=-
+POST /api/v1/companies/{id}/team/design admin permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/companies/{id}/team/design anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/companies/{id}/team/design member permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/companies/{id}/team/design must-change-password-admin refused:403:password_change_required source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/companies/{id}/team/design platform permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/companies/{id}/team/design tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/companies/{id}/team/design tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 POST /api/v1/companies/{id}/team/draft admin permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 POST /api/v1/companies/{id}/team/draft anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 POST /api/v1/companies/{id}/team/draft member permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
@@ -2182,6 +2189,13 @@ POST /api/v1/company/team must-change-password-admin refused:403:password_change
 POST /api/v1/company/team platform permitted source=ops access=scoped features=openhuman blast=authority note="Members may add teammates unless privileged budget or tool fields are requested." wait=-
 POST /api/v1/company/team tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=authority note="Members may add teammates unless privileged budget or tool fields are requested." wait=-
 POST /api/v1/company/team tenant-owner permitted source=ops access=scoped features=openhuman blast=authority note="Members may add teammates unless privileged budget or tool fields are requested." wait=-
+POST /api/v1/company/team/design admin permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/company/team/design anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/company/team/design member permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/company/team/design must-change-password-admin refused:403:password_change_required source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/company/team/design platform permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/company/team/design tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/company/team/design tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 POST /api/v1/company/team/draft admin permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 POST /api/v1/company/team/draft anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 POST /api/v1/company/team/draft member permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-

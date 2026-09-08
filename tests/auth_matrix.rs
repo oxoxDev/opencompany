@@ -355,8 +355,8 @@ macro_rules! body_admin {
     }};
 }
 
-// Source-derived at upstream/main 0056ddf0e: 184 canonical scoped route-method
-// pairs across 142 suffixes. Forty method pairs use `AdminScopedCompany`; the
+// Source-derived at upstream/main 54de00102: 185 canonical scoped route-method
+// pairs across 143 suffixes. Forty method pairs use `AdminScopedCompany`; the
 // earlier count of 28 conflated an older source revision with unique paths.
 const OPS_SCOPED_ROUTES: &[Route] = &[
     r!(Get, "/activation", Scoped, Ordinary, ""),
@@ -736,6 +736,7 @@ const OPS_SCOPED_ROUTES: &[Route] = &[
     ),
     red!(Delete, "/team/{agent_id}", Destructive, TeamFix),
     r!(Post, "/team/draft", Scoped, Ordinary, ""),
+    r!(Post, "/team/design", Scoped, Ordinary, ""),
     r!(Post, "/team/{agent_id}/draft", Scoped, Ordinary, ""),
     r!(
         Put,
@@ -1258,24 +1259,24 @@ async fn company_status_temp_password_boundary_waits_for_an_assigned_branch() {
 
 #[test]
 fn table_counts_and_intentional_widenings_are_explicit() {
-    assert_eq!(OPS_SCOPED_ROUTES.len(), 184);
+    assert_eq!(OPS_SCOPED_ROUTES.len(), 185);
     assert_eq!(
         OPS_SCOPED_ROUTES
             .iter()
             .map(|route| route.path)
             .collect::<BTreeSet<_>>()
             .len(),
-        142,
+        143,
     );
     assert_eq!(OPS_EXACT_ROUTES.len(), 3);
     assert_eq!(
         OPS_SCOPED_ROUTES.len() * 2,
-        368,
+        370,
         "dual-address ops route-method rows",
     );
     assert_eq!(
         OPS_SCOPED_ROUTES.len() * 2 + OPS_EXACT_ROUTES.len(),
-        371,
+        373,
         "complete ops route-method rows",
     );
     assert_eq!(EXTERNAL_AUTHORITY_ROUTES.len(), 8);
@@ -1284,7 +1285,7 @@ fn table_counts_and_intentional_widenings_are_explicit() {
         all_routes()
             .map(|route| route_patterns(route).len())
             .sum::<usize>(),
-        380,
+        382,
         "concrete route-method rows",
     );
     assert_eq!(
@@ -1292,10 +1293,10 @@ fn table_counts_and_intentional_widenings_are_explicit() {
             .flat_map(route_patterns)
             .collect::<BTreeSet<_>>()
             .len(),
-        295,
+        297,
         "concrete paths",
     );
-    assert_eq!(render_snapshot().lines().count(), 2_660);
+    assert_eq!(render_snapshot().lines().count(), 2_674);
     assert_eq!(
         all_routes()
             .map(|route| {
