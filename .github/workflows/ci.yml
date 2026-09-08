@@ -1042,6 +1042,14 @@ jobs:
       - name: Clippy (openhuman, tinymemory)
         run: cargo clippy --locked --no-deps --features openhuman --all-targets -- -D warnings
 
+      # The route-authority matrix names its target explicitly, because a
+      # bare `cargo test` reports success when it selects no tests at all —
+      # which is how a disabled integration target passes as green. The
+      # script exists so the target name lives in one place; a lane that
+      # inlines the command instead drifts the moment the target is renamed.
+      - name: Route authority matrix
+        run: scripts/ci/assert-auth-matrix.sh
+
       # Issue #1524 (PR 1). `pub mod memory` is gated on `tinymemory`
       # (`store/mod.rs`), and neither strict lane enabled that gate: the
       # default-features clippy lints a tree where the module does not exist,
