@@ -274,7 +274,6 @@ impl Wait {
 enum RedCells {
     None,
     Member,
-    MemberAndTempPassword,
     TenantOwnerAndPlatform,
     TempPassword,
 }
@@ -284,10 +283,6 @@ impl RedCells {
         match self {
             Self::None => false,
             Self::Member => matches!(principal, Principal::Member),
-            Self::MemberAndTempPassword => matches!(
-                principal,
-                Principal::Member | Principal::MustChangePasswordAdmin
-            ),
             Self::TenantOwnerAndPlatform => {
                 matches!(principal, Principal::TenantOwner | Principal::Platform)
             }
