@@ -2594,6 +2594,19 @@ pub(crate) async fn execute_effect_once(
     if rt.journal.is_executed(key) {
         return Ok(());
     }
+    // The commit boundary, and so the last place the stop can still hold.
+    //
+    // Every caller checks the flag before reaching here, and every one of those
+    // checks sits behind at least one `.await` — resolving an approval journals
+    // the verdict before this runs, and a tool-call settlement yields on the
+    // grant lookup. A stop landing in that window would otherwise send the
+    // email or move the money after the company had reported itself stopped.
+    //
+    // Refused before `record_executed`, never after: the at-most-once mark is
+    // what makes the runtime never re-attempt an effect, so recording it and
+    // then refusing would lose the effect permanently rather than defer it.
+    // Unmarked, the key is still executable once an operator releases the stop.
+    rt.ensure_not_emergency_stopped()?;
     // The commit now describes what it is committing (issue #351). Classified
     // here, against the gate in force at execution time, because this is the one
     // place that has both the effect and the policy — and because "was this
@@ -6000,6 +6013,53 @@ members = ["writer"]
             .await
             .unwrap();
         let record = rt2.store.load(rt2.id()).await.unwrap().unwrap();
+        assert_eq!(record.ledger.len(), 1);
+    }
+
+    /// The commit boundary holds the stop, and defers rather than destroys.
+    ///
+    /// Callers check the flag before reaching the executor, and every one of
+    /// those checks sits behind an await — resolving an approval journals the
+    /// verdict first, so a stop landing in that window used to send the money
+    /// anyway. Refusing must also leave the key unexecuted, or the effect is
+    /// lost instead of postponed.
+    #[tokio::test]
+    async fn a_stop_refuses_the_effect_commit_and_leaves_it_executable_after_release() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let rt = RuntimeBuilder::fs_defaults(home.clone(), manifest("full"))
+            .await
+            .unwrap();
+
+        let effect = Effect {
+            kind: "x402.spend".into(),
+            group: EffectGroup::Spend,
+            amount_usd: Some(3.0),
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
+
+        rt.approval_gate.set_emergency(true);
+        execute_effect_once(&rt, "k1", &effect, None)
+            .await
+            .expect_err("a stopped company must not commit an effect");
+
+        assert!(
+            !rt.journal.is_executed("k1"),
+            "a refused commit must not carry the at-most-once mark, or the effect is lost \
+             rather than deferred"
+        );
+        let record = rt.store().load(rt.id()).await.unwrap().unwrap();
+        assert!(record.ledger.is_empty(), "and the money must not have moved");
+
+        rt.approval_gate.set_emergency(false);
+        execute_effect_once(&rt, "k1", &effect, None)
+            .await
+            .expect("released, so the deferred effect runs");
+        let record = rt.store().load(rt.id()).await.unwrap().unwrap();
         assert_eq!(record.ledger.len(), 1);
     }
 
