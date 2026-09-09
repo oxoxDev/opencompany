@@ -370,7 +370,10 @@ mod tests {
 
         gate.set_emergency(true);
         let refused = client
-            .request(json!({ "method": "GET", "url": "https://api.test/x" }), None)
+            .request(
+                json!({ "method": "GET", "url": "https://api.test/x" }),
+                None,
+            )
             .await
             .expect_err("a stopped company must make no request");
         assert!(
@@ -380,7 +383,10 @@ mod tests {
 
         gate.set_emergency(false);
         let allowed = client
-            .request(json!({ "method": "GET", "url": "https://api.test/x" }), None)
+            .request(
+                json!({ "method": "GET", "url": "https://api.test/x" }),
+                None,
+            )
             .await;
         assert!(
             !matches!(allowed, Err(EngineError::Capability(ref m)) if m.contains("is stopped")),

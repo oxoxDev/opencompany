@@ -6053,7 +6053,10 @@ members = ["writer"]
              rather than deferred"
         );
         let record = rt.store().load(rt.id()).await.unwrap().unwrap();
-        assert!(record.ledger.is_empty(), "and the money must not have moved");
+        assert!(
+            record.ledger.is_empty(),
+            "and the money must not have moved"
+        );
 
         rt.approval_gate.set_emergency(false);
         execute_effect_once(&rt, "k1", &effect, None)
