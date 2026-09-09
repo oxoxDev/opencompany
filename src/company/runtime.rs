@@ -882,8 +882,13 @@ impl CompanyRuntime {
     /// (wired by the [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) to the one
     /// the harness deps hold, so the orchestrator's `run_workflow` tool registers
     /// into the map the cancel route reads).
+    ///
+    /// Re-gated on this runtime's emergency flag for
+    /// [`adopt_workflow_gates`](Self::adopt_workflow_gates)' reason: the
+    /// supervisor that reaches a runtime must refuse admission while the stop
+    /// is engaged whether or not the site that built it remembered to say so.
     pub fn set_run_supervisor(&mut self, supervisor: crate::runtime::RunSupervisor) {
-        self.run_supervisor = supervisor;
+        self.run_supervisor = supervisor.with_emergency_gate(self.approval_gate.clone());
     }
 
     /// This company's live set of cancellable workflow runs (issue #383).
@@ -1938,8 +1943,16 @@ impl CompanyRuntime {
     /// alongside it: the two describe one run's decisions from opposite sides,
     /// and a runtime holding a fresh copy of one and an inherited copy of the
     /// other would release a batch it cannot re-dispatch.
+    ///
+    /// The adopted queue is re-gated on this runtime's own emergency flag. A
+    /// queue arrives here from two places that both have reason not to carry
+    /// one — a boot builds a fresh queue to rehydrate parked gates into, and a
+    /// rebuild clones the outgoing runtime's — so requiring each construction
+    /// site to remember the gate makes the stop hold only where someone
+    /// remembered. Re-gating on adoption is the one place that cannot be
+    /// forgotten, because it is the only way a queue reaches a runtime.
     pub fn adopt_workflow_gates(&mut self, gates: WorkflowGateQueue) {
-        self.workflow_gates = gates;
+        self.workflow_gates = gates.with_emergency_gate(self.approval_gate.clone());
     }
 
     /// Installs the blocked-agent-node stash the builder prepared (issue #899,
@@ -14171,6 +14184,63 @@ to = "draft"
                 .await
                 .expect("usage query")
                 .len()
+        }
+
+        /// The stop must survive the runtime being *assembled*, not only the
+        /// runtime being constructed.
+        ///
+        /// `CompanyRuntime::new` gates the workflow gate queue, and then the
+        /// builder replaces that field wholesale with the queue it prepared —
+        /// a fresh one on a boot, the outgoing runtime's on a rebuild. Neither
+        /// has a company to ask, so neither carries a gate, and the queue that
+        /// actually reaches production carried none: a batch whose last sibling
+        /// expired during a stop was released and destroyed, and the approved
+        /// work in it could not be recovered.
+        ///
+        /// Built through the real builder rather than by hand, because
+        /// assembling it by hand is what hid this.
+        #[tokio::test]
+        async fn a_builder_assembled_runtime_still_refuses_to_release_a_batch_while_stopped() {
+            use crate::ports::types::{Effect, EffectGroup, Verdict};
+            use crate::runtime::workflow_resume::{PAYLOAD_NODE_ID, WORKFLOW_APPROVE_KIND};
+
+            let (rt, _brain, _home) = working_company().await;
+
+            let gate = Effect {
+                kind: WORKFLOW_APPROVE_KIND.to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({ PAYLOAD_NODE_ID: "node-a" }),
+                agent: None,
+                run_id: Some("wr-1".to_string()),
+            };
+            let id = crate::ports::types::ApprovalId::new("appr-a");
+            rt.workflow_gates().arm("turn-1", &id, &gate);
+            rt.workflow_gates().decide("turn-1", &id, Verdict::Approve);
+
+            rt.workflow_gates()
+                .release("turn-1")
+                .expect("running, so the batch releases")
+                .expect("a batch was armed");
+
+            rt.workflow_gates().arm("turn-2", &id, &gate);
+            rt.workflow_gates().decide("turn-2", &id, Verdict::Approve);
+            rt.emergency_pause(operator(), None).await.expect("stop");
+
+            rt.workflow_gates()
+                .release("turn-2")
+                .expect_err("a stopped company must not release a decided batch");
+            assert!(
+                rt.workflow_gates().is_armed("turn-2"),
+                "the refused batch keeps every verdict it banked, for a redrive after the stop"
+            );
+            assert_eq!(
+                rt.workflow_gates().ready_for_release(),
+                vec!["turn-2".to_string()],
+                "and it is discoverable, which is what makes the approved work recoverable"
+            );
         }
 
         /// **The defect.** With the stop engaged, a new turn must not run, the
