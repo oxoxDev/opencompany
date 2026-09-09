@@ -360,6 +360,34 @@ mod test {
         }
     }
 
+    fn gate_kind_effect_without_node_id() -> Effect {
+        Effect {
+            kind: crate::runtime::workflow_resume::WORKFLOW_APPROVE_KIND.to_string(),
+            group: EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: json!({}),
+            agent: None,
+            run_id: Some("wr-1".to_string()),
+        }
+    }
+
+    fn gate_kind_effect_with_blank_node_id() -> Effect {
+        Effect {
+            kind: crate::runtime::workflow_resume::WORKFLOW_APPROVE_KIND.to_string(),
+            group: EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: json!({
+                crate::runtime::workflow_resume::PAYLOAD_NODE_ID: "   ",
+            }),
+            agent: None,
+            run_id: Some("wr-1".to_string()),
+        }
+    }
+
     /// **Codex review finding on PR #2140 (`3955615141`).** Before this,
     /// `release` removed a fully-decided batch unconditionally, and only the
     /// caller two `.await`s downstream (`RunSupervisor::begin`) could refuse
@@ -473,6 +501,38 @@ mod test {
             "a non-gate effect must not arm a batch"
         );
         assert_eq!(q.undecided("turn-1"), 0);
+    }
+
+    /// `arm` and `rearm` both delegate the "is this really a gate" question to
+    /// `gate_node_id`, which is kind-checked AND rejects an absent or
+    /// whitespace-only `node_id`. This proves that rejection actually stops a
+    /// batch from forming — a `workflow.approve`-kind effect with no usable
+    /// node id must arm nothing, the same as a wrong-kind effect, not a batch
+    /// keyed on an empty string a continuation could never match a real card
+    /// against.
+    #[test]
+    fn arm_and_rearm_ignore_a_gate_kind_effect_with_no_usable_node_id() {
+        let q = WorkflowGateQueue::default();
+        let id_a = ApprovalId::new("a");
+        q.arm("turn-1", &id_a, &gate_kind_effect_without_node_id());
+        assert!(
+            !q.is_armed("turn-1"),
+            "a gate-kind effect with no node_id key must not arm a batch"
+        );
+
+        let id_b = ApprovalId::new("b");
+        q.arm("turn-1", &id_b, &gate_kind_effect_with_blank_node_id());
+        assert!(
+            !q.is_armed("turn-1"),
+            "a gate-kind effect with a whitespace-only node_id must not arm a batch"
+        );
+
+        let missing = gate_kind_effect_without_node_id();
+        q.rearm(vec![("turn-2".to_string(), id_a.clone(), &missing)]);
+        assert!(
+            !q.is_armed("turn-2"),
+            "rearm must skip the same malformed gate rather than rehydrate a phantom batch"
+        );
     }
 
     /// Deciding an id/turn this queue never armed — the shape of a stale or
@@ -651,6 +711,91 @@ mod test {
         let q = WorkflowGateQueue::default();
         assert_eq!(q.undecided("no-such-turn"), 0);
         assert!(!q.is_armed("no-such-turn"));
+    }
+
+    /// `ready_for_release` is the list `CompanyRuntime::emergency_resume`
+    /// redrives once a stop lifts — handing it a batch that still has an
+    /// undecided gate would replay a run one decision short. This proves the
+    /// boundary: a batch with one of two gates decided is excluded, and only
+    /// crossing into zero undecided makes it appear.
+    #[test]
+    fn ready_for_release_excludes_a_batch_with_a_gate_still_undecided() {
+        let q = WorkflowGateQueue::default();
+        let id_a = ApprovalId::new("a");
+        let id_b = ApprovalId::new("b");
+        q.arm("turn-1", &id_a, &gate("wf", "node-a"));
+        q.arm("turn-1", &id_b, &gate("wf", "node-b"));
+
+        q.decide("turn-1", &id_a, Verdict::Approve);
+        assert_eq!(q.undecided("turn-1"), 1);
+        assert!(
+            q.ready_for_release().is_empty(),
+            "a batch with one gate still undecided must not be offered for release"
+        );
+
+        q.decide("turn-1", &id_b, Verdict::Deny);
+        assert_eq!(
+            q.ready_for_release(),
+            vec!["turn-1".to_string()],
+            "the batch becomes ready only once every gate has landed"
+        );
+    }
+
+    /// The emergency-stop refusal in `release` must hold at any point in a
+    /// batch's life, not just once every gate has landed — and refusing
+    /// release must not also freeze `decide`, or a verdict banked while
+    /// stopped would have nowhere to go and the operator's decision would be
+    /// silently lost. This proves both: release is refused on a batch with
+    /// one gate still undecided, `decide` still lands the remaining verdict
+    /// while the stop is engaged, and the now-fully-decided batch surfaces via
+    /// `ready_for_release` before anyone releases it.
+    #[test]
+    fn emergency_stop_refuses_a_partial_batch_but_decide_still_banks_during_the_stop() {
+        let emergency_gate = Arc::new(crate::policy::gate::ManifestApprovalGate::new(
+            crate::company::Policy {
+                mode: "full".to_string(),
+                always_approve: Vec::new(),
+                auto_approve_under_usd: None,
+                approval_ttl_hours: None,
+            },
+        ));
+        let q = WorkflowGateQueue::default().with_emergency_gate(emergency_gate.clone());
+        let id_a = ApprovalId::new("a");
+        let id_b = ApprovalId::new("b");
+        q.arm("turn-1", &id_a, &gate("wf", "node-a"));
+        q.arm("turn-1", &id_b, &gate("wf", "node-b"));
+        q.decide("turn-1", &id_a, Verdict::Approve);
+
+        emergency_gate.set_emergency(true);
+        match q.release("turn-1") {
+            Err(ReleaseRefusal::EmergencyStop) => {}
+            Ok(_) => panic!("a partial batch must be refused, not released, while stopped"),
+        }
+        assert_eq!(
+            q.undecided("turn-1"),
+            1,
+            "the refusal must leave the still-undecided gate exactly as it was"
+        );
+
+        q.decide("turn-1", &id_b, Verdict::Deny);
+        assert_eq!(
+            q.undecided("turn-1"),
+            0,
+            "a verdict must still bank while the company is stopped, or it is lost"
+        );
+        assert_eq!(
+            q.ready_for_release(),
+            vec!["turn-1".to_string()],
+            "a batch decided during a stop must be discoverable for the post-lift redrive"
+        );
+
+        emergency_gate.set_emergency(false);
+        let released = q
+            .release("turn-1")
+            .expect("stop lifted")
+            .expect("the batch is still there");
+        assert_eq!(released.approved, vec!["node-a".to_string()]);
+        assert_eq!(released.denied, vec!["node-b".to_string()]);
     }
 
     /// A poisoned lock (some other caller panicked while holding it) must
