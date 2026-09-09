@@ -792,7 +792,7 @@ mod tests {
         use crate::ports::CompanyStore;
         use crate::ports::types::{CompanyId, CompanyRecord};
         use crate::runtime::RuntimeBuilder;
-        use crate::server::ops::skills::MAX_SKILL_DOC_BYTES;
+        use crate::server::ops::skills::{MAX_SKILL_DOC_BYTES, valid_slug, write_lock};
         use crate::server::router;
         use crate::server::test_support::{
             fixed_cookie, member_cookie, seed_fixed_admin, seed_fixed_member,
@@ -1084,6 +1084,161 @@ mod tests {
                 slugs(&state).await.is_empty(),
                 "an over-cap body must not land a delta"
             );
+        }
+
+        /// The property [`write_lock`] exists for, asserted where it actually
+        /// has to hold: on the handlers, not on the primitive.
+        ///
+        /// [`write_lock_serializes_same_company_writes`](super::write_lock_serializes_same_company_writes)
+        /// proves the mutex is a mutex; it passes unchanged if every handler
+        /// stops taking it. This holds the addressed company's lock and drives
+        /// each write route over the real router: a route that reached the
+        /// store anyway answers while the lock is held, which is the whole
+        /// defect — `set_enabled`'s list-then-write window is only closed
+        /// while *every* writer waits on the same lock.
+        #[tokio::test]
+        async fn every_write_route_waits_on_the_company_write_lock() {
+            let home = tempfile::tempdir().unwrap();
+            let state = state_with_company(home.path()).await;
+
+            // One uncontended write first, so everything a request lazily opens
+            // on its way to the handler (session lookup, the skill store) is
+            // already warm and the wait below is measuring the lock alone.
+            let (status, _, raw) = send(
+                &state,
+                "POST",
+                "/api/v1/company/skills/warm-up/install",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "warm-up install: {raw}");
+
+            let attempts: [(&'static str, &'static str, Option<&'static str>); 4] = [
+                ("POST", "/api/v1/company/skills/seo-audit/install", None),
+                (
+                    "PUT",
+                    "/api/v1/company/skills/seo-audit",
+                    Some(r#"{"enabled":false}"#),
+                ),
+                (
+                    "POST",
+                    "/api/v1/company/skills",
+                    Some(r#"{"name":"Locked Skill","description":"waits its turn"}"#),
+                ),
+                ("POST", "/api/v1/company/skills/warm-up/uninstall", None),
+            ];
+
+            for (method, uri, body) in attempts {
+                let lock = write_lock(&CompanyId::new("acme"));
+                let guard = lock.lock().await;
+
+                let held = state.clone();
+                let mut pending = tokio::spawn(async move {
+                    send_as(&held, method, uri, body, Some(&fixed_cookie("acme"))).await
+                });
+
+                let ran_anyway =
+                    tokio::time::timeout(std::time::Duration::from_millis(750), &mut pending).await;
+                assert!(
+                    ran_anyway.is_err(),
+                    "{method} {uri} reached the store while another writer held \
+                     the company write lock"
+                );
+
+                drop(guard);
+                let (status, _, raw) = pending.await.expect("the write task did not panic");
+                assert!(
+                    status.is_success(),
+                    "{method} {uri} once the lock was free: {raw}"
+                );
+            }
+        }
+
+        /// Authoring derives the slug from the display name, so the name is the
+        /// untrusted input that decides a store key and a `skills/<slug>/`
+        /// directory name. Whatever `create_custom` accepts must therefore
+        /// derive a slug the slug-bearing routes accept: an id `valid_slug`
+        /// refuses is a skill nobody can toggle or uninstall afterwards, and a
+        /// path segment nothing else in the product will honour.
+        ///
+        /// Asserted end to end — the derived id is fed straight back to
+        /// `PUT …/skills/{slug}`, the route that does apply `valid_slug`.
+        #[tokio::test]
+        async fn an_authored_slug_is_always_one_the_slug_routes_accept() {
+            let home = tempfile::tempdir().unwrap();
+            let state = state_with_company(home.path()).await;
+
+            for name in [
+                "!!!",
+                "  ---  ",
+                "-leading dash",
+                "Ünïcödé Skill",
+                "42",
+                "A/B\\C",
+                "UPPER CASE",
+                "under_score",
+            ] {
+                let body = serde_json::json!({
+                    "name": name,
+                    "description": "a description",
+                })
+                .to_string();
+                let (status, resp, raw) =
+                    send(&state, "POST", "/api/v1/company/skills", Some(&body)).await;
+                assert_eq!(status, StatusCode::OK, "authoring {name:?}: {raw}");
+
+                let slug = resp["id"].as_str().expect("an id").to_string();
+                assert!(
+                    valid_slug(&slug),
+                    "{name:?} derived {slug:?}, which the slug routes refuse"
+                );
+
+                let (status, _, raw) = send(
+                    &state,
+                    "PUT",
+                    &format!("/api/v1/company/skills/{slug}"),
+                    Some(r#"{"enabled":false}"#),
+                )
+                .await;
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "the skill authored from {name:?} cannot be managed by its own id \
+                     {slug:?}: {raw}"
+                );
+            }
+        }
+
+        /// A refusal raised *inside* the guarded region must still hand the
+        /// company's write lock back.
+        ///
+        /// Every write handler takes the lock before it validates, so the
+        /// over-cap refusal returns with the guard live. A guard that outlived
+        /// its request would not fail that request — it would wedge every
+        /// later write for that one company, for the life of the process, with
+        /// nothing in the failed response to say so.
+        #[tokio::test]
+        async fn a_write_refused_inside_the_lock_still_hands_it_back() {
+            let home = tempfile::tempdir().unwrap();
+            let state = state_with_company(home.path()).await;
+
+            let body = serde_json::json!({
+                "name": "Huge Skill",
+                "description": "short",
+                "body": "x".repeat(MAX_SKILL_DOC_BYTES),
+            })
+            .to_string();
+            let (status, _, raw) =
+                send(&state, "POST", "/api/v1/company/skills", Some(&body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{raw}");
+
+            let next = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                send(&state, "POST", "/api/v1/company/skills/a-1/install", None),
+            )
+            .await
+            .expect("the refused write left the company write lock held");
+            assert_eq!(next.0, StatusCode::OK, "{}", next.2);
         }
     }
 }
