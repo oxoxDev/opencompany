@@ -16350,4 +16350,203 @@ mode = "full"
             }
         }
     }
+
+    // -- Deciding an approval: which states admit it, and what a failure costs --
+
+    /// STATE. `run_resolve` asks `ensure_running` before it touches the gate,
+    /// and the ordering is the guarantee: a company that has stopped accepting
+    /// work must refuse the decision *and leave the approval parked*, so the
+    /// operator still has a card to decide once it is running again.
+    ///
+    /// A refusal that consumed the park would be worse than no refusal at all —
+    /// the effect would be neither approved nor decidable.
+    #[tokio::test]
+    async fn resolving_on_a_paused_company_is_refused_and_leaves_the_approval_parked() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let approval = park_for_extend(&runtime, "appr-paused", crate::ports::now_millis()).await;
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let app = router(state);
+
+        let lifecycle = |verb: &str| {
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/companies/acme/{verb}"))
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let paused = app.clone().oneshot(lifecycle("pause")).await.unwrap();
+        assert_eq!(paused.status(), StatusCode::OK, "the company is now paused");
+
+        for verdict in ["approve", "deny"] {
+            let refused = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/company/approvals/{approval}"))
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({ "verdict": verdict }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                refused.status(),
+                StatusCode::CONFLICT,
+                "a paused company answered a {verdict} instead of refusing it"
+            );
+        }
+
+        assert!(
+            runtime.pending_approvals().iter().any(|p| p.id == approval),
+            "the refusal must leave the approval decidable, not spend it"
+        );
+        assert_eq!(
+            runtime.grants.live_count(),
+            0,
+            "and it must mint nothing on the way out"
+        );
+
+        let resumed = app.clone().oneshot(lifecycle("resume")).await.unwrap();
+        assert_eq!(resumed.status(), StatusCode::OK);
+        let allowed = app
+            .oneshot(resolve_request(
+                &approval,
+                serde_json::json!({ "verdict": "approve", "detach": true }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            allowed.status(),
+            StatusCode::OK,
+            "the same decision lands once the company is running again"
+        );
+    }
+
+    /// CONC. Two operators on the same card — or one on a double click — reach
+    /// this route at the same time. The approval may settle once and buy one
+    /// permission; the loser must be told it was already decided rather than
+    /// minting a second grant against the same effect.
+    ///
+    /// Distinct from [`a_second_resolve_reports_already_resolved_and_mints_nothing`],
+    /// which sends its second request only after the first has fully settled:
+    /// that one passes even if the parked-set take is a non-atomic
+    /// check-then-remove, because there is no window for the two to overlap in.
+    /// These two are in flight together.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_simultaneous_resolves_settle_once_and_mint_one_permission() {
+        let home_dir = home();
+        let c = stalled_company(home_dir.path()).await;
+        c.release.notify_one();
+
+        let approve = || {
+            resolve_request(
+                &c.approval_id,
+                serde_json::json!({ "verdict": "approve", "detach": true }),
+            )
+        };
+        // Spawned onto a multi-threaded runtime, so these genuinely overlap
+        // rather than being polled to completion one at a time. Eight rather
+        // than two because the window a lost take opens is narrow: one pair can
+        // miss it by scheduling luck, and a race this test cannot lose is worth
+        // more than a tidier number.
+        let racers: Vec<_> = (0..8)
+            .map(|_| tokio::spawn(c.app.clone().oneshot(approve())))
+            .collect();
+
+        let mut settled = Vec::new();
+        for racer in racers {
+            let response = racer
+                .await
+                .expect("the request task did not panic")
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = body_json(response).await;
+            settled.push(
+                body["alreadyResolved"]
+                    .as_bool()
+                    .unwrap_or_else(|| panic!("a receipt says whether it settled: {body}")),
+            );
+        }
+        assert_eq!(
+            settled.iter().filter(|already| !**already).count(),
+            1,
+            "exactly one simultaneous resolve may settle the approval, got {settled:?}"
+        );
+
+        assert!(await_continuation(&c.runtime).await);
+        assert_eq!(
+            c.runtime.grants.live_count(),
+            1,
+            "simultaneous approves must not buy more than one permission"
+        );
+    }
+
+    /// FAIL. On the synchronous shape the operator waits for the follow-up
+    /// cycle, so a cycle that falls over is theirs to hear about: the request
+    /// answers an error rather than a success over nothing.
+    ///
+    /// And the verdict is durable regardless — it is settled inline, before the
+    /// cycle is ever spawned. The pairing is the point. An error that also lost
+    /// the decision would leave the operator re-approving something already
+    /// approved; an error swallowed into a `200` would leave them believing work
+    /// resumed that never did.
+    #[tokio::test]
+    async fn a_synchronous_resolve_reports_a_failed_follow_up_and_keeps_the_verdict() {
+        let home_dir = home();
+        let c = multi_park_company(home_dir.path(), 1, Some("sales"), true).await;
+        let approval = c.approvals[0].clone();
+
+        let response = c
+            .app
+            .clone()
+            .oneshot(resolve_request(
+                &approval,
+                serde_json::json!({ "verdict": "approve" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a continuation that fell over must reach the operator waiting on it"
+        );
+
+        assert!(
+            !c.runtime
+                .pending_approvals()
+                .iter()
+                .any(|p| p.id == approval),
+            "the verdict is settled before the cycle runs, so a failed cycle cannot un-decide it"
+        );
+        assert_eq!(c.runtime.grants.live_count(), 1);
+
+        let again = c
+            .app
+            .clone()
+            .oneshot(resolve_request(
+                &approval,
+                serde_json::json!({ "verdict": "approve", "detach": true }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(again.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(again).await["alreadyResolved"],
+            true,
+            "re-deciding after the failure must say it was already decided"
+        );
+        assert_eq!(
+            c.runtime.grants.live_count(),
+            1,
+            "and must not buy a second permission"
+        );
+    }
 }
