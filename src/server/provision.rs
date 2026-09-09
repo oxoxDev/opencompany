@@ -774,7 +774,7 @@ fn confirmation_error(supplied: &str, expected: &str) -> Option<Response> {
 /// (admin-scoped, issue #86).
 ///
 /// The confirmation phrase below is a step-up against a stray click, not an
-/// authority check: it is a fixed, published string. Authority is
+/// authority check: it is a fixed, published string every member knows. Authority is
 /// [`AdminScopedCompany`] in the signature.
 ///
 /// Halts admission of new work — chat included — until an operator

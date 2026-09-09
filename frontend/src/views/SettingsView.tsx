@@ -423,8 +423,9 @@ export function LifecycleControls({
           <Alert data-testid="lifecycle-admin-only">
             <TriangleAlert className="size-4" />
             <AlertDescription>
-              Pausing and resuming a company need admin authority here — ask one of this
-              company&rsquo;s admins, since a member&rsquo;s session cannot reach these controls.
+              Pausing and resuming a company now take admin authority. A member&rsquo;s session
+              reaches these routes but the host refuses them, so the controls are left out here
+              rather than shown failing — ask a company admin.
             </AlertDescription>
           </Alert>
         )}

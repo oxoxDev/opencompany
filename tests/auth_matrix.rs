@@ -256,8 +256,6 @@ enum Probe {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Wait {
     None,
-    AuthRoleBranch,
-    SkillsBranch,
     BodyAdminFix,
     LedgerFix,
     TeamFix,
@@ -269,8 +267,6 @@ impl Wait {
     const fn label(self) -> &'static str {
         match self {
             Self::None => "-",
-            Self::AuthRoleBranch => "fix/auth-role-dimension-on-authorize-address",
-            Self::SkillsBranch => "fix/skills-admin-and-bounded-write",
             Self::BodyAdminFix => "none-assigned:body-admin-signature",
             Self::LedgerFix => "none-assigned:ledger-authority",
             Self::TeamFix => "none-assigned:team-delete-authority",
@@ -284,7 +280,6 @@ impl Wait {
 enum RedCells {
     None,
     Member,
-    MemberAndTempPassword,
     TenantOwnerAndPlatform,
     TempPassword,
 }
@@ -294,10 +289,6 @@ impl RedCells {
         match self {
             Self::None => false,
             Self::Member => matches!(principal, Principal::Member),
-            Self::MemberAndTempPassword => matches!(
-                principal,
-                Principal::Member | Principal::MustChangePasswordAdmin
-            ),
             Self::TenantOwnerAndPlatform => {
                 matches!(principal, Principal::TenantOwner | Principal::Platform)
             }
@@ -663,7 +654,7 @@ const OPS_SCOPED_ROUTES: &[Route] = &[
     r!(Post, "/skills/{slug}/uninstall", Admin, Destructive, ""),
     r!(Get, "/skills/registry", Scoped, Ordinary, ""),
     r!(Put, "/skills/{slug}", Admin, Authority, ""),
-    red!(Post, "/skills", Authority, SkillsBranch),
+    r!(Post, "/skills", Admin, Authority, ""),
     r!(Get, "/skills", Scoped, Ordinary, ""),
     r!(Get, "/smtp", Scoped, Ordinary, ""),
     r!(Put, "/smtp", Admin, Credential, ""),
@@ -880,49 +871,49 @@ const EXTERNAL_AUTHORITY_ROUTES: &[Route] = &[
         Verb::Post,
         "/api/v1/companies/{id}/pause",
         Probe::Empty,
-        RedCells::Member,
+        RedCells::None,
     ),
     external_admin(
         Verb::Post,
         "/api/v1/companies/{id}/resume",
         Probe::Empty,
-        RedCells::Member,
+        RedCells::None,
     ),
     external_admin(
         Verb::Post,
         "/api/v1/companies/{id}/emergency-pause",
         Probe::Empty,
-        RedCells::Member,
+        RedCells::None,
     ),
     external_admin(
         Verb::Post,
         "/api/v1/companies/{id}/emergency-resume",
         Probe::Empty,
-        RedCells::Member,
+        RedCells::None,
     ),
     external_admin(
         Verb::Post,
         "/api/v1/companies/{id}/approvals/{aid}",
         Probe::Json(r#"{"verdict":"deny","amended_payload":{}}"#),
-        RedCells::MemberAndTempPassword,
+        RedCells::None,
     ),
     external_admin(
         Verb::Post,
         "/api/v1/company/approvals/{aid}",
         Probe::Json(r#"{"verdict":"deny","amended_payload":{}}"#),
-        RedCells::Member,
+        RedCells::None,
     ),
     external_admin(
         Verb::Post,
         "/api/v1/companies/{id}/approvals/{aid}/extend",
         Probe::Empty,
-        RedCells::MemberAndTempPassword,
+        RedCells::None,
     ),
     external_admin(
         Verb::Post,
         "/api/v1/company/approvals/{aid}/extend",
         Probe::Empty,
-        RedCells::Member,
+        RedCells::None,
     ),
 ];
 
@@ -958,7 +949,7 @@ const fn external_admin(
         blast: Blast::Authority,
         probe,
         note: "",
-        wait: Wait::AuthRoleBranch,
+        wait: Wait::None,
         red_cells,
     }
 }
@@ -1243,18 +1234,6 @@ async fn declared_non_defect_cells_hold_the_seven_principal_boundary() {
 }
 
 #[tokio::test]
-#[ignore = "waits on fix/auth-role-dimension-on-authorize-address"]
-async fn lifecycle_and_approval_authority_waits_on_auth_role_branch() {
-    check_cells(Some(Wait::AuthRoleBranch)).await;
-}
-
-#[tokio::test]
-#[ignore = "waits on fix/skills-admin-and-bounded-write"]
-async fn custom_skill_authority_waits_on_skills_branch() {
-    check_cells(Some(Wait::SkillsBranch)).await;
-}
-
-#[tokio::test]
 #[ignore = "waits on a body-admin signature branch; none assigned in handoff section 7"]
 async fn body_admin_machine_principals_wait_for_an_assigned_branch() {
     check_cells(Some(Wait::BodyAdminFix)).await;
@@ -1335,7 +1314,7 @@ fn table_counts_and_intentional_widenings_are_explicit() {
                         .count()
             })
             .sum::<usize>(),
-        55,
+        43,
         "ignored red principal cells",
     );
     assert_eq!(
@@ -1519,21 +1498,19 @@ fn external_authority_router_files_have_no_unclassified_paths() {
             "/api/v1/companies/{id}/chat/attribution-audit",
             "/api/v1/companies/{id}/chat/messages/{seq}/reactions",
             "/api/v1/companies/{id}/approvals",
-            "/api/v1/companies/{id}/approvals/{aid}",
-            "/api/v1/companies/{id}/approvals/{aid}/extend",
             "/api/v1/company/chat",
             "/api/v1/company/chat/history",
             "/api/v1/company/chat/attribution-audit",
             "/api/v1/company/chat/messages/{seq}/reactions",
             "/api/v1/company/approvals",
-            "/api/v1/company/approvals/{aid}",
-            "/api/v1/company/approvals/{aid}/extend",
         ]),
         &operator.direct,
     );
     assert_set_eq(
         "operator scoped suffix",
         &string_set(&[
+            "/approvals/{aid}",
+            "/approvals/{aid}/extend",
             "/desks",
             "/desks/{desk_id}",
             "/desks/{desk_id}/members",

@@ -441,8 +441,7 @@ export function decisionLabel(
 function payloadLead(a: ApprovalSummary): string | null {
   // Withheld contents have nothing to lead with, but the button still has to
   // say *why*: two hidden cards must not read as ordinary no-argument
-  // approvals (issue #618), and the resolve route accepts any member, not just
-  // admins — so the name has to tell the reader the payload is gone rather
+  // approvals — so the name has to tell the reader the payload is gone rather
   // than pretend it was never there.
   if (a.contents_hidden) return "details hidden by your role";
 

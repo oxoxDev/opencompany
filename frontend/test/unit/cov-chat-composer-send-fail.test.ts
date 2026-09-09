@@ -139,8 +139,9 @@ describe("a chat send the host refuses", () => {
     // The draft is cleared optimistically (`MessageComposer.send`) — the
     // refusal must not leave the operator's words looking lost.
     expect(composerInput().value).toBe("");
+    expect(container.textContent).toContain("a message the host will refuse");
     expect(container.textContent).toContain(
-      "Couldn't send — That message is too long to send.",
+      "Not sent — That message is too long to send.",
     );
   });
 
@@ -151,6 +152,7 @@ describe("a chat send the host refuses", () => {
     type(composerInput(), "hello");
     await send();
 
-    expect(container.textContent).toContain("Couldn't send — something went wrong");
+    expect(container.textContent).toContain("hello");
+    expect(container.textContent).toContain("Not sent — something went wrong");
   });
 });

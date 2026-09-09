@@ -1505,15 +1505,15 @@ POST /api/v1/companies/{id}/agents/{agent_id}/budget-pause/redeem tenant-non-own
 POST /api/v1/companies/{id}/agents/{agent_id}/budget-pause/redeem tenant-owner permitted source=ops access=scoped features=openhuman blast=authority note="Members may resume an agent after the budget interruption is cleared." wait=-
 POST /api/v1/companies/{id}/approvals/{aid} admin permitted source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/approvals/{aid} anonymous refused:401:unauthorized source=external access=admin features=openhuman blast=authority note="" wait=-
-POST /api/v1/companies/{id}/approvals/{aid} member refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=fix/auth-role-dimension-on-authorize-address
-POST /api/v1/companies/{id}/approvals/{aid} must-change-password-admin refused:403:password_change_required source=external access=admin features=openhuman blast=authority note="" wait=fix/auth-role-dimension-on-authorize-address
+POST /api/v1/companies/{id}/approvals/{aid} member refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/approvals/{aid} must-change-password-admin refused:403:password_change_required source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/approvals/{aid} platform permitted source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/approvals/{aid} tenant-non-owner refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/approvals/{aid} tenant-owner permitted source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/approvals/{aid}/extend admin permitted source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/approvals/{aid}/extend anonymous refused:401:unauthorized source=external access=admin features=openhuman blast=authority note="" wait=-
-POST /api/v1/companies/{id}/approvals/{aid}/extend member refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=fix/auth-role-dimension-on-authorize-address
-POST /api/v1/companies/{id}/approvals/{aid}/extend must-change-password-admin refused:403:password_change_required source=external access=admin features=openhuman blast=authority note="" wait=fix/auth-role-dimension-on-authorize-address
+POST /api/v1/companies/{id}/approvals/{aid}/extend member refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/approvals/{aid}/extend must-change-password-admin refused:403:password_change_required source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/approvals/{aid}/extend platform permitted source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/approvals/{aid}/extend tenant-non-owner refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/approvals/{aid}/extend tenant-owner permitted source=external access=admin features=openhuman blast=authority note="" wait=-
@@ -1582,14 +1582,14 @@ POST /api/v1/companies/{id}/domain/verify tenant-non-owner refused:403:forbidden
 POST /api/v1/companies/{id}/domain/verify tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 POST /api/v1/companies/{id}/emergency-pause admin permitted source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/emergency-pause anonymous refused:401:unauthorized source=external access=admin features=openhuman blast=authority note="" wait=-
-POST /api/v1/companies/{id}/emergency-pause member refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=fix/auth-role-dimension-on-authorize-address
+POST /api/v1/companies/{id}/emergency-pause member refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/emergency-pause must-change-password-admin refused:403:password_change_required source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/emergency-pause platform permitted source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/emergency-pause tenant-non-owner refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/emergency-pause tenant-owner permitted source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/emergency-resume admin permitted source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/emergency-resume anonymous refused:401:unauthorized source=external access=admin features=openhuman blast=authority note="" wait=-
-POST /api/v1/companies/{id}/emergency-resume member refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=fix/auth-role-dimension-on-authorize-address
+POST /api/v1/companies/{id}/emergency-resume member refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/emergency-resume must-change-password-admin refused:403:password_change_required source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/emergency-resume platform permitted source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/emergency-resume tenant-non-owner refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=-
@@ -1729,14 +1729,14 @@ POST /api/v1/companies/{id}/memory/ingest/links tenant-non-owner refused:403:for
 POST /api/v1/companies/{id}/memory/ingest/links tenant-owner permitted source=ops access=scoped features=openhuman blast=authority note="Members may submit URLs for server-side ingestion." wait=-
 POST /api/v1/companies/{id}/pause admin permitted source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/pause anonymous refused:401:unauthorized source=external access=admin features=openhuman blast=authority note="" wait=-
-POST /api/v1/companies/{id}/pause member refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=fix/auth-role-dimension-on-authorize-address
+POST /api/v1/companies/{id}/pause member refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/pause must-change-password-admin refused:403:password_change_required source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/pause platform permitted source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/pause tenant-non-owner refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/pause tenant-owner permitted source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/resume admin permitted source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/resume anonymous refused:401:unauthorized source=external access=admin features=openhuman blast=authority note="" wait=-
-POST /api/v1/companies/{id}/resume member refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=fix/auth-role-dimension-on-authorize-address
+POST /api/v1/companies/{id}/resume member refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/resume must-change-password-admin refused:403:password_change_required source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/resume platform permitted source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/resume tenant-non-owner refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=-
@@ -1750,7 +1750,7 @@ POST /api/v1/companies/{id}/setup/roster tenant-non-owner refused:403:forbidden 
 POST /api/v1/companies/{id}/setup/roster tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 POST /api/v1/companies/{id}/skills admin permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/skills anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=authority note="" wait=-
-POST /api/v1/companies/{id}/skills member refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=fix/skills-admin-and-bounded-write
+POST /api/v1/companies/{id}/skills member refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/skills must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/skills platform permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/skills tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
@@ -1932,14 +1932,14 @@ POST /api/v1/company/agents/{agent_id}/budget-pause/redeem tenant-non-owner refu
 POST /api/v1/company/agents/{agent_id}/budget-pause/redeem tenant-owner permitted source=ops access=scoped features=openhuman blast=authority note="Members may resume an agent after the budget interruption is cleared." wait=-
 POST /api/v1/company/approvals/{aid} admin permitted source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/company/approvals/{aid} anonymous refused:401:unauthorized source=external access=admin features=openhuman blast=authority note="" wait=-
-POST /api/v1/company/approvals/{aid} member refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=fix/auth-role-dimension-on-authorize-address
+POST /api/v1/company/approvals/{aid} member refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/company/approvals/{aid} must-change-password-admin refused:403:password_change_required source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/company/approvals/{aid} platform permitted source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/company/approvals/{aid} tenant-non-owner refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/company/approvals/{aid} tenant-owner permitted source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/company/approvals/{aid}/extend admin permitted source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/company/approvals/{aid}/extend anonymous refused:401:unauthorized source=external access=admin features=openhuman blast=authority note="" wait=-
-POST /api/v1/company/approvals/{aid}/extend member refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=fix/auth-role-dimension-on-authorize-address
+POST /api/v1/company/approvals/{aid}/extend member refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/company/approvals/{aid}/extend must-change-password-admin refused:403:password_change_required source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/company/approvals/{aid}/extend platform permitted source=external access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/company/approvals/{aid}/extend tenant-non-owner refused:403:forbidden source=external access=admin features=openhuman blast=authority note="" wait=-
@@ -2149,7 +2149,7 @@ POST /api/v1/company/setup/roster tenant-non-owner refused:403:forbidden source=
 POST /api/v1/company/setup/roster tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 POST /api/v1/company/skills admin permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/company/skills anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=authority note="" wait=-
-POST /api/v1/company/skills member refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=fix/skills-admin-and-bounded-write
+POST /api/v1/company/skills member refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/company/skills must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/company/skills platform permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/company/skills tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
