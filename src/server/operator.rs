@@ -2788,6 +2788,13 @@ async fn accept_chat_turn(
         // claim. Empty on a message with no attachment, which skips the field.
         attachments,
     };
+    // Asked again, immediately before the durable write. The check above sits
+    // two awaits back — attachment and mention resolution both yield — and a
+    // stop landing in that window would leave a message in the transcript that
+    // no turn will ever answer, on a company that has already reported itself
+    // stopped. The first check is still worth keeping: it refuses before the
+    // resolution work rather than after it.
+    runtime.ensure_accepting().map_err(ApiError)?;
     let message_seq = runtime
         .events()
         .append(id, message_event.clone())

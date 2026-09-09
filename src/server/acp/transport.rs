@@ -393,6 +393,12 @@ async fn prompt(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Valu
         // ACP-sent message never has attachments (issue #1682).
         attachments: vec![],
     };
+    // Asked again, immediately before the durable write, for the reason
+    // `chat_and_emit` asks again: the check above sits behind mention and desk
+    // resolution, and a stop landing in that window would leave a transcript
+    // entry no turn will ever answer — and on this ingress no turn row or
+    // failure event explains it either.
+    runtime.ensure_accepting().map_err(|e| e.to_string())?;
     let message_seq = runtime
         .events()
         .append(&session.company, event.clone())
