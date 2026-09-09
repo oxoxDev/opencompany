@@ -310,6 +310,10 @@ pub struct WorkflowToolInvoker {
     /// The company's `[tools].allow` grant globs — the fail-closed gate.
     grants: Vec<String>,
     wiring: WorkflowToolWiring,
+    /// The emergency stop, consulted per call. A run admitted before the switch
+    /// was pulled holds its admission for the whole run, so admission alone
+    /// cannot stop it; the node's own dispatch has to ask.
+    emergency: Option<Arc<crate::policy::gate::ManifestApprovalGate>>,
 }
 
 impl WorkflowToolInvoker {
@@ -414,7 +418,23 @@ impl WorkflowToolInvoker {
             tools,
             grants,
             wiring,
+            emergency: None,
         }
+    }
+}
+
+impl WorkflowToolInvoker {
+    /// Installs the emergency stop [`invoke`](ToolInvoker::invoke) refuses a
+    /// node's call against.
+    ///
+    /// Without this the invoker dispatches regardless of the flag — the default
+    /// for every construction site with no company to ask.
+    pub fn with_emergency_gate(
+        mut self,
+        gate: Option<Arc<crate::policy::gate::ManifestApprovalGate>>,
+    ) -> Self {
+        self.emergency = gate;
+        self
     }
 }
 
@@ -439,6 +459,16 @@ impl ToolInvoker for WorkflowToolInvoker {
         // nothing.
         if let Some(result) = super::super::replay::replayed_result(slug, &args) {
             return Ok(result);
+        }
+        if self
+            .emergency
+            .as_ref()
+            .is_some_and(|gate| gate.is_emergency())
+        {
+            return Err(EngineError::Capability(format!(
+                "tool_call '{slug}' refused: the company is stopped and will run no work until \
+                 an operator releases it"
+            )));
         }
         // FAIL-CLOSED grant check FIRST, before any lookup or execution.
         if let Some(message) = refusal_for(slug, &self.grants, &self.wiring) {
@@ -584,6 +614,7 @@ mod tests {
             tools: HashMap::new(),
             grants: vec!["web.*".to_string()],
             wiring: WorkflowToolWiring::default(),
+            emergency: None,
         };
         let denied = tokio_test_block_on(invoker.invoke("csv_export", json!({}), None));
         assert!(
@@ -598,6 +629,45 @@ mod tests {
         );
     }
 
+    /// A run admitted before the switch was pulled must not keep calling tools.
+    ///
+    /// Admission is taken once, for the whole run, and the workflow runner
+    /// disables policy gates inside it — so nothing between admission and the
+    /// node's own dispatch asks the flag again. Without this check a `tool_call`
+    /// node could send an email or move money after the stop was acknowledged.
+    #[test]
+    fn a_stopped_company_refuses_a_node_tool_call_even_on_an_admitted_run() {
+        use tinyflows::caps::ToolInvoker;
+        let gate = std::sync::Arc::new(crate::policy::gate::ManifestApprovalGate::new(
+            crate::company::Policy {
+                mode: "full".to_string(),
+                always_approve: Vec::new(),
+                auto_approve_under_usd: None,
+                approval_ttl_hours: None,
+            },
+        ));
+        let invoker = WorkflowToolInvoker {
+            tools: HashMap::new(),
+            grants: vec!["*".to_string()],
+            wiring: WorkflowToolWiring::default(),
+            emergency: None,
+        }
+        .with_emergency_gate(Some(gate.clone()));
+
+        let running = tokio_test_block_on(invoker.invoke("csv_export", json!({}), None));
+        assert!(
+            matches!(running, Err(EngineError::Capability(ref m)) if m.contains("not available")),
+            "not stopped, so the call reaches the tool lookup: {running:?}"
+        );
+
+        gate.set_emergency(true);
+        let stopped = tokio_test_block_on(invoker.invoke("csv_export", json!({}), None));
+        assert!(
+            matches!(stopped, Err(EngineError::Capability(ref m)) if m.contains("is stopped")),
+            "{stopped:?}"
+        );
+    }
+
     #[test]
     fn the_search_namespace_requires_an_explicit_grant_not_a_wildcard() {
         use tinyflows::caps::ToolInvoker;
@@ -607,6 +677,7 @@ mod tests {
             tools: HashMap::new(),
             grants: vec!["*".to_string()],
             wiring: WorkflowToolWiring::default(),
+            emergency: None,
         };
         let denied = tokio_test_block_on(wildcard.invoke("web_search", json!({}), None));
         assert!(
@@ -619,6 +690,7 @@ mod tests {
             tools: HashMap::new(),
             grants: vec!["search".to_string()],
             wiring: WorkflowToolWiring::default(),
+            emergency: None,
         };
         let looked_up = tokio_test_block_on(granted.invoke("web_search", json!({}), None));
         assert!(

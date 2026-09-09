@@ -374,8 +374,10 @@ pub async fn build_capabilities(
             deps.tenant_search.as_ref(),
             search_metering,
             wiring,
-        );
-        let http = GuardedHttpClient::new(exec_security, web_allowed_domains);
+        )
+        .with_emergency_gate(deps.emergency_gate.clone());
+        let http = GuardedHttpClient::new(exec_security, web_allowed_domains)
+            .with_emergency_gate(deps.emergency_gate.clone());
 
         // Durable run state over the per-company secret store, namespaced by
         // workflow id. `None` (default/tests) keeps the inert no-op with a

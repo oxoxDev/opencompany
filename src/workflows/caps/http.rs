@@ -24,6 +24,10 @@ use openhuman_core::openhuman as oh;
 /// [`HttpRequestTool`].
 pub struct GuardedHttpClient {
     tool: HttpRequestTool,
+    /// The emergency stop, consulted per request, for
+    /// [`WorkflowToolInvoker`](super::tools::WorkflowToolInvoker)'s reason: a
+    /// run admitted before the switch was pulled never re-consults admission.
+    emergency: Option<std::sync::Arc<crate::policy::gate::ManifestApprovalGate>>,
 }
 
 impl GuardedHttpClient {
@@ -39,7 +43,19 @@ impl GuardedHttpClient {
                 defaults.max_response_size,
                 defaults.timeout_secs,
             ),
+            emergency: None,
         }
+    }
+
+    /// Installs the emergency stop [`request`](HttpClient::request) refuses
+    /// against. `None` keeps the client dispatching exactly as before, which is
+    /// what every construction site with no company to ask wants.
+    pub fn with_emergency_gate(
+        mut self,
+        gate: Option<Arc<crate::policy::gate::ManifestApprovalGate>>,
+    ) -> Self {
+        self.emergency = gate;
+        self
     }
 }
 
@@ -50,6 +66,17 @@ impl HttpClient for GuardedHttpClient {
     /// has no per-account HTTP connection registry yet, so a request acts as the
     /// company itself; threading a real credential is a documented follow-on.
     async fn request(&self, request: Value, _conn: Option<&str>) -> TfResult<Value> {
+        if self
+            .emergency
+            .as_ref()
+            .is_some_and(|gate| gate.is_emergency())
+        {
+            return Err(EngineError::Capability(
+                "http_request refused: the company is stopped and will run no work until an \
+                 operator releases it"
+                    .to_string(),
+            ));
+        }
         let args = to_tool_args(&request);
         let result = self
             .tool
@@ -320,6 +347,46 @@ fn is_non_global_v4(v4: std::net::Ipv4Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run admitted before the switch was pulled must not keep making
+    /// requests. Admission is taken once for the whole run, so the request
+    /// itself has to ask.
+    ///
+    /// Refused before the URL is even resolved: the point is that no packet
+    /// leaves, not that a bad one is rejected.
+    #[tokio::test]
+    async fn a_stopped_company_refuses_a_node_http_request() {
+        use tinyflows::caps::HttpClient;
+        let gate = Arc::new(crate::policy::gate::ManifestApprovalGate::new(
+            crate::company::Policy {
+                mode: "full".to_string(),
+                always_approve: Vec::new(),
+                auto_approve_under_usd: None,
+                approval_ttl_hours: None,
+            },
+        ));
+        let client = GuardedHttpClient::new(Arc::new(SecurityPolicy::default()), Vec::new())
+            .with_emergency_gate(Some(gate.clone()));
+
+        gate.set_emergency(true);
+        let refused = client
+            .request(json!({ "method": "GET", "url": "https://api.test/x" }), None)
+            .await
+            .expect_err("a stopped company must make no request");
+        assert!(
+            matches!(refused, EngineError::Capability(ref m) if m.contains("is stopped")),
+            "{refused:?}"
+        );
+
+        gate.set_emergency(false);
+        let allowed = client
+            .request(json!({ "method": "GET", "url": "https://api.test/x" }), None)
+            .await;
+        assert!(
+            !matches!(allowed, Err(EngineError::Capability(ref m)) if m.contains("is stopped")),
+            "released, so the stop no longer refuses it: {allowed:?}"
+        );
+    }
 
     #[test]
     fn to_tool_args_maps_method_url_headers_and_stringifies_body() {
