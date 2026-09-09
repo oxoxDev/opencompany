@@ -432,6 +432,22 @@ pub(crate) fn forbidden() -> Response {
 /// The extractor resolves the addressed company from the `{id}` path param when
 /// present so a session cookie can be matched to it; on the single-company
 /// alias the registry's sole company is the addressed one.
+///
+/// ## Addressing is enforced here, not left to the handler
+///
+/// When the path names a company this host serves, this runs
+/// [`authorize_address`] itself. Every handler already made that call — and had
+/// to, or it was open to any verified principal on the host — but nothing in
+/// the type system said so: the extractor handed back a principal that had only
+/// *authenticated*, and a route that forgot the follow-up was cross-company-open
+/// with no compile error and no failing test. Answering it in the extractor
+/// makes the safe shape the default one. Handlers that still call it are
+/// unaffected: the second call is the same decision over the same inputs.
+///
+/// Deliberately scoped to a company the registry actually holds. An id this
+/// host does not serve is a *not found*, and every route that resolves one says
+/// so; turning it into a `403` here would reorder those answers and disclose
+/// nothing useful in exchange.
 pub struct CompanyAuth(pub GqlAuth);
 
 impl FromRequestParts<AppState> for CompanyAuth {
@@ -457,10 +473,15 @@ impl FromRequestParts<AppState> for CompanyAuth {
             .extensions
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
             .map(|info| info.0);
-        match resolve_principal(&parts.headers, state, company.as_ref(), peer).await {
-            Ok(auth) => Ok(Self(auth)),
-            Err(_) => Err(unauthorized()),
+        let auth = resolve_principal(&parts.headers, state, company.as_ref(), peer)
+            .await
+            .map_err(|_| unauthorized())?;
+        if let Some(id) = company.filter(|id| state.registry().get(id).is_some())
+            && let Some(resp) = authorize_address(state, &auth, &id)
+        {
+            return Err(resp);
         }
+        Ok(Self(auth))
     }
 }
 
@@ -1067,6 +1088,184 @@ mod test {
             .expect("a session minted for one company must not authorize another");
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert!(authorize_address(&state, &auth, &CompanyId::new("acme")).is_none());
+    }
+
+    /// [`CompanyAuth`] over a route with **no guard of its own** — the shape a
+    /// new route acquires by default, and the shape that used to be
+    /// cross-company-open.
+    ///
+    /// Every existing handler pairs the extractor with [`authorize_address`],
+    /// so none of these are reachable defects today; they are reachable the
+    /// moment somebody writes the obvious handler. Driving a deliberately
+    /// unguarded route is the only way to assert what the *extractor* decides
+    /// rather than what one handler remembered to ask.
+    mod addressed {
+        use std::sync::Arc;
+
+        use axum::body::Body;
+        use axum::extract::Path;
+        use axum::http::Request;
+        use axum::routing::get;
+        use axum::{Router, http::StatusCode};
+        use tower::ServiceExt;
+
+        use super::super::CompanyAuth;
+        use crate::AppState;
+        use crate::company::CompanyManifest;
+        use crate::ports::types::CompanyId;
+        use crate::runtime::RuntimeBuilder;
+        use crate::server::test_support;
+
+        /// The unguarded handler: a principal and a company id, and nothing
+        /// asking whether the one may address the other.
+        async fn probe(CompanyAuth(_auth): CompanyAuth, Path(id): Path<String>) -> String {
+            id
+        }
+
+        /// The alias shape — no `{id}` at all — so the addressed check can be
+        /// shown to fire only when the path names a company.
+        async fn probe_alias(CompanyAuth(_auth): CompanyAuth) -> &'static str {
+            "sole"
+        }
+
+        /// Two companies under two tenants: `acme` owned by `tenant:matrix-owner`
+        /// (the [`FIXED_TENANT_OWNER_TEST_TOKEN`](test_support::FIXED_TENANT_OWNER_TEST_TOKEN)
+        /// bearer) and `globex` owned by the other fixed tenant. One company
+        /// cannot tell "refused correctly" from "there was nothing to reach".
+        async fn state_with_two_tenants(home: &std::path::Path) -> AppState {
+            let manifest: CompanyManifest =
+                toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+            let state = AppState::new(crate::AppConfig::default())
+                .with_home(home.to_path_buf())
+                .with_platform_auth(test_support::fixed_principal_platform_auth());
+            for name in ["acme", "globex"] {
+                let id = CompanyId::new(name);
+                let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest.clone())
+                    .with_id(id.clone())
+                    .build()
+                    .await
+                    .unwrap();
+                state.registry().insert(id, Arc::new(runtime));
+                test_support::seed_fixed_admin(&state, name).await;
+            }
+            state.set_owner(CompanyId::new("acme"), "tenant:matrix-owner");
+            state.set_owner(CompanyId::new("globex"), "tenant:matrix-outsider");
+            state
+        }
+
+        fn app(state: AppState) -> Router {
+            Router::new()
+                .route("/api/v1/companies/{id}/probe", get(probe))
+                .route("/api/v1/probe", get(probe_alias))
+                .with_state(state)
+        }
+
+        async fn reach(app: &Router, uri: &str, bearer: Option<&str>) -> StatusCode {
+            let mut request = Request::builder().uri(uri);
+            if let Some(bearer) = bearer {
+                request = request.header("authorization", format!("Bearer {bearer}"));
+            }
+            app.clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status()
+        }
+
+        /// AUTH. A verified tenant credential is not a licence to address every
+        /// company on the host: the one it owns is served, the one it does not
+        /// is `403`.
+        #[tokio::test]
+        async fn an_unguarded_route_refuses_a_tenant_the_company_it_does_not_own() {
+            let home = tempfile::tempdir().unwrap();
+            let app = app(state_with_two_tenants(home.path()).await);
+            let owner = test_support::FIXED_TENANT_OWNER_TEST_TOKEN;
+
+            assert_eq!(
+                reach(&app, "/api/v1/companies/acme/probe", Some(owner)).await,
+                StatusCode::OK,
+                "the owning tenant must still be served its own company"
+            );
+            assert_eq!(
+                reach(&app, "/api/v1/companies/globex/probe", Some(owner)).await,
+                StatusCode::FORBIDDEN,
+                "a route that asked nothing served a tenant another tenant's company"
+            );
+        }
+
+        /// INPUT. The `{id}` segment — not the credential — names the target,
+        /// so the refusal has to follow it in both directions rather than
+        /// hard-coding one tenant as the outsider.
+        #[tokio::test]
+        async fn the_path_id_is_what_decides_which_company_is_refused() {
+            let home = tempfile::tempdir().unwrap();
+            let app = app(state_with_two_tenants(home.path()).await);
+            let outsider = test_support::FIXED_TENANT_NON_OWNER_TEST_TOKEN;
+
+            assert_eq!(
+                reach(&app, "/api/v1/companies/globex/probe", Some(outsider)).await,
+                StatusCode::OK,
+                "the second tenant owns globex"
+            );
+            assert_eq!(
+                reach(&app, "/api/v1/companies/acme/probe", Some(outsider)).await,
+                StatusCode::FORBIDDEN,
+                "and must not reach the first tenant's company"
+            );
+        }
+
+        /// STATE. Ownership is read from the registry on every request, not
+        /// captured when the credential was minted — a tenant that acquires a
+        /// company reaches it immediately, and one that loses it stops.
+        #[tokio::test]
+        async fn ownership_is_re_read_on_every_request() {
+            let home = tempfile::tempdir().unwrap();
+            let state = state_with_two_tenants(home.path()).await;
+            let app = app(state.clone());
+            let outsider = test_support::FIXED_TENANT_NON_OWNER_TEST_TOKEN;
+
+            assert_eq!(
+                reach(&app, "/api/v1/companies/acme/probe", Some(outsider)).await,
+                StatusCode::FORBIDDEN
+            );
+            state.set_owner(CompanyId::new("acme"), "tenant:matrix-outsider");
+            assert_eq!(
+                reach(&app, "/api/v1/companies/acme/probe", Some(outsider)).await,
+                StatusCode::OK,
+                "the ownership map moved; the extractor must have re-read it"
+            );
+        }
+
+        /// BOUND. Two edges of the check. No credential at all stays `401` —
+        /// authorization must not restate an unauthenticated request as a role
+        /// decision — and the alias form, which names no company in its path,
+        /// is untouched by it.
+        #[tokio::test]
+        async fn no_credential_is_unauthorized_and_the_alias_form_is_untouched() {
+            let home = tempfile::tempdir().unwrap();
+            let app = app(state_with_two_tenants(home.path()).await);
+
+            assert_eq!(
+                reach(&app, "/api/v1/companies/acme/probe", None).await,
+                StatusCode::UNAUTHORIZED,
+                "an anonymous request is not a forbidden one"
+            );
+            assert_eq!(
+                reach(&app, "/api/v1/companies/acme/probe", Some("not-a-token")).await,
+                StatusCode::UNAUTHORIZED,
+                "and neither is an unverifiable one"
+            );
+            assert_eq!(
+                reach(
+                    &app,
+                    "/api/v1/probe",
+                    Some(test_support::FIXED_TENANT_NON_OWNER_TEST_TOKEN)
+                )
+                .await,
+                StatusCode::OK,
+                "the alias form names no company, so the addressed check must not fire"
+            );
+        }
     }
 
     #[cfg(feature = "platform-jwt")]
