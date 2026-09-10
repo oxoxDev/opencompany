@@ -2882,12 +2882,13 @@ mod tests {
         ) -> crate::Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
             unreachable!("the ownership gate only reads the tree")
         }
-        async fn rename_move(
+        async fn rename_move_with_revision(
             &self,
             _company: &CompanyId,
             _id: &str,
             _name: Option<&str>,
             _parent: Option<Option<&str>>,
+            _expected_updated_at: Option<u64>,
         ) -> crate::Result<WorkspaceNode> {
             unreachable!("the ownership gate only reads the tree")
         }
@@ -4267,12 +4268,13 @@ mod tests {
         ) -> crate::Result<crate::ports::workspace::FolderClaim> {
             unreachable!("the listing never claims a folder")
         }
-        async fn rename_move(
+        async fn rename_move_with_revision(
             &self,
             _company: &CompanyId,
             _id: &str,
             _name: Option<&str>,
             _parent_id: Option<Option<&str>>,
+            _expected_updated_at: Option<u64>,
         ) -> crate::Result<WorkspaceNode> {
             unreachable!("the listing never renames")
         }
@@ -5129,14 +5131,15 @@ mod tests {
         ) -> crate::Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
             self.inner.read_bytes(company, id).await
         }
-        async fn rename_move(
+        async fn rename_move_with_revision(
             &self,
             company: &CompanyId,
             id: &str,
             name: Option<&str>,
             parent: Option<Option<&str>>,
+            expected_updated_at: Option<u64>,
         ) -> crate::Result<WorkspaceNode> {
-            self.inner.rename_move(company, id, name, parent).await
+            self.inner.rename_move_with_revision(company, id, name, parent, expected_updated_at).await
         }
         async fn swap_files(
             &self,
@@ -6489,14 +6492,15 @@ mod tests {
         ) -> crate::Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
             self.inner.read_bytes(company, id).await
         }
-        async fn rename_move(
+        async fn rename_move_with_revision(
             &self,
             company: &CompanyId,
             id: &str,
             name: Option<&str>,
             parent: Option<Option<&str>>,
+            expected_updated_at: Option<u64>,
         ) -> crate::Result<WorkspaceNode> {
-            self.inner.rename_move(company, id, name, parent).await
+            self.inner.rename_move_with_revision(company, id, name, parent, expected_updated_at).await
         }
         async fn swap_files(
             &self,

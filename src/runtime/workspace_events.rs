@@ -262,15 +262,16 @@ impl WorkspaceStore for WorkspaceAnnouncer {
     /// The prior state is read before the call, so the comparison is against
     /// what the tree actually held rather than against what the caller asked
     /// for.
-    async fn rename_move(
+    async fn rename_move_with_revision(
         &self,
         company: &CompanyId,
         id: &str,
         name: Option<&str>,
         parent: Option<Option<&str>>,
+        expected_updated_at: Option<u64>,
     ) -> Result<WorkspaceNode> {
         let previous = self.current(company, id).await;
-        let node = self.inner.rename_move(company, id, name, parent).await?;
+        let node = self.inner.rename_move_with_revision(company, id, name, parent, expected_updated_at).await?;
         let moved = previous
             .is_none_or(|before| before.name != node.name || before.parent_id != node.parent_id);
         if moved {
@@ -551,6 +552,28 @@ mod test {
                 ("note".to_string(), CHANGE_UPDATED.to_string()),
             ]
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conditional_renames_cross_all_decorators_and_only_announce_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FsOps::new(dir.path()));
+        let guarded = Arc::new(crate::runtime::DerivedGuardWorkspace::new(
+            backend.clone(),
+            backend,
+        ));
+        let metered = Arc::new(crate::runtime::QuotaEnforcedWorkspace::new(
+            guarded,
+            crate::runtime::WorkspaceQuota::default(),
+        ));
+        let log = Arc::new(MemLog::default());
+        let store = Arc::new(WorkspaceAnnouncer::new(metered, log.clone()));
+        crate::store::conformance::assert_workspace_conditional_rename(store.clone(), store).await;
+        let expected: Vec<_> = (0..16)
+            .flat_map(|_| [CHANGE_OPENED, CHANGE_UPDATED, CHANGE_UPDATED, CHANGE_UPDATED])
+            .map(|change| ("note".to_string(), change.to_string()))
+            .collect();
+        assert_eq!(changes(&log), expected);
     }
 
     /// A rename that renames announces; one that names no change is silent. A

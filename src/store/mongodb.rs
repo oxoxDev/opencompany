@@ -4245,12 +4245,13 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         )))
     }
 
-    async fn rename_move(
+    async fn rename_move_with_revision(
         &self,
         company: &CompanyId,
         id: &str,
         name: Option<&str>,
         parent: Option<Option<&str>>,
+        expected_updated_at: Option<u64>,
     ) -> Result<crate::ports::workspace::WorkspaceNode> {
         use crate::ports::workspace::NodeKind;
         loop {
@@ -4289,7 +4290,7 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
                 node.parent_id = parent.map(str::to_string);
             }
             node.updated_at_millis =
-                crate::ports::workspace::next_write_revision(node.updated_at_millis, None)?;
+                crate::ports::workspace::next_write_revision(node.updated_at_millis, expected_updated_at)?;
             let mut set = doc! {
                 "node_json": serde_json::to_string(&node)?,
                 "updated_ms": node.updated_at_millis as i64,
@@ -6269,6 +6270,13 @@ mod test {
     async fn conformance_workspace_conditional_write() {
         let Some(s) = store().await else { return };
         conformance::assert_workspace_conditional_write(s.clone(), s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conformance_workspace_conditional_rename() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workspace_conditional_rename(s.clone(), s.clone()).await;
         drop_db(&s).await;
     }
 

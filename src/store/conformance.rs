@@ -4524,6 +4524,100 @@ pub async fn assert_workspace_conditional_write(
     );
 }
 
+pub async fn assert_workspace_conditional_rename(
+    first: Arc<dyn WorkspaceStore>,
+    second: Arc<dyn WorkspaceStore>,
+) {
+    let revision = i64::MAX as u64 / 2;
+    let original = WorkspaceNode {
+        id: "note".to_string(),
+        name: "shared.md".to_string(),
+        kind: NodeKind::File,
+        parent_id: None,
+        updated_at_millis: revision,
+        created_by: WorkspaceOrigin::Seed,
+        updated_by: WorkspaceOrigin::Seed,
+        mime: None,
+        size: None,
+        sha256: None,
+        adopted: false,
+    };
+    for race_write in [false, true] {
+        for attempt in 0..8 {
+            let company = CompanyId::new(format!("conditional-rename-{race_write}-{attempt}"));
+            first.create(&company, &original, Some("original")).await.unwrap();
+            let gate = Arc::new(tokio::sync::Barrier::new(2));
+            let left_store = first.clone();
+            let left_company = company.clone();
+            let left_gate = gate.clone();
+            let left = tokio::spawn(async move {
+                left_gate.wait().await;
+                left_store.rename_move_with_revision(
+                    &left_company, "note", Some("first.md"), None, Some(revision),
+                ).await
+            });
+            let right_store = second.clone();
+            let right_company = company.clone();
+            let right = tokio::spawn(async move {
+                if race_write {
+                    let author = WorkspaceOrigin::Operator;
+                    gate.wait().await;
+                    right_store.write_with_revision(
+                        &right_company, "note", "edited", author, Some(revision),
+                    ).await
+                } else {
+                    gate.wait().await;
+                    right_store.rename_move_with_revision(
+                        &right_company, "note", Some("second.md"), None, Some(revision),
+                    ).await
+                }
+            });
+            let (left, right) = tokio::join!(left, right);
+            let (left, right) = (left.unwrap(), right.unwrap());
+            assert_eq!(
+                [&left, &right].iter().filter(|result| result.is_ok()).count(),
+                1,
+                "exactly one rename or write at one revision must succeed (write={race_write}, attempt={attempt}); left={left:?}, right={right:?}"
+            );
+            let (winner, expected_name, expected_body, expected_author) = match (left, right) {
+                (Ok(node), Err(crate::error::OpenCompanyError::Conflict(message))) => {
+                    assert!(message.contains("changed since you read it"), "{message}");
+                    (node, "first.md", "original", WorkspaceOrigin::Seed)
+                }
+                (Err(crate::error::OpenCompanyError::Conflict(message)), Ok(node)) => {
+                    assert!(message.contains("changed since you read it"), "{message}");
+                    if race_write {
+                        (node, "shared.md", "edited", WorkspaceOrigin::Operator)
+                    } else {
+                        (node, "second.md", "original", WorkspaceOrigin::Seed)
+                    }
+                }
+                (left, right) => panic!("unexpected conditional-rename results: {left:?}, {right:?}"),
+            };
+            assert_eq!(winner.updated_at_millis, revision + 1);
+            assert_eq!(winner.name, expected_name);
+            assert_eq!(winner.created_by, WorkspaceOrigin::Seed);
+            assert_eq!(winner.updated_by, expected_author);
+            let stored = first.read(&company, "note").await.unwrap().unwrap();
+            assert_eq!(stored, (winner, expected_body.to_string()));
+            let stale = first.rename_move_with_revision(
+                &company, "note", Some("stale.md"), None, Some(revision),
+            ).await.unwrap_err();
+            assert!(matches!(stale, crate::error::OpenCompanyError::Conflict(_)));
+            assert_eq!(first.read(&company, "note").await.unwrap().unwrap(), stored);
+            let unconditional = second.rename_move(
+                &company, "note", Some("operator.md"), None,
+            ).await.unwrap();
+            assert_eq!(unconditional.updated_at_millis, revision + 2);
+            let fresh = first.rename_move_with_revision(
+                &company, "note", Some("fresh.md"), None, Some(unconditional.updated_at_millis),
+            ).await.unwrap();
+            assert_eq!(fresh.updated_at_millis, revision + 3);
+            assert_eq!(first.read(&company, "note").await.unwrap().unwrap(), (fresh, expected_body.to_string()));
+        }
+    }
+}
+
 pub async fn assert_workspace_revision_mutations(
     first: Arc<dyn WorkspaceStore>,
     second: Arc<dyn WorkspaceStore>,

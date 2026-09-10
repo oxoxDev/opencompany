@@ -1714,12 +1714,13 @@ mod test {
                 )
             }))
         }
-        async fn rename_move(
+        async fn rename_move_with_revision(
             &self,
             _company: &crate::ports::types::CompanyId,
             _id: &str,
             _name: Option<&str>,
             _parent: Option<Option<&str>>,
+            _expected_updated_at: Option<u64>,
         ) -> Result<WorkspaceNode> {
             unreachable!("resolve does not move nodes")
         }

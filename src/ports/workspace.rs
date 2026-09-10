@@ -761,6 +761,21 @@ pub trait WorkspaceStore: Send + Sync {
         id: &str,
         name: Option<&str>,
         parent: Option<Option<&str>>,
+    ) -> Result<WorkspaceNode> {
+        self.rename_move_with_revision(company, id, name, parent, None)
+            .await
+    }
+    /// Renames or reparents atomically with its revision check. A mismatched
+    /// revision returns `Conflict` without changing the node or its payload.
+    /// `None` requests an unconditional move. Successful moves advance the
+    /// revision under the same synchronization as conditional text writes.
+    async fn rename_move_with_revision(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        name: Option<&str>,
+        parent: Option<Option<&str>>,
+        expected_updated_at: Option<u64>,
     ) -> Result<WorkspaceNode>;
     /// Atomically installs a staged file at `name`, conditional on what is
     /// there now. A compare-and-swap on the *occupant of the path*.

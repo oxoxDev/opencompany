@@ -248,12 +248,13 @@ impl WorkspaceStore for DerivedGuardWorkspace {
         self.inner.read_bytes(company, id).await
     }
 
-    async fn rename_move(
+    async fn rename_move_with_revision(
         &self,
         company: &CompanyId,
         id: &str,
         name: Option<&str>,
         parent: Option<Option<&str>>,
+        expected_updated_at: Option<u64>,
     ) -> Result<WorkspaceNode> {
         // Both ends. Moving a derived file out would strand a file the next
         // derivation immediately recreates; moving an ordinary note *in* would
@@ -269,7 +270,7 @@ impl WorkspaceStore for DerivedGuardWorkspace {
         {
             return Err(self.refuse(company, &path).await);
         }
-        self.inner.rename_move(company, id, name, parent).await
+        self.inner.rename_move_with_revision(company, id, name, parent, expected_updated_at).await
     }
 
     async fn swap_files(

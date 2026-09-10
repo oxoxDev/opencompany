@@ -10611,14 +10611,15 @@ impl crate::ports::workspace::WorkspaceStore for RecordingReads {
         self.inner.read_bytes(company, id).await
     }
 
-    async fn rename_move(
+    async fn rename_move_with_revision(
         &self,
         company: &CompanyId,
         id: &str,
         name: Option<&str>,
         parent: Option<Option<&str>>,
+        expected_updated_at: Option<u64>,
     ) -> crate::Result<crate::ports::workspace::WorkspaceNode> {
-        self.inner.rename_move(company, id, name, parent).await
+        self.inner.rename_move_with_revision(company, id, name, parent, expected_updated_at).await
     }
 
     async fn swap_files(

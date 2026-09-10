@@ -3938,12 +3938,13 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         Ok(Some((node, crate::ports::workspace::one_chunk(blob))))
     }
 
-    async fn rename_move(
+    async fn rename_move_with_revision(
         &self,
         company: &CompanyId,
         id: &str,
         name: Option<&str>,
         parent: Option<Option<&str>>,
+        expected_updated_at: Option<u64>,
     ) -> Result<crate::ports::workspace::WorkspaceNode> {
         use crate::ports::workspace::NodeKind;
         let mut conn = self.conn();
@@ -3977,7 +3978,7 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
             node.parent_id = parent.map(str::to_string);
         }
         node.updated_at_millis =
-            crate::ports::workspace::next_write_revision(node.updated_at_millis, None)?;
+            crate::ports::workspace::next_write_revision(node.updated_at_millis, expected_updated_at)?;
         tx.execute(
             "UPDATE workspace_nodes SET node_json = ?1, updated_ms = ?2 \
              WHERE company_id = ?3 AND id = ?4",
@@ -4821,6 +4822,17 @@ mod test {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("conditional.db");
         conformance::assert_workspace_conditional_write(
+            Arc::new(SqliteStore::open(&path).unwrap()),
+            Arc::new(SqliteStore::open(&path).unwrap()),
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conformance_workspace_conditional_rename() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("conditional-rename.db");
+        conformance::assert_workspace_conditional_rename(
             Arc::new(SqliteStore::open(&path).unwrap()),
             Arc::new(SqliteStore::open(&path).unwrap()),
         )

@@ -276,12 +276,13 @@ impl WorkspaceStore for LooseWorkspace {
         }))
     }
 
-    async fn rename_move(
+    async fn rename_move_with_revision(
         &self,
         company: &CompanyId,
         id: &str,
         name: Option<&str>,
         parent: Option<Option<&str>>,
+        expected_updated_at: Option<u64>,
     ) -> Result<WorkspaceNode> {
         self.with(company, |state, key| {
             let tree = state.tree(&key);
@@ -308,14 +309,17 @@ impl WorkspaceStore for LooseWorkspace {
                 }
             }
             let node = tree.iter_mut().find(|n| n.id == id).expect("node present");
+            let revision = crate::ports::workspace::next_write_revision(
+                node.updated_at_millis,
+                expected_updated_at,
+            )?;
             if let Some(name) = name {
                 node.name = name.to_string();
             }
             if let Some(parent) = parent {
                 node.parent_id = parent.map(str::to_string);
             }
-            node.updated_at_millis =
-                crate::ports::workspace::next_write_revision(node.updated_at_millis, None)?;
+            node.updated_at_millis = revision;
             let node = node.clone();
             if let Some(hook) = state.after_move.take() {
                 hook(state.tree(&key));

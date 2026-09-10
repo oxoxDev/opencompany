@@ -1936,12 +1936,13 @@ impl WorkspaceStore for FsOps {
         )))
     }
 
-    async fn rename_move(
+    async fn rename_move_with_revision(
         &self,
         company: &CompanyId,
         id: &str,
         name: Option<&str>,
         parent: Option<Option<&str>>,
+        expected_updated_at: Option<u64>,
     ) -> Result<WorkspaceNode> {
         if let Some(name) = name {
             reject_unsafe_name(name)?;
@@ -1983,7 +1984,7 @@ impl WorkspaceStore for FsOps {
                 node.parent_id = parent.map(str::to_string);
             }
             node.updated_at_millis =
-                crate::ports::workspace::next_write_revision(node.updated_at_millis, None)?;
+                crate::ports::workspace::next_write_revision(node.updated_at_millis, expected_updated_at)?;
         }
         let node = index.get(id).cloned().expect("node present");
         let new_physical = self.physical_path(company, &index, id)?;
@@ -2901,6 +2902,16 @@ mod test {
     async fn conformance_workspace_conditional_write() {
         let root = tmp_root();
         conformance::assert_workspace_conditional_write(
+            Arc::new(FsOps::new(root.path())),
+            Arc::new(FsOps::new(root.path())),
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conformance_workspace_conditional_rename() {
+        let root = tmp_root();
+        conformance::assert_workspace_conditional_rename(
             Arc::new(FsOps::new(root.path())),
             Arc::new(FsOps::new(root.path())),
         )

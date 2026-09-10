@@ -687,12 +687,13 @@ impl WorkspaceStore for FixedTree {
     ) -> crate::Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
         panic!("search must never read a payload — see the binary-node rule")
     }
-    async fn rename_move(
+    async fn rename_move_with_revision(
         &self,
         _company: &CompanyId,
         _id: &str,
         _name: Option<&str>,
         _parent: Option<Option<&str>>,
+        _expected_updated_at: Option<u64>,
     ) -> crate::Result<WorkspaceNode> {
         unreachable!("search never renames")
     }

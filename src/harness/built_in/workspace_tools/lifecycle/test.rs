@@ -1183,12 +1183,13 @@ impl WorkspaceStore for BrittleStore {
         }
     }
 
-    async fn rename_move(
+    async fn rename_move_with_revision(
         &self,
         _company: &CompanyId,
         _id: &str,
         _new_name: Option<&str>,
         _new_parent: Option<Option<&str>>,
+        _expected_updated_at: Option<u64>,
     ) -> crate::Result<WorkspaceNode> {
         Err(crate::error::OpenCompanyError::Store(
             "the workspace backend is unreachable".into(),

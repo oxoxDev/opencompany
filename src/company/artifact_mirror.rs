@@ -1208,14 +1208,15 @@ mod test {
         ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
             WorkspaceStore::read_bytes(&*self.0, company, id).await
         }
-        async fn rename_move(
+        async fn rename_move_with_revision(
             &self,
             company: &CompanyId,
             id: &str,
             name: Option<&str>,
             parent: Option<Option<&str>>,
+            expected_updated_at: Option<u64>,
         ) -> Result<WorkspaceNode> {
-            WorkspaceStore::rename_move(&*self.0, company, id, name, parent).await
+            WorkspaceStore::rename_move_with_revision(&*self.0, company, id, name, parent, expected_updated_at).await
         }
         async fn swap_files(
             &self,
@@ -1345,14 +1346,15 @@ mod test {
         ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
             WorkspaceStore::read_bytes(&*self.0, company, id).await
         }
-        async fn rename_move(
+        async fn rename_move_with_revision(
             &self,
             company: &CompanyId,
             id: &str,
             name: Option<&str>,
             parent: Option<Option<&str>>,
+            expected_updated_at: Option<u64>,
         ) -> Result<WorkspaceNode> {
-            WorkspaceStore::rename_move(&*self.0, company, id, name, parent).await
+            WorkspaceStore::rename_move_with_revision(&*self.0, company, id, name, parent, expected_updated_at).await
         }
         async fn swap_files(
             &self,
@@ -1752,14 +1754,15 @@ mod test {
         ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
             WorkspaceStore::read_bytes(&*self.0, company, id).await
         }
-        async fn rename_move(
+        async fn rename_move_with_revision(
             &self,
             company: &CompanyId,
             id: &str,
             name: Option<&str>,
             parent: Option<Option<&str>>,
+            expected_updated_at: Option<u64>,
         ) -> Result<WorkspaceNode> {
-            WorkspaceStore::rename_move(&*self.0, company, id, name, parent).await
+            WorkspaceStore::rename_move_with_revision(&*self.0, company, id, name, parent, expected_updated_at).await
         }
         async fn adopt_or_create_folder(
             &self,
@@ -2069,14 +2072,15 @@ mod test {
         ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
             WorkspaceStore::read_bytes(&*self.inner, company, id).await
         }
-        async fn rename_move(
+        async fn rename_move_with_revision(
             &self,
             company: &CompanyId,
             id: &str,
             name: Option<&str>,
             parent: Option<Option<&str>>,
+            expected_updated_at: Option<u64>,
         ) -> Result<WorkspaceNode> {
-            WorkspaceStore::rename_move(&*self.inner, company, id, name, parent).await
+            WorkspaceStore::rename_move_with_revision(&*self.inner, company, id, name, parent, expected_updated_at).await
         }
         async fn swap_files(
             &self,
