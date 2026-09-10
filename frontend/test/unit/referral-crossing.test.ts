@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { ReferralConversationDto } from "@/api/types";
-import { ReferralChip, ReferralConversation } from "@/views/chat/StepTimeline";
+import { ReferralChip, ReferralConversation } from "@/views/room/StepTimeline";
 
 /**
  * **What a crossing looks like to the operator reading it.**
