@@ -1625,10 +1625,7 @@ base_url = "https://byo.example/v1"
         let request = Request::builder()
             .method("POST")
             .uri("/api/v1/company/inference/restart")
-            .header(
-                "cookie",
-                crate::server::test_support::member_cookie("acme"),
-            )
+            .header("cookie", crate::server::test_support::member_cookie("acme"))
             .body(Body::empty())
             .unwrap();
         let response = router(state.clone()).oneshot(request).await.unwrap();

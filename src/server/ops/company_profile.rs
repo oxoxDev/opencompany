@@ -384,10 +384,7 @@ mod tests {
         let request = Request::builder()
             .method("PATCH")
             .uri("/api/v1/company")
-            .header(
-                "cookie",
-                crate::server::test_support::member_cookie("acme"),
-            )
+            .header("cookie", crate::server::test_support::member_cookie("acme"))
             .header("content-type", "application/json")
             .body(Body::from(json!({ "name": "Member's Choice" }).to_string()))
             .unwrap();
