@@ -318,6 +318,12 @@ fn migrate_bundles(companies: &Path, migration: &mut NestMigration) -> Result<()
         }
         let destination = companies.join(&name);
         if exists(&destination) {
+            // Another process migrating this same bundle takes the legacy entry
+            // with it, so a destination that appeared while the source vanished
+            // is that move — not two different bundles contending for one name.
+            if !exists(&legacy) {
+                continue;
+            }
             migration.collisions.push(Collision {
                 what: Relocated::Company,
                 legacy,
@@ -461,13 +467,16 @@ fn read_dir_names(dir: &Path) -> Result<Vec<std::ffi::OsString>> {
         }
     };
     entries
-        .map(|entry| {
-            entry
-                .map(|entry| entry.file_name())
-                .map_err(|source| OpenCompanyError::StoreIo {
-                    path: dir.to_path_buf(),
-                    source,
-                })
+        .filter_map(|entry| match entry {
+            Ok(entry) => Some(Ok(entry.file_name())),
+            // The directory went away mid-scan: another process finished the
+            // same migration and removed it. Nothing left to enumerate, which
+            // is the same answer an absent directory gives above.
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => None,
+            Err(source) => Some(Err(OpenCompanyError::StoreIo {
+                path: dir.to_path_buf(),
+                source,
+            })),
         })
         .collect()
 }
@@ -1209,6 +1218,58 @@ mod test {
                 !home.path().join("companies/companies/acme").exists(),
                 "the loser must not have left a stale copy behind at the legacy path"
             );
+        }
+    }
+
+    /// The sibling above races two whole migrations, so the interleaving it
+    /// needs is probable rather than certain: a schedule where the winner
+    /// finishes before the loser scans passes without ever reaching the
+    /// tolerated `NotFound`. This one barriers at the rename itself, leaving
+    /// nothing between release and syscall, so the contended path is the only
+    /// path it can take.
+    #[test]
+    fn two_threads_renaming_one_bundle_split_into_exactly_one_mover_and_one_no_op() {
+        for attempt in 0..8 {
+            let home = TempHome::new(&format!("rename-contention-{attempt}"));
+            home.write(
+                "companies/companies/acme/company.toml",
+                "[company]\nname = \"Acme\"\n",
+            );
+            let legacy = home.path().join("companies/companies/acme");
+            let destination = home.path().join("companies/acme");
+
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let race = |barrier: std::sync::Arc<std::sync::Barrier>| {
+                let from = legacy.clone();
+                let to = destination.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    rename_or_already_moved(&from, &to)
+                })
+            };
+            let handle_a = race(barrier.clone());
+            let handle_b = race(barrier.clone());
+
+            let moved_a = handle_a
+                .join()
+                .expect("thread a did not panic")
+                .expect("the losing thread must not surface the winner's NotFound as an error");
+            let moved_b = handle_b
+                .join()
+                .expect("thread b did not panic")
+                .expect("the losing thread must not surface the winner's NotFound as an error");
+
+            assert_eq!(
+                usize::from(moved_a) + usize::from(moved_b),
+                1,
+                "exactly one thread may claim the rename: a={moved_a} b={moved_b}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(destination.join("company.toml")).unwrap(),
+                "[company]\nname = \"Acme\"\n",
+                "the bundle must arrive intact, not merged by two overlapping renames"
+            );
+            assert!(!legacy.exists(), "nothing may remain at the legacy path");
         }
     }
 
