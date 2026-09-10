@@ -8,7 +8,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
 import { isGeneralChannel } from "@/lib/chat";
 import { TOUR } from "@/tour/steps";
-import { ChatView } from "@/views/ChatView";
+import { RoomView } from "@/views/RoomView";
 
 /**
  * The channel composer answers a read-only channel by not existing, and the
@@ -28,12 +28,12 @@ import { ChatView } from "@/views/ChatView";
  * from the Send that provokes one.
  *
  * A grep cannot tell a rendered control from a removed one, so this mounts the
- * real `ChatView` against a stub client and asks the DOM.
+ * real `RoomView` against a stub client and asks the DOM.
  *
  * # The writable half is not optional
  *
  * Every read-only assertion here is an assertion of absence, and absence is
- * also what a `ChatView` that failed to mount produces. The writable cases
+ * also what a `RoomView` that failed to mount produces. The writable cases
  * pin the same queries finding everything, off the same fixture — so a
  * mount that silently renders nothing fails rather than passing twice.
  */
@@ -97,7 +97,7 @@ afterEach(() => {
  *
  * Every other test here passes no `inflightRuns` at all, which is why the
  * sibling-order tests below could once claim the banner and the composer are
- * adjacent: `ChatView` gates `InflightRunBar` on the prop being defined, so a
+ * adjacent: `RoomView` gates `InflightRunBar` on the prop being defined, so a
  * harness that omits it never renders the row that actually sits between them
  * (codex and CodeRabbit, both on PR #2159).
  */
@@ -117,7 +117,7 @@ function tree(
   typing: string[] = [],
   inflight = false,
 ): ReactNode {
-  const view = createElement(ChatView, {
+  const view = createElement(RoomView, {
     client,
     company: "acme",
     sub,
@@ -147,7 +147,7 @@ function tree(
  * Render (or re-render) this root at `sub`, then let the reads settle.
  *
  * Re-rendering the same root with the same client is how the draft test walks
- * between channels: React reconciles `ChatView` in place, which is exactly the
+ * between channels: React reconciles `RoomView` in place, which is exactly the
  * production path an operator takes when they click another channel in the
  * rail. Remounting instead would discard the composer's state for reasons that
  * have nothing to do with the behaviour under test, and the test would pass
@@ -237,7 +237,7 @@ describe("a read-only channel renders no composer", () => {
     await mount("operator");
 
     // "Give the team a brief" prefills a composer this channel does not
-    // render; "Add people" opens a members pane `ChatView` gates off on the
+    // render; "Add people" opens a members pane `RoomView` gates off on the
     // same flag. Both were dead controls under the notice.
     expect(container.textContent).not.toContain("Give the team a brief");
     expect(container.textContent).not.toContain("Add people");
@@ -410,7 +410,7 @@ describe("the harness-unavailable notice sits next to the composer, or without o
  *
  * This is the regression the read-only change nearly shipped (codex review on
  * PR #1984). `MessageComposer` holds the draft, the staged attachment, the
- * mentions and the intent in its own `useState`, and `ChatView` renders one
+ * mentions and the intent in its own `useState`, and `RoomView` renders one
  * instance for every channel — so React reconciling it in place is the only
  * reason a draft has ever survived walking to another channel and back.
  * Gating the element on `!readOnly` unmounted it, and the operator came back
@@ -507,7 +507,7 @@ describe("a General address resolves to whichever channel holds the line", () =>
  * Two of the eight stops spotlight `[data-tour="chat-composer"]`, and one of
  * them is the closing "You're all set". A stop that names only `view: "chat"`
  * inherits whichever channel was last open there — `app-shell`'s remembered
- * sub-segment, or `ChatView`'s remembered channel on a cold start — which can
+ * sub-segment, or `RoomView`'s remembered channel on a cold start — which can
  * be the read-only Operator feed. Since PR #1984 that feed renders no composer,
  * so the anchor never mounts, `waitForTarget` times out, and the stop is
  * **skipped in silence**: a missing anchor degrades rather than errors, so the
@@ -527,7 +527,7 @@ describe("the tour's composer stops address a writable channel", () => {
       expect(stop.view).toBe("chat");
       expect(stop.sub).toBeTruthy();
       // A General spelling: the company-wide line exists in every company and
-      // is writable in all of them, and `ChatView` folds every spelling of it
+      // is writable in all of them, and `RoomView` folds every spelling of it
       // onto whichever channel actually holds the line.
       expect(isGeneralChannel(stop.sub!)).toBe(true);
     }
