@@ -114,7 +114,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::Result;
-use crate::company::load_workflow_union;
+use crate::company::load_workflow_with_globals;
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::types::Effect;
@@ -1244,21 +1244,19 @@ async fn spawn_continuation(
         )));
     };
 
-    // The same seed ∪ overlay union the run route loads through, so a graph
-    // authored on a hosted tenant (no source directory) resumes exactly like a
-    // committed one.
-    let overlays = runtime
+    let (overlays, disable) = runtime
         .store()
         .load(runtime.id())
         .await?
-        .map(|record| record.overlay_workflows)
+        .map(|record| (record.overlay_workflows, record.manifest.globals.disable))
         .unwrap_or_default();
     let workflow =
-        load_workflow_union(runtime.source_dir(), &overlays, workflow_id)?.ok_or_else(|| {
-            OpenCompanyError::CompanyNotFound(format!(
-                "workflow {workflow_id} (it was approved, but the graph no longer exists)"
-            ))
-        })?;
+        load_workflow_with_globals(runtime.source_dir(), &overlays, &disable, workflow_id)?
+            .ok_or_else(|| {
+                OpenCompanyError::CompanyNotFound(format!(
+                    "workflow {workflow_id} (it was approved, but the graph no longer exists)"
+                ))
+            })?;
 
     let input = continuation_input(effect, approved, denied)?;
     // Issue #1862 prerequisite: carry the paused run's attribution into the
@@ -1405,19 +1403,20 @@ pub async fn spawn_blocked_node_continuation(
              workflow execution wired, so there is nothing to continue"
         )));
     };
-    let overlays = runtime
+    let (overlays, disable) = runtime
         .store()
         .load(runtime.id())
         .await?
-        .map(|record| record.overlay_workflows)
+        .map(|record| (record.overlay_workflows, record.manifest.globals.disable))
         .unwrap_or_default();
     let workflow =
-        load_workflow_union(runtime.source_dir(), &overlays, workflow_id)?.ok_or_else(|| {
-            OpenCompanyError::CompanyNotFound(format!(
-                "workflow {workflow_id} (a blocked step was approved, but the graph no longer \
-                 exists)"
-            ))
-        })?;
+        load_workflow_with_globals(runtime.source_dir(), &overlays, &disable, workflow_id)?
+            .ok_or_else(|| {
+                OpenCompanyError::CompanyNotFound(format!(
+                    "workflow {workflow_id} (a blocked step was approved, but the graph no longer \
+             exists)"
+                ))
+            })?;
     // Issue #401: `begin` refuses at the concurrency ceiling; propagate it so
     // the caller surfaces the same refusal rather than losing the run
     // silently. Deliberately split from `spawn_admitted` below (mirroring the
@@ -3721,6 +3720,63 @@ mode = "full"
             remaining.is_empty(),
             "the refused lineage is unreachable from here on, so it must be pruned rather than \
              leaked: {remaining:?}"
+        );
+    }
+
+    /// A blocked node on a global graph resumes.
+    ///
+    /// A global lives only in the static baseline, so a resume that reloads
+    /// the graph through the company's own two sources cannot find it: the
+    /// answer is banked, the continuation never starts, and the run ends
+    /// stranded carrying a message that says the graph no longer exists.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_blocked_node_on_a_global_graph_resumes() {
+        let global = crate::globals::workflows()
+            .first()
+            .expect("the baseline ships at least one workflow");
+
+        let home = seed_home();
+        assert!(
+            !home
+                .path()
+                .join("workflows")
+                .join(format!("{}.toml", global.id))
+                .exists(),
+            "the fixture must not carry a company copy of {}, or the union loader would find \
+             it and the global layer would go untested",
+            global.id
+        );
+
+        let mut rt = RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+            .with_seed_dir(home.path().to_path_buf())
+            .build()
+            .await
+            .expect("runtime builds");
+        let runner = Arc::new(RecordingRunner::default());
+        rt.set_workflow_runner(runner.clone());
+        let rt = Arc::new(rt);
+
+        spawn_blocked_node_continuation(
+            &rt,
+            "blocked-turn",
+            &global.id,
+            json!({ "request": "x" }),
+            crate::ports::types::StartedBy::Operator,
+            None,
+            None,
+        )
+        .await
+        .expect("a blocked node on a global graph continues");
+
+        let started = wait_for_runs(&runner, 1).await;
+        assert_eq!(
+            started
+                .iter()
+                .map(|run| run.workflow_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![global.id.as_str()],
+            "answering the question must start the continuation, not strand the run"
         );
     }
 
