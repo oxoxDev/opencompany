@@ -57,14 +57,14 @@ import { fromDto, newMember, type TeamMember } from "@/lib/team";
 import { personAvatar } from "@/lib/person";
 import { useAskerNames } from "@/components/approval-card";
 import { useRoomRailSlot } from "@/components/room-rail";
-import { AddMemberDialog, type NewMemberFields } from "./chat/AddMemberDialog";
-import { ChannelCreateDialog } from "./chat/ChannelCreateDialog";
-import { ChannelRail } from "./chat/ChannelRail";
-import { ChatHeader } from "./chat/ChatHeader";
-import { MembersPane } from "./chat/MembersPane";
-import { TypingLine } from "./chat/TypingLine";
-import { InflightRunBar } from "./chat/InflightRunBar";
-import { MessageComposer } from "./chat/MessageComposer";
+import { AddMemberDialog, type NewMemberFields } from "./room/AddMemberDialog";
+import { ChannelCreateDialog } from "./room/ChannelCreateDialog";
+import { ChannelRail } from "./room/ChannelRail";
+import { ChatHeader } from "./room/ChatHeader";
+import { MembersPane } from "./room/MembersPane";
+import { TypingLine } from "./room/TypingLine";
+import { InflightRunBar } from "./room/InflightRunBar";
+import { MessageComposer } from "./room/MessageComposer";
 import {
   mentionablesFor,
   sameTarget,
@@ -72,11 +72,11 @@ import {
   utf8ByteLength,
   type Mention,
   type Mentionable,
-} from "./chat/mentions";
-import { echoCause } from "./chat/EchoPlaceholder";
-import { MessageTimeline } from "./chat/MessageTimeline";
-import type { ChatReceipt } from "./chat/ChatLiveReceipt";
-import { ThreadPanel } from "./chat/ThreadPanel";
+} from "./room/mentions";
+import { echoCause } from "./room/EchoPlaceholder";
+import { MessageTimeline } from "./room/MessageTimeline";
+import type { ChatReceipt } from "./room/ChatLiveReceipt";
+import { ThreadPanel } from "./room/ThreadPanel";
 import { useLocalScope } from "@/connections/ConnectionContext";
 import {
   buildChannels,
@@ -164,7 +164,7 @@ interface Props {
    * teammate here and staying in chat would leave them half-written with
    * nothing pointing at where to finish them.
    *
-   * Optional, so `ChatView` still mounts standalone in tests — but a mount
+   * Optional, so `RoomView` still mounts standalone in tests — but a mount
    * without it turns the reduced dialog's create into a dead end, so the shell
    * always passes it.
    */
@@ -175,7 +175,7 @@ interface Props {
    * Every channel's transcript, keyed by channel id, and its setter — owned by
    * `AppShell` rather than here so a transcript survives this component
    * unmounting when the operator navigates to another view and back (the shell
-   * mounts and unmounts `ChatView` per route; component-local state would be
+   * mounts and unmounts `RoomView` per route; component-local state would be
    * discarded on every trip away from Chat).
    */
   transcripts: Transcripts;
@@ -453,7 +453,7 @@ function threadRootOf(parentId: string | undefined): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-export function ChatView({
+export function RoomView({
   client,
   company,
   sub,
@@ -661,7 +661,7 @@ export function ChatView({
    * admin, or this operator in a second window, can configure inference and
    * rebuild the runtime while this chat sits open (codex, PR #1740). The
    * operator's *own* trip to Connections → Inference already re-reads — the shell
-   * mounts and unmounts `ChatView` per route, so coming back remounts it — but
+   * mounts and unmounts `RoomView` per route, so coming back remounts it — but
    * nothing covered the cross-session case, and a standing banner insisting
    * that a company which now thinks perfectly well cannot is the same class of
    * wrong claim as the one this surface exists to remove.
@@ -694,7 +694,7 @@ export function ChatView({
         // An older host, or one that could not answer. Nothing is claimed
         // either way, and chat renders exactly as it did before the banner
         // existed.
-        console.debug("[ChatView] cognition state unavailable", e);
+        console.debug("[RoomView] cognition state unavailable", e);
         if (isCurrent()) setLoadedCognition({ client, company, state: null });
       }
     };
@@ -896,7 +896,7 @@ export function ChatView({
     //
     // A plain revisit is the other caller, and it must not blank anything.
     // `roomVisits` re-runs this every time an operator returns to Room, and
-    // `setDesks(null)` sent `ChatView` down its `if (!desks)` branch — which
+    // `setDesks(null)` sent `RoomView` down its `if (!desks)` branch — which
     // renders a loading pane and, crucially, no rail. The rail is portalled
     // into the app sidebar, so a refetch of data the operator already had tore
     // the channel list out of the sidebar and put it back a frame later,
@@ -966,7 +966,7 @@ export function ChatView({
       if (isOperatorChannelDto(dto)) {
         setOperator(dto);
       } else if (dto !== null) {
-        console.debug("[ChatView] getOperatorChannel returned an unexpected shape", dto);
+        console.debug("[RoomView] getOperatorChannel returned an unexpected shape", dto);
       }
     });
   }, [client, company, roomVisits]);
@@ -1424,9 +1424,9 @@ export function ChatView({
   // like `workflowRunEvents`/`openTurns`/`budgetProximity` above — host
   // message ids (`h<seq>`) are a per-company sequence, so a marker id cached
   // under company A's message id must not answer for company B's
-  // identically-numbered one. `ChatView` is not remounted on a company
+  // identically-numbered one. `RoomView` is not remounted on a company
   // switch, so nothing else clears this map: `transcripts` resetting (in
-  // `AppShell`) does not reach a `ChatView`-local `useState`.
+  // `AppShell`) does not reach a `RoomView`-local `useState`.
   useEffect(() => {
     setBudgetPauseMarkerByNotice((prev) => (prev.size === 0 ? prev : new Map()));
   }, [client, company]);
@@ -1815,7 +1815,7 @@ export function ChatView({
    * the panel is showing.
    *
    * They used to be one lookup on the channel id, which could not tell the two
-   * apart — so `ChatView` suppressed the channel's indicator whenever any
+   * apart — so `RoomView` suppressed the channel's indicator whenever any
    * thread was open, and a turn the host was actively running showed nowhere at
    * all. The shell now keys them per thread (`turnStateKey`), which is what
    * makes this split expressible.
