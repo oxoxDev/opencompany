@@ -1113,6 +1113,14 @@ impl GrantSet {
                 .checked_sub(grant.at_millis)
                 .is_none_or(|duration| duration == 0 || duration > MAX_STANDING_GRANT_MILLIS)
             {
+                tracing::warn!(
+                    "[grants] standing grant '{}' was not restored: its lifetime \
+                     ({} -> {}) is zero, inverted, or past the {}ms ceiling",
+                    grant.id,
+                    grant.at_millis,
+                    grant.expires_at_millis,
+                    MAX_STANDING_GRANT_MILLIS
+                );
                 continue;
             }
             state.standing.insert(grant.id.clone(), grant);
