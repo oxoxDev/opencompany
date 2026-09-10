@@ -1022,10 +1022,13 @@ pub fn list_source_workflows(source_dir: Option<&Path>) -> Vec<WorkflowFile> {
 /// sources: the version-controlled seed file (`source_dir/workflows/<id>.toml`)
 /// and the record's runtime-authored [`OverlayWorkflow`] bodies.
 ///
-/// This is the single read path for "give me graph `<id>`" — the REST
-/// `GET …/workflows/{wid}` and run routes, the GraphQL resolver, the
-/// orchestrator's `run_workflow` tool, and the `sub_workflow` resolver all go
-/// through it, so they can never disagree about which graphs exist.
+/// The company's own two sources and nothing else: a **global** graph is in
+/// neither, so this returns `Ok(None)` for one. Readers that resolve an id an
+/// operator could have meant — the REST `GET …/workflows/{wid}` and run routes,
+/// the GraphQL resolver, the orchestrator's `run_workflow` tool, the
+/// `sub_workflow` resolver, and both resume paths — go through
+/// [`load_workflow_with_globals`] instead, so they can never disagree about
+/// which graphs exist.
 ///
 /// **The seed file wins on an id collision.** An overlay body with the same id
 /// as a committed file is shadowed, not destroyed — it stays on the record and
