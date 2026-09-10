@@ -1155,53 +1155,61 @@ mod test {
     /// names directly.
     #[test]
     fn two_concurrent_migrations_of_the_same_home_never_lose_or_duplicate_a_bundle() {
-        let home = TempHome::new("concurrent-race");
-        home.write(
-            "companies/companies/acme/company.toml",
-            "[company]\nname = \"Acme\"\n",
-        );
+        // The barrier releases both threads before `migrate_legacy_nest`, which
+        // scans before it renames — so a schedule where the winner finishes
+        // before the loser scans never reaches the tolerated `NotFound` at all.
+        // Repeating the race makes that interleaving near-certain rather than
+        // lucky; every attempt asserts the same invariants, so a regression
+        // fails on whichever attempt exposes it.
+        for attempt in 0..24 {
+            let home = TempHome::new(&format!("concurrent-race-{attempt}"));
+            home.write(
+                "companies/companies/acme/company.toml",
+                "[company]\nname = \"Acme\"\n",
+            );
 
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-        let path_a = home.path().to_path_buf();
-        let barrier_a = barrier.clone();
-        let handle_a = std::thread::spawn(move || {
-            barrier_a.wait();
-            migrate_legacy_nest(&path_a)
-        });
-        let path_b = home.path().to_path_buf();
-        let barrier_b = barrier.clone();
-        let handle_b = std::thread::spawn(move || {
-            barrier_b.wait();
-            migrate_legacy_nest(&path_b)
-        });
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let path_a = home.path().to_path_buf();
+            let barrier_a = barrier.clone();
+            let handle_a = std::thread::spawn(move || {
+                barrier_a.wait();
+                migrate_legacy_nest(&path_a)
+            });
+            let path_b = home.path().to_path_buf();
+            let barrier_b = barrier.clone();
+            let handle_b = std::thread::spawn(move || {
+                barrier_b.wait();
+                migrate_legacy_nest(&path_b)
+            });
 
-        let result_a = handle_a.join().expect("thread a did not panic");
-        let result_b = handle_b.join().expect("thread b did not panic");
+            let result_a = handle_a.join().expect("thread a did not panic");
+            let result_b = handle_b.join().expect("thread b did not panic");
 
-        let migration_a =
-            result_a.expect("the losing thread must not abort with the winner's NotFound");
-        let migration_b =
-            result_b.expect("the losing thread must not abort with the winner's NotFound");
+            let migration_a =
+                result_a.expect("the losing thread must not abort with the winner's NotFound");
+            let migration_b =
+                result_b.expect("the losing thread must not abort with the winner's NotFound");
 
-        assert!(migration_a.collisions.is_empty(), "{migration_a:?}");
-        assert!(migration_b.collisions.is_empty(), "{migration_b:?}");
-        assert_eq!(
-            migration_a.moved.len() + migration_b.moved.len(),
-            1,
-            "exactly one of the two racing calls may claim the move — the other \
-             must see it already done: a={migration_a:?} b={migration_b:?}"
-        );
+            assert!(migration_a.collisions.is_empty(), "{migration_a:?}");
+            assert!(migration_b.collisions.is_empty(), "{migration_b:?}");
+            assert_eq!(
+                migration_a.moved.len() + migration_b.moved.len(),
+                1,
+                "exactly one of the two racing calls may claim the move — the other \
+                 must see it already done: a={migration_a:?} b={migration_b:?}"
+            );
 
-        assert_eq!(
-            std::fs::read_to_string(home.path().join("companies/acme/company.toml")).unwrap(),
-            "[company]\nname = \"Acme\"\n",
-            "the bundle must land intact exactly once, never merged or truncated \
-             by the two renames overlapping"
-        );
-        assert!(
-            !home.path().join("companies/companies/acme").exists(),
-            "the loser must not have left a stale copy behind at the legacy path"
-        );
+            assert_eq!(
+                std::fs::read_to_string(home.path().join("companies/acme/company.toml")).unwrap(),
+                "[company]\nname = \"Acme\"\n",
+                "the bundle must land intact exactly once, never merged or truncated \
+                 by the two renames overlapping"
+            );
+            assert!(
+                !home.path().join("companies/companies/acme").exists(),
+                "the loser must not have left a stale copy behind at the legacy path"
+            );
+        }
     }
 
     #[test]

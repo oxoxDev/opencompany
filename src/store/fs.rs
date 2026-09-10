@@ -3710,10 +3710,19 @@ mod test {
             .map(|writer| vec![b'A' + writer; BYTES])
             .collect();
 
+        // `spawn` alone permits the runtime to finish one writer before the
+        // next begins, and a serial schedule passes this test without ever
+        // reaching the contended path. The barrier holds every task at the
+        // instant before the write so they are released together.
+        let gate = std::sync::Arc::new(tokio::sync::Barrier::new(WRITERS as usize));
         let mut set = tokio::task::JoinSet::new();
         for candidate in candidates.clone() {
             let path = path.clone();
-            set.spawn(async move { write_atomic_bytes(&path, &candidate).await });
+            let gate = std::sync::Arc::clone(&gate);
+            set.spawn(async move {
+                gate.wait().await;
+                write_atomic_bytes(&path, &candidate).await
+            });
         }
         while let Some(res) = set.join_next().await {
             res.unwrap().expect("no writer observes an I/O error");
