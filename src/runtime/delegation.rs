@@ -3498,7 +3498,20 @@ impl<'a> DelegationRunner<'a> {
                 ));
                 card.column = lifecycle::review_landing_column(decision).to_string();
                 card.updated_at_millis = now_millis();
-                tasks.upsert(self.company, &card).await?;
+                if !tasks
+                    .update_if_column(self.company, &card, lifecycle::COLUMN_IN_REVIEW)
+                    .await?
+                {
+                    return Ok(DelegationOutcome {
+                        refused_card: Some(RefusedCardWrite {
+                            tool: "review_task",
+                            task_id,
+                            reason: "the card changed before the review could be recorded"
+                                .to_string(),
+                        }),
+                        ..DelegationOutcome::default()
+                    });
+                }
                 Ok(DelegationOutcome::default())
             }
         }
@@ -9739,6 +9752,16 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                 "FailingUpsertStore: forced failure on the write".to_string(),
             ))
         }
+        async fn update_if_column(
+            &self,
+            _company: &CompanyId,
+            _task: &TaskRecord,
+            _expected_column: &str,
+        ) -> Result<bool> {
+            Err(crate::error::OpenCompanyError::Harness(
+                "FailingUpsertStore: forced failure on the write".to_string(),
+            ))
+        }
         async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
             self.inner.delete(company, id).await
         }
@@ -9867,6 +9890,16 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         async fn upsert(&self, company: &CompanyId, task: &TaskRecord) -> Result<()> {
             self.inner.upsert(company, task).await
         }
+        async fn update_if_column(
+            &self,
+            company: &CompanyId,
+            task: &TaskRecord,
+            expected_column: &str,
+        ) -> Result<bool> {
+            self.inner
+                .update_if_column(company, task, expected_column)
+                .await
+        }
         async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
             self.inner.delete(company, id).await
         }
@@ -9956,11 +9989,8 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         );
     }
 
-    /// The same lost-update shape on `review_task`: two concurrent verdicts
-    /// on the same card — one `Approve`, one `Revise` — leave the card in
-    /// whichever verdict's write landed last, with the other silently gone.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn two_concurrent_reviews_of_the_same_card_lose_exactly_one_writer() {
+    async fn two_concurrent_reviews_of_the_same_card_admit_exactly_one_writer() {
         let dir = tempfile::tempdir().expect("tempdir");
         let backing: Arc<dyn TaskStore> = Arc::new(FsOps::new(dir.path()));
         let record = record();
@@ -10016,22 +10046,26 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                 MessageContext::default(),
             ),
         );
-        a.expect("A's write itself succeeds");
-        b.expect("B's write itself succeeds");
+        let a = a.expect("A's review completes");
+        let b = b.expect("B's review completes");
+        let refused = usize::from(a.refused_card.is_some()) + usize::from(b.refused_card.is_some());
+        assert_eq!(
+            refused, 1,
+            "exactly one stale review must be refused after both read the same revision"
+        );
 
         let cards = backing.list(&record.id).await.unwrap();
         assert_eq!(cards.len(), 1);
         let card = &cards[0];
         assert!(
             card.column == COLUMN_DONE || card.column == COLUMN_TODO,
-            "the card must land wherever exactly one of the two verdicts sent it: {card:?}"
+            "the card must land wherever the admitted verdict sent it: {card:?}"
         );
         let note = card.note.as_deref().unwrap_or_default();
         assert!(
             (card.column == COLUMN_DONE) == note.contains("approved by A")
                 && (card.column == COLUMN_TODO) == note.contains("sent back by B"),
-            "the surviving note must belong to the verdict that actually landed — a lost \
-             update, not a merge of the two: {card:?}"
+            "the surviving note must belong to the admitted verdict: {card:?}"
         );
     }
 }
