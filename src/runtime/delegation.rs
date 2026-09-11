@@ -9922,6 +9922,51 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         }
     }
 
+    struct AssignmentBeforeReviewStore {
+        inner: Arc<dyn TaskStore>,
+        both_read: Arc<tokio::sync::Barrier>,
+        assignment_written: Arc<tokio::sync::Barrier>,
+    }
+
+    #[async_trait]
+    impl TaskStore for AssignmentBeforeReviewStore {
+        async fn list(&self, company: &CompanyId) -> Result<Vec<TaskRecord>> {
+            let result = self.inner.list(company).await;
+            self.both_read.wait().await;
+            result
+        }
+
+        async fn upsert(&self, company: &CompanyId, task: &TaskRecord) -> Result<()> {
+            self.inner.upsert(company, task).await
+        }
+
+        async fn update_if_column(
+            &self,
+            company: &CompanyId,
+            task: &TaskRecord,
+            observed: &TaskRecord,
+            expected_column: &str,
+        ) -> Result<bool> {
+            if task.column == expected_column {
+                let updated = self
+                    .inner
+                    .update_if_column(company, task, observed, expected_column)
+                    .await;
+                self.assignment_written.wait().await;
+                updated
+            } else {
+                self.assignment_written.wait().await;
+                self.inner
+                    .update_if_column(company, task, observed, expected_column)
+                    .await
+            }
+        }
+
+        async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
+            self.inner.delete(company, id).await
+        }
+    }
+
     /// Two assignments that read the same card revision admit one writer and
     /// explicitly refuse the stale one.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -10093,9 +10138,10 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             .upsert(&record.id, &card_in("card-real", COLUMN_IN_REVIEW))
             .await
             .expect("seed the real card");
-        let tasks: Arc<dyn TaskStore> = Arc::new(BothReadBeforeEitherWritesStore {
+        let tasks: Arc<dyn TaskStore> = Arc::new(AssignmentBeforeReviewStore {
             inner: backing.clone(),
-            barrier: Arc::new(tokio::sync::Barrier::new(2)),
+            both_read: Arc::new(tokio::sync::Barrier::new(2)),
+            assignment_written: Arc::new(tokio::sync::Barrier::new(2)),
         });
         let queue = DelegationQueue::default();
         let steer = InflightRegistry::default();
