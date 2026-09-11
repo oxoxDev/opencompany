@@ -1754,6 +1754,7 @@ mod live {
     #[derive(Default)]
     pub(super) struct AuthorizeCache {
         pending: std::collections::HashMap<String, PendingAuthorization>,
+        in_flight: std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>,
     }
 
     impl std::fmt::Debug for AuthorizeCache {
@@ -1803,14 +1804,46 @@ mod live {
         extra: Option<Value>,
     ) -> Result<ComposioAuthorizeResponse> {
         let key = authorize_request_key(config, company, credential, toolkit, &extra)?;
-        let mut cache = config.authorizations.lock().await;
-        cache
-            .pending
-            .retain(|_, pending| pending.started.elapsed() < AUTHORIZE_HANDOFF_LIFETIME);
-        if let Some(pending) = cache.pending.get(&key) {
+        let key_lock = {
+            let mut cache = config.authorizations.lock().await;
+            cache
+                .pending
+                .retain(|_, pending| pending.started.elapsed() < AUTHORIZE_HANDOFF_LIFETIME);
+            cache.in_flight.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = cache.in_flight.get(&key).and_then(std::sync::Weak::upgrade) {
+                lock
+            } else {
+                let occupied = cache.pending.len()
+                    + cache
+                        .in_flight
+                        .keys()
+                        .filter(|in_flight_key| !cache.pending.contains_key(*in_flight_key))
+                        .count();
+                if !cache.pending.contains_key(&key) && occupied >= MAX_PENDING_AUTHORIZATIONS {
+                    anyhow::bail!(
+                        "too many cached OAuth handoffs; wait for earlier handoffs to expire"
+                    );
+                }
+                let lock = Arc::new(tokio::sync::Mutex::new(()));
+                cache.in_flight.insert(key.clone(), Arc::downgrade(&lock));
+                lock
+            }
+        };
+        let _key_guard = key_lock.lock().await;
+        let pending = {
+            let mut cache = config.authorizations.lock().await;
+            cache
+                .pending
+                .retain(|_, pending| pending.started.elapsed() < AUTHORIZE_HANDOFF_LIFETIME);
+            cache
+                .pending
+                .get(&key)
+                .map(|pending| (pending.started, pending.response.clone()))
+        };
+        if let Some((started, response)) = pending {
             let connections = client.list_connections().await?;
             if let Some(connection) = connections.connections.iter().find(|connection| {
-                connection.id == pending.response.connection_id
+                connection.id == response.connection_id
                     && connection
                         .normalized_toolkit()
                         .eq_ignore_ascii_case(toolkit)
@@ -1818,8 +1851,8 @@ mod live {
                 let status = connection.status.trim().to_ascii_uppercase();
                 match status.as_str() {
                     "PENDING" | "INITIATED" | "INITIALIZING" => {
-                        if pending.started.elapsed() < AUTHORIZE_HANDOFF_LIFETIME {
-                            return Ok(pending.response.clone());
+                        if started.elapsed() < AUTHORIZE_HANDOFF_LIFETIME {
+                            return Ok(response);
                         }
                     }
                     "ACTIVE" | "CONNECTED" | "EXPIRED" | "FAILED" | "ERROR" | "INACTIVE"
@@ -1829,13 +1862,12 @@ mod live {
                     ),
                 }
             }
+            let mut cache = config.authorizations.lock().await;
             cache.pending.remove(&key);
-        }
-        if cache.pending.len() >= MAX_PENDING_AUTHORIZATIONS {
-            anyhow::bail!("too many cached OAuth handoffs; wait for earlier handoffs to expire");
         }
         let started = tokio::time::Instant::now();
         let response = client.authorize(toolkit, extra).await?;
+        let mut cache = config.authorizations.lock().await;
         cache.pending.insert(
             key,
             PendingAuthorization {
@@ -2142,6 +2174,73 @@ mod live {
                     "attempt {attempt}: racing cloned tools must open one handoff"
                 );
             }
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_slow_authorize_does_not_block_an_unrelated_toolkit() {
+            use axum::{Router, extract::State, routing::post};
+
+            #[derive(Default)]
+            struct ParallelBackend {
+                slow_started: tokio::sync::Notify,
+                release_slow: tokio::sync::Notify,
+            }
+
+            async fn authorize(
+                State(state): State<Arc<ParallelBackend>>,
+                axum::Json(body): axum::Json<Value>,
+            ) -> axum::Json<Value> {
+                let toolkit = body["toolkit"].as_str().unwrap().to_string();
+                if toolkit == "gmail" {
+                    state.slow_started.notify_one();
+                    state.release_slow.notified().await;
+                }
+                axum::Json(json!({ "success": true, "data": {
+                    "connectionId": format!("connection-{toolkit}"),
+                    "connectUrl": format!("https://connect.composio.dev/{toolkit}")
+                } }))
+            }
+
+            let state = Arc::new(ParallelBackend::default());
+            let app = Router::new()
+                .route("/agent-integrations/composio/authorize", post(authorize))
+                .with_state(state.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let config = TenantComposio::new(url, Credential::from_value("token-a"), Vec::new());
+            let gmail = authorize_tool(&config, "acme");
+            let gmail_call =
+                tokio::spawn(async move { gmail.execute(json!({ "toolkit": "gmail" })).await });
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                state.slow_started.notified(),
+            )
+            .await
+            .expect("the slow request must reach the backend");
+
+            let slack = authorize_tool(&config, "acme");
+            let slack_result = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                slack.execute(json!({ "toolkit": "slack" })),
+            )
+            .await;
+            let slack_completed = match slack_result {
+                Ok(result) => {
+                    let result = result.unwrap();
+                    assert!(!result.is_error, "{}", result.output());
+                    true
+                }
+                Err(_) => false,
+            };
+            state.release_slow.notify_one();
+            let gmail_result = gmail_call.await.unwrap().unwrap();
+            assert!(!gmail_result.is_error, "{}", gmail_result.output());
+            assert_eq!(
+                slack_completed, true,
+                "an authorization for one toolkit must not wait for another toolkit's network call"
+            );
+            server.abort();
         }
 
         #[tokio::test]
