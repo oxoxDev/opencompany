@@ -11968,6 +11968,7 @@ mod tests {
                 &self,
                 _company: &CompanyId,
                 _task: &TaskRecord,
+                _observed: &TaskRecord,
                 _expected_column: &str,
             ) -> crate::Result<bool> {
                 Ok(false)

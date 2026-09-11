@@ -1650,8 +1650,12 @@ impl crate::ports::tasks::TaskStore for SqliteStore {
         &self,
         company: &CompanyId,
         task: &crate::ports::tasks::TaskRecord,
+        observed: &crate::ports::tasks::TaskRecord,
         expected_column: &str,
     ) -> Result<bool> {
+        if observed.id != task.id || observed.column != expected_column {
+            return Ok(false);
+        }
         let conn = self.conn();
         let current = conn
             .query_row(
@@ -1665,7 +1669,7 @@ impl crate::ports::tasks::TaskStore for SqliteStore {
             return Ok(false);
         };
         let current: crate::ports::tasks::TaskRecord = serde_json::from_str(&current_json)?;
-        if current.column != expected_column {
+        if current != *observed {
             return Ok(false);
         }
         let task_json = serde_json::to_string(task)?;

@@ -155,11 +155,12 @@ impl TaskStore for BoardAnnouncer {
         &self,
         company: &CompanyId,
         task: &TaskRecord,
+        observed: &TaskRecord,
         expected_column: &str,
     ) -> Result<bool> {
         let updated = self
             .inner
-            .update_if_column(company, task, expected_column)
+            .update_if_column(company, task, observed, expected_column)
             .await?;
         if updated {
             self.announce(company, &task.id, CHANGE_UPDATED, Some(task.column.clone()))
@@ -211,12 +212,13 @@ mod test {
             &self,
             _company: &CompanyId,
             task: &TaskRecord,
+            observed: &TaskRecord,
             expected_column: &str,
         ) -> Result<bool> {
             let mut rows = self.rows.lock().unwrap();
             let Some(existing) = rows
                 .iter_mut()
-                .find(|existing| existing.id == task.id && existing.column == expected_column)
+                .find(|existing| *existing == observed && existing.column == expected_column)
             else {
                 return Ok(false);
             };

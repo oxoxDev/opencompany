@@ -1709,8 +1709,12 @@ impl crate::ports::tasks::TaskStore for MongoStore {
         &self,
         company: &CompanyId,
         task: &crate::ports::tasks::TaskRecord,
+        observed: &crate::ports::tasks::TaskRecord,
         expected_column: &str,
     ) -> Result<bool> {
+        if observed.id != task.id || observed.column != expected_column {
+            return Ok(false);
+        }
         let collection = self.collection("tasks");
         let Some(current) = collection
             .find_one(doc! {"company_id": company.as_ref(), "task_id": &task.id})
@@ -1720,8 +1724,8 @@ impl crate::ports::tasks::TaskStore for MongoStore {
             return Ok(false);
         };
         let current_json = get_str(&current, "task_json")?;
-        let current_task: crate::ports::tasks::TaskRecord = serde_json::from_str(current_json)?;
-        if current_task.column != expected_column {
+        let current_task: crate::ports::tasks::TaskRecord = serde_json::from_str(&current_json)?;
+        if current_task != *observed {
             return Ok(false);
         }
         let result = collection

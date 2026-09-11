@@ -3375,6 +3375,7 @@ impl<'a> DelegationRunner<'a> {
                         ..DelegationOutcome::default()
                     });
                 };
+                let observed = card.clone();
                 // Issue #205: the orchestrator writes this `assignee` out of an
                 // LLM tool call, so it is exactly as capable of naming somebody
                 // who does not exist as the operator's free-text field is. Held
@@ -3443,7 +3444,20 @@ impl<'a> DelegationRunner<'a> {
                 // holds one level deeper too: the write goes through the
                 // `TaskStore` port, which cannot trigger dispatch at all.
                 card.updated_at_millis = now_millis();
-                tasks.upsert(self.company, &card).await?;
+                if !tasks
+                    .update_if_column(self.company, &card, &observed, &observed.column)
+                    .await?
+                {
+                    return Ok(DelegationOutcome {
+                        refused_card: Some(RefusedCardWrite {
+                            tool: "assign_task",
+                            task_id,
+                            reason: "the card changed before the assignment could be recorded"
+                                .to_string(),
+                        }),
+                        ..DelegationOutcome::default()
+                    });
+                }
                 Ok(DelegationOutcome {
                     assigned,
                     ..DelegationOutcome::default()
@@ -3481,6 +3495,7 @@ impl<'a> DelegationRunner<'a> {
                         ..DelegationOutcome::default()
                     });
                 };
+                let observed = card.clone();
                 if card.column != lifecycle::COLUMN_IN_REVIEW {
                     return Ok(DelegationOutcome {
                         refused_card: Some(RefusedCardWrite {
@@ -3499,7 +3514,7 @@ impl<'a> DelegationRunner<'a> {
                 card.column = lifecycle::review_landing_column(decision).to_string();
                 card.updated_at_millis = now_millis();
                 if !tasks
-                    .update_if_column(self.company, &card, lifecycle::COLUMN_IN_REVIEW)
+                    .update_if_column(self.company, &card, &observed, lifecycle::COLUMN_IN_REVIEW)
                     .await?
                 {
                     return Ok(DelegationOutcome {
@@ -9756,6 +9771,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             &self,
             _company: &CompanyId,
             _task: &TaskRecord,
+            _observed: &TaskRecord,
             _expected_column: &str,
         ) -> Result<bool> {
             Err(crate::error::OpenCompanyError::Harness(
@@ -9894,10 +9910,11 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             &self,
             company: &CompanyId,
             task: &TaskRecord,
+            observed: &TaskRecord,
             expected_column: &str,
         ) -> Result<bool> {
             self.inner
-                .update_if_column(company, task, expected_column)
+                .update_if_column(company, task, observed, expected_column)
                 .await
         }
         async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
@@ -9905,16 +9922,10 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         }
     }
 
-    /// `run_delegation`'s read-then-write over the card (`load_card` then
-    /// `tasks.upsert`) holds no per-card lock. Two `assign_task` calls that
-    /// both name the SAME real card — two operator turns landing at once, a
-    /// routine shape — can therefore both read the pre-race card, and
-    /// whichever upsert lands last silently overwrites the other's write
-    /// whole, note and assignee together, with nothing that detects or
-    /// reports the loss. Forced deterministic with a barrier rather than
-    /// hoped for, so this is not a flaky proof of a real defect.
+    /// Two assignments that read the same card revision admit one writer and
+    /// explicitly refuse the stale one.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn two_concurrent_assignments_of_the_same_card_lose_exactly_one_writer() {
+    async fn two_concurrent_assignments_of_the_same_card_admit_exactly_one_writer() {
         let dir = tempfile::tempdir().expect("tempdir");
         let backing: Arc<dyn TaskStore> = Arc::new(FsOps::new(dir.path()));
         let record = record();
@@ -9970,8 +9981,13 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                 MessageContext::default(),
             ),
         );
-        a.expect("A's write itself succeeds");
-        b.expect("B's write itself succeeds");
+        let a = a.expect("A's assignment completes");
+        let b = b.expect("B's assignment completes");
+        let refused = usize::from(a.refused_card.is_some()) + usize::from(b.refused_card.is_some());
+        assert_eq!(
+            refused, 1,
+            "exactly one stale assignment must be refused after both read the same revision"
+        );
 
         let cards = backing.list(&record.id).await.unwrap();
         assert_eq!(cards.len(), 1);
@@ -9984,8 +10000,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         assert!(
             (card.assignee == "chief") == note.contains("from A")
                 && (card.assignee == "engineer") == note.contains("from B"),
-            "the surviving note must belong to the surviving assignee — a lost update, not a \
-             merge of the two: {card:?}"
+            "the surviving note must belong to the admitted assignee: {card:?}"
         );
     }
 
@@ -10066,6 +10081,83 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             (card.column == COLUMN_DONE) == note.contains("approved by A")
                 && (card.column == COLUMN_TODO) == note.contains("sent back by B"),
             "the surviving note must belong to the admitted verdict: {card:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_same_column_assignment_cannot_be_overwritten_by_a_stale_review() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backing: Arc<dyn TaskStore> = Arc::new(FsOps::new(dir.path()));
+        let record = record();
+        backing
+            .upsert(&record.id, &card_in("card-real", COLUMN_IN_REVIEW))
+            .await
+            .expect("seed the real card");
+        let tasks: Arc<dyn TaskStore> = Arc::new(BothReadBeforeEitherWritesStore {
+            inner: backing.clone(),
+            barrier: Arc::new(tokio::sync::Barrier::new(2)),
+        });
+        let queue = DelegationQueue::default();
+        let steer = InflightRegistry::default();
+        let idle_turns_fx = Fixture::new();
+        let idle_turns = ScriptedTurns::new(&idle_turns_fx, vec![]);
+        let assigner = DelegationRunner::new(
+            &idle_turns,
+            &record,
+            Some(&tasks),
+            &steer,
+            &record.id,
+            &queue,
+            orchestrator::MAX_DELEGATIONS_PER_TURN,
+        );
+        let reviewer = DelegationRunner::new(
+            &idle_turns,
+            &record,
+            Some(&tasks),
+            &steer,
+            &record.id,
+            &queue,
+            orchestrator::MAX_DELEGATIONS_PER_TURN,
+        );
+
+        let (assigned, reviewed) = tokio::join!(
+            assigner.run_delegation(
+                Delegation::AssignTask {
+                    task_id: "card-real".to_string(),
+                    assignee: "chief".to_string(),
+                    note: Some("assigned concurrently".to_string()),
+                },
+                None,
+                MessageContext::default(),
+            ),
+            reviewer.run_delegation(
+                Delegation::ReviewTask {
+                    task_id: "card-real".to_string(),
+                    decision: lifecycle::ReviewDecision::Approve,
+                    note: Some("reviewed concurrently".to_string()),
+                },
+                None,
+                MessageContext::default(),
+            ),
+        );
+        let assigned = assigned.expect("assignment completes");
+        let reviewed = reviewed.expect("review completes");
+        assert_eq!(
+            usize::from(assigned.refused_card.is_some())
+                + usize::from(reviewed.refused_card.is_some()),
+            1,
+            "one operation must refuse the snapshot invalidated by the other"
+        );
+
+        let cards = backing.list(&record.id).await.unwrap();
+        let card = &cards[0];
+        let note = card.note.as_deref().unwrap_or_default();
+        assert!(
+            (card.column == COLUMN_IN_REVIEW
+                && card.assignee == "chief"
+                && note.contains("assigned concurrently"))
+                || (card.column == COLUMN_DONE && note.contains("reviewed concurrently")),
+            "the stored card must be exactly the admitted writer's result: {card:?}"
         );
     }
 }
