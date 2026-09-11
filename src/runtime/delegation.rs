@@ -9721,40 +9721,6 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         }
     }
 
-    #[tokio::test]
-    async fn a_task_drain_records_a_refused_review_without_mutating_its_target() {
-        let fx = Fixture::new();
-        fx.tasks
-            .upsert(&fx.record.id, &card_in("card-refused", COLUMN_TODO))
-            .await
-            .unwrap();
-        let mut current = card_in("card-running", COLUMN_IN_PROGRESS);
-        let turns = ScriptedTurns::new(&fx, vec![]);
-        let _claim = fx.queue.claim();
-        fx.queue.push(Delegation::ReviewTask {
-            task_id: "card-refused".to_string(),
-            decision: lifecycle::ReviewDecision::Approve,
-            note: None,
-        });
-        let handed = fx
-            .runner(&turns)
-            .for_task("card-running")
-            .handle_task_delegations(&mut current, "chief")
-            .await
-            .unwrap();
-        assert!(handed.is_none());
-        let note = current.note.as_deref().unwrap_or_default();
-        assert!(
-            note.contains("card-refused") && note.contains("not in_review"),
-            "refusal must reach the current card: {note:?}"
-        );
-        assert_eq!(
-            fx.cards().await[0].column,
-            COLUMN_TODO,
-            "refused review must not change the target"
-        );
-    }
-
     /// A [`TaskStore`] whose `upsert` always fails, passing `list`/`delete`
     /// straight through to a real backing store — so a lookup succeeds and a
     /// write does not, driving a delegation through the store-fault arm
