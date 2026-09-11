@@ -187,6 +187,24 @@ mod tests {
         assert_eq!(ids(second.drain()), vec!["second"]);
     }
 
+    #[tokio::test]
+    async fn collects_the_exact_published_artifact_revision() {
+        let collector = TurnOutputCollector::default();
+        let claim = collector.claim();
+        claim
+            .scoped(async {
+                collector.artifact("a-1", "t-1", 3, "Launch brief");
+            })
+            .await;
+
+        let outputs = claim.drain();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].kind, ChatOutputKind::Artifact);
+        assert_eq!(outputs[0].target_id, "a-1");
+        assert_eq!(outputs[0].task_id.as_deref(), Some("t-1"));
+        assert_eq!(outputs[0].version, Some(3));
+    }
+
     async fn collector_write(collector: &TurnOutputCollector, id: &str, title: &str) {
         collector.workspace_node(id, title);
     }

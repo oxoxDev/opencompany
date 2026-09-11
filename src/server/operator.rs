@@ -9855,6 +9855,129 @@ mode = "full"
         assert_eq!(reply["steps"][0]["elapsedMs"], 9);
     }
 
+    /// A reply's produced-file buttons are durable transcript data, and the
+    /// projection must stop returning either kind once its target is gone.
+    #[tokio::test]
+    async fn chat_history_route_rehydrates_outputs_and_drops_deleted_targets() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let company = runtime.id().clone();
+
+        runtime
+            .workspace()
+            .create(
+                &company,
+                &attachment_note_node("node-1", "launch-note.md"),
+                Some("Launch notes"),
+            )
+            .await
+            .unwrap();
+        runtime
+            .artifacts()
+            .upsert(
+                &company,
+                &crate::ports::artifacts::ArtifactRecord::new(
+                    "artifact-1",
+                    "task-1",
+                    "Launch brief",
+                    crate::ports::artifacts::ArtifactKind::Markdown,
+                    "# Launch",
+                    "ceo",
+                    1,
+                ),
+            )
+            .await
+            .unwrap();
+        runtime
+            .events()
+            .append(
+                &company,
+                CompanyEvent::AgentReply {
+                    audience: Vec::new(),
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    outputs: vec![
+                        crate::ports::types::ChatOutput {
+                            kind: crate::ports::types::ChatOutputKind::WorkspaceNode,
+                            target_id: "node-1".to_string(),
+                            title: "launch-note.md".to_string(),
+                            task_id: None,
+                            version: None,
+                        },
+                        crate::ports::types::ChatOutput {
+                            kind: crate::ports::types::ChatOutputKind::Artifact,
+                            target_id: "artifact-1".to_string(),
+                            title: "Launch brief".to_string(),
+                            task_id: Some("task-1".to_string()),
+                            version: Some(1),
+                        },
+                    ],
+                    chat_id: "main".to_string(),
+                    agent_id: "ceo".to_string(),
+                    text: "I wrote both files.".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let history = |app: axum::Router| async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/company/chat/history")
+                        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        };
+
+        let app = router(state);
+        let first = history(app.clone()).await;
+        let reply = first
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["text"] == "I wrote both files.")
+            .unwrap();
+        assert_eq!(reply["outputs"].as_array().unwrap().len(), 2);
+        assert_eq!(reply["outputs"][0]["targetId"], "node-1");
+        assert_eq!(reply["outputs"][1]["kind"], "artifact");
+        assert_eq!(reply["outputs"][1]["taskId"], "task-1");
+        assert_eq!(reply["outputs"][1]["version"], 1);
+
+        runtime
+            .workspace()
+            .delete(&company, "node-1")
+            .await
+            .unwrap();
+        runtime
+            .artifacts()
+            .delete(&company, "artifact-1")
+            .await
+            .unwrap();
+
+        let reloaded = history(app).await;
+        let reply = reloaded
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["text"] == "I wrote both files.")
+            .unwrap();
+        assert!(
+            reply.get("outputs").is_none(),
+            "deleted targets must not rehydrate dead buttons: {reply}"
+        );
+    }
+
     /// Issue #246: a reply that opened a board card must still say so after a
     /// transcript reload. The "card opened" chip is rendered from `taskId`, and
     /// a chip that exists only on the live POST response vanishes the moment
