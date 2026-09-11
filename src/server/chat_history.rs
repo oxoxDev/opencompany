@@ -1740,7 +1740,11 @@ async fn drop_dead_outputs(
             .into_iter()
             .flat_map(|artifact| {
                 artifact.versions.into_iter().map(move |version| {
-                    (artifact.id.clone(), artifact.task_id.clone(), version.version)
+                    (
+                        artifact.id.clone(),
+                        artifact.task_id.clone(),
+                        version.version,
+                    )
                 })
             })
             .collect()
