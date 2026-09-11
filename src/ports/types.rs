@@ -3045,6 +3045,41 @@ pub struct ReplyTo {
     pub chat_id: String,
 }
 
+/// One durable thing an agent turn produced for the operator.
+///
+/// This is deliberately an address, not a preview. Workspace nodes and
+/// published artifacts have different console routes, but the reply carries
+/// the same small set of facts for both: what kind of target it is, its stable
+/// id, and the already-redacted label the button should show. Artifact links
+/// additionally need the owning task and pinned version.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatOutput {
+    /// Which console route resolves [`target_id`](Self::target_id).
+    pub kind: ChatOutputKind,
+    /// A workspace node id or artifact id, according to [`kind`](Self::kind).
+    pub target_id: String,
+    /// The bounded, redacted operator-facing button label.
+    pub title: String,
+    /// The artifact's owning task. Absent for workspace nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// The exact artifact revision this turn produced. Absent for workspace
+    /// nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
+}
+
+/// The two addressable output kinds a chat reply may carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChatOutputKind {
+    /// A node in the company's shared workspace tree.
+    WorkspaceNode,
+    /// A versioned artifact attached to a board task.
+    Artifact,
+}
+
 /// A message the company emits on a channel.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OutboundMessage {
