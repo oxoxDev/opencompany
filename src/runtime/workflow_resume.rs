@@ -1526,6 +1526,16 @@ pub async fn spawn_blocked_node_continuation(
 /// before. `false` only when a fingerprint WAS stashed and no longer matches:
 /// the workflow was edited while this approval sat pending, so its checkpoint
 /// no longer describes the graph the continuation would run against.
+fn graph_unchanged_since_park(effect: &Effect, workflow: &crate::company::WorkflowFile) -> bool {
+    fingerprint_unchanged_since_park(
+        effect
+            .payload
+            .get(PAYLOAD_WORKFLOW_FINGERPRINT)
+            .and_then(Value::as_str),
+        workflow,
+    )
+}
+
 /// Whether the graph that resolved is a global this run never parked against.
 ///
 /// A company graph and a global can answer to one id: the company's wins while
@@ -1539,16 +1549,6 @@ fn a_global_this_run_never_parked_against(
     workflow: &crate::company::WorkflowFile,
 ) -> bool {
     workflow.global && parked.is_some_and(|parked| parked != workflow.content_fingerprint())
-}
-
-fn graph_unchanged_since_park(effect: &Effect, workflow: &crate::company::WorkflowFile) -> bool {
-    fingerprint_unchanged_since_park(
-        effect
-            .payload
-            .get(PAYLOAD_WORKFLOW_FINGERPRINT)
-            .and_then(Value::as_str),
-        workflow,
-    )
 }
 
 /// The shared check behind [`graph_unchanged_since_park`] (the gate path,
