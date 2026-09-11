@@ -2629,15 +2629,18 @@ fn policy_ensure_lock(company: &CompanyId) -> Arc<tokio::sync::Mutex<()>> {
 }
 
 static MONTHLY_SPEND_LOCKS: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<CompanyId, Arc<tokio::sync::Mutex<()>>>>,
+    std::sync::Mutex<HashMap<CompanyId, std::sync::Weak<tokio::sync::Mutex<()>>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 fn monthly_spend_lock(company: &CompanyId) -> Arc<tokio::sync::Mutex<()>> {
     let mut locks = MONTHLY_SPEND_LOCKS.lock().expect("monthly spend locks");
-    locks
-        .entry(company.clone())
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone()
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(company).and_then(std::sync::Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(company.clone(), Arc::downgrade(&lock));
+    lock
 }
 
 /// What the total-ceiling gate decided.
@@ -11087,6 +11090,96 @@ description = "Sets direction."
             "This company has reached its monthly spend cap of $1.00 — dispatch is paused until the month resets.",
             "the refusal must explain the company-wide monthly cap"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn racing_inference_turns_cannot_both_spend_the_last_monthly_budget() {
+        struct DelayedProvider(ScriptedProvider);
+
+        #[async_trait]
+        impl ChatModel<()> for DelayedProvider {
+            async fn invoke(
+                &self,
+                state: &(),
+                request: ModelRequest,
+            ) -> tinyinference::Result<ModelResponse> {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                self.0.invoke(state, request).await
+            }
+        }
+
+        impl HarnessModel for DelayedProvider {
+            fn telemetry_provider_id(&self) -> String {
+                "monthly-budget-race".to_string()
+            }
+        }
+
+        for attempt in 0..5 {
+            let dir = tempfile::tempdir().expect("temporary workspace");
+            let store = Arc::new(crate::store::FsCompanyStore::new(dir.path()));
+            let provider = Arc::new(DelayedProvider(
+                ScriptedProvider::new(vec![Ok("completed".to_string()); 2]).reporting_usage(
+                    tinyinference::Usage {
+                        input_tokens: 1_200,
+                        output_tokens: 340,
+                        total_tokens: 1_540,
+                        ..Default::default()
+                    },
+                ),
+            ));
+            let mut deps = deps_with_plan(dir.path(), Arc::new(MockContext::default()), None, None);
+            deps.store = store.clone();
+            deps.provider = provider.clone();
+            let deps = Arc::new(deps);
+
+            let mut rec = record();
+            rec.id = CompanyId::new(format!("monthly-budget-race-{attempt}"));
+            rec.manifest.place.discoverable = false;
+            rec.manifest.budget.monthly_usd = Some(1.0);
+            store.save(&rec).await.expect("company is persisted");
+            store
+                .append_ledger(
+                    &rec.id,
+                    LedgerEntry {
+                        at_millis: crate::ports::now_millis(),
+                        kind: "inference.spend".to_string(),
+                        amount_usd: -0.999_999,
+                        memo: "prior inference".to_string(),
+                    },
+                )
+                .await
+                .expect("prior inference spend is persisted");
+
+            let pool = Arc::new(HarnessPool::new());
+            pool.ensure(&rec, &deps).await.expect("roster builds");
+            let barrier = Arc::new(tokio::sync::Barrier::new(2));
+            let mut racers = tokio::task::JoinSet::new();
+            for _ in 0..2 {
+                let barrier = barrier.clone();
+                let pool = pool.clone();
+                let deps = deps.clone();
+                let company = rec.id.clone();
+                racers.spawn(async move {
+                    barrier.wait().await;
+                    pool.run(
+                        &company,
+                        "ceo",
+                        "answer once",
+                        &deps,
+                        crate::runtime::delegation::ChatTarget::default(),
+                    )
+                    .await
+                });
+            }
+            while let Some(result) = racers.join_next().await {
+                result.expect("racer joins").expect("dispatch resolves");
+            }
+            assert_eq!(
+                provider.0.calls.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "attempt {attempt}: one remaining monthly budget must admit exactly one model call"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
