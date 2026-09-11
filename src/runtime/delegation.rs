@@ -10189,21 +10189,30 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let assigned = assigned.expect("assignment completes");
         let reviewed = reviewed.expect("review completes");
         assert_eq!(
-            usize::from(assigned.refused_card.is_some())
-                + usize::from(reviewed.refused_card.is_some()),
+            usize::from(assigned.refused_card.is_some()),
+            0,
+            "the assignment ordered first must succeed"
+        );
+        assert_eq!(
+            usize::from(reviewed.refused_card.is_some()),
             1,
-            "one operation must refuse the snapshot invalidated by the other"
+            "the stale review ordered second must refuse"
         );
 
         let cards = backing.list(&record.id).await.unwrap();
         let card = &cards[0];
         let note = card.note.as_deref().unwrap_or_default();
+        assert_eq!(
+            card.column, COLUMN_IN_REVIEW,
+            "the assignment must leave the card in review"
+        );
+        assert_eq!(
+            card.assignee, "chief",
+            "the stored card must retain the assignment's assignee"
+        );
         assert!(
-            (card.column == COLUMN_IN_REVIEW
-                && card.assignee == "chief"
-                && note.contains("assigned concurrently"))
-                || (card.column == COLUMN_DONE && note.contains("reviewed concurrently")),
-            "the stored card must be exactly the admitted writer's result: {card:?}"
+            note.contains("assigned concurrently"),
+            "the stored card must retain the assignment note: {card:?}"
         );
     }
 }
