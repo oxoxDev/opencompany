@@ -924,7 +924,7 @@ mod live {
         let http = managed_execute_client()?;
 
         let post =
-            async |body: &Value| post_managed_execute(client.inner(), &http, body, &key).await;
+            async |body: &Value| post_managed_execute(client.inner(), http, body, &key).await;
 
         let mut resp = post(&body).await?;
         if is_post_oauth_auth_error(&resp) {
@@ -2237,7 +2237,8 @@ mod live {
             let gmail_result = gmail_call.await.unwrap().unwrap();
             assert!(!gmail_result.is_error, "{}", gmail_result.output());
             assert_eq!(
-                slack_completed, true,
+                usize::from(slack_completed),
+                1,
                 "an authorization for one toolkit must not wait for another toolkit's network call"
             );
             server.abort();
