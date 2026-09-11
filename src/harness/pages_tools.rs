@@ -1213,6 +1213,33 @@ impl PagesDeleteTool {
     fn new(pages: CompanyPages) -> Self {
         Self { pages }
     }
+
+    async fn referrers(&self, target_slug: &str) -> crate::Result<Vec<String>> {
+        let needle = format!("/pages/{target_slug}");
+        let mut referrers = Vec::new();
+        for (slug, bundle) in self.pages.all_pages().await? {
+            if slug == target_slug {
+                continue;
+            }
+            let Some(source) = bundle.source else {
+                continue;
+            };
+            if let Some((_, body)) = self
+                .pages
+                .store
+                .read(&self.pages.company, &source.id)
+                .await?
+                && body.match_indices(&needle).any(|(at, _)| {
+                    body[at + needle.len()..].chars().next().is_none_or(|next| {
+                        !(next.is_ascii_lowercase() || next.is_ascii_digit() || next == '-')
+                    })
+                })
+            {
+                referrers.push(slug);
+            }
+        }
+        Ok(referrers)
+    }
 }
 
 #[async_trait]
@@ -1223,7 +1250,7 @@ impl Tool for PagesDeleteTool {
 
     fn description(&self) -> &str {
         "Permanently remove one internal dashboard page and everything in it, by `slug`. This \
-         cannot be undone."
+         cannot be undone. Refuses deletion while another page links to the target."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -1268,6 +1295,26 @@ impl Tool for PagesDeleteTool {
                 "No page named `{slug}`. Call `{PAGES_LIST_TOOL}` to see what exists."
             )));
         };
+
+        let referrers = match self.referrers(slug).await {
+            Ok(referrers) => referrers,
+            Err(e) => {
+                return Ok(ToolResult::error(format!(
+                    "Could not check whether other pages link to `{slug}`: {reason}.",
+                    reason = store_reason(&e),
+                )));
+            }
+        };
+        if !referrers.is_empty() {
+            return Ok(ToolResult::error(format!(
+                "Refused: page `{slug}` is linked from {}. Update those pages before deleting it.",
+                referrers
+                    .iter()
+                    .map(|referrer| format!("`{referrer}`"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )));
+        }
 
         match self
             .pages
@@ -1941,7 +1988,6 @@ export default function Page() { send(document.cookie); return <div/>; }
     /// link in a dashboard nobody edited. The safe answer is to name the
     /// referrers before destroying the target.
     #[tokio::test]
-    #[ignore = "pages_delete performs no referential-integrity check against other pages' links"]
     async fn pages_delete_names_the_pages_that_link_to_the_slug_it_is_about_to_remove() {
         let (_dir, store) = store().await;
         let pages = pages(store, "acme");
