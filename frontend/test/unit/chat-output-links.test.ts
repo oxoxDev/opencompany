@@ -2,11 +2,36 @@
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ChatHistoryMessageDto, ChatOutput } from "@/api/types";
 import { fromHistory } from "@/lib/chat";
+import type { TeamMember } from "@/lib/team";
 import { OutputLinkRow } from "@/views/room/MessageRow";
+import { ThreadPanel } from "@/views/room/ThreadPanel";
+import type { Channel } from "@/views/room/model";
+
+const CHANNEL: Channel = {
+  id: "general",
+  name: "general",
+  voice: "General",
+  kind: "channel",
+  purpose: "",
+};
+
+const MEMBERS: TeamMember[] = [
+  {
+    id: "writer",
+    name: "Writer",
+    role: "Writer",
+    description: "",
+    tone: "violet",
+    avatar: "badger",
+    inboxEnabled: true,
+    effectiveTools: [],
+    desks: [],
+  },
+];
 
 let container: HTMLDivElement;
 let root: Root;
@@ -82,5 +107,43 @@ describe("chat reply output links", () => {
   it("renders no row when the reply produced nothing", () => {
     render([]);
     expect(container.querySelector("[data-chat-output-links]")).toBeNull();
+  });
+
+  it("renders a rehydrated output on a reply that lives only in a thread", () => {
+    const outputs = rehydratedOutputs([
+      {
+        kind: "workspace-node",
+        targetId: "thread-node",
+        title: "thread-note.md",
+      },
+    ]);
+
+    act(() =>
+      root.render(
+        createElement(ThreadPanel, {
+          channel: CHANNEL,
+          members: MEMBERS,
+          parent: { id: "parent", from: "you", text: "Write the note", at: 1 },
+          replies: [
+            {
+              id: "reply",
+              parentId: "parent",
+              from: "company",
+              channel: "writer",
+              text: "Done.",
+              at: 2,
+              outputs,
+            },
+          ],
+          sending: false,
+          onSend: vi.fn(),
+          onClose: vi.fn(),
+        }),
+      ),
+    );
+
+    const link = container.querySelector('[data-chat-output-links] a');
+    expect(link?.textContent).toContain("thread-note.md");
+    expect(link?.getAttribute("href")).toBe("#/company/workspace/thread-node");
   });
 });
