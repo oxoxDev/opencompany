@@ -1784,7 +1784,7 @@ mod live {
             config.backend_url,
             config.mode() == ComposioMode::Byok,
             credential,
-            toolkit,
+            toolkit.trim().to_ascii_lowercase(),
             extra.is_some(),
             extra
         ]);
@@ -4382,7 +4382,7 @@ mod isolation_tests {
 
         let first = tool.execute(json!({ "toolkit": "gmail" })).await.unwrap();
         assert!(!first.is_error, "{}", first.output());
-        let second = tool.execute(json!({ "toolkit": "gmail" })).await.unwrap();
+        let second = tool.execute(json!({ "toolkit": "GMAIL" })).await.unwrap();
         assert!(!second.is_error, "{}", second.output());
 
         assert_eq!(
