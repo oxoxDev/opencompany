@@ -1257,12 +1257,13 @@ async fn spawn_continuation(
                     "workflow {workflow_id} (it was approved, but the graph no longer exists)"
                 ))
             })?;
-    if a_global_this_run_never_parked_against(
+    if a_contested_id_no_longer_holds_the_parked_graph(
         effect
             .payload
             .get(PAYLOAD_WORKFLOW_FINGERPRINT)
             .and_then(Value::as_str),
         &workflow,
+        &disable,
     ) {
         return Err(OpenCompanyError::CompanyNotFound(format!(
             "workflow {workflow_id} (it was approved, but the graph it parked against is gone)"
@@ -1428,7 +1429,11 @@ pub async fn spawn_blocked_node_continuation(
              exists)"
                 ))
             })?;
-    if a_global_this_run_never_parked_against(workflow_fingerprint.as_deref(), &workflow) {
+    if a_contested_id_no_longer_holds_the_parked_graph(
+        workflow_fingerprint.as_deref(),
+        &workflow,
+        &disable,
+    ) {
         return Err(OpenCompanyError::CompanyNotFound(format!(
             "workflow {workflow_id} (a blocked step was approved, but the graph it parked \
              against is gone)"
@@ -1536,19 +1541,30 @@ fn graph_unchanged_since_park(effect: &Effect, workflow: &crate::company::Workfl
     )
 }
 
-/// Whether the graph that resolved is a global this run never parked against.
+/// Whether an id a global could answer to resolved to a graph this run did not
+/// park against.
 ///
-/// A company graph and a global can answer to one id: the company's wins while
-/// it exists, and the global surfaces if it is deleted. A parked fingerprint
-/// that no longer matches normally means the graph was edited, and a trigger
-/// re-run is the honest answer. On a global it means something stronger — the
-/// graph the operator answered for is gone and a different one now holds its
-/// id, so a re-run would execute nodes nobody approved.
-fn a_global_this_run_never_parked_against(
+/// A company graph and a global can hold one id, and either can replace the
+/// other while a run sits parked: deleting the company's copy surfaces the
+/// global, and authoring one buries it. Both directions end with a graph that
+/// is not what the operator answered for, and a trigger re-run there executes
+/// nodes nobody approved.
+///
+/// Keyed on the id being contested rather than on which side won, so the two
+/// directions cannot drift apart. An id no global answers to is untouched: an
+/// edited company graph is the operator's own edit of their own graph, and
+/// still falls back to a trigger re-run. A run parked before fingerprints were
+/// stashed still replays as it did.
+fn a_contested_id_no_longer_holds_the_parked_graph(
     parked: Option<&str>,
     workflow: &crate::company::WorkflowFile,
+    disable: &[String],
 ) -> bool {
-    workflow.global && parked.is_some_and(|parked| parked != workflow.content_fingerprint())
+    let contested = !crate::globals::disabled(disable, "workflow", &workflow.id)
+        && crate::globals::workflows()
+            .iter()
+            .any(|global| global.id == workflow.id);
+    contested && parked.is_some_and(|parked| parked != workflow.content_fingerprint())
 }
 
 /// The shared check behind [`graph_unchanged_since_park`] (the gate path,
@@ -2823,41 +2839,71 @@ from = "start"
 to = "gate"
 "#;
 
-    /// A global is not the graph a run parked against just because it answers
-    /// to the same id.
+    /// A contested id that no longer holds the graph a run parked against is
+    /// refused, whichever side won it.
     ///
-    /// A company graph can shadow a global, and deleting it leaves the global
-    /// holding that id with no claim behind it. The parked fingerprint is the
-    /// only thing that still knows which graph the operator answered for.
+    /// A company graph and a global can hold one id. Deleting the company's
+    /// copy surfaces the global; authoring one buries it. Both directions end
+    /// with a graph the operator never answered for.
     #[test]
-    fn a_global_holding_a_deleted_graphs_id_is_not_what_parked() {
-        let mut global = crate::company::parse_workflow(FINGERPRINT_V1).expect("parses");
-        global.global = true;
-        let parked_against_something_else =
-            crate::company::parse_workflow(FINGERPRINT_V2).expect("parses");
+    fn a_contested_id_is_refused_in_both_directions() {
+        let contested = &crate::globals::workflows()[0].id;
+        let parked = crate::company::parse_workflow(FINGERPRINT_V1).expect("parses");
+        let other = crate::company::parse_workflow(FINGERPRINT_V2).expect("parses");
 
+        let mut surfaced_global = other.clone();
+        surfaced_global.id = contested.clone();
+        surfaced_global.global = true;
         assert!(
-            a_global_this_run_never_parked_against(
-                Some(&parked_against_something_else.content_fingerprint()),
-                &global,
+            a_contested_id_no_longer_holds_the_parked_graph(
+                Some(&parked.content_fingerprint()),
+                &surfaced_global,
+                &[],
             ),
-            "a global whose content is not what parked must not be re-run in its place"
+            "a global surfacing under a deleted company graph's id must not run in its place"
+        );
+
+        let mut authored_company = other.clone();
+        authored_company.id = contested.clone();
+        authored_company.global = false;
+        assert!(
+            a_contested_id_no_longer_holds_the_parked_graph(
+                Some(&parked.content_fingerprint()),
+                &authored_company,
+                &[],
+            ),
+            "a company graph authored over a parked global must not run in its place either"
+        );
+
+        let mut unchanged = surfaced_global.clone();
+        unchanged.global = true;
+        assert!(
+            !a_contested_id_no_longer_holds_the_parked_graph(
+                Some(&unchanged.content_fingerprint()),
+                &unchanged,
+                &[],
+            ),
+            "the graph a run genuinely parked against still resumes"
         );
         assert!(
-            !a_global_this_run_never_parked_against(Some(&global.content_fingerprint()), &global),
-            "the global a run genuinely parked against still resumes"
-        );
-        assert!(
-            !a_global_this_run_never_parked_against(None, &global),
+            !a_contested_id_no_longer_holds_the_parked_graph(None, &surfaced_global, &[]),
             "a run parked before fingerprints were stashed keeps replaying as it did"
         );
-        let company = crate::company::parse_workflow(FINGERPRINT_V1).expect("parses");
         assert!(
-            !a_global_this_run_never_parked_against(
-                Some(&parked_against_something_else.content_fingerprint()),
-                &company,
+            !a_contested_id_no_longer_holds_the_parked_graph(
+                Some(&parked.content_fingerprint()),
+                &other,
+                &[],
             ),
-            "an edited company graph is the operator's own edit — unchanged behaviour"
+            "an id no global answers to is the operator's own edit — unchanged behaviour"
+        );
+        assert!(
+            !a_contested_id_no_longer_holds_the_parked_graph(
+                Some(&parked.content_fingerprint()),
+                &surfaced_global,
+                &[format!("workflow:{contested}")],
+            ),
+            "a global the company disabled cannot contest the id at all"
         );
     }
 
