@@ -688,7 +688,7 @@ impl Tool for PagesReadTool {
     fn description(&self) -> &str {
         "Read one dashboard page's manifest (title, description, icon, nav visibility) and its \
          `page.tsx` source, by `slug`. USE FOR reviewing or revising a page you or a teammate \
-         already built."
+         already built. Oversized sources are size-capped; use the returned offset to continue."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -698,6 +698,11 @@ impl Tool for PagesReadTool {
                 "slug": {
                     "type": "string",
                     "description": "The page's slug, as shown by pages_list, e.g. \"revenue-overview\"."
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Start at this byte offset in page.tsx; defaults to zero. Use the next offset returned by a capped read."
                 }
             },
             "required": ["slug"],
@@ -721,6 +726,17 @@ impl Tool for PagesReadTool {
                  and contain only lowercase letters, digits and hyphens."
             )));
         }
+        let offset = match args.get("offset") {
+            None => 0,
+            Some(value) => match value.as_u64().and_then(|n| usize::try_from(n).ok()) {
+                Some(offset) => offset,
+                None => {
+                    return Ok(ToolResult::error(
+                        "Invalid arguments: `offset` must be a nonnegative integer.".to_string(),
+                    ));
+                }
+            },
+        };
 
         let bundle = match self.pages.page(slug).await {
             Ok(bundle) => bundle,
@@ -770,8 +786,26 @@ impl Tool for PagesReadTool {
                          page.tsx ---\n",
                         rev = node.updated_at_millis
                     ));
-                    out.push_str(&body);
+                    let start = offset.min(body.len());
+                    if !body.is_char_boundary(start) {
+                        return Ok(ToolResult::error(format!(
+                            "Invalid arguments: `offset` {start} is not a UTF-8 boundary in \
+                             `{slug}`'s page.tsx."
+                        )));
+                    }
+                    let end = crate::store::text::floor_boundary(
+                        &body,
+                        start.saturating_add(MAX_SOURCE_BYTES).min(body.len()),
+                    );
+                    out.push_str(&body[start..end]);
                     out.push_str("\n--- END page.tsx ---\n");
+                    if end < body.len() {
+                        out.push_str(&format!(
+                            "Source is size-capped; bytes {start}..{end} of {} are shown. Continue \
+                             with `pages_read({{\"slug\":\"{slug}\",\"offset\":{end}}})`.\n",
+                            body.len(),
+                        ));
+                    }
                 }
                 _ => out.push_str("Its `page.tsx` could not be read.\n"),
             },
@@ -1817,7 +1851,6 @@ export * from "https://evil.example/x.js";
     /// console edit, a `workspace_write`, a body written before the cap existed
     /// — is returned in full and overflows the budget the cap was derived from.
     #[tokio::test]
-    #[ignore = "pages_read never clamps the source body: an oversized page.tsx overflows the budget"]
     async fn pages_read_stays_within_the_budget_when_the_stored_source_exceeds_the_cap() {
         let (_dir, store) = store().await;
         let company = CompanyId::new("acme");
