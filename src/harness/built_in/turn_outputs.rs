@@ -57,6 +57,25 @@ impl TurnOutputCollector {
         });
     }
 
+    /// Registers one artifact revision recorded for the active chat turn.
+    /// Calls from dispatched cards and other non-chat contexts are unscoped
+    /// and intentionally ignored.
+    pub fn artifact(
+        &self,
+        artifact_id: impl Into<String>,
+        task_id: impl Into<String>,
+        version: u32,
+        title: &str,
+    ) {
+        self.push(ChatOutput {
+            kind: ChatOutputKind::Artifact,
+            target_id: artifact_id.into(),
+            title: redacted_text("title", title),
+            task_id: Some(task_id.into()),
+            version: Some(version),
+        });
+    }
+
     fn push(&self, output: ChatOutput) {
         let Ok(scope) = CURRENT_OUTPUT_SCOPE.try_with(|scope| *scope) else {
             return;

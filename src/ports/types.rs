@@ -1081,6 +1081,10 @@ pub enum CompanyEvent {
         /// scrubbed shape (see [`crate::harness::steps`]).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         steps: Vec<TurnStep>,
+        /// Addressable workspace nodes and artifacts this reply produced.
+        /// Stored beside the reply so its buttons survive transcript reloads.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        outputs: Vec<ChatOutput>,
         /// The board task this reply was produced by, when it came out of a
         /// [`TaskDispatched`](Self::TaskDispatched) cycle rather than a chat
         /// turn (issue #185).
@@ -3121,6 +3125,10 @@ pub struct OutboundMessage {
     /// output, or call ids — only the scrubbed [`TurnStep`] shape.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<TurnStep>,
+    /// Addressable workspace nodes and artifacts this chat turn produced.
+    /// Omitted when empty so replies from before this field remain unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<ChatOutput>,
     /// Where to deliver the reply, for channels addressed to a specific
     /// chat/thread (Telegram). `None` on the operator channel and on every
     /// message emitted before this field existed; `skip_serializing_if` keeps
@@ -6340,6 +6348,7 @@ mod test {
             text: "hi".to_string(),
             steps: Vec::new(),
             task_id: None,
+            outputs: Vec::new(),
             parent: None,
             mentions: Vec::new(),
             mention_depth: 0,
@@ -6537,6 +6546,7 @@ mod test {
         let no_steps = OutboundMessage {
             message_id: None,
             task_id: None,
+            outputs: Vec::new(),
             channel: "operator".to_string(),
             agent: None,
             text: "hi".to_string(),
@@ -6554,6 +6564,7 @@ mod test {
         let with_steps = OutboundMessage {
             message_id: None,
             task_id: None,
+            outputs: Vec::new(),
             channel: "operator".to_string(),
             agent: None,
             text: "done".to_string(),
@@ -6581,6 +6592,7 @@ mod test {
         let no_card = OutboundMessage {
             message_id: None,
             task_id: None,
+            outputs: Vec::new(),
             channel: "operator".to_string(),
             agent: None,
             text: "hi".to_string(),
@@ -6601,6 +6613,7 @@ mod test {
         let with_card = OutboundMessage {
             message_id: None,
             task_id: Some("t-42".to_string()),
+            outputs: Vec::new(),
             channel: "operator".to_string(),
             agent: None,
             text: "opened one".to_string(),
@@ -6638,6 +6651,7 @@ mod test {
             mention_depth: 0,
             parent: None,
             task_id: None,
+            outputs: Vec::new(),
             chat_id: "main".to_string(),
             agent_id: "ceo".to_string(),
             text: "hi".to_string(),
@@ -6653,6 +6667,7 @@ mod test {
             mention_depth: 0,
             parent: None,
             task_id: None,
+            outputs: Vec::new(),
             chat_id: "main".to_string(),
             agent_id: "ceo".to_string(),
             text: "done".to_string(),
@@ -6699,6 +6714,7 @@ mod test {
             text: "hi".to_string(),
             steps: Vec::new(),
             task_id: None,
+            outputs: Vec::new(),
         };
         assert_eq!(
             serde_json::to_string(&untagged).unwrap(),
@@ -6716,6 +6732,7 @@ mod test {
             text: "done".to_string(),
             steps: Vec::new(),
             task_id: Some("t-1".to_string()),
+            outputs: Vec::new(),
         };
         let back: CompanyEvent =
             serde_json::from_str(&serde_json::to_string(&tagged).unwrap()).unwrap();
@@ -6951,6 +6968,7 @@ mod test {
             mention_depth: 0,
             parent: Some(EventSeq::new(41)),
             task_id: None,
+            outputs: Vec::new(),
             chat_id: "studio".into(),
             agent_id: "ceo".into(),
             text: "on it".into(),
