@@ -122,6 +122,75 @@ test("a key typed for a BYOK provider is not discarded by switching provider", a
   expect((await cleared.json()).keyConfigured).toBe(false);
 });
 
+test("a managed company with its own key names the managed route in both places", async ({
+  page,
+}) => {
+  // The regression this exists for: saving the managed card with a TinyHumans
+  // key sent every turn to openrouter.ai, and the card then read `OpenRouter`
+  // in the header while the endpoint line still said the platform. The probe
+  // resolved on the raw provider kind and runtime resolution normalized
+  // `managed` to `openrouter` first, so onboarding verified a configuration no
+  // turn could use.
+  //
+  // Driven with a key set, because managed WITHOUT a key was never broken — the
+  // keyless inheritance arm caught it. The key is what skipped that arm.
+  await openConnections(page);
+  await expect(page.locator("#inference-key")).toBeVisible({ timeout: 30_000 });
+
+  await pickProvider(page, "Managed (TinyHumans)");
+  await page.locator("#inference-key").fill(`pw-e2e-managed-${Date.now()}`);
+  await page.getByTestId("inference-save").click();
+  await expect(
+    page.getByText(/Inference updated\.|Inference saved — restart the company/),
+  ).toBeVisible({ timeout: 30_000 });
+
+  // The host is the authority on which route the traffic takes.
+  const body = await (await page.request.get("/api/v1/company/inference")).json();
+  expect(body.keyConfigured).toBe(true);
+  expect(body.baseUrl).not.toContain("openrouter.ai");
+  expect(body.slug).toBe("subscription");
+
+  // And the card agrees with it, in both the places that name a provider —
+  // they used to disagree, which is what made the defect look like a display
+  // glitch rather than a routing one.
+  await expect(page.getByTestId("inference-current-provider")).toHaveText(
+    "Managed (TinyHumans)",
+    { timeout: 30_000 },
+  );
+  await expect(page.locator("#inference-provider")).toHaveText(/Managed \(TinyHumans\)/);
+
+  // Nothing is pending straight after a save, so the unsaved cue must be absent
+  // — otherwise it would cry wolf on every load and stop meaning anything.
+  await expect(page.getByTestId("inference-unsaved")).toHaveCount(0);
+
+  // Leave the company on its committed default for whatever runs next.
+  await page.getByRole("button", { name: "Reset to default" }).click();
+  await expect(
+    page.getByText("Reverted to the committed manifest (or managed) configuration."),
+  ).toBeVisible({ timeout: 30_000 });
+});
+
+test("an edited form says it is unsaved while the header keeps reporting the running config", async ({
+  page,
+}) => {
+  // The header states what the company runs; the form states what it would
+  // switch to. They legitimately differ mid-edit, and without a cue that gap is
+  // indistinguishable from the card contradicting itself — which it did, for
+  // real, until the fix above.
+  await openConnections(page);
+  await expect(page.locator("#inference-key")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("inference-unsaved")).toHaveCount(0);
+
+  await pickProvider(page, "OpenRouter");
+
+  await expect(page.getByTestId("inference-unsaved")).toBeVisible();
+  // The header is unmoved: nothing was saved, so nothing about the running
+  // company changed.
+  await expect(page.getByTestId("inference-current-provider")).toHaveText(
+    "Managed (TinyHumans)",
+  );
+});
+
 test("a key typed for a BYOK provider does reach the host on save", async ({ page }) => {
   // The managed case above must not be the only one that lands: the same input,
   // saved under a provider with its own endpoint, still has to reach the host.

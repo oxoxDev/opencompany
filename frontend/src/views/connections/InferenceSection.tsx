@@ -87,17 +87,12 @@ const PROVIDERS: Record<
     label: "Managed (TinyHumans)",
     acceptsKey: true,
     requiresBaseUrl: false,
-    // The managed brain is OpenRouter with the platform paying: the host treats
-    // `managed` as a legacy alias for `openrouter` (`LEGACY_MANAGED`, since
-    // OpenCompany stopped exposing its own model SKUs), so a key saved here is
-    // resolved onto OpenRouter's own endpoint and sent there.
-    //
-    // This line used to read "a TinyHumans API key" — true when `managed` was a
-    // provider of its own, and never updated when it stopped being one. It is
-    // what issue #1737 actually cost: the operator was asked for one vendor's
-    // key on a card that stored it against another, and every turn and every
-    // Test since has presented it to OpenRouter, which rejects it (issue #1737).
-    keyKind: "an OpenRouter key (`sk-or-…`) — the managed brain is OpenRouter, so that is where a key set here is sent",
+    // The card decides the endpoint: `managed` is the TinyHumans one, so a key
+    // saved here is a TinyHumans key and rides the platform endpoint on this
+    // company's own account. Going direct to OpenRouter is what selecting the
+    // `openrouter` provider does.
+    keyKind:
+      "a TinyHumans API key — the managed card runs on the platform endpoint, so that is where a key set here is sent",
     preset: { baseUrl: "", models: {} },
   },
   openrouter: {
@@ -534,8 +529,16 @@ export function InferenceSection({
    * reasoning as `removeKey` below.
    */
   const seedFromStatus = useCallback((next: InferenceStatus) => {
+    // `provider` is the normalized kind, so a company on the managed card reads
+    // back as `openrouter` and the dropdown would rest on OpenRouter while the
+    // header names the managed route. The host reports which one the traffic
+    // actually takes, so one field decides both and they cannot disagree.
     const stored = (
-      next.provider in PROVIDERS ? next.provider : "openrouter"
+      next.slug === "subscription"
+        ? "managed"
+        : next.provider in PROVIDERS
+          ? next.provider
+          : "openrouter"
     ) as InferenceProvider;
     // The form is a "switch to" form, so it opens on something the operator can
     // actually complete. A company on a route this console does not offer has no
@@ -610,6 +613,30 @@ export function InferenceSection({
    * `wouldSaveProxied` is computed.
    */
   const savedIsProxied = !(status?.provider === "openrouter" && status.keyConfigured);
+
+  /**
+   * Whether the form holds anything the header is not already reporting.
+   *
+   * The header states what the company is running; the form is what it would
+   * switch to. Without a cue for the gap, a header that disagrees with the
+   * select is ambiguous between an unsaved draft and the card contradicting
+   * itself — and the card contradicting itself was a real defect, so the two
+   * have to be told apart at a glance.
+   *
+   * The saved provider is read the way the select seeds, through `slug`, or a
+   * managed company would read as dirty the moment the card loaded.
+   */
+  const savedProvider = status
+    ? status.slug === "subscription"
+      ? "managed"
+      : status.provider
+    : null;
+  const unsavedChanges =
+    status !== null &&
+    (provider !== savedProvider ||
+      baseUrl !== baseline.baseUrl ||
+      key.trim() !== "" ||
+      JSON.stringify(models) !== JSON.stringify(baseline.models));
 
   /**
    * Whether typing a key has pointed the draft at a *different endpoint* than
@@ -1196,7 +1223,9 @@ export function InferenceSection({
               <div className="space-y-2">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-medium" data-testid="inference-current-provider">
-                    {providerLabel(status.provider)}
+                    {providerLabel(
+                      status.slug === "subscription" ? "managed" : status.provider,
+                    )}
                   </span>
                   {/* `source` reads `managed` for a company this console has no
                       route for, which is the hidden route's own name. The badge
@@ -1667,6 +1696,14 @@ export function InferenceSection({
                 )}
 
                 <div className="flex items-center gap-2">
+                  {unsavedChanges && (
+                    <span
+                      className="text-xs text-muted-foreground"
+                      data-testid="inference-unsaved"
+                    >
+                      Unsaved — the header above still shows what is running.
+                    </span>
+                  )}
                   <Button
                     data-testid="inference-save"
                     disabled={busy !== null}

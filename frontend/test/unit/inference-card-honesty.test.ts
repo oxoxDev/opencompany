@@ -164,6 +164,53 @@ describe("the Provider select shows the provider the host holds (issue #1737)", 
     expect(providerSelect()).toBe("Custom (OpenAI-compatible)");
   });
 
+  it("names the managed route in both places when the host reports the proxy", async () => {
+    // The header and the select read the same status from two different fields:
+    // the header from the label, the select from `provider`. `managed` is
+    // normalized to `openrouter` on the way in, so a company on the managed card
+    // came back as `openrouter` and the select rested there while the header
+    // named TinyHumans — one card, two answers, for one configuration.
+    //
+    // `slug` is the host saying which route the traffic actually takes, so both
+    // read it and cannot disagree.
+    await mount(stubClient([status({ provider: "openrouter", slug: "subscription" })]));
+
+    expect(providerSelect()).toBe("Managed (TinyHumans)");
+    expect(testId("inference-current-provider")?.textContent).toBe("Managed (TinyHumans)");
+  });
+
+  it("still names OpenRouter when the traffic really is direct", async () => {
+    await mount(stubClient([status({ provider: "openrouter", slug: "openrouter" })]));
+
+    expect(providerSelect()).toBe("OpenRouter");
+    expect(testId("inference-current-provider")?.textContent).toBe("OpenRouter");
+  });
+
+  it("says nothing is unsaved when the form still matches the host", async () => {
+    await mount(stubClient([status({ provider: "openrouter", slug: "subscription" })]));
+    expect(testId("inference-unsaved")).toBeNull();
+  });
+
+  it("marks the form unsaved once the draft leaves what is running", async () => {
+    // The header reports the running config and the select reports the draft,
+    // so the two legitimately differ mid-edit. Without this cue that gap is
+    // indistinguishable from the card contradicting itself, which it used to do.
+    await mount(stubClient([status({ provider: "openrouter", slug: "subscription" })]));
+    expect(testId("inference-unsaved")).toBeNull();
+
+    const field = container.querySelector("#inference-key") as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      setter?.call(field, "sk-or-typed-but-not-saved");
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    expect(testId("inference-unsaved")?.textContent).toContain("Unsaved");
+  });
+
   it("rehydrates after a save rather than snapping back to the default", async () => {
     // The reported sequence: save under one provider, and the select goes on
     // reading the initializer's value while the header reads the saved one.
