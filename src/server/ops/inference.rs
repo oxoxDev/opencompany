@@ -1988,11 +1988,11 @@ base_url = "https://byo.example/v1"
             dto.key_configured,
             "a console-set key must read as configured"
         );
-        // Same company, same injected platform default, opposite answer — and the
-        // key is not merely recorded: it moves the company off the subscription
-        // proxy and onto its own OpenRouter account, which is the only way a
-        // stored `sk-or-…` could actually be used.
-        assert_eq!(dto.base_url, inference::OPENROUTER_BASE_URL);
+        // The endpoint is decided by the card, not by whether a key is set. The
+        // managed card is the TinyHumans one, so a key saved on it is a
+        // TinyHumans key and rides the platform endpoint. Going direct to
+        // OpenRouter is what selecting the `openrouter` provider does.
+        assert_eq!(dto.base_url, STAGING_URL);
     }
 
     #[tokio::test]
@@ -2293,13 +2293,16 @@ base_url = "https://byo.example/v1"
         assert_eq!(status, StatusCode::OK, "{raw}");
         // The legacy name aliases through to what it now means.
         assert_eq!(resp["status"]["provider"], "openrouter");
-        assert_eq!(resp["status"]["slug"], "openrouter");
+        // Proxied through the platform, which is what the slug reports: the
+        // kind is `openrouter`, but the traffic is the subscription's.
+        assert_eq!(resp["status"]["slug"], "subscription");
         assert_eq!(resp["status"]["source"], "runtime");
         assert_eq!(resp["status"]["keyConfigured"], true);
-        // A key means the tenant's own OpenRouter account pays.
+        // The card decides the endpoint: `managed` is the TinyHumans one, so a
+        // key saved on it is a TinyHumans key and stays on the platform.
         assert_eq!(
             resp["status"]["baseUrl"],
-            crate::company::inference::OPENROUTER_BASE_URL
+            crate::company::inference::PLATFORM_BASE_URL
         );
         assert!(!raw.contains(TOKEN), "PUT leaked the token: {raw}");
 

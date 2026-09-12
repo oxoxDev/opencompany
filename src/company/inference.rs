@@ -600,14 +600,17 @@ fn resolve_endpoint(
     let has_key = !key.trim().is_empty();
 
     if is_managed_choice(provider) {
-        // The managed card carries no endpoint field, so a base URL left in the
-        // form by a previously-picked provider is stale, not a chosen endpoint:
-        // it never redirects the managed probe. The endpoint is always the
-        // platform's, and the credential is the operator's own key when given,
-        // else the injected managed one.
-        let base_url = env_default
-            .map(|e| e.base_url.clone())
-            .unwrap_or_else(|| PLATFORM_BASE_URL.to_string());
+        // The endpoint is the platform's, and the credential is the operator's
+        // own key when given, else the injected managed one. Selecting the
+        // managed card is what decides the endpoint — a key on it is a
+        // TinyHumans key for the platform, not a signal to go somewhere else.
+        // A `base_url` that reached here was declared, not left in a form: the
+        // probe drops a stale one before calling.
+        let base_url = base_url_override.map(str::to_string).unwrap_or_else(|| {
+            env_default
+                .map(|e| e.base_url.clone())
+                .unwrap_or_else(|| PLATFORM_BASE_URL.to_string())
+        });
         let credential = if has_key {
             Credential::from_value(key)
         } else {
@@ -669,6 +672,15 @@ pub fn decl_for_probe(
     env_default: Option<&EnvDefault>,
 ) -> InferenceDecl {
     let provider = provider.trim().to_string();
+    // The managed card has no endpoint field, so a URL still in the form came
+    // from a previously-picked provider. Dropping it here — rather than in
+    // `resolve_endpoint` — keeps a `base_url` an operator really did declare
+    // (in a manifest) honoured while a stale one never redirects the probe.
+    let base_url = if is_managed_choice(&provider) {
+        None
+    } else {
+        base_url
+    };
     let (base_url, credential, proxied) = resolve_endpoint(
         &provider,
         base_url,
@@ -920,8 +932,16 @@ pub async fn resolve_effective_scoped(
         let provider = normalize_provider(&runtime.provider).to_string();
         reject_unknown_provider(&provider, "the stored runtime inference config")?;
         let key = load_key_scoped(company, secrets, None, scope).await?;
-        let (base_url, credential, proxied) =
-            resolve_endpoint(&provider, runtime.base_url.as_deref(), key, env_default);
+        // Resolved on the RAW kind: the managed branch is what pins the platform
+        // endpoint, and normalizing first folds `managed` into `openrouter`
+        // before that branch can match. `provider` below still reports the
+        // normalized value, so storage and telemetry are unchanged.
+        let (base_url, credential, proxied) = resolve_endpoint(
+            &runtime.provider,
+            runtime.base_url.as_deref(),
+            key,
+            env_default,
+        );
         return Ok(Some(InferenceDecl {
             provider,
             base_url,
@@ -940,8 +960,12 @@ pub async fn resolve_effective_scoped(
         reject_unknown_provider(&provider, "`[inference].provider`")?;
         let key =
             load_key_scoped(company, secrets, manifest.api_key_secret.as_deref(), scope).await?;
-        let (base_url, credential, proxied) =
-            resolve_endpoint(&provider, manifest.base_url.as_deref(), key, env_default);
+        let (base_url, credential, proxied) = resolve_endpoint(
+            manifest.provider.as_deref().unwrap_or_default(),
+            manifest.base_url.as_deref(),
+            key,
+            env_default,
+        );
         return Ok(Some(InferenceDecl {
             provider,
             base_url,
@@ -2082,6 +2106,54 @@ mod tests {
         assert_eq!(decl.base_url, "https://env.example/openai/v1");
         assert!(decl.is_proxied());
         assert_eq!(bearer(&decl).await.as_deref(), Some("th-key"));
+    }
+
+    /// The runtime twin of `managed_probe_with_own_key_keeps_the_managed_endpoint`.
+    ///
+    /// The probe kept the managed endpoint and the console reported a working
+    /// credential, while every real turn went to `openrouter.ai` and was refused:
+    /// the probe resolves on the raw kind, and runtime resolution normalized
+    /// `managed` into `openrouter` before `resolve_endpoint` could match its
+    /// managed branch. With a key present the keyless inheritance arm does not
+    /// catch it either, so a company that saved the managed card with its own
+    /// TinyHumans key had no path to the platform endpoint at all.
+    #[tokio::test]
+    async fn a_saved_managed_config_with_an_own_key_still_reaches_the_platform_endpoint() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let env = managed_env();
+        save_runtime_config(
+            &company,
+            &secrets,
+            &RuntimeInference {
+                provider: LEGACY_MANAGED.into(),
+                base_url: None,
+                models: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        store_key(&company, &secrets, "th-key").await.unwrap();
+
+        let decl = resolve_effective(&company, &Inference::default(), Some(&env), &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            decl.base_url, "https://env.example/openai/v1",
+            "a saved managed choice must reach the platform endpoint, never openrouter.ai"
+        );
+        assert_eq!(
+            bearer(&decl).await.as_deref(),
+            Some("th-key"),
+            "and carry the operator's own key on it"
+        );
+        assert!(decl.is_proxied());
+        assert_eq!(
+            decl.provider, DEFAULT_PROVIDER,
+            "while still reporting the normalized kind, so storage and telemetry are unchanged"
+        );
     }
 
     /// A host holding no managed credential probes the managed endpoint honestly
