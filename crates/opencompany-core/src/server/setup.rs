@@ -1204,6 +1204,12 @@ pub struct InferenceTestDto {
     error: Option<String>,
 }
 
+#[cfg(feature = "openhuman")]
+const MODEL_DISCOVERY_FAILURE: &str = "Could not list models from this provider.";
+
+#[cfg(feature = "openhuman")]
+const MODEL_PROBE_CANDIDATE_LIMIT: usize = 5;
+
 /// `POST /api/v1/setup/inference/test` — a live one-turn probe of a credential
 /// the operator has just typed, before anything is written.
 ///
@@ -1271,48 +1277,12 @@ async fn probe_inference<E: EnvSource + Sync>(
             ),
         };
     }
-    let mut decl = crate::company::inference::decl_for_probe(
+    let decl = crate::company::inference::decl_for_probe(
         &req.provider,
         normalized_base_url.as_deref(),
         req.key.as_deref(),
         env_default.as_ref(),
     );
-    let model = if matches!(
-        crate::company::inference::normalize_provider(&req.provider),
-        "ollama" | "openai_compatible"
-    ) {
-        let bearer = decl.bearer().await.ok().flatten();
-        // The provider the operator just chose, through the same catalogue
-        // lookup every other caller uses — **not** a hardcoded bearer. A wizard
-        // that always probes with `Authorization: Bearer` breaks Anthropic
-        // during setup in exactly the way it broke the model picker, and the
-        // first thing a new operator would see is a 400 on a good key.
-        //
-        // This branch only runs for `ollama` and `openai_compatible` today, both
-        // of which are bearer-or-nothing, so the lookup changes no behaviour
-        // now. It is here so that widening the branch cannot silently
-        // reintroduce the bug.
-        let auth = crate::company::inference::catalogue::auth_style_for(&req.provider);
-        let shape =
-            crate::company::inference::catalogue::catalog_shape_for(&req.provider, &decl.base_url);
-        crate::server::inference_models::discover_models(
-            &decl.base_url,
-            bearer.as_deref(),
-            auth,
-            shape,
-        )
-        .await
-        .ok()
-        .and_then(|models| models.into_iter().next())
-        .map(|model| model.id)
-    } else {
-        None
-    };
-    if let Some(model) = &model {
-        for tier in crate::company::INFERENCE_TIERS {
-            decl.models.insert((*tier).to_string(), model.clone());
-        }
-    }
     // What is *said* about the endpoint — in this response and in the log below.
     // Redacted, because an endpoint that reached here without being typed (an
     // `OPENCOMPANY_INFERENCE_URL` this host does not own) can still carry
@@ -1331,33 +1301,102 @@ async fn probe_inference<E: EnvSource + Sync>(
         };
     }
 
-    // No company exists yet at this step, so there is no harness to name — the
-    // repair hint on failure falls back to the company-level phrasing (there is
-    // no company-level config to name either, but nothing here has one to
-    // offer instead).
-    match crate::harness::provider::probe(&decl, None).await {
-        Ok(()) => InferenceTestDto {
-            ok: true,
-            base_url,
-            model,
-            error: None,
-        },
-        Err(err) => {
-            // Logged in full for whoever runs the host; summarised for the page.
+    let bearer = match decl.bearer().await {
+        Ok(bearer) => bearer,
+        Err(error) => {
             tracing::info!(
                 provider = %req.provider,
                 base_url = %base_url,
-                error = %err,
-                "[setup] the inference test could not reach the provider"
+                error = %error,
+                "[setup] the inference test could not list provider models"
             );
-            InferenceTestDto {
+            return InferenceTestDto {
                 ok: false,
                 base_url,
-                model,
-                error: Some(summarise_probe_failure(&err.to_string())),
+                model: None,
+                error: Some(MODEL_DISCOVERY_FAILURE.to_string()),
+            };
+        }
+    };
+    let auth = crate::company::inference::catalogue::auth_style_for(&req.provider);
+    let shape =
+        crate::company::inference::catalogue::catalog_shape_for(&req.provider, &decl.base_url);
+    let models = match crate::server::inference_models::discover_models(
+        &decl.base_url,
+        bearer.as_deref(),
+        auth,
+        shape,
+    )
+    .await
+    {
+        Ok(models) => models,
+        Err(error) => {
+            tracing::info!(
+                provider = %req.provider,
+                base_url = %base_url,
+                error = %error,
+                "[setup] the inference test could not list provider models"
+            );
+            let message = match error.credential_status() {
+                Some(401) => "That key was rejected by the provider.",
+                Some(403) => "That key was accepted but is not allowed to list models.",
+                _ => MODEL_DISCOVERY_FAILURE,
+            };
+            return InferenceTestDto {
+                ok: false,
+                base_url,
+                model: None,
+                error: Some(message.to_string()),
+            };
+        }
+    };
+    if models.is_empty() {
+        return InferenceTestDto {
+            ok: false,
+            base_url,
+            model: None,
+            error: Some(MODEL_DISCOVERY_FAILURE.to_string()),
+        };
+    }
+
+    let mut last_failure = None;
+    for model in models
+        .into_iter()
+        .take(MODEL_PROBE_CANDIDATE_LIMIT)
+        .map(|model| model.id)
+    {
+        let candidate = decl.clone().with_chosen_model(model.clone());
+        match crate::harness::provider::probe(&candidate, &model, None).await {
+            Ok(()) => {
+                return InferenceTestDto {
+                    ok: true,
+                    base_url,
+                    model: Some(model),
+                    error: None,
+                };
+            }
+            Err(err) => {
+                tracing::info!(
+                    provider = %req.provider,
+                    base_url = %base_url,
+                    model = %model,
+                    error = %err,
+                    "[setup] the inference test could not reach the provider"
+                );
+                let result = InferenceTestDto {
+                    ok: false,
+                    base_url: base_url.clone(),
+                    model: Some(model),
+                    error: Some(summarise_probe_failure(&err)),
+                };
+                if !probe_failure_may_be_model_specific(&err) {
+                    return result;
+                }
+                last_failure = Some(result);
             }
         }
     }
+    last_failure.expect("a non-empty model catalog produced at least one probe result")
 }
 
 /// Without the harness there is nothing to probe with.
@@ -1380,27 +1419,45 @@ async fn probe_inference<E: EnvSource + Sync>(
 
 /// Turns a provider failure into one line an operator can act on.
 ///
-/// Three outcomes are worth telling apart because each has a different fix: the
-/// key is wrong, the endpoint is wrong, or the provider said no for its own
-/// reasons. Everything else is reported as unreachable rather than guessed at.
+/// Typed provider statuses and configuration errors each keep their own action.
+/// Only untyped transport failures fall back to inspecting rendered text.
 #[cfg(feature = "openhuman")]
-fn summarise_probe_failure(raw: &str) -> String {
-    let lower = raw.to_lowercase();
-    if lower.contains("401") || lower.contains("unauthorized") || lower.contains("invalid api key")
-    {
-        "That key was rejected by the provider.".to_string()
-    } else if lower.contains("403") || lower.contains("forbidden") {
-        "That key was accepted but is not allowed to use this model.".to_string()
-    } else if lower.contains("404") {
-        "Reached the host, but there is no chat endpoint at that URL.".to_string()
-    } else if lower.contains("429") || lower.contains("rate limit") {
-        "The provider is rate-limiting this key right now.".to_string()
-    } else if lower.contains("timed out") || lower.contains("timeout") {
+fn summarise_probe_failure(err: &anyhow::Error) -> String {
+    if let Some(error) = err.downcast_ref::<tinyinference::Error>() {
+        let message = match error {
+            tinyinference::Error::Provider(error) => match error.status {
+                Some(401) => "That key was rejected by the provider.",
+                Some(403) => "That key was accepted but is not allowed to use this model.",
+                Some(404) => "That model is not available from this provider for your account.",
+                Some(429) => "The provider is rate-limiting this key right now.",
+                _ => "Could not get a reply from the provider.",
+            },
+            tinyinference::Error::Model(_) | tinyinference::Error::Validation(_) => {
+                "The model configuration for this connection is invalid."
+            }
+            _ => "Could not get a reply from the provider.",
+        };
+        return message.to_string();
+    }
+
+    let lower = err.to_string().to_lowercase();
+    if lower.contains("timed out") || lower.contains("timeout") {
         "The provider did not answer in time.".to_string()
     } else if lower.contains("dns") || lower.contains("connect") || lower.contains("resolve") {
         "Could not reach that address.".to_string()
     } else {
         "Could not get a reply from the provider.".to_string()
+    }
+}
+
+#[cfg(feature = "openhuman")]
+fn probe_failure_may_be_model_specific(err: &anyhow::Error) -> bool {
+    match err.downcast_ref::<tinyinference::Error>() {
+        Some(tinyinference::Error::Model(_)) => true,
+        Some(tinyinference::Error::Provider(error)) => {
+            matches!(error.status, Some(400 | 403 | 404 | 422))
+        }
+        _ => false,
     }
 }
 

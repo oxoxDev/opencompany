@@ -1433,8 +1433,13 @@ async fn unauthenticated_reason(
 /// another vendor fails here while the card still reports one is set. Saying so
 /// is the difference between a dead end and a next step.
 #[cfg(feature = "openhuman")]
-fn probe_failure(decl: &inference::InferenceDecl, raw: &str) -> (String, &'static str) {
-    if raw.contains("401 Unauthorized") {
+fn probe_failure(decl: &inference::InferenceDecl, error: &anyhow::Error) -> (String, &'static str) {
+    let raw = error.to_string();
+    let rejected = matches!(
+        error.downcast_ref::<tinyinference::Error>(),
+        Some(tinyinference::Error::Provider(error)) if error.status == Some(401)
+    );
+    if rejected || raw.contains("401 Unauthorized") {
         return (
             format!(
                 "{} rejected the credential stored for this company. The request did carry an \
@@ -1526,10 +1531,9 @@ async fn test_config(company: ScopedCompany) -> Response {
                 Ok(None) => {}
             }
             // No vocabulary discovery any more (keys rework, issue #2306,
-            // slice 2d): `probe` reaches `inference::model_on_the_wire`
-            // through `request_plan`, which never sends a tier name — a
-            // company whose Test resolves no real id gets `NO_MODEL_CHOSEN`
-            // back as the probe error instead.
+            // slice 2d): resolve the stored choice before `probe`, so a tier
+            // name can never reach the wire. A company whose Test resolves no
+            // real id gets `NO_MODEL_CHOSEN` back instead.
             //
             // The default harness's real id, whether or not it declares its own
             // `[harness.inference]` — `model_unavailable_advice` names the same
@@ -1537,25 +1541,39 @@ async fn test_config(company: ScopedCompany) -> Response {
             // fallback), so this always passes it rather than gating on
             // `is_default` the way `TenantProvider::invoke` deliberately does not
             // (Codex review on #1824's #1811 follow-up).
-            match crate::harness::provider::probe(&decl, Some(harness_id.as_str())).await {
+            let failure = |error: &anyhow::Error| {
+                let (error, code) = probe_failure(&decl, error);
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "ok": false,
+                        "error": error,
+                        "code": code,
+                    })),
+                )
+                    .into_response()
+            };
+            let model = match inference::model_on_the_wire(
+                &decl,
+                crate::harness::provider::DEFAULT_HOSTED_MODEL,
+            ) {
+                Ok(model) => model,
+                Err(err) => return failure(&anyhow::Error::new(err)),
+            };
+            match crate::harness::provider::probe(
+                &decl,
+                &model,
+                Some(harness_id.as_str()),
+            )
+            .await
+            {
                 Ok(()) => Json(serde_json::json!({
                     "ok": true,
                     "provider": decl.provider,
                     "note": "Reached the provider and got a reply.",
                 }))
                 .into_response(),
-                Err(err) => {
-                    let (error, code) = probe_failure(&decl, &err.to_string());
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(serde_json::json!({
-                            "ok": false,
-                            "error": error,
-                            "code": code,
-                        })),
-                    )
-                        .into_response()
-                }
+                Err(err) => failure(&err),
             }
         }
     }
@@ -1960,6 +1978,106 @@ base_url = "https://byo.example/v1"
         assert_eq!(body["code"], json!("probe_failed"), "{raw}");
     }
 
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn saved_company_probe_sends_its_resolved_model() {
+        let sent_model = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let model_for_route = sent_model.clone();
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+                let sent_model = model_for_route.clone();
+                async move {
+                    *sent_model.lock().unwrap() = body["model"].as_str().map(str::to_string);
+                    axum::Json(json!({
+                        "choices": [{ "message": { "content": "pong" } }]
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let home_dir = home();
+        let state = state_with_company(home_dir.path()).await;
+
+        let (status, _, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({
+                "provider": "openai_compatible",
+                "baseUrl": format!("http://{address}/v1"),
+                "models": { "chat-v1": "provider/model" }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        let (status, body, raw) =
+            send(&state, "POST", "/api/v1/company/inference/test", None).await;
+        server.abort();
+
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(body["ok"], true, "{raw}");
+        assert_eq!(
+            sent_model.lock().unwrap().as_deref(),
+            Some("provider/model")
+        );
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn saved_company_probe_keeps_typed_credential_failures() {
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(|| async {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({
+                        "error": {
+                            "message": "Missing Authentication header",
+                            "code": 401
+                        }
+                    })),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let home_dir = home();
+        let state = state_with_company(home_dir.path()).await;
+
+        let (status, _, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({
+                "provider": "openai_compatible",
+                "baseUrl": format!("http://{address}/v1"),
+                "key": "not-a-real-key",
+                "models": { "chat-v1": "provider/model" }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        let (status, body, raw) =
+            send(&state, "POST", "/api/v1/company/inference/test", None).await;
+        server.abort();
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{raw}");
+        assert_eq!(body["code"], json!("credential_rejected"), "{raw}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("did carry an Authorization header"),
+            "{raw}"
+        );
+    }
+
     /// Issue #1737, the sentence that would have saved an hour: OpenRouter
     /// answers a credential it cannot parse with `Missing Authentication
     /// header`, which reads as "nothing was sent" and is how the issue came to
@@ -1973,9 +2091,15 @@ base_url = "https://byo.example/v1"
             Some("a-key-for-some-other-vendor"),
             None,
         );
-        let raw = "inference returned 401 Unauthorized: \
-                   {\"error\":{\"message\":\"Missing Authentication header\",\"code\":401}}";
-        let (message, code) = probe_failure(&decl, raw);
+        let error = anyhow::Error::new(tinyinference::Error::Provider(Box::new(
+            tinyinference::model::ProviderError {
+                provider: "inference".to_string(),
+                status: Some(401),
+                message: "Missing Authentication header".to_string(),
+                ..Default::default()
+            },
+        )));
+        let (message, code) = probe_failure(&decl, &error);
 
         assert_eq!(code, "credential_rejected");
         assert!(

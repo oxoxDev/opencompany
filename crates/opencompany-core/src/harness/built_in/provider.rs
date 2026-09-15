@@ -36,7 +36,7 @@ use async_trait::async_trait;
 
 use tinyinference::message::{AssistantMessage, ContentBlock, Message};
 use tinyinference::model::{
-    ChatModel, Modalities, ModelProfile, ModelRequest, ModelResponse, ToolChoice,
+    ChatModel, Modalities, ModelProfile, ModelRequest, ModelResponse, ProviderError, ToolChoice,
 };
 use tinyinference::tool::{ToolCall, ToolSchema};
 use tinyinference::usage::Usage;
@@ -1960,6 +1960,13 @@ enum SendFailure {
     Other(anyhow::Error),
 }
 
+fn into_inference_error(error: anyhow::Error) -> InferenceError {
+    match error.downcast::<InferenceError>() {
+        Ok(error) => error,
+        Err(error) => InferenceError::Model(error.to_string()),
+    }
+}
+
 impl SendFailure {
     fn into_error(self) -> anyhow::Error {
         match self {
@@ -2000,7 +2007,41 @@ async fn send_body(
             credential.invalidate();
         }
         let text = response.text().await.unwrap_or_default();
-        let error = format!("inference returned {status}: {}", scrub(text.clone()));
+        let scrubbed = scrub(text.clone());
+        let error = format!("inference returned {status}: {scrubbed}");
+        let raw = serde_json::from_str::<serde_json::Value>(&scrubbed).ok();
+        let error_object = raw.as_ref().and_then(|value| value.get("error"));
+        let message = error_object
+            .and_then(|value| value.get("message"))
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                raw.as_ref()
+                    .and_then(|value| value.get("message"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or(&scrubbed)
+            .to_string();
+        let code = error_object
+            .and_then(|value| value.get("code").or_else(|| value.get("type")))
+            .and_then(|value| match value {
+                serde_json::Value::String(code) => Some(code.clone()),
+                serde_json::Value::Number(code) => Some(code.to_string()),
+                _ => None,
+            });
+        let provider_error = |message: String| {
+            anyhow::Error::new(InferenceError::Provider(Box::new(ProviderError {
+                provider: "inference".to_string(),
+                model: Some(plan.model.clone()),
+                status: Some(status.as_u16()),
+                code: code.clone(),
+                message,
+                retryable: status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    || status.is_server_error(),
+                retry_after_ms: None,
+                raw: None,
+            })))
+        };
         // `plan.url` is always `{base_url}/chat/completions` (see
         // `RequestPlan::url`'s doc and `request_plan`'s construction of it), so
         // this recovers the same `base_url` the failed request actually used —
@@ -2013,7 +2054,7 @@ async fn send_body(
             .unwrap_or_else(|| plan.url.clone());
         if let Some(advice) = model_unavailable_advice(status, &error, &models_url, harness, source)
         {
-            return Err(SendFailure::Other(anyhow::anyhow!("{advice}")));
+            return Err(SendFailure::Other(provider_error(advice)));
         }
         // Only a 400 is a statement about the request's shape. A 5xx, a 429 or a
         // 401 is about the service or the credential, and narrowing the body in
@@ -2024,10 +2065,10 @@ async fn send_body(
         {
             return Err(SendFailure::Rejected {
                 parameter,
-                error: anyhow::anyhow!("{error}"),
+                error: provider_error(message),
             });
         }
-        return Err(SendFailure::Other(anyhow::anyhow!("{error}")));
+        return Err(SendFailure::Other(provider_error(message)));
     }
     response.json().await.map_err(|e| {
         SendFailure::Other(anyhow::anyhow!(
@@ -2315,7 +2356,7 @@ impl ChatModel<()> for TenantProvider {
             Some(decl.source),
         )
         .await
-        .map_err(|e| InferenceError::Model(e.to_string()))?;
+        .map_err(into_inference_error)?;
         // Classified from `plan.model` — the exact string that goes on the wire,
         // *after* the tenant `[inference].models` table has been applied — so
         // the sample names what actually ran rather than the tier that was
@@ -2380,6 +2421,9 @@ impl HarnessModel for TenantProvider {
 /// the console's "Test" button. The error is scrubbed of the credential by
 /// [`send_plan`].
 ///
+/// `model` is the concrete provider id the caller resolved. A tier name is
+/// refused before a request can put it on the wire.
+///
 /// `harness` is the real id of the harness whose config `decl` resolved from,
 /// when the caller has one — `None` for the first-run wizard's
 /// [`decl_for_probe`](crate::company::inference::decl_for_probe), which runs
@@ -2391,14 +2435,20 @@ impl HarnessModel for TenantProvider {
 /// table its request never consulted — the same gap already closed for live
 /// turns in [`TenantProvider::invoke`] (Codex review on #1824's #1811
 /// follow-up).
-pub async fn probe(decl: &InferenceDecl, harness: Option<&str>) -> anyhow::Result<()> {
+pub async fn probe(decl: &InferenceDecl, model: &str, harness: Option<&str>) -> anyhow::Result<()> {
+    let model = model.trim();
+    if model.is_empty() || inference::legacy_tiers::is_tier_name(model) {
+        return Err(anyhow::Error::new(InferenceError::Model(
+            "Could not test this connection because no concrete model was available.".to_string(),
+        )));
+    }
     let client = reqwest::Client::new();
     let messages = vec![serde_json::json!({ "role": "user", "content": "ping" })];
     // The connectivity probe exposes no tools — it only checks the endpoint
     // answers a bare chat turn.
     let plan = request_plan(
         decl,
-        DEFAULT_HOSTED_MODEL,
+        model,
         messages,
         // A reachability check has no opinion about sampling. The hardcoded
         // `0.0` here made the probe fail on exactly the providers it exists to
@@ -4800,6 +4850,31 @@ mod tests {
         format!("http://{addr}")
     }
 
+    async fn spawn_rejection(
+        status: axum::http::StatusCode,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::Router;
+        use axum::routing::post;
+
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || async move {
+                (
+                    status,
+                    axum::Json(serde_json::json!({
+                        "error": { "message": "provider refused the request" }
+                    })),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), server)
+    }
+
     /// Spawns an in-process OpenAI-compatible stub whose `message.content` is
     /// the given raw JSON value rather than a plain string — used to exercise
     /// the array-of-text-parts content shape end to end.
@@ -5552,9 +5627,71 @@ mod tests {
         decl.models
             .insert("chat-v1".to_string(), "stub-model".to_string());
 
-        probe(&decl, None)
+        probe(&decl, "stub-model", None)
             .await
             .expect("array-shaped content must be recognized as a successful probe");
+    }
+
+    #[tokio::test]
+    async fn probe_refuses_a_tier_before_sending() {
+        let decl =
+            inference::decl_for_probe("openai_compatible", Some("http://127.0.0.1:9"), None, None);
+
+        let err = probe(&decl, DEFAULT_HOSTED_MODEL, None)
+            .await
+            .expect_err("a tier name is not a provider model id");
+        let typed = err
+            .downcast_ref::<InferenceError>()
+            .expect("configuration failures stay typed");
+        assert!(matches!(typed, InferenceError::Model(_)), "{typed}");
+        assert!(!typed.to_string().contains("Connections"), "{typed}");
+    }
+
+    #[tokio::test]
+    async fn probe_preserves_a_provider_status() {
+        let (base_url, server) = spawn_rejection(axum::http::StatusCode::NOT_FOUND).await;
+        let decl = inference::decl_for_probe("openai_compatible", Some(&base_url), None, None);
+
+        let err = probe(&decl, "provider/model", None)
+            .await
+            .expect_err("the stub rejects the model");
+        server.abort();
+        let typed = err
+            .downcast_ref::<InferenceError>()
+            .expect("provider failures stay typed");
+        let InferenceError::Provider(error) = typed else {
+            panic!("expected a provider error, got {typed}");
+        };
+        assert_eq!(error.status, Some(404));
+        assert_eq!(error.raw, None);
+    }
+
+    #[tokio::test]
+    async fn tenant_turn_preserves_a_provider_status() {
+        let (base_url, server) = spawn_rejection(axum::http::StatusCode::TOO_MANY_REQUESTS).await;
+        let company = CompanyId::new("acme");
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+        let mut manifest = manifest_inference("openai_compatible");
+        manifest.base_url = Some(base_url);
+        let provider = TenantProvider::new(company, secrets, manifest, None);
+
+        let err = provider
+            .invoke(
+                &(),
+                ModelRequest {
+                    model: Some("provider/model".to_string()),
+                    ..user_request("hi")
+                },
+            )
+            .await
+            .expect_err("the stub rate-limits the turn");
+        server.abort();
+        let InferenceError::Provider(error) = err else {
+            panic!("expected a provider error, got {err}");
+        };
+        assert_eq!(error.status, Some(429));
+        assert!(error.retryable);
+        assert_eq!(error.raw, None);
     }
 
     /// Reachability and usability are different questions, and `probe` asks
@@ -5624,7 +5761,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
 
-            let err = probe(&decl, None)
+            let err = probe(&decl, "stub-model", None)
                 .await
                 .expect_err("a broken tool call must fail the probe even with reasoning present");
             assert!(
@@ -5654,7 +5791,7 @@ mod tests {
         decl.models
             .insert("chat-v1".to_string(), "stub-model".to_string());
 
-        probe(&decl, None).await.expect(
+        probe(&decl, "stub-model", None).await.expect(
             "a reply carrying reasoning tokens proves the endpoint completes chat turns, \
              even with no budget left for a visible answer",
         );
@@ -5711,7 +5848,7 @@ mod tests {
         decl.models
             .insert("chat-v1".to_string(), "stub-model".to_string());
 
-        let err = probe(&decl, None)
+        let err = probe(&decl, "stub-model", None)
             .await
             .expect_err("a tool-call-only reply to a no-tools probe must not pass");
         assert!(
@@ -5755,7 +5892,7 @@ mod tests {
         decl.models
             .insert("chat-v1".to_string(), "stub-model".to_string());
 
-        let err = probe(&decl, None)
+        let err = probe(&decl, "stub-model", None)
             .await
             .expect_err("a tool call alongside text in a no-tools probe must not pass");
         assert!(
@@ -6055,7 +6192,7 @@ mod tests {
         let decl = inference::decl_for_probe("openai_compatible", Some(&base_url), None, None)
             .with_chosen_model("stub-model".to_string());
 
-        let err = probe(&decl, Some("embedded"))
+        let err = probe(&decl, "stub-model", Some("embedded"))
             .await
             .expect_err("the stub rejects every model");
         assert!(
@@ -6063,7 +6200,7 @@ mod tests {
             "the hint must name the owning harness: {err}"
         );
 
-        let err = probe(&decl, None)
+        let err = probe(&decl, "stub-model", None)
             .await
             .expect_err("the stub rejects every model");
         assert!(
