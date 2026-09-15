@@ -1685,7 +1685,13 @@ async fn managed_probe_reads_the_paged_catalog_and_sends_its_model() {
     let app = axum::Router::new()
         .route(
             "/agent-integrations/openrouter/models",
-            axum::routing::get(|| async {
+            axum::routing::get(|headers: axum::http::HeaderMap| async move {
+                assert_eq!(
+                    headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok()),
+                    Some("Bearer th-not-a-real-key")
+                );
                 axum::Json(serde_json::json!({
                     "success": true,
                     "data": {
@@ -1699,15 +1705,24 @@ async fn managed_probe_reads_the_paged_catalog_and_sends_its_model() {
         )
         .route(
             "/agent-integrations/openrouter/chat/completions",
-            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
-                let sent_model = model_for_route.clone();
-                async move {
-                    *sent_model.lock().unwrap() = body["model"].as_str().map(str::to_string);
-                    axum::Json(serde_json::json!({
-                        "choices": [{ "message": { "content": "pong" } }]
-                    }))
-                }
-            }),
+            axum::routing::post(
+                move |headers: axum::http::HeaderMap,
+                      axum::Json(body): axum::Json<serde_json::Value>| {
+                    let sent_model = model_for_route.clone();
+                    async move {
+                        assert_eq!(
+                            headers
+                                .get("authorization")
+                                .and_then(|value| value.to_str().ok()),
+                            Some("Bearer th-not-a-real-key")
+                        );
+                        *sent_model.lock().unwrap() = body["model"].as_str().map(str::to_string);
+                        axum::Json(serde_json::json!({
+                            "choices": [{ "message": { "content": "pong" } }]
+                        }))
+                    }
+                },
+            ),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
