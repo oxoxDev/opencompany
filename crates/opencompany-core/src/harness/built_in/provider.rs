@@ -2032,7 +2032,7 @@ async fn send_body(
                 retryable: status == reqwest::StatusCode::TOO_MANY_REQUESTS
                     || status.is_server_error(),
                 retry_after_ms: None,
-                raw: raw.clone(),
+                raw: None,
             })))
         };
         // `plan.url` is always `{base_url}/chat/completions` (see
@@ -5653,6 +5653,7 @@ mod tests {
             panic!("expected a provider error, got {typed}");
         };
         assert_eq!(error.status, Some(404));
+        assert_eq!(error.raw, None);
     }
 
     /// Reachability and usability are different questions, and `probe` asks
