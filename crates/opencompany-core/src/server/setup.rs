@@ -1204,6 +1204,9 @@ pub struct InferenceTestDto {
     error: Option<String>,
 }
 
+#[cfg(feature = "openhuman")]
+const MODEL_DISCOVERY_FAILURE: &str = "Could not list models from this provider.";
+
 /// `POST /api/v1/setup/inference/test` — a live one-turn probe of a credential
 /// the operator has just typed, before anything is written.
 ///
@@ -1271,48 +1274,12 @@ async fn probe_inference<E: EnvSource + Sync>(
             ),
         };
     }
-    let mut decl = crate::company::inference::decl_for_probe(
+    let decl = crate::company::inference::decl_for_probe(
         &req.provider,
         normalized_base_url.as_deref(),
         req.key.as_deref(),
         env_default.as_ref(),
     );
-    let model = if matches!(
-        crate::company::inference::normalize_provider(&req.provider),
-        "ollama" | "openai_compatible"
-    ) {
-        let bearer = decl.bearer().await.ok().flatten();
-        // The provider the operator just chose, through the same catalogue
-        // lookup every other caller uses — **not** a hardcoded bearer. A wizard
-        // that always probes with `Authorization: Bearer` breaks Anthropic
-        // during setup in exactly the way it broke the model picker, and the
-        // first thing a new operator would see is a 400 on a good key.
-        //
-        // This branch only runs for `ollama` and `openai_compatible` today, both
-        // of which are bearer-or-nothing, so the lookup changes no behaviour
-        // now. It is here so that widening the branch cannot silently
-        // reintroduce the bug.
-        let auth = crate::company::inference::catalogue::auth_style_for(&req.provider);
-        let shape =
-            crate::company::inference::catalogue::catalog_shape_for(&req.provider, &decl.base_url);
-        crate::server::inference_models::discover_models(
-            &decl.base_url,
-            bearer.as_deref(),
-            auth,
-            shape,
-        )
-        .await
-        .ok()
-        .and_then(|models| models.into_iter().next())
-        .map(|model| model.id)
-    } else {
-        None
-    };
-    if let Some(model) = &model {
-        for tier in crate::company::INFERENCE_TIERS {
-            decl.models.insert((*tier).to_string(), model.clone());
-        }
-    }
     // What is *said* about the endpoint — in this response and in the log below.
     // Redacted, because an endpoint that reached here without being typed (an
     // `OPENCOMPANY_INFERENCE_URL` this host does not own) can still carry
@@ -1331,15 +1298,69 @@ async fn probe_inference<E: EnvSource + Sync>(
         };
     }
 
+    let bearer = match decl.bearer().await {
+        Ok(bearer) => bearer,
+        Err(error) => {
+            tracing::info!(
+                provider = %req.provider,
+                base_url = %base_url,
+                error = %error,
+                "[setup] the inference test could not list provider models"
+            );
+            return InferenceTestDto {
+                ok: false,
+                base_url,
+                model: None,
+                error: Some(MODEL_DISCOVERY_FAILURE.to_string()),
+            };
+        }
+    };
+    let auth = crate::company::inference::catalogue::auth_style_for(&req.provider);
+    let shape =
+        crate::company::inference::catalogue::catalog_shape_for(&req.provider, &decl.base_url);
+    let models = match crate::server::inference_models::discover_models(
+        &decl.base_url,
+        bearer.as_deref(),
+        auth,
+        shape,
+    )
+    .await
+    {
+        Ok(models) => models,
+        Err(error) => {
+            tracing::info!(
+                provider = %req.provider,
+                base_url = %base_url,
+                error = %error,
+                "[setup] the inference test could not list provider models"
+            );
+            return InferenceTestDto {
+                ok: false,
+                base_url,
+                model: None,
+                error: Some(MODEL_DISCOVERY_FAILURE.to_string()),
+            };
+        }
+    };
+    let Some(model) = models.into_iter().next().map(|model| model.id) else {
+        return InferenceTestDto {
+            ok: false,
+            base_url,
+            model: None,
+            error: Some(MODEL_DISCOVERY_FAILURE.to_string()),
+        };
+    };
+    let decl = decl.with_chosen_model(model.clone());
+
     // No company exists yet at this step, so there is no harness to name — the
     // repair hint on failure falls back to the company-level phrasing (there is
     // no company-level config to name either, but nothing here has one to
     // offer instead).
-    match crate::harness::provider::probe(&decl, None).await {
+    match crate::harness::provider::probe(&decl, &model, None).await {
         Ok(()) => InferenceTestDto {
             ok: true,
             base_url,
-            model,
+            model: Some(model),
             error: None,
         },
         Err(err) => {
@@ -1353,7 +1374,7 @@ async fn probe_inference<E: EnvSource + Sync>(
             InferenceTestDto {
                 ok: false,
                 base_url,
-                model,
+                model: Some(model),
                 error: Some(summarise_probe_failure(&err.to_string())),
             }
         }

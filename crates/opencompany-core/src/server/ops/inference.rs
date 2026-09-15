@@ -1526,10 +1526,9 @@ async fn test_config(company: ScopedCompany) -> Response {
                 Ok(None) => {}
             }
             // No vocabulary discovery any more (keys rework, issue #2306,
-            // slice 2d): `probe` reaches `inference::model_on_the_wire`
-            // through `request_plan`, which never sends a tier name — a
-            // company whose Test resolves no real id gets `NO_MODEL_CHOSEN`
-            // back as the probe error instead.
+            // slice 2d): resolve the stored choice before `probe`, so a tier
+            // name can never reach the wire. A company whose Test resolves no
+            // real id gets `NO_MODEL_CHOSEN` back instead.
             //
             // The default harness's real id, whether or not it declares its own
             // `[harness.inference]` — `model_unavailable_advice` names the same
@@ -1537,25 +1536,39 @@ async fn test_config(company: ScopedCompany) -> Response {
             // fallback), so this always passes it rather than gating on
             // `is_default` the way `TenantProvider::invoke` deliberately does not
             // (Codex review on #1824's #1811 follow-up).
-            match crate::harness::provider::probe(&decl, Some(harness_id.as_str())).await {
+            let failure = |raw: &str| {
+                let (error, code) = probe_failure(&decl, raw);
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "ok": false,
+                        "error": error,
+                        "code": code,
+                    })),
+                )
+                    .into_response()
+            };
+            let model = match inference::model_on_the_wire(
+                &decl,
+                crate::harness::provider::DEFAULT_HOSTED_MODEL,
+            ) {
+                Ok(model) => model,
+                Err(err) => return failure(&err.to_string()),
+            };
+            match crate::harness::provider::probe(
+                &decl,
+                &model,
+                Some(harness_id.as_str()),
+            )
+            .await
+            {
                 Ok(()) => Json(serde_json::json!({
                     "ok": true,
                     "provider": decl.provider,
                     "note": "Reached the provider and got a reply.",
                 }))
                 .into_response(),
-                Err(err) => {
-                    let (error, code) = probe_failure(&decl, &err.to_string());
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(serde_json::json!({
-                            "ok": false,
-                            "error": error,
-                            "code": code,
-                        })),
-                    )
-                        .into_response()
-                }
+                Err(err) => failure(&err.to_string()),
             }
         }
     }

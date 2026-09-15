@@ -2380,6 +2380,9 @@ impl HarnessModel for TenantProvider {
 /// the console's "Test" button. The error is scrubbed of the credential by
 /// [`send_plan`].
 ///
+/// `model` is the concrete provider id the caller resolved. A tier name is
+/// refused before a request can put it on the wire.
+///
 /// `harness` is the real id of the harness whose config `decl` resolved from,
 /// when the caller has one — `None` for the first-run wizard's
 /// [`decl_for_probe`](crate::company::inference::decl_for_probe), which runs
@@ -2391,14 +2394,20 @@ impl HarnessModel for TenantProvider {
 /// table its request never consulted — the same gap already closed for live
 /// turns in [`TenantProvider::invoke`] (Codex review on #1824's #1811
 /// follow-up).
-pub async fn probe(decl: &InferenceDecl, harness: Option<&str>) -> anyhow::Result<()> {
+pub async fn probe(decl: &InferenceDecl, model: &str, harness: Option<&str>) -> anyhow::Result<()> {
+    let model = model.trim();
+    if model.is_empty() || inference::legacy_tiers::is_tier_name(model) {
+        return Err(anyhow::Error::new(InferenceError::Model(
+            "Could not test this connection because no concrete model was available.".to_string(),
+        )));
+    }
     let client = reqwest::Client::new();
     let messages = vec![serde_json::json!({ "role": "user", "content": "ping" })];
     // The connectivity probe exposes no tools — it only checks the endpoint
     // answers a bare chat turn.
     let plan = request_plan(
         decl,
-        DEFAULT_HOSTED_MODEL,
+        model,
         messages,
         // A reachability check has no opinion about sampling. The hardcoded
         // `0.0` here made the probe fail on exactly the providers it exists to
@@ -5552,7 +5561,7 @@ mod tests {
         decl.models
             .insert("chat-v1".to_string(), "stub-model".to_string());
 
-        probe(&decl, None)
+        probe(&decl, "stub-model", None)
             .await
             .expect("array-shaped content must be recognized as a successful probe");
     }
@@ -5624,7 +5633,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
 
-            let err = probe(&decl, None)
+            let err = probe(&decl, "stub-model", None)
                 .await
                 .expect_err("a broken tool call must fail the probe even with reasoning present");
             assert!(
@@ -5654,7 +5663,7 @@ mod tests {
         decl.models
             .insert("chat-v1".to_string(), "stub-model".to_string());
 
-        probe(&decl, None).await.expect(
+        probe(&decl, "stub-model", None).await.expect(
             "a reply carrying reasoning tokens proves the endpoint completes chat turns, \
              even with no budget left for a visible answer",
         );
@@ -5711,7 +5720,7 @@ mod tests {
         decl.models
             .insert("chat-v1".to_string(), "stub-model".to_string());
 
-        let err = probe(&decl, None)
+        let err = probe(&decl, "stub-model", None)
             .await
             .expect_err("a tool-call-only reply to a no-tools probe must not pass");
         assert!(
@@ -5755,7 +5764,7 @@ mod tests {
         decl.models
             .insert("chat-v1".to_string(), "stub-model".to_string());
 
-        let err = probe(&decl, None)
+        let err = probe(&decl, "stub-model", None)
             .await
             .expect_err("a tool call alongside text in a no-tools probe must not pass");
         assert!(
@@ -6055,7 +6064,7 @@ mod tests {
         let decl = inference::decl_for_probe("openai_compatible", Some(&base_url), None, None)
             .with_chosen_model("stub-model".to_string());
 
-        let err = probe(&decl, Some("embedded"))
+        let err = probe(&decl, "stub-model", Some("embedded"))
             .await
             .expect_err("the stub rejects every model");
         assert!(
@@ -6063,7 +6072,7 @@ mod tests {
             "the hint must name the owning harness: {err}"
         );
 
-        let err = probe(&decl, None)
+        let err = probe(&decl, "stub-model", None)
             .await
             .expect_err("the stub rejects every model");
         assert!(
