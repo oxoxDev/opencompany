@@ -1677,6 +1677,207 @@ async fn local_model_probe_normalizes_the_address_and_detects_its_model() {
     assert_eq!(result.model.as_deref(), Some("qwen3:8b"));
 }
 
+#[cfg(feature = "openhuman")]
+#[tokio::test]
+async fn managed_probe_reads_the_paged_catalog_and_sends_its_model() {
+    let sent_model = Arc::new(std::sync::Mutex::new(None::<String>));
+    let model_for_route = sent_model.clone();
+    let app = axum::Router::new()
+        .route(
+            "/agent-integrations/openrouter/models",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "success": true,
+                    "data": {
+                        "data": [{ "id": "openai/gpt-test" }],
+                        "total": 1,
+                        "limit": 500,
+                        "offset": 0
+                    }
+                }))
+            }),
+        )
+        .route(
+            "/agent-integrations/openrouter/chat/completions",
+            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let sent_model = model_for_route.clone();
+                async move {
+                    *sent_model.lock().unwrap() = body["model"].as_str().map(str::to_string);
+                    axum::Json(serde_json::json!({
+                        "choices": [{ "message": { "content": "pong" } }]
+                    }))
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let endpoint = format!("http://{address}/agent-integrations/openrouter");
+    let env = MapEnv::new([
+        ("OPENCOMPANY_INFERENCE_URL", endpoint.as_str()),
+        ("TINYHUMANS_API_KEY", "th-not-a-real-key"),
+    ]);
+
+    let result = super::probe_inference(
+        &super::InferenceTestRequest {
+            provider: "managed".to_string(),
+            ..Default::default()
+        },
+        &env,
+    )
+    .await;
+    server.abort();
+
+    assert!(result.ok, "{:?}", result.error);
+    assert_eq!(result.model.as_deref(), Some("openai/gpt-test"));
+    assert_eq!(
+        sent_model.lock().unwrap().as_deref(),
+        Some("openai/gpt-test")
+    );
+}
+
+#[cfg(feature = "openhuman")]
+#[tokio::test]
+async fn cloud_provider_probe_discovers_a_model_before_chat() {
+    let app = axum::Router::new()
+        .route(
+            "/v1/models",
+            axum::routing::get(|headers: axum::http::HeaderMap| async move {
+                assert_eq!(
+                    headers
+                        .get("x-api-key")
+                        .and_then(|value| value.to_str().ok()),
+                    Some("sk-ant-not-a-real-key")
+                );
+                axum::Json(serde_json::json!({
+                    "data": [{ "id": "claude-test" }]
+                }))
+            }),
+        )
+        .route(
+            "/v1/chat/completions",
+            axum::routing::post(|headers: axum::http::HeaderMap| async move {
+                assert_eq!(
+                    headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok()),
+                    Some("Bearer sk-ant-not-a-real-key")
+                );
+                axum::Json(serde_json::json!({
+                    "choices": [{ "message": { "content": "pong" } }]
+                }))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let result = super::probe_inference(
+        &super::InferenceTestRequest {
+            provider: "anthropic".to_string(),
+            key: Some("sk-ant-not-a-real-key".to_string()),
+            base_url: Some(format!("http://{address}/v1")),
+        },
+        &MapEnv::default(),
+    )
+    .await;
+    server.abort();
+
+    assert!(result.ok, "{:?}", result.error);
+    assert_eq!(result.model.as_deref(), Some("claude-test"));
+}
+
+#[cfg(feature = "openhuman")]
+#[tokio::test]
+async fn an_empty_catalog_has_its_own_failure_and_never_sends_chat() {
+    let chat_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hits_for_route = chat_hits.clone();
+    let app = axum::Router::new()
+        .route(
+            "/v1/models",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({ "data": [] })) }),
+        )
+        .route(
+            "/v1/chat/completions",
+            axum::routing::post(move || {
+                hits_for_route.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { axum::http::StatusCode::NO_CONTENT }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let result = super::probe_inference(
+        &super::InferenceTestRequest {
+            provider: "openai_compatible".to_string(),
+            base_url: Some(format!("http://{address}/v1")),
+            ..Default::default()
+        },
+        &MapEnv::default(),
+    )
+    .await;
+    server.abort();
+
+    assert!(!result.ok);
+    assert_eq!(
+        result.error.as_deref(),
+        Some(super::MODEL_DISCOVERY_FAILURE)
+    );
+    assert_eq!(result.model, None);
+    assert_eq!(chat_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[cfg(feature = "openhuman")]
+#[test]
+fn typed_probe_failures_choose_copy_from_the_error_type() {
+    let provider = |status| {
+        anyhow::Error::new(tinyinference::Error::Provider(Box::new(
+            tinyinference::model::ProviderError {
+                provider: "test".to_string(),
+                status: Some(status),
+                message: "wording may change".to_string(),
+                ..Default::default()
+            },
+        )))
+    };
+
+    for (status, expected) in [
+        (401, "That key was rejected by the provider."),
+        (
+            403,
+            "That key was accepted but is not allowed to use this model.",
+        ),
+        (
+            404,
+            "That model is not available from this provider for your account.",
+        ),
+        (429, "The provider is rate-limiting this key right now."),
+    ] {
+        assert_eq!(super::summarise_probe_failure(&provider(status)), expected);
+    }
+}
+
+#[cfg(feature = "openhuman")]
+#[test]
+fn typed_configuration_failures_cannot_match_transport_words() {
+    for error in [
+        tinyinference::Error::Model("Choose a model in Connections before continuing.".to_string()),
+        tinyinference::Error::Validation("connection model is invalid".to_string()),
+    ] {
+        assert_eq!(
+            super::summarise_probe_failure(&anyhow::Error::new(error)),
+            "The model configuration for this connection is invalid."
+        );
+    }
+    assert_eq!(
+        super::summarise_probe_failure(&anyhow::anyhow!(
+            "dns failed while connecting to the endpoint"
+        )),
+        "Could not reach that address."
+    );
+}
+
 /// The first-run probe refuses an endpoint carrying a credential **before it
 /// sends anything**, and never echoes the credential back.
 ///

@@ -4843,6 +4843,29 @@ mod tests {
         format!("http://{addr}")
     }
 
+    async fn spawn_rejection(status: axum::http::StatusCode) -> String {
+        use axum::Router;
+        use axum::routing::post;
+
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || async move {
+                (
+                    status,
+                    axum::Json(serde_json::json!({
+                        "error": { "message": "provider refused the request" }
+                    })),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
     /// Spawns an in-process OpenAI-compatible stub whose `message.content` is
     /// the given raw JSON value rather than a plain string — used to exercise
     /// the array-of-text-parts content shape end to end.
@@ -5598,6 +5621,38 @@ mod tests {
         probe(&decl, "stub-model", None)
             .await
             .expect("array-shaped content must be recognized as a successful probe");
+    }
+
+    #[tokio::test]
+    async fn probe_refuses_a_tier_before_sending() {
+        let decl =
+            inference::decl_for_probe("openai_compatible", Some("http://127.0.0.1:9"), None, None);
+
+        let err = probe(&decl, DEFAULT_HOSTED_MODEL, None)
+            .await
+            .expect_err("a tier name is not a provider model id");
+        let typed = err
+            .downcast_ref::<InferenceError>()
+            .expect("configuration failures stay typed");
+        assert!(matches!(typed, InferenceError::Model(_)), "{typed}");
+        assert!(!typed.to_string().contains("Connections"), "{typed}");
+    }
+
+    #[tokio::test]
+    async fn probe_preserves_a_provider_status() {
+        let base_url = spawn_rejection(axum::http::StatusCode::NOT_FOUND).await;
+        let decl = inference::decl_for_probe("openai_compatible", Some(&base_url), None, None);
+
+        let err = probe(&decl, "provider/model", None)
+            .await
+            .expect_err("the stub rejects the model");
+        let typed = err
+            .downcast_ref::<InferenceError>()
+            .expect("provider failures stay typed");
+        let InferenceError::Provider(error) = typed else {
+            panic!("expected a provider error, got {typed}");
+        };
+        assert_eq!(error.status, Some(404));
     }
 
     /// Reachability and usability are different questions, and `probe` asks

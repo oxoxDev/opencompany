@@ -1973,6 +1973,54 @@ base_url = "https://byo.example/v1"
         assert_eq!(body["code"], json!("probe_failed"), "{raw}");
     }
 
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn saved_company_probe_sends_its_resolved_model() {
+        let sent_model = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let model_for_route = sent_model.clone();
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+                let sent_model = model_for_route.clone();
+                async move {
+                    *sent_model.lock().unwrap() = body["model"].as_str().map(str::to_string);
+                    axum::Json(json!({
+                        "choices": [{ "message": { "content": "pong" } }]
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let home_dir = home();
+        let state = state_with_company(home_dir.path()).await;
+
+        let (status, _, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({
+                "provider": "openai_compatible",
+                "baseUrl": format!("http://{address}/v1"),
+                "models": { "chat-v1": "provider/model" }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        let (status, body, raw) =
+            send(&state, "POST", "/api/v1/company/inference/test", None).await;
+        server.abort();
+
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(body["ok"], true, "{raw}");
+        assert_eq!(
+            sent_model.lock().unwrap().as_deref(),
+            Some("provider/model")
+        );
+    }
+
     /// Issue #1737, the sentence that would have saved an hour: OpenRouter
     /// answers a credential it cannot parse with `Missing Authentication
     /// header`, which reads as "nothing was sent" and is how the issue came to
