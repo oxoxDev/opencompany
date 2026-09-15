@@ -36,7 +36,7 @@ the other three.
 | --- | --- | --- |
 | Agents | `CompanyManifest::apply_globals` | Appended after the company's own roster; an id the company declares is skipped. |
 | Workflows | `list_workflows_with_globals` / `load_workflow_with_globals` | Seed file, then saved overlay, then the global graph. |
-| Skills | `EffectiveSkills::materialize` | Installed as the bottom layer; a company bundle or `custom_doc` delta of the same slug supersedes it. |
+| Skills | `company::skill_effective::resolve` | Installed as the bottom layer; a company bundle or `custom_doc` delta of the same slug supersedes it. One derivation for all three readers — the harness materializes its enabled entries for each agent, and `GET …/skills` and GraphQL `Company.skills` report the whole set so a global's row carries its own enable/disable switch. |
 | Ledgers | `runtime::builder::seed_ledgers` | **Seeded once** into the company's own store at first boot, then owned by the company. A bundle declaration of the same slug replaces the global before either is stored. |
 | Setup cards | `runtime::builder::seed_tasks` | **Seeded once** onto the board at first boot, in To-do. A bundle card of the same id replaces the global one. Opt-in per caller — see below. |
 | Tools | `Tools::default` | `[tools].default_allow` is the belt a company with no `[tools]` section gets. |
@@ -55,7 +55,7 @@ disable = ["agent:researcher", "workflow:weekly_review", "skill:meeting-brief", 
 Every entry is `<kind>:<id>` with a kind from `globals::DISABLE_KINDS`, and must
 name a global that exists — a typo is a validation error, not a line that
 silently does nothing. `skill:` entries reach the effective skill set as
-synthesized disabling deltas (`harness::globals_skill_disables`) so the manifest
+synthesized disabling deltas (`company::skill_effective::globals_skill_disables`) so the manifest
 and the console's own toggle speak the same vocabulary; a disable beats an
 enable, so the manifest wins over a console re-enable.
 

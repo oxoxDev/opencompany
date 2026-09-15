@@ -1,21 +1,12 @@
 //! The effective skill set → OpenHuman skill *read* tools + a prompt catalogue.
 //!
-//! A company's effective skills are the union of three sources:
-//!
-//! 1. **Company-dir skills** — the `SKILL.md` bundles committed under the
-//!    company's source directory (`companies/<name>/skills/**`), parsed by
-//!    [`load_dir_skills`](crate::company::load_dir_skills).
-//! 2. **Operator deltas** — the [`SkillState`] rows the console writes through
-//!    the [`SkillStateStore`](crate::ports::SkillStateStore): enable/disable
-//!    overrides over a built-in, and custom skills authored in-app.
-//! 3. **Custom docs** — a delta's `custom_doc` carries the full `SKILL.md` for
-//!    a console-authored skill.
-//!
-//! [`EffectiveSkills::materialize`] folds those into one set, resolves
-//! enable/disable overrides, and writes the surviving bundles into a scratch
-//! `skills/<slug>/` tree under a per-agent directory. OpenHuman's three skill
-//! read tools then scan that tree (its `skills/` root is the legacy skill root,
-//! scanned without a trust marker) so an agent can **see and read** its skills.
+//! What a company's effective skills *are* lives in
+//! [`crate::company::skill_effective`], which the console's read paths share.
+//! [`EffectiveSkills::materialize`] takes that set and writes its enabled
+//! entries into a scratch `skills/<slug>/` tree under a per-agent directory.
+//! OpenHuman's three skill read tools then scan that tree (its `skills/` root is
+//! the legacy skill root, scanned without a trust marker) so an agent can **see
+//! and read** its skills.
 //!
 //! ## Freshness
 //!
@@ -35,7 +26,6 @@
 //!
 //! Compiled only under `feature = "openhuman"` (the whole `harness` module is).
 
-use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -45,26 +35,14 @@ use oh::config::Config;
 use oh::skills::tools::{WorkflowDescribeTool, WorkflowListTool, WorkflowReadResourceTool};
 use oh::tools::Tool;
 
-use crate::company::{SkillDoc, load_dir_skills, parse_skill_md, render_skill_md};
+use crate::company::SkillDoc;
+use crate::company::skill_effective::{self, SkillBody};
 use crate::error::OpenCompanyError;
-use crate::ports::skills_state::{SkillSource, SkillState};
+use crate::ports::skills_state::SkillState;
 
 mod naming;
 
 pub use naming::{DESCRIBE_SKILL_TOOL, LIST_SKILLS_TOOL, READ_SKILL_RESOURCE_TOOL};
-
-/// Whether `slug` is a safe directory name for `skills/<slug>/`: the same
-/// `^[a-z0-9][a-z0-9-]*$` shape the page tools enforce. Anything else — a
-/// traversal (`..`), a path separator, a dotfile — would escape the scratch
-/// tree via [`Path::join`], so it is refused wherever a slug enters.
-fn valid_slug(slug: &str) -> bool {
-    let mut chars = slug.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit() => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-}
 
 /// One agent's effective, enabled skill set, materialized on disk so OpenHuman's
 /// skill read tools can scan it.
@@ -80,26 +58,12 @@ pub struct EffectiveSkills {
 impl EffectiveSkills {
     /// Materializes the effective skill set for one agent under `workspace_dir`.
     ///
-    /// `source_dir` is the company's source directory (`companies/<name>`); its
-    /// `skills/` subtree supplies the committed bundles. `registry` is the
-    /// repo-level shared skill library (empty in platform-provisioned mode).
-    /// `deltas` are the operator overrides from the
-    /// [`SkillStateStore`](crate::ports::SkillStateStore).
-    ///
-    /// Resolution rules:
-    /// * the global baseline ([`crate::globals::skills`]) is the bottom layer:
-    ///   installed in every company, superseded by any same-slug company-dir
-    ///   bundle or `custom_doc` delta, and dropped by a disabling delta — which
-    ///   is how a company's `[globals].disable = ["skill:…"]` reaches here, as a
-    ///   synthesized disable beside the operator's own (see
-    ///   `harness::globals_skill_disables`);
-    /// * a company-dir skill is included unless a delta disables it;
-    /// * an enabled delta carrying a `custom_doc` supersedes any same-slug
-    ///   company-dir body (and installs a console-authored skill outright);
-    /// * a `Registry`-sourced delta whose snapshot is a pre-fix stub is healed
-    ///   from `registry` — see [`is_registry_stub`];
-    /// * a disabled delta drops the skill from the effective set;
-    /// * a malformed `custom_doc` is skipped (never fails the build).
+    /// The set itself is resolved by
+    /// [`skill_effective::resolve`](crate::company::skill_effective::resolve),
+    /// which the console's two read paths share — so what an agent gets on disk
+    /// and what the Skills tab reports are the same derivation. This writes the
+    /// enabled entries out; a disabled one is reported by the readers and never
+    /// materialized.
     ///
     /// The `workspace_dir/skills/` tree is rebuilt from scratch on every call so
     /// a rebuild reflects the current deltas (removed skills disappear).
@@ -109,98 +73,8 @@ impl EffectiveSkills {
         registry: &[SkillDoc],
         deltas: &[SkillState],
     ) -> crate::Result<Self> {
-        // Parsed effective docs, and where an on-disk bundle can be copied from
-        // (company-dir skills only). Custom docs carry their SKILL.md inline.
-        let mut docs: BTreeMap<String, SkillDoc> = BTreeMap::new();
-        let mut source_paths: BTreeMap<String, PathBuf> = BTreeMap::new();
-        let mut custom_docs: BTreeMap<String, String> = BTreeMap::new();
+        let effective = skill_effective::resolve(source_dir, registry, deltas)?;
 
-        // 0. The global baseline, installed in every company. Written inline
-        //    (like a console-authored skill) rather than copied from disk: these
-        //    are embedded in the binary, because a platform-provisioned tenant
-        //    has no repository checkout to copy from.
-        for doc in crate::globals::skills() {
-            custom_docs.insert(doc.slug.clone(), render_skill_md(doc));
-            docs.insert(doc.slug.clone(), doc.clone());
-        }
-
-        // 1. Company-dir skills (verbatim on-disk bundles, resources included).
-        if let Some(dir) = source_dir {
-            let skills_root = dir.join("skills");
-            for doc in load_dir_skills(&skills_root)? {
-                // A company bundle supersedes the global of the same slug: drop
-                // the inline global body so the on-disk bundle is what gets
-                // copied, resources and all.
-                custom_docs.remove(&doc.slug);
-                source_paths.insert(doc.slug.clone(), skills_root.join(&doc.slug));
-                docs.insert(doc.slug.clone(), doc);
-            }
-        }
-
-        // 2. Apply operator deltas: disables drop, enabled custom docs supersede.
-        //    A delta whose slug is not a safe directory name is skipped — a
-        //    traversal slug must never reach the `skills_out.join(slug)` write
-        //    below (the console validates at write time; this is the belt for a
-        //    row that predates that check or lands through a non-console path).
-        let mut disabled: HashSet<String> = HashSet::new();
-        for delta in deltas {
-            if !valid_slug(&delta.slug) {
-                log::warn!(
-                    "[harness][skills] skipping a skill delta whose slug is not a safe \
-                     directory name: {:?}",
-                    delta.slug
-                );
-                continue;
-            }
-            if !delta.enabled {
-                disabled.insert(delta.slug.clone());
-                continue;
-            }
-            let Some(body) = delta.custom_doc.as_deref() else {
-                // An enable-only delta over a built-in: nothing to materialize
-                // beyond what the company dir already supplies.
-                continue;
-            };
-            // A pre-fix registry install snapshotted its own description as the
-            // body (or, with no description to snapshot, wrote a doc that does
-            // not parse at all). Either way the agent gets nothing usable, so
-            // serve the live library document instead — see `registry_heal`.
-            let parsed = parse_skill_md(&delta.slug, body);
-            let resolved = match registry_heal(delta, parsed.as_ref().ok(), registry) {
-                Some(live) => {
-                    log::info!(
-                        "[harness][skills] healing pre-fix registry install '{}' from the shared library",
-                        delta.slug
-                    );
-                    Some((live.clone(), render_skill_md(live)))
-                }
-                None => match parsed {
-                    Ok(doc) => Some((doc, body.to_string())),
-                    Err(err) => {
-                        log::warn!(
-                            "[harness][skills] skipping malformed custom skill '{}': {err}",
-                            delta.slug
-                        );
-                        None
-                    }
-                },
-            };
-            if let Some((doc, source)) = resolved {
-                // A custom body supersedes any same-slug company-dir bundle.
-                source_paths.remove(&delta.slug);
-                custom_docs.insert(delta.slug.clone(), source);
-                docs.insert(delta.slug.clone(), doc);
-            }
-        }
-
-        // 3. Drop disabled skills from every source.
-        for slug in &disabled {
-            docs.remove(slug);
-            source_paths.remove(slug);
-            custom_docs.remove(slug);
-        }
-
-        // 4. Rebuild the scratch tree from the surviving set.
         let skills_out = workspace_dir.join("skills");
         if skills_out.exists() {
             std::fs::remove_dir_all(&skills_out).map_err(|e| {
@@ -217,23 +91,38 @@ impl EffectiveSkills {
             ))
         })?;
 
-        for slug in docs.keys() {
-            let dest = skills_out.join(slug);
-            if let Some(src) = source_paths.get(slug) {
-                copy_dir_recursive(src, &dest)?;
-            } else if let Some(body) = custom_docs.get(slug) {
-                std::fs::create_dir_all(&dest).map_err(|e| {
-                    OpenCompanyError::Harness(format!("creating skill dir {}: {e}", dest.display()))
-                })?;
-                std::fs::write(dest.join("SKILL.md"), body).map_err(|e| {
-                    OpenCompanyError::Harness(format!("writing SKILL.md for '{slug}': {e}"))
-                })?;
+        let mut docs = Vec::new();
+        for skill in effective {
+            if !skill.enabled {
+                continue;
             }
+            let Some(content) = skill.content else {
+                continue;
+            };
+            let dest = skills_out.join(&skill.slug);
+            match &content.body {
+                SkillBody::Bundle(src) => copy_dir_recursive(src, &dest)?,
+                SkillBody::Inline(body) => {
+                    std::fs::create_dir_all(&dest).map_err(|e| {
+                        OpenCompanyError::Harness(format!(
+                            "creating skill dir {}: {e}",
+                            dest.display()
+                        ))
+                    })?;
+                    std::fs::write(dest.join("SKILL.md"), body).map_err(|e| {
+                        OpenCompanyError::Harness(format!(
+                            "writing SKILL.md for '{}': {e}",
+                            skill.slug
+                        ))
+                    })?;
+                }
+            }
+            docs.push(content.doc);
         }
 
         Ok(Self {
             workspace_dir,
-            docs: docs.into_values().collect(),
+            docs,
         })
     }
 
@@ -309,59 +198,6 @@ impl EffectiveSkills {
     }
 }
 
-/// Whether a stored `SKILL.md` snapshot is a **pre-fix registry stub**.
-///
-/// Before this was fixed, installing a registry skill persisted a document built
-/// from the client's metadata with the description doubling as the body, so the
-/// agent read a one-line summary instead of the procedure. Such a snapshot is
-/// recognisable by construction: its body is exactly its own description.
-///
-/// A legitimately one-line skill (body identical to its description) would also
-/// match, and would be re-served from the live library rather than from its
-/// pinned snapshot. That is the one honest false positive: it costs the pin, not
-/// the content, and only for a skill whose entire body is a single line already
-/// held verbatim in its own frontmatter. No skill in the shared library is
-/// shaped that way (a test pins that), so it is a hypothetical.
-fn is_registry_stub(doc: &SkillDoc) -> bool {
-    doc.body.trim() == doc.description.trim()
-}
-
-/// The live library document that should supersede a stored snapshot, or `None`
-/// to keep whatever the row has.
-///
-/// `stored` is the parsed snapshot, or `None` when it does not parse at all —
-/// which the pre-fix path could produce, since it wrote `description:` with an
-/// empty value when the client sent no description, and the parser rejects that.
-/// Such a row is currently dropped from the effective set entirely, so healing it
-/// turns a silently missing skill into a working one.
-///
-/// Scoped deliberately narrowly:
-///
-/// * **Only `Registry`-sourced rows.** A `Custom` row is operator-authored and a
-///   `Company` row is committed to the repo; neither is ever second-guessed, so
-///   the heal cannot clobber content a human wrote. There is no route that
-///   writes an operator-authored body onto a `Registry` row — `install` upserts
-///   a snapshot and `set_enabled` only carries the existing doc forward — so a
-///   `Registry` body is always machine-generated.
-/// * **Only a degenerate or unparseable snapshot.** A real snapshot is left
-///   pinned, so an install does not silently track later library edits.
-/// * **Only when the slug is in the library**, so an install of a skill that has
-///   since left it keeps whatever it has rather than vanishing.
-fn registry_heal<'a>(
-    delta: &SkillState,
-    stored: Option<&SkillDoc>,
-    registry: &'a [SkillDoc],
-) -> Option<&'a SkillDoc> {
-    if delta.source != SkillSource::Registry {
-        return None;
-    }
-    // `None` = unparseable snapshot, which is always worth replacing.
-    if stored.is_some_and(|doc| !is_registry_stub(doc)) {
-        return None;
-    }
-    registry.iter().find(|doc| doc.slug == delta.slug)
-}
-
 /// Recursively copies a skill bundle directory (SKILL.md plus any bundled
 /// resource files) into `dest`. Regular files and directories only — symlinks
 /// are skipped so a bundle can't smuggle out-of-tree content into the scratch.
@@ -400,6 +236,7 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> crate::Result<()> {
 mod tests {
     use super::*;
 
+    use crate::company::parse_skill_md;
     use crate::ports::skills_state::SkillSource;
 
     /// Writes a company-dir `skills/<slug>/SKILL.md` (plus an optional resource).
@@ -775,7 +612,7 @@ mod tests {
     fn a_manifest_opt_out_drops_a_global_skill() {
         let ws = tempfile::tempdir().unwrap();
         let dropped = crate::globals::skills()[0].slug.clone();
-        let deltas = crate::harness::globals_skill_disables(&[format!("skill:{dropped}")]);
+        let deltas = skill_effective::globals_skill_disables(&[format!("skill:{dropped}")]);
 
         let eff =
             EffectiveSkills::materialize(ws.path().to_path_buf(), None, &[], &deltas).unwrap();

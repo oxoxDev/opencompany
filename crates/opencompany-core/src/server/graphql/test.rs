@@ -40,6 +40,26 @@ pub(crate) fn own_workflows(value: &serde_json::Value) -> Vec<&serde_json::Value
         .collect()
 }
 
+/// The skills a company itself has: the global baseline is installed in every
+/// company, and these tests are about what the company adds to it.
+///
+/// An **id heuristic**, like [`own_workflows`]: a `Skill` row carries no
+/// baseline flag, so a row is classified as the baseline's by whether its slug
+/// is one of `crate::globals::skills()`. A company bundle or delta of the same
+/// slug supersedes the global and would be wrongly excluded — the fixtures that
+/// exercise that case assert on the row directly instead.
+pub(crate) fn own_skills(value: &serde_json::Value) -> Vec<&serde_json::Value> {
+    value
+        .as_array()
+        .expect("skills")
+        .iter()
+        .filter(|row| {
+            let id = row["id"].as_str().unwrap_or_default();
+            !crate::globals::skills().iter().any(|doc| doc.slug == id)
+        })
+        .collect()
+}
+
 pub(crate) fn home() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("opencompany-gql-")
@@ -1362,7 +1382,7 @@ async fn empty_surfaces_resolve_to_empty_lists() {
     assert_eq!(folder["createdBy"]["kind"], "agent");
     assert_eq!(folder["createdBy"]["agentId"], "maya");
     assert_eq!(company["inboxes"].as_array().unwrap().len(), 0);
-    assert_eq!(company["skills"].as_array().unwrap().len(), 0);
+    assert_eq!(own_skills(&company["skills"]).len(), 0);
     // The global baseline is listed in every company, so "empty" here means the
     // company has no graphs of its own.
     assert_eq!(own_workflows(&company["workflows"]).len(), 0);
@@ -1580,10 +1600,22 @@ async fn skills_and_workflows_resolve_from_source_dir() {
     )
     .await;
     let company = &value["data"]["company"];
-    let skills = company["skills"].as_array().unwrap();
+    let skills = own_skills(&company["skills"]);
     assert_eq!(skills.len(), 1, "source-dir skill resolves");
     assert_eq!(skills[0]["id"], "deal-memo");
     assert_eq!(skills[0]["source"], "company");
+    // The baseline is installed in every company, so it is listed here too.
+    for doc in crate::globals::skills() {
+        assert!(
+            company["skills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["id"] == serde_json::json!(doc.slug)),
+            "the global `{}` is listed",
+            doc.slug
+        );
+    }
     // Company.workflow reads the graph from the source dir.
     assert_eq!(company["workflow"]["name"], "Test Flow");
     assert_eq!(company["workflow"]["nodes"].as_array().unwrap().len(), 1);
@@ -1688,7 +1720,13 @@ async fn company_skills_project_the_pinned_snapshot_of_a_registry_install() {
     )
     .await;
     let skills = value["data"]["company"]["skills"].as_array().unwrap();
-    assert_eq!(skills.len(), 2, "both installs resolve: {value}");
+    // `web-research` is also a baseline slug, so the row below doubles as proof
+    // that the install's pinned snapshot supersedes the global it sits on.
+    assert_eq!(
+        own_skills(&value["data"]["company"]["skills"]).len(),
+        1,
+        "the retired install is the only row outside the baseline: {value}"
+    );
 
     let pinned = skills
         .iter()

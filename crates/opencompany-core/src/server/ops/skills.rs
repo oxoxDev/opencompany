@@ -20,8 +20,6 @@
 //! `GET …/skills` and `GET …/skills/registry` — stay open to any member; only
 //! the writes decide anything.
 
-use std::collections::HashMap;
-use std::path::Path as FsPath;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -31,6 +29,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
+use crate::company::skill_effective::{self, EffectiveSkill, valid_slug};
 use crate::company::{SkillDoc, parse_skill_md, render_skill_md};
 use crate::error::OpenCompanyError;
 use crate::ports::skills_state::{SkillSource, SkillState};
@@ -54,19 +53,6 @@ const REGISTRY_PUBLISHER: &str = "OpenCompany";
 /// still small enough that no single skill can quietly dominate what every
 /// agent reads on every turn.
 const MAX_SKILL_DOC_BYTES: usize = 256 * 1024;
-
-/// Whether `slug` is a safe skill id: `^[a-z0-9][a-z0-9-]*$`. A slug is also a
-/// directory name in the agent's scratch tree (`skills/<slug>/`), so a
-/// traversal (`..`) or a path separator here would escape it. Mirrors
-/// `harness::built_in::skills::valid_slug`.
-fn valid_slug(slug: &str) -> bool {
-    let mut chars = slug.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit() => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-}
 
 /// Refuses a skill document over [`MAX_SKILL_DOC_BYTES`].
 ///
@@ -176,21 +162,23 @@ impl InstalledSkill {
         }
     }
 
-    /// Projects a company-bundle `SKILL.md` (`companies/<name>/skills/<slug>`)
-    /// to the console shape. These are [`SkillSource::Company`], enabled unless
-    /// a store delta later overrides the flag.
-    fn from_company_bundle(doc: &SkillDoc, enabled: bool) -> Self {
+    /// Projects one entry of the company's effective set
+    /// ([`skill_effective::resolve`]) to the console shape. An entry no layer
+    /// supplied a document for is rendered from its slug alone.
+    fn from_effective(skill: &EffectiveSkill) -> Self {
+        let doc = skill.doc();
         Self {
-            id: doc.slug.clone(),
-            name: doc.name.clone(),
-            description: doc.description.clone(),
+            id: skill.slug.clone(),
+            name: doc
+                .map(|doc| doc.name.clone())
+                .unwrap_or_else(|| titleize(&skill.slug)),
+            description: doc.map(|doc| doc.description.clone()).unwrap_or_default(),
             category: doc
-                .category
-                .clone()
+                .and_then(|doc| doc.category.clone())
                 .unwrap_or_else(|| DEFAULT_CATEGORY.to_string()),
-            source: SkillSource::Company,
-            enabled,
-            version: doc.version.clone(),
+            source: skill.source,
+            enabled: skill.enabled,
+            version: doc.and_then(|doc| doc.version.clone()),
         }
     }
 }
@@ -265,82 +253,31 @@ struct CreateSkill {
     body: Option<String>,
 }
 
-/// `GET …/skills` — the company's **effective** skill set: its on-disk bundles
-/// (`companies/<name>/skills/*/SKILL.md`) unioned with the operator's
-/// [`SkillStateStore`] deltas. The console renders this list; it mirrors the
-/// write-plane semantics (and the GraphQL `Company.skills` resolver).
-async fn list_skills(company: ScopedCompany) -> Result<Json<Vec<InstalledSkill>>, ApiError> {
-    let deltas = company.runtime.skills().list(company.id()).await?;
-    Ok(Json(merge_effective(company.runtime.source_dir(), deltas)))
-}
-
-/// Merges the company-dir bundles with the operator deltas: a delta over a
-/// same-slug bundle wins its `enabled` flag, source, and (if it carries one) its
-/// custom doc; a delta with no bundle appears on its own. Sorted by slug so the
-/// response is deterministic.
-fn merge_effective(source_dir: Option<&FsPath>, deltas: Vec<SkillState>) -> Vec<InstalledSkill> {
-    let mut by_slug: HashMap<String, InstalledSkill> = company_bundles(source_dir)
-        .into_iter()
-        .map(|skill| (skill.id.clone(), skill))
-        .collect();
-
-    for st in deltas {
-        match by_slug.get_mut(&st.slug) {
-            Some(existing) => {
-                existing.enabled = st.enabled;
-                existing.source = st.source;
-                // A delta that carries a doc (a custom override) refreshes the
-                // display fields; a plain enable/disable delta keeps the bundle's.
-                if let Some(doc) = st
-                    .custom_doc
-                    .as_deref()
-                    .and_then(|doc| parse_skill_md(&st.slug, doc).ok())
-                {
-                    existing.name = doc.name;
-                    existing.description = doc.description;
-                    existing.category =
-                        doc.category.unwrap_or_else(|| DEFAULT_CATEGORY.to_string());
-                    existing.version = doc.version;
-                }
-            }
-            None => {
-                by_slug.insert(st.slug.clone(), InstalledSkill::from_state(&st));
-            }
-        }
-    }
-
-    let mut out: Vec<InstalledSkill> = by_slug.into_values().collect();
-    out.sort_by(|a, b| a.id.cmp(&b.id));
-    out
-}
-
-/// Scans `<source_dir>/skills/*/SKILL.md` into console skills. A missing source
-/// dir (platform-provisioned mode) or unreadable directory yields an empty list,
-/// and a missing or malformed `SKILL.md` skips just that bundle — never fails.
-fn company_bundles(source_dir: Option<&FsPath>) -> Vec<InstalledSkill> {
-    let Some(dir) = source_dir.map(|dir| dir.join("skills")) else {
-        return Vec::new();
-    };
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let Some(slug) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        let Ok(body) = std::fs::read_to_string(path.join("SKILL.md")) else {
-            continue;
-        };
-        if let Ok(doc) = parse_skill_md(slug, &body) {
-            out.push(InstalledSkill::from_company_bundle(&doc, true));
-        }
-    }
-    out
+/// `GET …/skills` — the company's **effective** skill set, resolved by
+/// [`skill_effective::resolve`]: the global baseline, the company's on-disk
+/// bundles (`companies/<name>/skills/*/SKILL.md`), and the operator's
+/// [`SkillStateStore`] deltas, with the manifest's `[globals].disable` folded in
+/// as disabling deltas.
+///
+/// That is the same derivation the harness materializes for every agent, so the
+/// console reports the set the agents actually have — a disabled skill included,
+/// since its row is what carries the switch that turns it back on.
+async fn list_skills(
+    State(state): State<AppState>,
+    company: ScopedCompany,
+) -> Result<Json<Vec<InstalledSkill>>, ApiError> {
+    let mut deltas = company.runtime.skills().list(company.id()).await?;
+    deltas.extend(skill_effective::globals_skill_disables(
+        &company.runtime.globals_disable().await?,
+    ));
+    let registry = state.shared_skill_registry()?;
+    let effective = skill_effective::resolve(company.runtime.source_dir(), &registry, &deltas)?;
+    Ok(Json(
+        effective
+            .iter()
+            .map(InstalledSkill::from_effective)
+            .collect(),
+    ))
 }
 
 /// `POST …/skills/{slug}/install` — install a shared-library skill by slug.
@@ -588,6 +525,8 @@ fn titleize(slug: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path as FsPath;
+
     use super::*;
 
     fn write_bundle(root: &FsPath, slug: &str, contents: &str) {
@@ -615,28 +554,92 @@ mod tests {
         );
     }
 
+    /// The projection every `GET …/skills` row goes through, over the same
+    /// resolution the harness materializes.
+    fn list(source_dir: Option<&FsPath>, deltas: &[SkillState]) -> Vec<InstalledSkill> {
+        skill_effective::resolve(source_dir, &[], deltas)
+            .expect("resolves")
+            .iter()
+            .map(InstalledSkill::from_effective)
+            .collect()
+    }
+
+    fn global_slug() -> String {
+        crate::globals::skills()[0].slug.clone()
+    }
+
+    /// The global baseline is what every agent has before a company adds
+    /// anything, so it is what the console must list for a company with no
+    /// bundles and no deltas — the shape a platform-provisioned tenant boots in.
     #[test]
-    fn merge_unions_bundles_with_deltas_and_skips_malformed() {
+    fn the_list_includes_the_global_baseline_with_no_bundles_and_no_deltas() {
+        let out = list(None, &[]);
+        for doc in crate::globals::skills() {
+            let row = out
+                .iter()
+                .find(|s| s.id == doc.slug)
+                .unwrap_or_else(|| panic!("no `{}` row", doc.slug));
+            assert!(row.enabled);
+            assert_eq!(row.name, doc.name);
+            assert_eq!(row.description, doc.description);
+            assert_eq!(
+                row.source,
+                SkillSource::Company,
+                "a global is a baseline install, not something an operator added, \
+                 so it carries no uninstall affordance"
+            );
+        }
+    }
+
+    /// A disabled global keeps its row. Hiding it would remove the only control
+    /// that could turn it back on.
+    #[test]
+    fn a_disabled_global_is_listed_as_disabled_rather_than_hidden() {
+        let slug = global_slug();
+        let out = list(
+            None,
+            &[SkillState {
+                slug: slug.clone(),
+                enabled: false,
+                source: SkillSource::Company,
+                custom_doc: None,
+            }],
+        );
+
+        let row = out.iter().find(|s| s.id == slug).expect("row still listed");
+        assert!(!row.enabled);
+        assert!(!row.name.is_empty(), "a disabled row keeps its name");
+    }
+
+    /// `[globals].disable` is honoured by the reader exactly as the harness
+    /// honours it — via the same synthesized delta.
+    #[test]
+    fn a_manifest_opt_out_is_honoured_by_the_reader() {
+        let slug = global_slug();
+        let deltas = skill_effective::globals_skill_disables(&[format!("skill:{slug}")]);
+        let out = list(None, &deltas);
+
+        let row = out.iter().find(|s| s.id == slug).expect("row still listed");
+        assert!(!row.enabled, "the manifest opt-out reaches the console");
+    }
+
+    #[test]
+    fn the_list_unions_bundles_with_deltas() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        // A well-formed company bundle, plus one with no frontmatter that must be
-        // skipped rather than failing the whole scan.
         write_bundle(
             root,
             "onboard",
             "---\nname: Onboard\ndescription: Get set up\ncategory: Ops\n---\n# Onboard\n",
         );
-        write_bundle(root, "broken", "no frontmatter here\n");
 
         let deltas = vec![
-            // Disables the company bundle above (a plain enable/disable delta).
             SkillState {
                 slug: "onboard".to_string(),
                 enabled: false,
                 source: SkillSource::Company,
                 custom_doc: None,
             },
-            // A custom skill with no matching company bundle.
             SkillState {
                 slug: "my-skill".to_string(),
                 enabled: true,
@@ -647,10 +650,8 @@ mod tests {
             },
         ];
 
-        let out = merge_effective(Some(root), deltas);
+        let out = list(Some(root), &deltas);
 
-        // The company bundle appears, keeps its parsed name, and the delta flips
-        // it disabled.
         let onboard = out
             .iter()
             .find(|s| s.id == "onboard")
@@ -659,7 +660,6 @@ mod tests {
         assert_eq!(onboard.source, SkillSource::Company);
         assert!(!onboard.enabled, "delta flips the bundle disabled");
 
-        // The custom delta appears on its own, enriched from its doc.
         let custom = out
             .iter()
             .find(|s| s.id == "my-skill")
@@ -668,29 +668,149 @@ mod tests {
         assert_eq!(custom.name, "My Skill");
         assert!(custom.enabled);
 
-        // The malformed bundle is skipped, never surfaced.
-        assert!(
-            out.iter().all(|s| s.id != "broken"),
-            "malformed SKILL.md is skipped"
-        );
-
-        // Deterministic order (by slug): my-skill < onboard.
         let ids: Vec<&str> = out.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, vec!["my-skill", "onboard"]);
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted, "rows are ordered by slug");
     }
 
+    /// A malformed company bundle costs that company its whole catalogue in the
+    /// harness, so the reader reports the failure instead of a tidy subset that
+    /// no agent actually has.
     #[test]
-    fn merge_with_no_source_dir_returns_only_deltas() {
-        let deltas = vec![SkillState {
-            slug: "web-research".to_string(),
-            enabled: true,
-            source: SkillSource::Registry,
-            custom_doc: None,
-        }];
-        let out = merge_effective(None, deltas);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].id, "web-research");
-        assert_eq!(out[0].source, SkillSource::Registry);
+    fn a_malformed_company_bundle_surfaces_as_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_bundle(tmp.path(), "broken", "no frontmatter here\n");
+        assert!(skill_effective::resolve(Some(tmp.path()), &[], &[]).is_err());
+    }
+
+    /// The REST list and the GraphQL resolver project the same resolution, so
+    /// the two transports cannot report different skills for one company.
+    #[test]
+    fn the_rest_list_and_the_graphql_resolver_agree() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_bundle(
+            tmp.path(),
+            "onboard",
+            "---\nname: Onboard\ndescription: Get set up\ncategory: Ops\nversion: 2.0.0\n---\n# Onboard\n",
+        );
+        let deltas = vec![
+            SkillState {
+                slug: global_slug(),
+                enabled: false,
+                source: SkillSource::Company,
+                custom_doc: None,
+            },
+            SkillState {
+                slug: "onboard".to_string(),
+                enabled: true,
+                source: SkillSource::Custom,
+                custom_doc: Some(
+                    "---\nname: Onboard v2\ndescription: Rewritten\ncategory: Ops\nversion: 3.0.0\n---\n# v2\n"
+                        .to_string(),
+                ),
+            },
+        ];
+
+        let effective = skill_effective::resolve(Some(tmp.path()), &[], &deltas).expect("resolves");
+        let rest: Vec<InstalledSkill> = effective
+            .iter()
+            .map(InstalledSkill::from_effective)
+            .collect();
+        let gql = crate::server::graphql::skills::project(&effective);
+
+        assert_eq!(rest.len(), gql.len());
+        for (rest, gql) in rest.iter().zip(gql.iter()) {
+            assert_eq!(rest.id, gql.id.0);
+            assert_eq!(rest.name, gql.name);
+            assert_eq!(rest.description, gql.description);
+            assert_eq!(rest.category, gql.category);
+            assert_eq!(rest.enabled, gql.enabled);
+            assert_eq!(rest.version, gql.version);
+            assert_eq!(
+                serde_json::to_value(rest.source).unwrap(),
+                serde_json::Value::String(gql.source.clone()),
+            );
+        }
+
+        // The divergence this convergence closes: REST refreshed the display
+        // fields from a delta's document where GraphQL kept the bundle's.
+        let onboard = rest.iter().find(|s| s.id == "onboard").expect("row");
+        assert_eq!(onboard.name, "Onboard v2");
+        assert_eq!(onboard.version.as_deref(), Some("3.0.0"));
+    }
+
+    /// The test the bug needed: what the console lists and what the harness
+    /// writes into an agent's skill tree are the same set.
+    #[cfg(feature = "openhuman")]
+    #[test]
+    fn the_rest_list_and_the_harness_effective_set_agree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        write_bundle(
+            tmp.path(),
+            "onboard",
+            "---\nname: Onboard\ndescription: Get set up\n---\n# Onboard\n",
+        );
+        let deltas = vec![
+            SkillState {
+                slug: global_slug(),
+                enabled: false,
+                source: SkillSource::Company,
+                custom_doc: None,
+            },
+            SkillState {
+                slug: "my-skill".to_string(),
+                enabled: true,
+                source: SkillSource::Custom,
+                custom_doc: Some(
+                    "---\nname: My Skill\ndescription: Does a thing\n---\n# body\n".to_string(),
+                ),
+            },
+        ];
+
+        crate::harness::skills::EffectiveSkills::materialize(
+            ws.path().to_path_buf(),
+            Some(tmp.path()),
+            &[],
+            &deltas,
+        )
+        .expect("materializes");
+
+        let mut materialized: Vec<String> = std::fs::read_dir(ws.path().join("skills"))
+            .expect("skill tree")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        materialized.sort();
+
+        let mut listed: Vec<String> = list(Some(tmp.path()), &deltas)
+            .into_iter()
+            .filter(|row| row.enabled)
+            .map(|row| row.id)
+            .collect();
+        listed.sort();
+
+        assert_eq!(
+            listed, materialized,
+            "the console's enabled rows are exactly the skills the agents read"
+        );
+        assert!(
+            !materialized.contains(&global_slug()),
+            "the disabled global really is withheld from the agents"
+        );
+        // Pinned against the baseline itself, so an agreement of two empty
+        // halves cannot pass for agreement.
+        for doc in crate::globals::skills() {
+            if doc.slug == global_slug() {
+                continue;
+            }
+            assert!(
+                listed.contains(&doc.slug),
+                "the console lists the global `{}` the agents read",
+                doc.slug
+            );
+        }
     }
 
     /// `valid_slug` is the gate both write handlers share: a slug is also a
@@ -961,6 +1081,7 @@ mod tests {
             let state = state_with_company(home.path()).await;
             seed_fixed_member(&state, "acme").await;
             let member = member_cookie("acme");
+            let before = slugs(&state).await;
 
             let attempts: [(&str, &str, Option<&str>); 4] = [
                 ("POST", "/api/v1/company/skills/seo-audit/install", None),
@@ -995,8 +1116,9 @@ mod tests {
                 assert_eq!(resp["code"], "unauthorized", "{method} {uri}: {raw}");
             }
 
-            assert!(
-                slugs(&state).await.is_empty(),
+            assert_eq!(
+                slugs(&state).await,
+                before,
                 "no member or unauthenticated attempt landed a delta"
             );
         }
@@ -1058,6 +1180,58 @@ mod tests {
             );
         }
 
+        /// The affordance the missing rows were costing: a global reaches every
+        /// agent, and the only control that can withhold it is the row's own
+        /// switch. Driven over the real route, end to end.
+        #[tokio::test]
+        async fn a_global_can_be_disabled_and_re_enabled_through_the_put_route() {
+            let home = tempfile::tempdir().unwrap();
+            let state = state_with_company(home.path()).await;
+            let slug = super::tests::global_slug();
+
+            let listed = |state: &AppState, slug: String| {
+                let state = state.clone();
+                async move {
+                    let (status, value, raw) =
+                        send(&state, "GET", "/api/v1/company/skills", None).await;
+                    assert_eq!(status, StatusCode::OK, "list skills: {raw}");
+                    value
+                        .as_array()
+                        .expect("an array")
+                        .iter()
+                        .find(|row| row["id"] == slug)
+                        .unwrap_or_else(|| panic!("no `{slug}` row: {raw}"))
+                        .clone()
+                }
+            };
+
+            let row = listed(&state, slug.clone()).await;
+            assert_eq!(row["enabled"], true, "a global starts enabled");
+
+            let (status, _, raw) = send(
+                &state,
+                "PUT",
+                &format!("/api/v1/company/skills/{slug}"),
+                Some(r#"{"enabled":false}"#),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "disable a global: {raw}");
+
+            let row = listed(&state, slug.clone()).await;
+            assert_eq!(row["enabled"], false, "the switch stuck");
+            assert_eq!(row["source"], "company", "still not uninstallable");
+
+            let (status, _, raw) = send(
+                &state,
+                "PUT",
+                &format!("/api/v1/company/skills/{slug}"),
+                Some(r#"{"enabled":true}"#),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "re-enable a global: {raw}");
+            assert_eq!(listed(&state, slug).await["enabled"], true);
+        }
+
         /// A skill's document becomes part of every agent's effective prompt,
         /// so [`MAX_SKILL_DOC_BYTES`] is enforced on the assembled `SKILL.md`,
         /// not just accepted and truncated later — and the refusal is the same
@@ -1067,6 +1241,7 @@ mod tests {
         async fn an_over_cap_custom_skill_body_is_refused() {
             let home = tempfile::tempdir().unwrap();
             let state = state_with_company(home.path()).await;
+            let before = slugs(&state).await;
 
             let oversized = "x".repeat(MAX_SKILL_DOC_BYTES);
             let body = serde_json::json!({
@@ -1081,8 +1256,9 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST, "{raw}");
             assert_eq!(resp["code"], "invalid_request", "{raw}");
 
-            assert!(
-                slugs(&state).await.is_empty(),
+            assert_eq!(
+                slugs(&state).await,
+                before,
                 "an over-cap body must not land a delta"
             );
         }

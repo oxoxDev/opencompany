@@ -108,6 +108,7 @@ pub mod search;
 // polish pass and the fallback when that pass cannot run, so a company with no
 // inference credential still gets a real team.
 pub mod setup;
+pub mod skill_effective;
 mod skill_file;
 // Steer (issue #111): pause / cancel / redirect an in-flight task or delegation
 // from the operator chat. Always compiled + openhuman-free so the operator
@@ -186,6 +187,7 @@ pub(crate) use manifest::hive_problems;
 pub(crate) use manifest::is_snake_case;
 pub use manifest::{DELEGATES_TO_WILDCARD, LEGACY_MANIFEST_FILE, Located, MANIFEST_FILE, discover};
 pub use mcp_file::{MCP_FILE, has_mcp_file, load_dir_mcp_servers};
+pub use skill_effective::{EffectiveSkill, SkillBody, SkillContent};
 pub use skill_file::{SkillDoc, load_dir_skills, parse_skill_md, render_skill_md};
 pub use task_file::{TASKS_FILE, TaskSeed, has_task_file, load_dir_tasks};
 pub use types::{

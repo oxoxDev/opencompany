@@ -1072,6 +1072,19 @@ impl CompanyRuntime {
             .unwrap_or_default())
     }
 
+    /// The company manifest's `[globals].disable` opt-outs, read from the
+    /// persisted record. Empty when the record hasn't been saved yet.
+    ///
+    /// Read by both skill read paths so a manifest opt-out reaches them the way
+    /// it reaches the harness — as a synthesized disabling delta, via
+    /// [`globals_skill_disables`](crate::company::skill_effective::globals_skill_disables).
+    pub async fn globals_disable(&self) -> Result<Vec<String>> {
+        let record = self.store.load(&self.id).await?;
+        Ok(record
+            .map(|record| record.manifest.globals.disable)
+            .unwrap_or_default())
+    }
+
     /// This company's inbox store (inbound + outbound email).
     pub fn inbox(&self) -> &Arc<dyn InboxStore> {
         &self.inbox

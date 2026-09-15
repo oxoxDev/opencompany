@@ -3330,7 +3330,9 @@ impl HarnessPool {
         // the same thing in the same vocabulary, and a disable always beats an
         // enable there, so the company's own declaration wins over a console
         // re-enable of a skill it opted out of.
-        skill_deltas.extend(globals_skill_disables(&company.manifest.globals.disable));
+        skill_deltas.extend(crate::company::skill_effective::globals_skill_disables(
+            &company.manifest.globals.disable,
+        ));
         let skill_deltas = skill_deltas;
         let skill_fp = skill_delta_fingerprint(&skill_deltas);
 
@@ -5787,28 +5789,6 @@ fn company_name_fingerprint(name: &str) -> u64 {
 /// (and drop live agent conversation state) whenever the store returned the
 /// same skills in a different row order. The full `custom_doc` body is hashed so
 /// an *edited* skill (same slug, new content) also triggers a rebuild. No
-/// The disabling [`SkillState`] deltas a company's `[globals].disable` implies.
-///
-/// One per `skill:<slug>` entry, and nothing else: an entry naming another kind
-/// is that kind's business, and manifest validation has already refused an entry
-/// naming nothing at all.
-pub(crate) fn globals_skill_disables(disable: &[String]) -> Vec<SkillState> {
-    disable
-        .iter()
-        .filter_map(|entry| entry.strip_prefix("skill:"))
-        .map(|slug| SkillState {
-            slug: slug.to_string(),
-            enabled: false,
-            // The shared library is where these skills are authored, so that is
-            // what they are a delta over. The value is inert here in any case:
-            // this delta is synthesized per rebuild, never stored, and only its
-            // `enabled = false` is read.
-            source: crate::ports::SkillSource::Registry,
-            custom_doc: None,
-        })
-        .collect()
-}
-
 /// secrets are involved — a skill delta is operator-authored content.
 fn skill_delta_fingerprint(deltas: &[SkillState]) -> u64 {
     use std::collections::hash_map::DefaultHasher;

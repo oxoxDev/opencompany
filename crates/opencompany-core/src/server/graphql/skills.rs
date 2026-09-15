@@ -1,20 +1,20 @@
-//! Skill reads: `Company.skills` (company-dir docs unioned with the operator's
-//! [`SkillStateStore`] deltas) and the top-level `skillRegistry` (the repo-level
-//! shared library).
+//! Skill reads: `Company.skills` and the top-level `skillRegistry` (the
+//! repo-level shared library).
 //!
-//! The store holds deltas only; the effective set unions the company's on-disk
-//! `skills/*/SKILL.md` docs at read time — matching the write-plane semantics
-//! documented on [`RuntimeBuilder::build`](crate::runtime::RuntimeBuilder).
+//! The store holds deltas only. What the company's effective set *is* — the
+//! global baseline, its on-disk `skills/*/SKILL.md` bundles, and those deltas —
+//! is resolved by [`crate::company::skill_effective`], which the REST list and
+//! the harness read too, so no two of the three can drift.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_graphql::{Context, ID, SimpleObject};
 
 use crate::AppState;
+use crate::company::SkillDoc;
 use crate::company::runtime::CompanyRuntime;
-use crate::company::{SkillDoc, load_dir_skills, parse_skill_md};
-use crate::ports::skills_state::{SkillSource, SkillState};
+use crate::company::skill_effective::{self, EffectiveSkill};
+use crate::ports::skills_state::SkillSource;
 
 /// One skill installed in a company. Mirrors the console's `@/api/skills` types.
 #[derive(SimpleObject)]
@@ -82,21 +82,6 @@ fn titleize(slug: &str) -> String {
         .join(" ")
 }
 
-fn from_doc(doc: &SkillDoc, source: &str, enabled: bool) -> SkillGql {
-    SkillGql {
-        id: ID(doc.slug.clone()),
-        name: doc.name.clone(),
-        description: doc.description.clone(),
-        category: doc
-            .category
-            .clone()
-            .unwrap_or_else(|| DEFAULT_CATEGORY.to_string()),
-        source: source.to_string(),
-        enabled,
-        version: doc.version.clone(),
-    }
-}
-
 /// The repo-level skill registry docs, loaded from the shared `skills/` library
 /// directory. Empty when no source checkout is present (platform-provisioned
 /// mode), where the registry has nothing to serve. A configured library that
@@ -105,7 +90,12 @@ fn registry_docs(state: &AppState) -> async_graphql::Result<Arc<[SkillDoc]>> {
     Ok(state.shared_skill_registry()?)
 }
 
-/// Resolves `Company.skills`: company-dir docs overlaid with store deltas.
+/// Resolves `Company.skills` from the company's effective set
+/// ([`skill_effective::resolve`]) — the same derivation the harness materializes
+/// for every agent, and the same one `GET …/skills` answers with.
+///
+/// Disabled entries are reported rather than dropped: the console's switch needs
+/// a row to sit on.
 pub(crate) async fn resolve_company(
     ctx: &Context<'_>,
     runtime: &Arc<CompanyRuntime>,
@@ -113,95 +103,39 @@ pub(crate) async fn resolve_company(
     let state = ctx.data::<AppState>()?;
     let registry = registry_docs(state)?;
 
-    // Base: the company's own on-disk skills (`companies/<name>/skills`), all
-    // enabled by default. In platform-provisioned mode there is no source dir,
-    // so the base is empty and only the store deltas below contribute.
-    let mut by_slug: HashMap<String, SkillGql> = runtime
-        .source_dir()
-        .map(|dir| dir.join("skills"))
-        .and_then(|dir| load_dir_skills(&dir).ok())
-        .unwrap_or_default()
-        .iter()
-        .map(|doc| (doc.slug.clone(), from_doc(doc, "company", true)))
-        .collect();
+    let mut deltas = runtime.skills().list(runtime.id()).await?;
+    deltas.extend(skill_effective::globals_skill_disables(
+        &runtime.globals_disable().await?,
+    ));
 
-    // Overlay the operator's deltas (enabled toggles, installs, custom skills).
-    for st in runtime.skills().list(runtime.id()).await? {
-        if let Some(existing) = by_slug.get_mut(&st.slug) {
-            existing.enabled = st.enabled;
-            existing.source = source_str(st.source).to_string();
-        } else {
-            by_slug.insert(st.slug.clone(), skill_from_state(&st, &registry));
-        }
-    }
-
-    let mut out: Vec<SkillGql> = by_slug.into_values().collect();
-    out.sort_by(|a, b| a.id.0.cmp(&b.id.0));
-    Ok(out)
+    Ok(project(&skill_effective::resolve(
+        runtime.source_dir(),
+        &registry,
+        &deltas,
+    )?))
 }
 
-/// Projects a store delta with no company-dir doc into a `Skill`, reading a
-/// registry install from its pinned snapshot and a custom skill from its own
-/// `SKILL.md`.
-fn skill_from_state(st: &SkillState, registry: &[SkillDoc]) -> SkillGql {
-    match st.source {
-        SkillSource::Registry => {
-            // The install-time snapshot is authoritative, exactly as it is for
-            // the REST projection (`InstalledSkill::from_state`): `install()`
-            // pins the library document into `custom_doc` so a later library
-            // edit does not rewrite an existing install. Reading the live
-            // library here instead would make the two transports report
-            // different `version`s for the same install, and would discard real
-            // persisted content once a slug leaves the library.
-            let pinned = st
-                .custom_doc
-                .as_deref()
-                .and_then(|src| parse_skill_md(&st.slug, src).ok());
-            // The live library is a fallback only: a pre-fix install has no
-            // snapshot, or one that does not parse.
-            match pinned
-                .as_ref()
-                .or_else(|| registry.iter().find(|doc| doc.slug == st.slug))
-            {
-                Some(doc) => from_doc(doc, "registry", st.enabled),
-                None => SkillGql {
-                    id: ID(st.slug.clone()),
-                    name: titleize(&st.slug),
-                    description: String::new(),
-                    category: DEFAULT_CATEGORY.to_string(),
-                    source: "registry".to_string(),
-                    enabled: st.enabled,
-                    version: None,
-                },
-            }
-        }
-        SkillSource::Custom => {
-            let doc = st
-                .custom_doc
-                .as_deref()
-                .and_then(|src| parse_skill_md(&st.slug, src).ok());
-            match doc {
-                Some(doc) => from_doc(&doc, "custom", st.enabled),
-                None => SkillGql {
-                    id: ID(st.slug.clone()),
-                    name: titleize(&st.slug),
-                    description: String::new(),
-                    category: DEFAULT_CATEGORY.to_string(),
-                    source: "custom".to_string(),
-                    enabled: st.enabled,
-                    version: None,
-                },
-            }
-        }
-        SkillSource::Company => SkillGql {
-            id: ID(st.slug.clone()),
-            name: titleize(&st.slug),
-            description: String::new(),
-            category: DEFAULT_CATEGORY.to_string(),
-            source: "company".to_string(),
-            enabled: st.enabled,
-            version: None,
-        },
+/// Projects a resolved effective set into the GraphQL shape.
+pub(crate) fn project(effective: &[EffectiveSkill]) -> Vec<SkillGql> {
+    effective.iter().map(from_effective).collect()
+}
+
+/// Projects one effective entry into a `Skill`. An entry no layer supplied a
+/// document for is rendered from its slug alone.
+fn from_effective(skill: &EffectiveSkill) -> SkillGql {
+    let doc = skill.doc();
+    SkillGql {
+        id: ID(skill.slug.clone()),
+        name: doc
+            .map(|doc| doc.name.clone())
+            .unwrap_or_else(|| titleize(&skill.slug)),
+        description: doc.map(|doc| doc.description.clone()).unwrap_or_default(),
+        category: doc
+            .and_then(|doc| doc.category.clone())
+            .unwrap_or_else(|| DEFAULT_CATEGORY.to_string()),
+        source: source_str(skill.source).to_string(),
+        enabled: skill.enabled,
+        version: doc.and_then(|doc| doc.version.clone()),
     }
 }
 
