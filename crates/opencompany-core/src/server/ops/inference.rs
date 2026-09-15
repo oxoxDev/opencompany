@@ -1433,8 +1433,13 @@ async fn unauthenticated_reason(
 /// another vendor fails here while the card still reports one is set. Saying so
 /// is the difference between a dead end and a next step.
 #[cfg(feature = "openhuman")]
-fn probe_failure(decl: &inference::InferenceDecl, raw: &str) -> (String, &'static str) {
-    if raw.contains("401 Unauthorized") {
+fn probe_failure(decl: &inference::InferenceDecl, error: &anyhow::Error) -> (String, &'static str) {
+    let raw = error.to_string();
+    let rejected = matches!(
+        error.downcast_ref::<tinyinference::Error>(),
+        Some(tinyinference::Error::Provider(error)) if error.status == Some(401)
+    );
+    if rejected || raw.contains("401 Unauthorized") {
         return (
             format!(
                 "{} rejected the credential stored for this company. The request did carry an \
@@ -1536,8 +1541,8 @@ async fn test_config(company: ScopedCompany) -> Response {
             // fallback), so this always passes it rather than gating on
             // `is_default` the way `TenantProvider::invoke` deliberately does not
             // (Codex review on #1824's #1811 follow-up).
-            let failure = |raw: &str| {
-                let (error, code) = probe_failure(&decl, raw);
+            let failure = |error: &anyhow::Error| {
+                let (error, code) = probe_failure(&decl, error);
                 (
                     StatusCode::BAD_GATEWAY,
                     Json(serde_json::json!({
@@ -1553,7 +1558,7 @@ async fn test_config(company: ScopedCompany) -> Response {
                 crate::harness::provider::DEFAULT_HOSTED_MODEL,
             ) {
                 Ok(model) => model,
-                Err(err) => return failure(&err.to_string()),
+                Err(err) => return failure(&anyhow::Error::new(err)),
             };
             match crate::harness::provider::probe(
                 &decl,
@@ -1568,7 +1573,7 @@ async fn test_config(company: ScopedCompany) -> Response {
                     "note": "Reached the provider and got a reply.",
                 }))
                 .into_response(),
-                Err(err) => failure(&err.to_string()),
+                Err(err) => failure(&err),
             }
         }
     }
@@ -2021,6 +2026,58 @@ base_url = "https://byo.example/v1"
         );
     }
 
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn saved_company_probe_keeps_typed_credential_failures() {
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(|| async {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({
+                        "error": {
+                            "message": "Missing Authentication header",
+                            "code": 401
+                        }
+                    })),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let home_dir = home();
+        let state = state_with_company(home_dir.path()).await;
+
+        let (status, _, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({
+                "provider": "openai_compatible",
+                "baseUrl": format!("http://{address}/v1"),
+                "key": "not-a-real-key",
+                "models": { "chat-v1": "provider/model" }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        let (status, body, raw) =
+            send(&state, "POST", "/api/v1/company/inference/test", None).await;
+        server.abort();
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{raw}");
+        assert_eq!(body["code"], json!("credential_rejected"), "{raw}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("did carry an Authorization header"),
+            "{raw}"
+        );
+    }
+
     /// Issue #1737, the sentence that would have saved an hour: OpenRouter
     /// answers a credential it cannot parse with `Missing Authentication
     /// header`, which reads as "nothing was sent" and is how the issue came to
@@ -2034,9 +2091,15 @@ base_url = "https://byo.example/v1"
             Some("a-key-for-some-other-vendor"),
             None,
         );
-        let raw = "inference returned 401 Unauthorized: \
-                   {\"error\":{\"message\":\"Missing Authentication header\",\"code\":401}}";
-        let (message, code) = probe_failure(&decl, raw);
+        let error = anyhow::Error::new(tinyinference::Error::Provider(Box::new(
+            tinyinference::model::ProviderError {
+                provider: "inference".to_string(),
+                status: Some(401),
+                message: "Missing Authentication header".to_string(),
+                ..Default::default()
+            },
+        )));
+        let (message, code) = probe_failure(&decl, &error);
 
         assert_eq!(code, "credential_rejected");
         assert!(
