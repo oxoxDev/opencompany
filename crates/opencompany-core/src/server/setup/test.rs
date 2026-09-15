@@ -1829,6 +1829,44 @@ async fn an_empty_catalog_has_its_own_failure_and_never_sends_chat() {
 }
 
 #[cfg(feature = "openhuman")]
+#[tokio::test]
+async fn catalog_auth_rejections_keep_their_credential_message() {
+    for (status, expected) in [
+        (
+            axum::http::StatusCode::UNAUTHORIZED,
+            "That key was rejected by the provider.",
+        ),
+        (
+            axum::http::StatusCode::FORBIDDEN,
+            "That key was accepted but is not allowed to list models.",
+        ),
+    ] {
+        let app = axum::Router::new().route(
+            "/v1/models",
+            axum::routing::get(move || async move { status }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let result = super::probe_inference(
+            &super::InferenceTestRequest {
+                provider: "openai_compatible".to_string(),
+                key: Some("not-a-real-key".to_string()),
+                base_url: Some(format!("http://{address}/v1")),
+            },
+            &MapEnv::default(),
+        )
+        .await;
+        server.abort();
+
+        assert!(!result.ok);
+        assert_eq!(result.error.as_deref(), Some(expected));
+        assert_eq!(result.model, None);
+    }
+}
+
+#[cfg(feature = "openhuman")]
 #[test]
 fn typed_probe_failures_choose_copy_from_the_error_type() {
     let provider = |status| {

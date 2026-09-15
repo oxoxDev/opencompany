@@ -1334,11 +1334,16 @@ async fn probe_inference<E: EnvSource + Sync>(
                 error = %error,
                 "[setup] the inference test could not list provider models"
             );
+            let message = match error.credential_status() {
+                Some(401) => "That key was rejected by the provider.",
+                Some(403) => "That key was accepted but is not allowed to list models.",
+                _ => MODEL_DISCOVERY_FAILURE,
+            };
             return InferenceTestDto {
                 ok: false,
                 base_url,
                 model: None,
-                error: Some(MODEL_DISCOVERY_FAILURE.to_string()),
+                error: Some(message.to_string()),
             };
         }
     };

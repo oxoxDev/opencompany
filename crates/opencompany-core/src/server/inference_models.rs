@@ -149,8 +149,8 @@ fn parse_models(payload: RegistryResponse) -> Vec<InferenceModel> {
 #[derive(Debug)]
 pub(crate) struct DiscoveryError {
     message: String,
-    /// `true` for `401`/`403` — an answer about the presented key.
-    credential_specific: bool,
+    /// `401`/`403` when the answer is about the presented key.
+    credential_status: Option<u16>,
     /// `true` for `404` — the endpoint does not serve this path at all, which is
     /// what lets the account-scoped read fall back to the public one.
     not_found: bool,
@@ -160,15 +160,15 @@ impl DiscoveryError {
     fn endpoint(message: String) -> Self {
         Self {
             message,
-            credential_specific: false,
+            credential_status: None,
             not_found: false,
         }
     }
 
-    fn credential(message: String) -> Self {
+    fn credential(status: reqwest::StatusCode, message: String) -> Self {
         Self {
             message,
-            credential_specific: true,
+            credential_status: Some(status.as_u16()),
             not_found: false,
         }
     }
@@ -176,9 +176,14 @@ impl DiscoveryError {
     fn missing(message: String) -> Self {
         Self {
             message,
-            credential_specific: false,
+            credential_status: None,
             not_found: true,
         }
+    }
+
+    #[cfg(feature = "openhuman")]
+    pub(crate) fn credential_status(&self) -> Option<u16> {
+        self.credential_status
     }
 }
 
@@ -380,7 +385,7 @@ async fn send_classified(
         let message = format!("request to {named} failed: {error}");
         match status {
             reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
-                DiscoveryError::credential(message)
+                DiscoveryError::credential(status, message)
             }
             reqwest::StatusCode::NOT_FOUND => DiscoveryError::missing(message),
             _ => DiscoveryError::endpoint(message),
@@ -679,7 +684,7 @@ pub(crate) async fn catalog_models(
         let mut models = discover_models(base_url, bearer, auth, shape)
             .await
             .map_err(|error| {
-                if error.credential_specific {
+                if error.credential_status.is_some() {
                     FetchError::Credential(error.to_string())
                 } else {
                     FetchError::Failed(error.to_string())
@@ -765,7 +770,7 @@ mod tests {
             "the refusal should name the reason, said: {refused}"
         );
         assert!(
-            !refused.credential_specific,
+            refused.credential_status.is_none(),
             "a policy refusal is not evidence about the credential, and must not \
              be classified as one"
         );
@@ -1382,12 +1387,19 @@ mod tests {
         assert!(cache.lookup_failure(now).is_some());
 
         // And the classification that keeps a 401 out of that path.
-        assert!(
-            DiscoveryError::credential("401 Unauthorized".to_string()).credential_specific,
-            "a 401 is an answer about the key, not about the endpoint"
+        let rejection = DiscoveryError::credential(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "401 Unauthorized".to_string(),
         );
         assert!(
-            !DiscoveryError::endpoint("connection refused".to_string()).credential_specific,
+            rejection.credential_status.is_some(),
+            "a 401 is an answer about the key, not about the endpoint"
+        );
+        assert_eq!(rejection.credential_status, Some(401));
+        assert!(
+            DiscoveryError::endpoint("connection refused".to_string())
+                .credential_status
+                .is_none(),
             "a transport failure is an answer about the endpoint, and is memoized"
         );
     }
