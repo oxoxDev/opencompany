@@ -1375,7 +1375,7 @@ async fn probe_inference<E: EnvSource + Sync>(
                 ok: false,
                 base_url,
                 model: Some(model),
-                error: Some(summarise_probe_failure(&err.to_string())),
+                error: Some(summarise_probe_failure(&err)),
             }
         }
     }
@@ -1401,22 +1401,29 @@ async fn probe_inference<E: EnvSource + Sync>(
 
 /// Turns a provider failure into one line an operator can act on.
 ///
-/// Three outcomes are worth telling apart because each has a different fix: the
-/// key is wrong, the endpoint is wrong, or the provider said no for its own
-/// reasons. Everything else is reported as unreachable rather than guessed at.
+/// Typed provider statuses and configuration errors each keep their own action.
+/// Only untyped transport failures fall back to inspecting rendered text.
 #[cfg(feature = "openhuman")]
-fn summarise_probe_failure(raw: &str) -> String {
-    let lower = raw.to_lowercase();
-    if lower.contains("401") || lower.contains("unauthorized") || lower.contains("invalid api key")
-    {
-        "That key was rejected by the provider.".to_string()
-    } else if lower.contains("403") || lower.contains("forbidden") {
-        "That key was accepted but is not allowed to use this model.".to_string()
-    } else if lower.contains("404") {
-        "Reached the host, but there is no chat endpoint at that URL.".to_string()
-    } else if lower.contains("429") || lower.contains("rate limit") {
-        "The provider is rate-limiting this key right now.".to_string()
-    } else if lower.contains("timed out") || lower.contains("timeout") {
+fn summarise_probe_failure(err: &anyhow::Error) -> String {
+    if let Some(error) = err.downcast_ref::<tinyinference::Error>() {
+        let message = match error {
+            tinyinference::Error::Provider(error) => match error.status {
+                Some(401) => "That key was rejected by the provider.",
+                Some(403) => "That key was accepted but is not allowed to use this model.",
+                Some(404) => "That model is not available from this provider for your account.",
+                Some(429) => "The provider is rate-limiting this key right now.",
+                _ => "Could not get a reply from the provider.",
+            },
+            tinyinference::Error::Model(_) | tinyinference::Error::Validation(_) => {
+                "The model configuration for this connection is invalid."
+            }
+            _ => "Could not get a reply from the provider.",
+        };
+        return message.to_string();
+    }
+
+    let lower = err.to_string().to_lowercase();
+    if lower.contains("timed out") || lower.contains("timeout") {
         "The provider did not answer in time.".to_string()
     } else if lower.contains("dns") || lower.contains("connect") || lower.contains("resolve") {
         "Could not reach that address.".to_string()

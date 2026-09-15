@@ -36,7 +36,7 @@ use async_trait::async_trait;
 
 use tinyinference::message::{AssistantMessage, ContentBlock, Message};
 use tinyinference::model::{
-    ChatModel, Modalities, ModelProfile, ModelRequest, ModelResponse, ToolChoice,
+    ChatModel, Modalities, ModelProfile, ModelRequest, ModelResponse, ProviderError, ToolChoice,
 };
 use tinyinference::tool::{ToolCall, ToolSchema};
 use tinyinference::usage::Usage;
@@ -2000,7 +2000,41 @@ async fn send_body(
             credential.invalidate();
         }
         let text = response.text().await.unwrap_or_default();
-        let error = format!("inference returned {status}: {}", scrub(text.clone()));
+        let scrubbed = scrub(text.clone());
+        let error = format!("inference returned {status}: {scrubbed}");
+        let raw = serde_json::from_str::<serde_json::Value>(&scrubbed).ok();
+        let error_object = raw.as_ref().and_then(|value| value.get("error"));
+        let message = error_object
+            .and_then(|value| value.get("message"))
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                raw.as_ref()
+                    .and_then(|value| value.get("message"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or(&scrubbed)
+            .to_string();
+        let code = error_object
+            .and_then(|value| value.get("code").or_else(|| value.get("type")))
+            .and_then(|value| match value {
+                serde_json::Value::String(code) => Some(code.clone()),
+                serde_json::Value::Number(code) => Some(code.to_string()),
+                _ => None,
+            });
+        let provider_error = |message: String| {
+            anyhow::Error::new(InferenceError::Provider(Box::new(ProviderError {
+                provider: "inference".to_string(),
+                model: Some(plan.model.clone()),
+                status: Some(status.as_u16()),
+                code: code.clone(),
+                message,
+                retryable: status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    || status.is_server_error(),
+                retry_after_ms: None,
+                raw: raw.clone(),
+            })))
+        };
         // `plan.url` is always `{base_url}/chat/completions` (see
         // `RequestPlan::url`'s doc and `request_plan`'s construction of it), so
         // this recovers the same `base_url` the failed request actually used —
@@ -2013,7 +2047,7 @@ async fn send_body(
             .unwrap_or_else(|| plan.url.clone());
         if let Some(advice) = model_unavailable_advice(status, &error, &models_url, harness, source)
         {
-            return Err(SendFailure::Other(anyhow::anyhow!("{advice}")));
+            return Err(SendFailure::Other(provider_error(advice)));
         }
         // Only a 400 is a statement about the request's shape. A 5xx, a 429 or a
         // 401 is about the service or the credential, and narrowing the body in
@@ -2024,10 +2058,10 @@ async fn send_body(
         {
             return Err(SendFailure::Rejected {
                 parameter,
-                error: anyhow::anyhow!("{error}"),
+                error: provider_error(message),
             });
         }
-        return Err(SendFailure::Other(anyhow::anyhow!("{error}")));
+        return Err(SendFailure::Other(provider_error(message)));
     }
     response.json().await.map_err(|e| {
         SendFailure::Other(anyhow::anyhow!(
