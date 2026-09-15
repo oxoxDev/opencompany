@@ -289,35 +289,22 @@ export function SkillsView({ client, company }: Props) {
           </Alert>
         )}
 
-
-        {/* Issue #569: what install / enable actually buy. A desk agent can list,
-            describe and read a skill and can never run one — deliberate, and
-            pinned by `dispatched_belt_excludes_every_deferred_family` — but this
-            screen's vocabulary is the vocabulary of switching a capability on,
-            so without saying it the operator learns the difference by asking a
+        {/* What install / enable actually buy. A desk agent can list, describe
+            and read a skill and can never run one — deliberate, and pinned by
+            `dispatched_belt_excludes_every_deferred_family` — but this screen's
+            vocabulary is the vocabulary of switching a capability on, so
+            without saying it the operator learns the difference by asking an
             agent to do something and watching nothing happen. */}
         <Alert data-testid="skills-read-only-note">
           <BookOpen className="size-4" />
           <AlertDescription>{SKILLS_READ_ONLY_NOTE}</AlertDescription>
         </Alert>
 
-        {!canManage && (
-          <Alert data-testid="skills-admin-only">
-            <Info className="size-4" />
-            <AlertTitle>Only an admin can change this company&apos;s skills</AlertTitle>
-            <AlertDescription>
-              A skill's content reaches every agent, so an admin installs, removes, enables and
-              adds them. You can see what is installed and enabled.
-            </AlertDescription>
-          </Alert>
-        )}
-
         {error && (
           <Alert variant="destructive">
             <AlertDescription>{error}</AlertDescription>
           </Alert>
         )}
-
 
         <PageTabPanel idBase="skills" id="installed" value={tab}>
             {loading ? (
@@ -386,10 +373,12 @@ export function SkillsView({ client, company }: Props) {
         open={addOpen}
         onOpenChange={setAddOpen}
         onAdd={async (fields) => {
+          const playbook = fields.body.trim();
           const saved = await createSkill(client, company, {
             name: fields.name.trim(),
             description: fields.description.trim(),
             category: fields.category,
+            ...(playbook ? { body: playbook } : {}),
           });
           setSkills((all) => [saved, ...all.filter((s) => s.id !== saved.id)]);
           setAddOpen(false);
@@ -518,17 +507,24 @@ function AddSkillDialog({
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
-  onAdd: (fields: { name: string; description: string; category: SkillCategory }) => Promise<void>;
+  onAdd: (fields: {
+    name: string;
+    description: string;
+    category: SkillCategory;
+    body: string;
+  }) => Promise<void>;
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [category, setCategory] = useState<SkillCategory>("Marketing");
+  const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
 
   function reset() {
     setName("");
     setDescription("");
     setCategory("Marketing");
+    setBody("");
   }
 
   async function submit() {
@@ -536,7 +532,11 @@ function AddSkillDialog({
     if (!name.trim() || !description.trim()) return;
     setBusy(true);
     try {
-      await onAdd({ name, description, category });
+      await onAdd({ name, description, category, body });
+      // The caller closes the dialog by flipping `open`, which never reaches
+      // `onOpenChange`, so clearing on dismiss alone leaves the last skill's
+      // fields sitting in the next one.
+      reset();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "could not add the skill");
     } finally {
@@ -552,13 +552,9 @@ function AddSkillDialog({
         if (!o) reset();
       }}
     >
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Add a skill</DialogTitle>
-          {/* Not "a capability your company should have" (issue #569): this is
-              where an operator authors one, so it is the earliest point the
-              console can frame a skill as the playbook an agent reads rather
-              than as something the company will carry out. */}
           <DialogDescription>
             Describe a playbook your agents should follow — what to do, and when.
           </DialogDescription>
@@ -588,7 +584,27 @@ function AddSkillDialog({
         </div>
         <div className="grid gap-2">
           <Label htmlFor="skill-desc">What it does</Label>
-          <Textarea id="skill-desc" rows={3} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="One line on when to use it and what it delivers." />
+          {/* One line, and an `Input` so it can only be one: the host collapses
+              newlines out of this field, and it is what an agent reads when
+              deciding whether to open the skill at all. */}
+          <Input
+            id="skill-desc"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="One line on when to use it and what it delivers."
+          />
+        </div>
+        <div className="grid gap-2">
+          <Label htmlFor="skill-body">Playbook</Label>
+          <Textarea
+            id="skill-body"
+            rows={8}
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            placeholder={
+              "The steps to follow, in the order to follow them. Markdown, as long as it needs to be.\n\nLeave it empty and an agent gets the line above and nothing else."
+            }
+          />
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
