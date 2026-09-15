@@ -1347,43 +1347,49 @@ async fn probe_inference<E: EnvSource + Sync>(
             };
         }
     };
-    let Some(model) = models.into_iter().next().map(|model| model.id) else {
+    if models.is_empty() {
         return InferenceTestDto {
             ok: false,
             base_url,
             model: None,
             error: Some(MODEL_DISCOVERY_FAILURE.to_string()),
         };
-    };
-    let decl = decl.with_chosen_model(model.clone());
+    }
 
-    // No company exists yet at this step, so there is no harness to name — the
-    // repair hint on failure falls back to the company-level phrasing (there is
-    // no company-level config to name either, but nothing here has one to
-    // offer instead).
-    match crate::harness::provider::probe(&decl, &model, None).await {
-        Ok(()) => InferenceTestDto {
-            ok: true,
-            base_url,
-            model: Some(model),
-            error: None,
-        },
-        Err(err) => {
-            // Logged in full for whoever runs the host; summarised for the page.
-            tracing::info!(
-                provider = %req.provider,
-                base_url = %base_url,
-                error = %err,
-                "[setup] the inference test could not reach the provider"
-            );
-            InferenceTestDto {
-                ok: false,
-                base_url,
-                model: Some(model),
-                error: Some(summarise_probe_failure(&err)),
+    let mut last_failure = None;
+    for model in models.into_iter().map(|model| model.id) {
+        let candidate = decl.clone().with_chosen_model(model.clone());
+        match crate::harness::provider::probe(&candidate, &model, None).await {
+            Ok(()) => {
+                return InferenceTestDto {
+                    ok: true,
+                    base_url,
+                    model: Some(model),
+                    error: None,
+                };
+            }
+            Err(err) => {
+                tracing::info!(
+                    provider = %req.provider,
+                    base_url = %base_url,
+                    model = %model,
+                    error = %err,
+                    "[setup] the inference test could not reach the provider"
+                );
+                let result = InferenceTestDto {
+                    ok: false,
+                    base_url: base_url.clone(),
+                    model: Some(model),
+                    error: Some(summarise_probe_failure(&err)),
+                };
+                if !probe_failure_may_be_model_specific(&err) {
+                    return result;
+                }
+                last_failure = Some(result);
             }
         }
     }
+    last_failure.expect("a non-empty model catalog produced at least one probe result")
 }
 
 /// Without the harness there is nothing to probe with.
@@ -1434,6 +1440,17 @@ fn summarise_probe_failure(err: &anyhow::Error) -> String {
         "Could not reach that address.".to_string()
     } else {
         "Could not get a reply from the provider.".to_string()
+    }
+}
+
+#[cfg(feature = "openhuman")]
+fn probe_failure_may_be_model_specific(err: &anyhow::Error) -> bool {
+    match err.downcast_ref::<tinyinference::Error>() {
+        Some(tinyinference::Error::Model(_)) => true,
+        Some(tinyinference::Error::Provider(error)) => {
+            matches!(error.status, Some(400 | 403 | 404 | 422))
+        }
+        _ => false,
     }
 }
 

@@ -1804,6 +1804,70 @@ async fn cloud_provider_probe_discovers_a_model_before_chat() {
 
 #[cfg(feature = "openhuman")]
 #[tokio::test]
+async fn probe_tries_later_catalog_models_after_a_model_rejection() {
+    let attempted = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let attempted_for_route = attempted.clone();
+    let app = axum::Router::new()
+        .route(
+            "/v1/models",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "data": [
+                        { "id": "embedding-test" },
+                        { "id": "chat-test" }
+                    ]
+                }))
+            }),
+        )
+        .route(
+            "/v1/chat/completions",
+            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let attempted = attempted_for_route.clone();
+                async move {
+                    let model = body["model"].as_str().unwrap().to_string();
+                    attempted.lock().unwrap().push(model.clone());
+                    if model == "embedding-test" {
+                        return (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            axum::Json(serde_json::json!({
+                                "error": { "message": "model does not support chat" }
+                            })),
+                        );
+                    }
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "choices": [{ "message": { "content": "pong" } }]
+                        })),
+                    )
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let result = super::probe_inference(
+        &super::InferenceTestRequest {
+            provider: "openai_compatible".to_string(),
+            base_url: Some(format!("http://{address}/v1")),
+            ..Default::default()
+        },
+        &MapEnv::default(),
+    )
+    .await;
+    server.abort();
+
+    assert!(result.ok, "{:?}", result.error);
+    assert_eq!(result.model.as_deref(), Some("chat-test"));
+    assert_eq!(
+        attempted.lock().unwrap().as_slice(),
+        ["embedding-test", "chat-test"]
+    );
+}
+
+#[cfg(feature = "openhuman")]
+#[tokio::test]
 async fn an_empty_catalog_has_its_own_failure_and_never_sends_chat() {
     let chat_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let hits_for_route = chat_hits.clone();
