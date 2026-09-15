@@ -339,12 +339,10 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
    * Where the operator is, held as a step **id** rather than an index.
    *
    * The list of steps can lose one behind their back — choosing "no sign-in"
-   * removes the address screen — and an index silently means a *different
-   * screen* the moment it does. Today's order happens to make that unreachable:
-   * the only step that disappears sits after the only screen that can remove it,
-   * so the position is always before the gap. An id does not rest on that
-   * argument, which is the point — the next person to reorder these will not
-   * think to restate it.
+   * removes the address screen, and a host that reaches its own model removes
+   * the model screen — and an index silently means a *different screen* the
+   * moment it does. An id survives both, which is the point: the next person to
+   * reorder these will not think to restate the argument.
    */
   const [stepId, setStepId] = useState<string>(STEPS[0].id);
   const [values, setValues] = useState<Record<string, string>>({});
@@ -403,18 +401,13 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
    * The verdict on the credential, and the reason the step can gate on it.
    *
    * `"untested"` blocks Next; `"ok"` releases it; `"failed"` blocks with the
-   * reason shown. `"skipped"` releases it too — see the skip link. There is no
-   * state in which the operator cannot proceed at all: decision D3 says nobody
-   * gets stuck, and a credential they cannot obtain must not be the one thing
-   * that traps them.
+   * reason shown. `"skipped"` releases it too — see the skip link. `"hosted"`
+   * releases it as well, and says the model came with the host rather than
+   * from this operator. There is no state in which the operator cannot proceed
+   * at all: decision D3 says nobody gets stuck, and a credential they cannot
+   * obtain must not be the one thing that traps them.
    */
-  const [tested, setTested] = useState<
-    | { kind: "untested" }
-    | { kind: "testing" }
-    | { kind: "ok"; baseUrl: string; model?: string | null }
-    | { kind: "failed"; error: string }
-    | { kind: "skipped" }
-  >({ kind: "untested" });
+  const [tested, setTested] = useState<TestState>({ kind: "untested" });
   /**
    * The team, once the host has designed one — and `null` until then.
    *
@@ -486,6 +479,12 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
           seeded.auth_mode = "none";
         }
         setValues(seeded);
+        // A host that already reaches a model has answered the model question
+        // on the operator's behalf, so the step is not shown at all (see
+        // `visibleSteps`) and its verdict settles here rather than waiting for
+        // a probe nobody can run. Settled rather than cleared, the same way
+        // "No model" settles: there is nothing left to prove.
+        if (s.inference.ready) setTested({ kind: "hosted" });
         // Pre-fill the model step from what the host already holds. A hosted
         // operator has a credential injected by the control plane, no key of
         // their own, and no way to get one — the step should arrive answered.
@@ -612,6 +611,11 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
    * is absent rather than optional — and an absent step gets no slot in the
    * progress bar either, or the bar counts a screen that will never arrive.
    *
+   * A host that already reaches a model is the same shape of fact. Its operator
+   * has a credential injected by the control plane, no key of their own and no
+   * way to get one, so the model step is a question with one possible answer —
+   * and asking it demands a key from the one person who cannot supply one.
+   *
    * `status` is null until the first read lands, and that counts as "show it":
    * the mode it would be judged against has not been read yet, and a bar that
    * changes length under someone already looking at it is worse than one that
@@ -621,6 +625,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
     () =>
       STEPS.filter(
         (s) =>
+          (s.id !== "power" || !status?.inference.ready) &&
           (s.id !== "account" || !status || requiresSignIn(status, values)) &&
           (s.id !== "advanced" || ADVANCED_GROUPS.length > 0),
       ),
@@ -628,8 +633,8 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
   );
 
   // A position whose step is no longer shown falls back to the start. That is
-  // unreachable today for the reason given on `stepId`, and a defined screen
-  // beats a blank one if it ever stops being.
+  // how a hosted host opens: `stepId` begins on the model step, which the
+  // status it then reads removes.
   const step = Math.max(0, visibleSteps.findIndex((s) => s.id === stepId));
 
   const restartKeys = useMemo(() => {
@@ -998,7 +1003,12 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
   const problem = (): string | undefined => {
     // The gate. Untested is not "probably fine": the whole reason this step
     // moved to the front is that a bad credential is silent everywhere else.
-    if (current.id === "power" && tested.kind !== "ok" && tested.kind !== "skipped") {
+    if (
+      current.id === "power" &&
+      tested.kind !== "ok" &&
+      tested.kind !== "skipped" &&
+      tested.kind !== "hosted"
+    ) {
       return tested.kind === "failed"
         ? "That connection did not work. Fix it, or continue without a model."
         : "Test the connection first, or continue without a model.";
@@ -1894,7 +1904,8 @@ type TestState =
   | { kind: "testing" }
   | { kind: "ok"; baseUrl: string; model?: string | null }
   | { kind: "failed"; error: string }
-  | { kind: "skipped" };
+  | { kind: "skipped" }
+  | { kind: "hosted" };
 
 // ---------------------------------------------------------------------------
 // Review, and the team as reviewed
@@ -2157,6 +2168,15 @@ function ReviewStep({
           Anything that leaves the company — sending, publishing, spending — waits
           for you until you say otherwise.
         </p>
+        {/* Said, because the alternative is an operator who was never asked for
+            a model wondering later where theirs came from. A skipped question
+            still owes its answer somewhere. */}
+        {status.inference.ready && (
+          <p className="mt-1" data-testid="setup-host-model">
+            The model comes with this host, so there was no key to supply and none
+            is stored against your company.
+          </p>
+        )}
         {email.trim() && (
           <p className="mt-1">
             You&apos;ll sign in as <span className="font-medium text-foreground">{email.trim()}</span>.
