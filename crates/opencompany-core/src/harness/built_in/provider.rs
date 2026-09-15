@@ -4843,7 +4843,9 @@ mod tests {
         format!("http://{addr}")
     }
 
-    async fn spawn_rejection(status: axum::http::StatusCode) -> String {
+    async fn spawn_rejection(
+        status: axum::http::StatusCode,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         use axum::Router;
         use axum::routing::post;
 
@@ -4860,10 +4862,10 @@ mod tests {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
+        let server = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), server)
     }
 
     /// Spawns an in-process OpenAI-compatible stub whose `message.content` is
@@ -5640,12 +5642,13 @@ mod tests {
 
     #[tokio::test]
     async fn probe_preserves_a_provider_status() {
-        let base_url = spawn_rejection(axum::http::StatusCode::NOT_FOUND).await;
+        let (base_url, server) = spawn_rejection(axum::http::StatusCode::NOT_FOUND).await;
         let decl = inference::decl_for_probe("openai_compatible", Some(&base_url), None, None);
 
         let err = probe(&decl, "provider/model", None)
             .await
             .expect_err("the stub rejects the model");
+        server.abort();
         let typed = err
             .downcast_ref::<InferenceError>()
             .expect("provider failures stay typed");
