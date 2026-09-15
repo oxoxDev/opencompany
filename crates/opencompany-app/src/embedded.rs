@@ -169,15 +169,13 @@ pub async fn start_with(
     );
     opencompany::product::install_into_embedded_core();
 
+    // The host-wide layers — the process environment, then this root's
+    // `config.toml` — resolved through the pass every host shares. What is
+    // spelled out below is only what this host owns: the loopback bind and the
+    // sign-in default.
+    let config_file = opencompany::app::config::ConfigFile::load(instance.home())?;
     let config = AppConfig {
         bind: "127.0.0.1:0".to_string(),
-        // The `[workspace]` section of the root's `config.toml`, resolved by
-        // `prepare_instance`. Not layout — these two are the knobs every
-        // company builder reads — but they come from the same file, and `serve`
-        // sets them from it. A desktop that skipped them ran with the
-        // compiled-in defaults and silently ignored the operator's config.
-        workspace_quota: instance.workspace().quota,
-        workspace_git_enabled: instance.workspace().git_enabled,
         // No sign-in, for every company this host serves.
         //
         // A desktop install is one machine and one person: there is nobody to
@@ -212,15 +210,15 @@ pub async fn start_with(
         // it names a mode, because the setup wizard writes that key and an
         // operator who deliberately turned a sign-in on — to share their
         // instance with somebody — must not find it off again at the next
-        // launch. This host builds its config by hand rather than through
-        // `AppConfig::load`, so that layer reaches it only here.
+        // launch.
         auth_mode_override: Some(
             instance
                 .auth_mode()
                 .unwrap_or(opencompany::app::config::AuthMode::None),
         ),
-        ..AppConfig::default()
+        ..AppConfig::resolve_host(&opencompany::app::config::ProcessEnv, config_file.as_ref())?
     };
+    let api_url = config.api_url.clone();
     let state = AppState::new(config)
         .with_home(instance.home().to_path_buf())
         // Issue #1245: the desktop is the one place with an
@@ -236,7 +234,20 @@ pub async fn start_with(
         //
         // Wired before any company registers, matching `serve`, so the first
         // edit on a freshly booted host already has a rebuilder to reach for.
-        .with_rebuilder(std::sync::Arc::new(opencompany::desktop::DesktopRebuilder));
+        .with_rebuilder(std::sync::Arc::new(opencompany::desktop::DesktopRebuilder))
+        // Without this `hub_identity()` is `None`, and every surface that asks
+        // the hub whose token this is answers as though the host belonged to no
+        // ecosystem: the Account page reports the balance unknown, and
+        // `credential/link/start` refuses before it builds a URL. Unconditional
+        // rather than `#[cfg]`-guarded, for the same reason
+        // `install_into_embedded_core` above is: this crate's `opencompany`
+        // dependency enables `tinyhumans` outright, so a desktop build without
+        // the exchange is not a shape that exists — and if that dependency line
+        // ever loses the feature, this stops compiling rather than shipping a
+        // host that silently disowns its own account.
+        .with_hub_identity(std::sync::Arc::new(
+            opencompany::server::hub_identity::HttpHubIdentityExchange::new(api_url),
+        ));
     // Read before `state` moves into `bind`. Minting here rather than on the
     // first `/spec` also means the console can be told who this host is without
     // waiting to contact it — which is the whole point, since the address it
@@ -416,11 +427,10 @@ mod test {
     /// The setup wizard offers all three modes on a loopback host, and an
     /// operator who wants to share their instance with a colleague can pick
     /// `email` — it writes `auth_mode` to the root's `config.toml` and applies
-    /// it live. But this host builds its `AppConfig` by hand rather than through
-    /// `AppConfig::load`, so a mode forced in the literal above would be a mode
-    /// the file can never win against: the choice would hold until quit and
-    /// silently revert on the next launch, which is precisely the "configuration
-    /// ignored" failure the setup surface exists to prevent.
+    /// it live. A mode forced in the literal above would be a mode the file can
+    /// never win against: the choice would hold until quit and silently revert
+    /// on the next launch, which is precisely the "configuration ignored"
+    /// failure the setup surface exists to prevent.
     ///
     /// So the file is read and `none` is what it falls back to.
     #[tokio::test]
@@ -440,6 +450,62 @@ mod test {
             requested.status(),
             409,
             "409 is `auth_mode` refusing the route by mode — the file said email"
+        );
+    }
+
+    /// The config layer reaches this host at all.
+    ///
+    /// It did not. The `AppConfig` was built from a literal over
+    /// `AppConfig::default()`, so `api_url` was the compiled-in production
+    /// constant no matter what the root's `config.toml` said — a desktop
+    /// pointed at staging reported, and talked to, production. Asked through
+    /// `/spec` rather than the struct because `/spec` is what an operator
+    /// checks, and what reported the wrong answer.
+    #[tokio::test]
+    async fn the_root_config_names_the_hub_this_host_talks_to() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "api_url = \"https://staging-api.tinyhumans.ai\"\n",
+        )
+        .unwrap();
+
+        let host = start(dir.path().to_path_buf()).await.expect("host starts");
+        let spec: serde_json::Value = reqwest::get(format!("{}/spec", host.base_url()))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            spec["api_url"], "https://staging-api.tinyhumans.ai",
+            "the root's config.toml must name the hub: {spec}"
+        );
+    }
+
+    /// The account surfaces stop disowning the host.
+    ///
+    /// Unwired, `hub_identity()` is `None` and every surface that asks the hub
+    /// whose credential this is answers that the host belongs to no TinyHumans
+    /// ecosystem — the Account page reports the balance unknown, and
+    /// `credential/link/start` refuses before it builds a URL. The exchange is
+    /// wired at boot now, so the route answers about providers rather than
+    /// about the host's existence.
+    #[tokio::test]
+    async fn the_host_knows_it_belongs_to_an_ecosystem() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = start(dir.path().to_path_buf()).await.expect("host starts");
+
+        let answered = reqwest::get(format!("{}/api/v1/company/auth/hub", host.base_url()))
+            .await
+            .expect("the route answers");
+        let status = answered.status();
+        let body = answered.text().await.unwrap_or_default();
+
+        assert!(
+            !body.contains("not part of a TinyHumans ecosystem"),
+            "the host must not disown its own account: {status} {body}"
         );
     }
 

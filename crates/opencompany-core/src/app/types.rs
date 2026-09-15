@@ -205,6 +205,125 @@ pub fn canonical_tenant(tenant: &str) -> &str {
 }
 
 impl AppConfig {
+    /// The host-wide configuration layers — the process environment, then the
+    /// instance root's `config.toml` — resolved onto one `AppConfig`.
+    ///
+    /// Every field below is host-wide: it describes the *install*, not any one
+    /// company, and every host that serves companies wants the same answer for
+    /// it. Resolving them in one place is the point. Two entry points used to
+    /// keep two hand-written lists — `serve` populated its list from this
+    /// layer and the embedded desktop host populated a shorter one from
+    /// nothing, so the desktop pinned `api_url` to the compiled-in production
+    /// constant and silently ignored a `config.toml` an operator had written.
+    ///
+    /// What is deliberately **not** here is anything an entry point owns: the
+    /// bind address, the sign-in override, and the multi-tenant fields a
+    /// platform injects. A caller resolves this and then overrides what it
+    /// owns, rather than this function trying to know which host is asking.
+    ///
+    /// A hosted tenant is handed its whole environment by the platform that
+    /// provisions it, so an `api_url` named by neither layer is refused rather
+    /// than defaulted to production — see
+    /// [`HostedDefault`](crate::app::config::HostedDefault).
+    pub fn resolve_host(
+        env: &dyn EnvSource,
+        config_toml: Option<&crate::app::config::ConfigFile>,
+    ) -> crate::Result<Self> {
+        use crate::app::config::{
+            BaseUrlSources, ConfigProvenance, DEFAULT_API_URL, DEFAULT_TINYPLACE_API_URL,
+            HostedDefault, WEB_URL_ENV, resolve_base_url, resolve_opt,
+        };
+
+        let deployment = crate::app::deployment::Deployment::from_env(env);
+        let mut prov = ConfigProvenance::default();
+
+        let api_url = resolve_base_url(
+            &mut prov,
+            "api_url",
+            "TINYHUMANS_API_URL",
+            deployment,
+            HostedDefault::Refuse,
+            BaseUrlSources {
+                env: env.get("TINYHUMANS_API_URL"),
+                toml: config_toml.and_then(|c| c.api_url.clone()),
+                default: DEFAULT_API_URL.to_string(),
+            },
+        )?;
+
+        let tinyplace_api_url = resolve_base_url(
+            &mut prov,
+            "tinyplace_api_url",
+            "TINYPLACE_API_URL",
+            deployment,
+            HostedDefault::Allow,
+            BaseUrlSources {
+                env: env.get("TINYPLACE_API_URL"),
+                toml: config_toml.and_then(|c| c.tinyplace_api_url.clone()),
+                default: DEFAULT_TINYPLACE_API_URL.to_string(),
+            },
+        )?;
+
+        // Trimmed and blanked before the layers are compared, not after:
+        // filtering only the winner would let a whitespace-only environment
+        // value outrank a real `config.toml` one instead of falling through.
+        let web_url = resolve_opt(
+            &mut prov,
+            "web_url",
+            env.get(WEB_URL_ENV).filter(|v| !v.trim().is_empty()),
+            config_toml
+                .and_then(|c| c.web_url.clone())
+                .filter(|v| !v.trim().is_empty()),
+        );
+
+        // `OPENCOMPANY_INFERENCE_KEY` outranks `TINYHUMANS_API_KEY` for the
+        // same reason the harness prefers it: it names this instance's
+        // cognition credential specifically, where the other names the
+        // account. The `config.toml` layer under both is what a host with no
+        // exported environment resolves against.
+        let tinyhumans_credential = resolve_opt(
+            &mut prov,
+            "tinyhumans_credential",
+            env.get("OPENCOMPANY_INFERENCE_KEY")
+                .or_else(|| env.get(crate::company::credentials::API_KEY_ENV))
+                .filter(|v| !v.trim().is_empty()),
+            config_toml
+                .and_then(|c| c.tinyhumans_api_key.clone())
+                .filter(|v| !v.trim().is_empty()),
+        )
+        .map(SecretValue);
+
+        // Normalized at the boundary that reads the file, so a rejected entry
+        // is named at boot where somebody is looking rather than thinning the
+        // list on every company's first agent turn. A bad entry warns; it does
+        // not refuse the boot, because these are additive convenience.
+        let default_mcp_servers = match config_toml {
+            Some(file) if !file.default_mcp_servers.is_empty() => {
+                let (kept, problems) =
+                    crate::company::mcp::normalize_default_servers(&file.default_mcp_servers);
+                for problem in &problems {
+                    tracing::warn!(target: "opencompany::config", "{problem}");
+                }
+                kept
+            }
+            _ => Vec::new(),
+        };
+
+        let workspace = config_toml
+            .map(|file| file.workspace.resolve())
+            .unwrap_or_default();
+
+        Ok(Self {
+            api_url,
+            web_url,
+            tinyplace_api_url,
+            tinyhumans_credential,
+            default_mcp_servers,
+            workspace_quota: workspace.quota,
+            workspace_git_enabled: workspace.git_enabled,
+            ..Self::default()
+        })
+    }
+
     /// The TinyHumans **site** this deployment belongs to: the dashboard whose
     /// API keys and balance are the ones this host's credential spends.
     ///
@@ -1361,6 +1480,91 @@ pub struct AppSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The layer the desktop never had: an environment that names a hub is the
+    /// hub, rather than the compiled-in production constant.
+    #[test]
+    fn resolve_host_takes_the_hub_the_environment_names() {
+        let env = crate::app::config::MapEnv::new([(
+            "TINYHUMANS_API_URL",
+            "https://staging-api.tinyhumans.ai",
+        )]);
+        let config = AppConfig::resolve_host(&env, None).expect("resolves");
+        assert_eq!(config.api_url, "https://staging-api.tinyhumans.ai");
+    }
+
+    /// And the file under it, which is the layer the first-run setup wizard
+    /// writes — a host that ignored it would honour an operator's choice until
+    /// they quit.
+    #[test]
+    fn resolve_host_falls_through_to_the_config_file() {
+        let file = toml::from_str::<crate::app::config::ConfigFile>(
+            "api_url = \"https://toml-api.example\"\ntinyplace_api_url = \"https://toml-place.example\"\n",
+        )
+        .expect("parses");
+        let config =
+            AppConfig::resolve_host(&crate::app::config::MapEnv::new([("", "")]), Some(&file))
+                .expect("resolves");
+        assert_eq!(config.api_url, "https://toml-api.example");
+        assert_eq!(config.tinyplace_api_url, "https://toml-place.example");
+    }
+
+    /// The environment outranks the file, and a value that is only whitespace
+    /// is nobody having said anything — not a blank that beats a real setting.
+    #[test]
+    fn an_environment_hub_outranks_the_file_but_a_blank_one_does_not() {
+        let file = toml::from_str::<crate::app::config::ConfigFile>(
+            "api_url = \"https://toml-api.example\"\n",
+        )
+        .expect("parses");
+
+        let env = crate::app::config::MapEnv::new([("TINYHUMANS_API_URL", "https://env.example")]);
+        assert_eq!(
+            AppConfig::resolve_host(&env, Some(&file))
+                .expect("resolves")
+                .api_url,
+            "https://env.example"
+        );
+
+        let blank = crate::app::config::MapEnv::new([("TINYHUMANS_API_URL", "   ")]);
+        assert_eq!(
+            AppConfig::resolve_host(&blank, Some(&file))
+                .expect("resolves")
+                .api_url,
+            "https://toml-api.example"
+        );
+    }
+
+    /// `hub_site` derives from the resolved hub, so pointing a host at staging
+    /// points its "manage keys" and "top up" links at the staging dashboard —
+    /// the reason `api_url` reaching the desktop matters beyond `/spec`.
+    #[test]
+    fn a_resolved_hub_carries_the_dashboard_with_it() {
+        let env = crate::app::config::MapEnv::new([(
+            "TINYHUMANS_API_URL",
+            "https://staging-api.tinyhumans.ai",
+        )]);
+        let config = AppConfig::resolve_host(&env, None).expect("resolves");
+        assert_ne!(
+            config.hub_site(),
+            AppConfig::default().hub_site(),
+            "a host on staging must not link to the production dashboard"
+        );
+    }
+
+    /// The `[workspace]` knobs every company builder reads come from the same
+    /// pass, so a host cannot resolve the hub and still run the compiled-in
+    /// quota.
+    #[test]
+    fn resolve_host_carries_the_workspace_section() {
+        let file =
+            toml::from_str::<crate::app::config::ConfigFile>("[workspace]\ngit_enabled = true\n")
+                .expect("parses");
+        let config =
+            AppConfig::resolve_host(&crate::app::config::MapEnv::new([("", "")]), Some(&file))
+                .expect("resolves");
+        assert!(config.workspace_git_enabled);
+    }
 
     #[test]
     fn default_config_binds_locally() {

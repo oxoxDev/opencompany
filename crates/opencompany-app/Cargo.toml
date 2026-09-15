@@ -131,9 +131,18 @@ path = "src/main.rs"
 # tiles render disabled with "this build was compiled without the `tinymemory`
 # feature", an instruction no desktop user can follow. Only the in-pod engines
 # above are excluded.
+# `tinyhumans` is what makes this host able to ask the hub whose credential it
+# is holding. Without it `HttpHubIdentityExchange` and `HttpTinyHumansClient`
+# are not compiled, `hub_identity()` stays `None`, and the Account page reports
+# that this host is not part of a TinyHumans ecosystem while
+# `credential/link/start` refuses with the same sentence. It is `["dep:reqwest"]`
+# and nothing else, and `oauth` above already pulls reqwest, so it adds no
+# package and leaves `Cargo.lock` byte-identical — which is what lets a release
+# still build `--locked`.
+#
 # The package is `opencompany-core`; its library crate is still named
 # `opencompany`, which is why the code says `use opencompany::`.
-opencompany-core = { path = "../opencompany-core", default-features = false, features = ["sqlite", "platform-jwt", "oauth", "mcp", "tinymemory"] }
+opencompany-core = { path = "../opencompany-core", default-features = false, features = ["sqlite", "platform-jwt", "oauth", "mcp", "tinymemory", "tinyhumans"] }
 
 tauri = { version = "2", features = [] }
 # The OS credential store, so a device session token never has to live in the

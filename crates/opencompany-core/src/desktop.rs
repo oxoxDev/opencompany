@@ -479,12 +479,22 @@ fn desktop_builder(
     state: &AppState,
     id: crate::ports::types::CompanyId,
     manifest: CompanyManifest,
-) -> RuntimeBuilder {
-    let mut builder =
-        crate::app::attach_harness(RuntimeBuilder::new(state.home().to_path_buf(), manifest))
-            .with_id(id)
-            // The host-wide sign-in mode, which outranks the manifest's own.
-            .with_auth_mode_override(state.auth_mode_override());
+) -> Result<RuntimeBuilder> {
+    let mut builder = attach_tinyhumans_feedback(
+        crate::app::attach_harness(RuntimeBuilder::new(state.home().to_path_buf(), manifest)),
+        state.config(),
+    )
+    .with_id(id)
+    // The host-wide sign-in mode, which outranks the manifest's own.
+    .with_auth_mode_override(state.auth_mode_override())
+    .with_tinyplace_api_url(state.config().tinyplace_api_url.clone())
+    .with_default_mcp_servers(state.config().default_mcp_servers.clone())
+    .with_workspace_quota(state.config().workspace_quota)
+    .with_workspace_git_enabled(state.config().workspace_git_enabled)
+    // Empty unless a `skills_root` is set, which a packaged install has no
+    // checkout to supply — so this resolves to the honest "this host serves no
+    // shared registry" rather than inventing a directory to point at.
+    .with_skills_registry(state.shared_skill_registry()?);
     if let Some(stores) = state.stores() {
         builder = builder.with_stores(stores);
     }
@@ -497,7 +507,25 @@ fn desktop_builder(
     if let Some(factory) = state.acp_agents() {
         builder = builder.with_acp_agents(factory);
     }
+    Ok(builder)
+}
+
+/// Routes feedback through the hub when this build can reach it, so a report
+/// from a host holding a credential is recorded against that credential's
+/// owner rather than filed from nowhere.
+#[cfg(not(feature = "tinyhumans"))]
+fn attach_tinyhumans_feedback(builder: RuntimeBuilder, _config: &AppConfig) -> RuntimeBuilder {
     builder
+}
+
+#[cfg(feature = "tinyhumans")]
+fn attach_tinyhumans_feedback(builder: RuntimeBuilder, config: &AppConfig) -> RuntimeBuilder {
+    match &config.tinyhumans_credential {
+        Some(credential) => builder.with_tinyhumans_feedback(std::sync::Arc::new(
+            crate::feedback::HttpTinyHumansClient::new(config.api_url.clone(), credential.clone()),
+        )),
+        None => builder,
+    }
 }
 
 /// Rebuilds a desktop company in place, with the wiring it booted with.
@@ -517,7 +545,7 @@ impl crate::runtime::RuntimeRebuilder for DesktopRebuilder {
         state: &AppState,
         request: crate::runtime::RebuildRequest,
     ) -> Result<crate::CompanyRuntime> {
-        desktop_builder(state, request.id.clone(), request.manifest)
+        desktop_builder(state, request.id.clone(), request.manifest)?
             // The successor adopts the live journal, approval gate, stores and
             // harness pool rather than constructing a second copy of any of
             // them. Not attaching this is a correctness bug, not a missed
@@ -539,19 +567,7 @@ async fn register(
     // supplies. Without this a desktop company had no harness even in a build
     // that compiled one in, so every turn fell back to the echo brain and the
     // console reported that this build cannot reach a model.
-    let mut builder = desktop_builder(state, id.clone(), manifest)
-            // The host-wide sign-in mode (`OPENCOMPANY_AUTH_MODE` / `config.toml`
-            // `auth_mode`), which outranks this manifest's own `[users].mode`.
-            //
-            // `serve`'s `--company` path has always applied it; this one did not,
-            // so a company registered here silently kept its manifest's mode. That
-            // was invisible while only the desktop app reached this code, and stops
-            // being invisible the moment anything else does: the first-run setup
-            // flow writes `auth_mode` and tells the operator to restart, and
-            // without this the restart adopts the company and quietly ignores the
-            // setting they were just told would take effect. `None` — the normal
-            // case — leaves each manifest to name its own mode, as before.
-        ;
+    let mut builder = desktop_builder(state, id.clone(), manifest)?;
     if let Some(provenance) = provenance {
         builder = builder.with_template_provenance(provenance);
     }

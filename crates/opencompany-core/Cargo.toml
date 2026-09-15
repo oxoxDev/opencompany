@@ -52,6 +52,10 @@ name = "desktop_e2e"
 path = "tests/desktop_e2e.rs"
 
 [[test]]
+name = "desktop_serve_parity"
+path = "tests/desktop_serve_parity.rs"
+
+[[test]]
 name = "hivemind_e2e"
 path = "tests/hivemind_e2e.rs"
 

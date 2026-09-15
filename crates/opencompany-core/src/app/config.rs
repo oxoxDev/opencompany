@@ -1079,16 +1079,16 @@ pub enum HostedDefault {
 /// unset in both branches — a launcher that exported the variable with
 /// nothing in it has said nothing.
 /// Where a base URL may come from, in precedence order.
-struct BaseUrlSources {
+pub(crate) struct BaseUrlSources {
     /// The process environment.
-    env: Option<String>,
+    pub(crate) env: Option<String>,
     /// `config.toml`.
-    toml: Option<String>,
+    pub(crate) toml: Option<String>,
     /// The built-in default, which for every field here is production.
-    default: String,
+    pub(crate) default: String,
 }
 
-fn resolve_base_url(
+pub(crate) fn resolve_base_url(
     prov: &mut ConfigProvenance,
     field: &'static str,
     var_name: &str,
@@ -1123,7 +1123,7 @@ fn resolve_base_url(
 
 /// Resolves an optional string field, recording its winning layer (`Default`
 /// when unset by every source).
-fn resolve_opt(
+pub(crate) fn resolve_opt(
     prov: &mut ConfigProvenance,
     field: &'static str,
     env_val: Option<String>,
