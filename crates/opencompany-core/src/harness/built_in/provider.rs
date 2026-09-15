@@ -1960,6 +1960,13 @@ enum SendFailure {
     Other(anyhow::Error),
 }
 
+fn into_inference_error(error: anyhow::Error) -> InferenceError {
+    match error.downcast::<InferenceError>() {
+        Ok(error) => error,
+        Err(error) => InferenceError::Model(error.to_string()),
+    }
+}
+
 impl SendFailure {
     fn into_error(self) -> anyhow::Error {
         match self {
@@ -2349,7 +2356,7 @@ impl ChatModel<()> for TenantProvider {
             Some(decl.source),
         )
         .await
-        .map_err(|e| InferenceError::Model(e.to_string()))?;
+        .map_err(into_inference_error)?;
         // Classified from `plan.model` — the exact string that goes on the wire,
         // *after* the tenant `[inference].models` table has been applied — so
         // the sample names what actually ran rather than the tier that was
@@ -5656,6 +5663,34 @@ mod tests {
             panic!("expected a provider error, got {typed}");
         };
         assert_eq!(error.status, Some(404));
+        assert_eq!(error.raw, None);
+    }
+
+    #[tokio::test]
+    async fn tenant_turn_preserves_a_provider_status() {
+        let (base_url, server) = spawn_rejection(axum::http::StatusCode::TOO_MANY_REQUESTS).await;
+        let company = CompanyId::new("acme");
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+        let mut manifest = manifest_inference("openai_compatible");
+        manifest.base_url = Some(base_url);
+        let provider = TenantProvider::new(company, secrets, manifest, None);
+
+        let err = provider
+            .invoke(
+                &(),
+                ModelRequest {
+                    model: Some("provider/model".to_string()),
+                    ..user_request("hi")
+                },
+            )
+            .await
+            .expect_err("the stub rate-limits the turn");
+        server.abort();
+        let InferenceError::Provider(error) = err else {
+            panic!("expected a provider error, got {err}");
+        };
+        assert_eq!(error.status, Some(429));
+        assert!(error.retryable);
         assert_eq!(error.raw, None);
     }
 
