@@ -33,12 +33,23 @@ describe("credentialAffordance", () => {
     expect(credentialAffordance("credential_required")).toBe("add_token");
   });
 
+  it("offers the token field to a credential the server saw and refused", () => {
+    // `token_rejected` fell to the default arm and got no control, under a
+    // message telling the operator to "update it and Test again" — the one
+    // hint that names a stored credential still got no way to replace it.
+    expect(credentialAffordance("token_rejected")).toBe("add_token");
+    for (const source of ["manifest", "runtime", "default"] as const) {
+      expect(credentialAffordance("token_rejected", { source, status: "needs_config" })).toBe(
+        "add_token",
+      );
+    }
+  });
+
   it("offers nothing for a healthy server or an unknown code", () => {
     // A server that probed `ok` carries no hint at all, and must not sprout a
     // credential control; an unrecognised future code must not either, because
     // guessing which control it wants is how the wrong one gets offered.
     expect(credentialAffordance(undefined)).toBe("none");
-    expect(credentialAffordance("token_rejected")).toBe("none");
     expect(credentialAffordance("some_code_added_later")).toBe("none");
   });
 
@@ -70,6 +81,16 @@ describe("credentialAffordance — directory installs", () => {
   it("routes a registry row to its own env rotation", () => {
     expect(credentialAffordance(undefined, { source: "registry", status: "needs_config" })).toBe(
       "rotate_env",
+    );
+  });
+
+  it("offers no credential control at all when the install wants a browser sign-in", () => {
+    // The env form collects named values for the registry store; it cannot
+    // store a browser session, and no registry route starts one. Routing this
+    // row to `rotate_env` put a Save button under a host message that already
+    // said a pasted token would not work.
+    expect(credentialAffordance("oauth_required", { source: "registry", status: "needs_config" })).toBe(
+      "none",
     );
   });
 

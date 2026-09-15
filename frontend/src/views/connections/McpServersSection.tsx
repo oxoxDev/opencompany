@@ -56,7 +56,9 @@ import {
   missingEnvKeys,
   mcpRowControls,
   mcpSourceBadge,
+  REGISTRY_OAUTH_UNSUPPORTED_NOTICE,
   REGISTRY_UNWIRED_NOTICE,
+  registryOauthUnsupported,
   registryOutage,
 } from "@/lib/mcp-registry";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -92,7 +94,10 @@ import { ProviderDetail } from "@/views/connections/ProviderDetail";
  * `row.status` is consulted only for that case, and it has to be: the host's
  * registry projection emits a stable `authHint` only when the upstream
  * connection reported one, so a directory install refused for want of a
- * credential can arrive as `needs_config` with no hint at all. List A's
+ * credential can arrive as `needs_config` with no hint at all. The hint still
+ * has the last word on a registry row: `oauth_required` names a credential the
+ * env form neither collects nor stores, and no route here can start that
+ * sign-in, so such a row is offered no credential control at all. List A's
  * mapping below is untouched — it is still a function of the hint and nothing
  * else.
  */
@@ -101,6 +106,7 @@ export function credentialAffordance(
   row?: { source: McpSource; status?: McpStatus },
 ): "sign_in" | "add_token" | "rotate_env" | "none" {
   if (row?.source === "registry") {
+    if (authHint === "oauth_required") return "none";
     return row.status === "needs_config" ? "rotate_env" : "none";
   }
   switch (authHint) {
@@ -110,6 +116,8 @@ export function credentialAffordance(
     // A plain credential prompt wants the same field; it simply never had a
     // sign-in button to withdraw.
     case "credential_required":
+    // A refused credential is replaced through that same field.
+    case "token_rejected":
       return "add_token";
     default:
       return "none";
@@ -692,6 +700,14 @@ export function McpServersSection({
       );
       const after = res.test;
       if (after) setTested((t) => ({ ...t, [server.name]: after }));
+      if (after && after.status !== "ok") {
+        setEnvError(
+          after.message.trim() ||
+            `${server.name} still isn't connected with those credentials.`,
+        );
+        await refresh();
+        return;
+      }
       setEnvFor(null);
       setEnvDraft({});
       await refresh();
@@ -1108,6 +1124,14 @@ export function McpServersSection({
                       {health && health.status !== "ok" && health.message && (
                         <p className="text-xs text-muted-foreground">
                           {health.message}
+                        </p>
+                      )}
+                      {registryOauthUnsupported(server, health) && (
+                        <p
+                          className="text-xs text-muted-foreground"
+                          data-testid="mcp-no-credential-control"
+                        >
+                          {REGISTRY_OAUTH_UNSUPPORTED_NOTICE}
                         </p>
                       )}
                       {credentialFor === server.name && canManage && (

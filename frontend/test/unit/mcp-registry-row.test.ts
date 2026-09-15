@@ -8,6 +8,7 @@ import {
   mcpRemovalNote,
   mcpRowControls,
   mcpSourceBadge,
+  registryOauthUnsupported,
 } from "@/lib/mcp-registry";
 
 /**
@@ -107,6 +108,26 @@ describe("mcpLifecycle — connect/disconnect belongs to registry rows only", ()
     }
   });
 
+  it("withholds connect when the host refused it for a sign-in this console can't start", () => {
+    // Connect can only be refused again — and `lifecycle` discards the refusal
+    // it comes back with, so the click reports nothing at all.
+    const server = row({ source: "registry", serverId: "srv_1" });
+
+    expect(mcpLifecycle(server, health("needs_config", "oauth_required"))).toBe("none");
+    expect(mcpRowControls(server, health("needs_config", "oauth_required")).lifecycle).toBe("none");
+  });
+
+  it("keeps connect for every other credential refusal, which a value can fix", () => {
+    const server = row({ source: "registry", serverId: "srv_1" });
+
+    for (const hint of [undefined, "credential_required", "token_rejected"]) {
+      expect(mcpLifecycle(server, health("needs_config", hint))).toBe("connect");
+    }
+    // An OAuth hint on a state the host did not refuse for a credential is not
+    // this rule's business.
+    expect(mcpLifecycle(server, health("error", "oauth_required"))).toBe("connect");
+  });
+
   it("offers neither on a reconciled row, whose live half is List A's", () => {
     // The connect route would accept this `serverId`, which is the trap: what
     // the company's agents reach through this row is the List A half, so a
@@ -157,6 +178,33 @@ describe("mcpRowControls — which half of the API a row may call", () => {
       lifecycle: "none",
       removal: { kind: "index", name: "notion" },
     });
+  });
+});
+
+describe("registryOauthUnsupported", () => {
+  it("holds only for a directory install the host refused for a browser sign-in", () => {
+    expect(
+      registryOauthUnsupported(row({ source: "registry" }), health("needs_config", "oauth_required")),
+    ).toBe(true);
+  });
+
+  it("does not hold for a List A row, which has a sign-in route", () => {
+    for (const source of ["manifest", "runtime", "default"] as const) {
+      expect(
+        registryOauthUnsupported(row({ source }), health("needs_config", "oauth_required")),
+      ).toBe(false);
+    }
+  });
+
+  it("does not hold on a healthy install, or on one refused for a value", () => {
+    const server = row({ source: "registry" });
+
+    expect(registryOauthUnsupported(server, health("ok", "oauth_required"))).toBe(false);
+    expect(registryOauthUnsupported(server, health("needs_config", "credential_required"))).toBe(
+      false,
+    );
+    expect(registryOauthUnsupported(server, health("needs_config"))).toBe(false);
+    expect(registryOauthUnsupported(server, undefined)).toBe(false);
   });
 });
 

@@ -97,15 +97,42 @@ export function mcpRemoval(server: McpServer): McpRemoval {
 }
 
 /**
+ * Whether this row's only credential path is a browser sign-in the console
+ * cannot start.
+ *
+ * A directory install is authorised by writing named env values to the host's
+ * registry store. A server that answers `oauth_required` is asking for
+ * something else entirely, and the registry routes expose no `oauth/start` —
+ * so every credential control the console has is one that cannot authorise
+ * this row.
+ */
+export function registryOauthUnsupported(
+  server: Pick<McpServer, "source">,
+  health: McpHealth | undefined,
+): boolean {
+  return (
+    server.source === "registry" &&
+    health?.status === "needs_config" &&
+    health.authHint === "oauth_required"
+  );
+}
+
+/** What the console says on a row {@link registryOauthUnsupported} holds true of. */
+export const REGISTRY_OAUTH_UNSUPPORTED_NOTICE =
+  "This console can't sign a directory install in, so this server can't be authorised here yet.";
+
+/**
  * Which way a registry row's connection control points.
  *
  * `ok` is the only state that means a live session exists; every other state —
  * refused for a credential, failed, disabled, connecting, never dialled — is one
- * a Connect is the right offer for.
+ * a Connect is the right offer for, except the one the host has already refused
+ * for a credential this console cannot supply.
  */
 export function mcpLifecycle(server: McpServer, health: McpHealth | undefined): McpLifecycle {
   if (server.source !== "registry" || !server.serverId) return "none";
-  return health?.status === "ok" ? "disconnect" : "connect";
+  if (health?.status === "ok") return "disconnect";
+  return registryOauthUnsupported(server, health) ? "none" : "connect";
 }
 
 /**
