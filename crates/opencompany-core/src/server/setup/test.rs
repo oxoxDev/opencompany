@@ -1868,6 +1868,58 @@ async fn probe_tries_later_catalog_models_after_a_model_rejection() {
 
 #[cfg(feature = "openhuman")]
 #[tokio::test]
+async fn probe_bounds_model_specific_catalog_rejections() {
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let attempts_for_route = attempts.clone();
+    let models = (0..super::MODEL_PROBE_CANDIDATE_LIMIT + 2)
+        .map(|index| serde_json::json!({ "id": format!("model-{index}") }))
+        .collect::<Vec<_>>();
+    let app = axum::Router::new()
+        .route(
+            "/v1/models",
+            axum::routing::get(move || {
+                let models = models.clone();
+                async move { axum::Json(serde_json::json!({ "data": models })) }
+            }),
+        )
+        .route(
+            "/v1/chat/completions",
+            axum::routing::post(move || {
+                attempts_for_route.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async {
+                    (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        axum::Json(serde_json::json!({
+                            "error": { "message": "model does not support chat" }
+                        })),
+                    )
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let result = super::probe_inference(
+        &super::InferenceTestRequest {
+            provider: "openai_compatible".to_string(),
+            base_url: Some(format!("http://{address}/v1")),
+            ..Default::default()
+        },
+        &MapEnv::default(),
+    )
+    .await;
+    server.abort();
+
+    assert!(!result.ok);
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::SeqCst),
+        super::MODEL_PROBE_CANDIDATE_LIMIT
+    );
+}
+
+#[cfg(feature = "openhuman")]
+#[tokio::test]
 async fn an_empty_catalog_has_its_own_failure_and_never_sends_chat() {
     let chat_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let hits_for_route = chat_hits.clone();

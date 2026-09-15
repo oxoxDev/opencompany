@@ -1207,6 +1207,9 @@ pub struct InferenceTestDto {
 #[cfg(feature = "openhuman")]
 const MODEL_DISCOVERY_FAILURE: &str = "Could not list models from this provider.";
 
+#[cfg(feature = "openhuman")]
+const MODEL_PROBE_CANDIDATE_LIMIT: usize = 5;
+
 /// `POST /api/v1/setup/inference/test` — a live one-turn probe of a credential
 /// the operator has just typed, before anything is written.
 ///
@@ -1357,7 +1360,11 @@ async fn probe_inference<E: EnvSource + Sync>(
     }
 
     let mut last_failure = None;
-    for model in models.into_iter().map(|model| model.id) {
+    for model in models
+        .into_iter()
+        .take(MODEL_PROBE_CANDIDATE_LIMIT)
+        .map(|model| model.id)
+    {
         let candidate = decl.clone().with_chosen_model(model.clone());
         match crate::harness::provider::probe(&candidate, &model, None).await {
             Ok(()) => {
