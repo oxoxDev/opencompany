@@ -1650,6 +1650,47 @@ async fn starting_a_link_sends_the_console_to_the_hub_with_a_challenge_not_a_sec
     assert!(url.contains(&crate::server::hub_link::challenge_for(&link.verifier)));
 }
 
+/// The scopes ask reaches the wire, from the shared builder rather than here.
+///
+/// A key minted without `connections` cannot drive
+/// `/agent-integrations/composio/*`, and this route is the only way a console
+/// that is not a provisioned tenant gets a key at all — so the ask being
+/// absent from this URL is the whole third-party integrations surface
+/// answering 403, with nothing local to point at.
+#[tokio::test]
+async fn starting_a_link_asks_the_hub_for_the_connections_scope() {
+    let home_dir = home();
+    let state = state_with_hub(home_dir.path(), "acme").await;
+
+    let (status, resp, raw) = send(
+        &state,
+        "acme",
+        "POST",
+        "/api/v1/company/credential/link/start",
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+
+    let url = resp["authorizeUrl"].as_str().expect("authorizeUrl");
+    let (_, query) = url.split_once('?').expect("a query");
+
+    // Last, and exactly where `key_grant_query` puts it. The route appends
+    // nothing of its own to the builder's output, so a `scopes` that arrived
+    // by concatenation here would land somewhere else or twice —
+    // `hub_identity::both_readers_carry_the_same_built_query` pins the other
+    // half of that.
+    assert!(
+        query.ends_with("&scopes=connections"),
+        "managed Composio 403s without the ask: {url}"
+    );
+    assert_eq!(
+        query.matches("scopes=").count(),
+        1,
+        "one ask, from one builder: {url}"
+    );
+}
+
 /// The grant runs the same fan-out `PUT …/credential` does, and — per Q10 —
 /// declares no provider of its own: `finish_link_runs_the_fan_out_and_writes_no_inference_config`
 /// pins the "no entry zero, no `inference/config`" half of that; this test

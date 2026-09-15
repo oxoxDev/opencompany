@@ -142,19 +142,40 @@ pub fn key_grant_url(api_url: &str, callback_url: &str, challenge: &str, name: &
     )
 }
 
+/// The scopes a key grant asks the hub to put on the key it mints.
+///
+/// Only `connections` turns on anything the ask decides. Every grant carries
+/// the set a human could have minted by hand whether it asks or not, and the
+/// hub drops a name outside its grantable vocabulary rather than refusing the
+/// grant — so this stays the one scope a console on this side would otherwise
+/// never be handed, and the list is not a place to collect scopes nothing here
+/// spends.
+///
+/// `connections` is what `/agent-integrations/composio/*` enforces. Without it
+/// a key minted to a console that is not a provisioned tenant — a desktop
+/// install, a developer's laptop — reaches managed Composio and is told it is
+/// missing the scope, which is the whole of the third-party integrations
+/// surface answering 403.
+pub const KEY_GRANT_SCOPES: &[&str] = &["connections"];
+
 /// The grant parameters as one query string, without the endpoint.
 ///
 /// Split out because the same parameters are read by two pages: the API's
 /// `GET /auth/key`, which acts on them, and the site's `/connect`, which shows
 /// a person who is asking and lets them pick a provider before handing off to
 /// exactly that endpoint ([`hub_account::connect_url`](crate::server::hub_account::connect_url)).
-/// Building them once means the challenge cannot differ between the two.
+/// Building them once means the challenge cannot differ between the two — and
+/// the same holds for [`KEY_GRANT_SCOPES`], which decides what the key may do
+/// and is named on the consent screen the approver reads. A scope asked for on
+/// one path and not the other would mint a key whose reach depended on which
+/// page the browser happened to go through.
 pub fn key_grant_query(callback_url: &str, challenge: &str, name: &str) -> String {
     format!(
-        "callback_url={}&code_challenge={}&code_challenge_method=S256&name={}",
+        "callback_url={}&code_challenge={}&code_challenge_method=S256&name={}&scopes={}",
         percent_encode(callback_url),
         percent_encode(challenge),
         percent_encode(name),
+        percent_encode(&KEY_GRANT_SCOPES.join(",")),
     )
 }
 
@@ -403,6 +424,55 @@ mod test {
             "https://hub.example.com/auth/google/login\
              ?redirectUri=https%3A%2F%2Fsmoke1.example.com%2F%3Fcompany%3Dsmoke1"
         );
+    }
+
+    /// The exact string the hub's `GET /auth/key` receives, pinned whole.
+    ///
+    /// Every value percent-encoded the same way, `scopes` included: the hub
+    /// reads it off the query string like any other parameter, and an encoder
+    /// applied to three of four values is the one that surprises somebody.
+    #[test]
+    fn a_key_grant_query_asks_for_its_scopes_beside_the_challenge() {
+        assert_eq!(
+            key_grant_query("https://acme.example.com/?company=acme", "chal-abc", "Acme"),
+            "callback_url=https%3A%2F%2Facme.example.com%2F%3Fcompany%3Dacme\
+             &code_challenge=chal-abc\
+             &code_challenge_method=S256\
+             &name=Acme\
+             &scopes=connections"
+        );
+    }
+
+    /// Without this name on the ask, a key minted to anything but a provisioned
+    /// tenant cannot drive `/agent-integrations/composio/*` at all.
+    #[test]
+    fn the_scopes_asked_for_name_connections() {
+        assert!(
+            KEY_GRANT_SCOPES.contains(&"connections"),
+            "managed Composio 403s without it: {KEY_GRANT_SCOPES:?}"
+        );
+    }
+
+    /// Both readers get the builder's output verbatim.
+    ///
+    /// The property the split exists for: neither path may append a parameter
+    /// of its own, because a grant whose reach depends on which page the
+    /// browser went through is one nobody can reason about from the consent
+    /// screen.
+    #[test]
+    fn both_readers_carry_the_same_built_query() {
+        let query = key_grant_query("http://127.0.0.1:5173/?key=link", "chal-abc", "Acme");
+
+        let api = key_grant_url(
+            "https://api.example.com",
+            "http://127.0.0.1:5173/?key=link",
+            "chal-abc",
+            "Acme",
+        );
+        let site = crate::server::hub_account::connect_url("https://example.com", &query);
+
+        assert_eq!(api, format!("https://api.example.com/auth/key?{query}"));
+        assert_eq!(site, format!("https://example.com/connect?{query}"));
     }
 }
 
