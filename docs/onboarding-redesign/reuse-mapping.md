@@ -148,14 +148,26 @@ unchanged; only which step populates it moves.
 
 Once Managed step 1 calls the real fan-out (§1's required change), it gets
 this for free — `set_key`/`set_model`/`finish_link` already call
-`rebuild_if_pending` themselves. The only thing to verify in slice 7 is that
-the wizard doesn't *also* need its own rebuild trigger for whatever happens
-at final submit (`apply_inner` → `seed_generated_company` → `register()`),
-since that path boots the runtime fresh rather than rebuilding an existing
-one — confirm at implementation time whether a freshly-registered company
-ever needs `rebuild_if_pending` at all, or whether `register()`'s own boot
-already resolves inference correctly the first time. This is a real open
-question, not assumed either way — see [open-questions.md](open-questions.md).
+`rebuild_if_pending` themselves. The wizard's final submit needed the same
+call, and slice 4a's `store_account_key` makes it.
+
+**Resolved, two branches** (slice 7; full reasoning in
+[open-questions.md](open-questions.md)):
+
+- **Managed** sends no `company.inference`, so the seeded company boots on the
+  echo brain. The fan-out then fills the `tinyhumans` row and the default,
+  `restart_pending` flips true, and the rebuild fires — which is why
+  `store_account_key` calls `rebuild_if_pending` on both of its seed
+  sub-paths.
+- **Self-managed / BYOK** sets `manifest.inference.provider` *before*
+  `seed_generated_company`, so the company boots already configured on
+  `HARNESS_PATH` and `restart_pending` is false. No rebuild is owed there —
+  not by this slice and not by 4b.
+
+Neither branch races `register()`, which resolves inference fresh at boot.
+Both are now pinned by tests in `server/setup/test.rs`; the managed one is
+gated on `openhuman`, because `harness_reachable` is a `false` stub at default
+features and the rebuild is unreachable without a pool.
 
 ## §5 The search tier (#2342)
 
