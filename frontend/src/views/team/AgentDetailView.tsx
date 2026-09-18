@@ -81,6 +81,7 @@ import {
   statusOf,
   type HarnessRow,
 } from "@/lib/harnesses";
+import { HarnessDetailDialog } from "@/components/harness-detail";
 import { useHarnessRows } from "@/lib/use-harness-rows";
 import { draftAgentField } from "@/api/agent-copilot";
 import { getInferenceStatus, type CognitionPath, type InferenceStatus } from "@/api/inference";
@@ -353,6 +354,11 @@ export function AgentDetailView({
    */
   const [harnesses, setHarnesses] = useState<HarnessDto[]>([]);
   /**
+   * Bumped to re-run the fetch below. The survey has no refresh of its own —
+   * re-reading the declared list is what re-surveys it.
+   */
+  const [harnessNonce, setHarnessNonce] = useState(0);
+  /**
    * The company's providers and its default choice (keys rework, issue #2306,
    * slice 3b) — what the Provider select offers, and what an unpinned agent's
    * fallback line names. Loaded once per teammate, not gated on the editor
@@ -514,7 +520,7 @@ export function AgentDetailView({
     return () => {
       live = false;
     };
-  }, [client, company]);
+  }, [client, company, harnessNonce]);
 
 
 
@@ -1177,6 +1183,7 @@ export function AgentDetailView({
               client={client}
               company={company}
               saving={savingHarness}
+              onRecheck={() => setHarnessNonce((n) => n + 1)}
               onEdit={() => {
                 setHarnessDraft(agent.harness ?? HARNESS_DEFAULT);
                 setModelDraft(agent.model ?? "");
@@ -1847,6 +1854,7 @@ function HarnessAndModel({
   client,
   company,
   saving,
+  onRecheck,
   onEdit,
   onHarnessChange,
   onModelChange,
@@ -1872,6 +1880,8 @@ function HarnessAndModel({
   client: OpenCompanyClient;
   company: string | null;
   saving: boolean;
+  /** Re-read the declared harness list, which re-runs the readiness survey. */
+  onRecheck: () => void;
   onEdit: () => void;
   onHarnessChange: (value: string) => void;
   onModelChange: (value: string) => void;
@@ -1929,8 +1939,14 @@ function HarnessAndModel({
    * Probing on page view would start a subprocess per harness every time
    * anyone opened a teammate, for an answer nobody had asked for yet.
    */
-  const { rows, install, installing, installErrors } = useHarnessRows(harnesses, editing);
+  const { rows, surveying, install, installing, installErrors } = useHarnessRows(harnesses, editing);
   const rowFor = (id: string | undefined) => rows?.find((row) => row.id === id);
+  /**
+   * Which harness the detail dialog is open on, held as an id rather than as a
+   * row: the survey keeps settling while it is open, and a captured row would
+   * freeze the dialog on the readiness it had when it was opened.
+   */
+  const [managingId, setManagingId] = useState<string | null>(null);
   const draftRow = rowFor(draftHarnessId);
   const draftAction = draftRow ? harnessAction(draftRow) : "none";
 
@@ -2001,23 +2017,40 @@ function HarnessAndModel({
     >
       {editing ? (
         <div className="space-y-3">
-          <Select value={harnessDraft} onValueChange={(value) => onHarnessChange(value ?? HARNESS_DEFAULT)}>
-            <SelectTrigger className="w-full" data-testid="agent-harness-select">
-              <SelectValue>{harnessLabel}</SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={HARNESS_DEFAULT}>
-                Company default{defaultHarness ? ` (${harnessOptionLabel(defaultHarness)})` : ""}
-                <HarnessReadiness row={rowFor(defaultHarness?.id)} />
-              </SelectItem>
-              {harnesses.map((harness) => (
-                <SelectItem key={harness.id} value={harness.id}>
-                  {harnessOptionLabel(harness)}
-                  <HarnessReadiness row={rowFor(harness.id)} />
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <div className="flex items-center gap-2">
+            <div className="min-w-0 flex-1">
+              <Select value={harnessDraft} onValueChange={(value) => onHarnessChange(value ?? HARNESS_DEFAULT)}>
+                <SelectTrigger className="w-full" data-testid="agent-harness-select">
+                  <SelectValue>{harnessLabel}</SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={HARNESS_DEFAULT}>
+                    Company default{defaultHarness ? ` (${harnessOptionLabel(defaultHarness)})` : ""}
+                    <HarnessReadiness row={rowFor(defaultHarness?.id)} />
+                  </SelectItem>
+                  {harnesses.map((harness) => (
+                    <SelectItem key={harness.id} value={harness.id}>
+                      {harnessOptionLabel(harness)}
+                      <HarnessReadiness row={rowFor(harness.id)} />
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {/* The closed trigger is a plain string with nowhere to put a
+                badge, so everything this machine knows about the selected
+                harness lives one click away rather than only inside the open
+                dropdown. */}
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={!draftRow}
+              onClick={() => setManagingId(draftHarnessId ?? null)}
+              data-testid="agent-harness-manage"
+            >
+              Manage
+            </Button>
+          </div>
           {draftRow && draftAction !== "none" && (
             // Only where there is something this app can do about it. A harness
             // that is merely unready — not signed in, no Node, unseen from a
@@ -2261,6 +2294,20 @@ function HarnessAndModel({
       {declaredKind !== "acp" && agent.provider && agent.model && (
         <BrokenPairNote agent={agent} providers={providers} />
       )}
+      <HarnessDetailDialog
+        client={client}
+        company={company}
+        row={rowFor(managingId ?? undefined) ?? null}
+        defaultHarnessId={defaultHarness?.id}
+        onRecheck={onRecheck}
+        checking={surveying}
+        install={install}
+        installing={installing}
+        installErrors={installErrors}
+        onOpenChange={(open) => {
+          if (!open) setManagingId(null);
+        }}
+      />
     </Section>
   );
 }
