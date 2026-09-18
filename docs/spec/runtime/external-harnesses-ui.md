@@ -24,18 +24,32 @@ That the join works is deliberate, not luck: the manifest vocabulary
 `claude`, `codex`.
 
 ```text
-GET {scope}/harnesses  ──┐                              ┌─▶ External harnesses page
+GET {scope}/harnesses  ──┐                              ┌─▶ Providers page, Local harnesses
    declared + detected   ├──▶  joinHarnesses()  ────────┤
 oc_acp_harnesses ────────┘        (lib/harnesses.ts)    └─▶ an agent's Harness & model picker
-   readiness per id
+   readiness per id                                        (both open the detail view)
 ```
 
 Two surfaces render that join, through the shared `useHarnessRows` hook: the
-Settings page, which is *about* the harnesses, and the agent editor's picker,
-where the operator is choosing one. Each fetches `GET {scope}/harnesses`
-itself — Settings has to tell a 404 from an empty list, and the agent page
-already holds the list for its own picker — and both go through the same
-survey, so the same machine state can never be given two different names.
+**Local harnesses** section of the LLM Providers page, which is *about* the
+harnesses, and the agent editor's picker, where the operator is choosing one.
+Each fetches `GET {scope}/harnesses` itself — the section has to tell a 404
+from an empty list, and the agent page already holds the list for its own
+picker — and both go through the same survey, so the same machine state can
+never be given two different names.
+
+The General settings page carried this list until the Providers page grew the
+section. It sat where nobody looking for a coding engine would look: the
+question "what can a teammate think with" was answered on two pages, one of
+which never mentioned the other.
+
+Both surfaces open the **same** detail view (`components/harness-detail.tsx`),
+a dialog rather than a page — a harness has no address to preserve, and the
+console's route table has an expensive history of entries that left pages
+unreachable. Each caller passes its own survey into it, so a list and the
+dialog opened from it can never disagree. It has no re-check of its own: the
+survey is derived from the declared list, so re-reading that list is what
+re-surveys.
 
 The picker surveys only while its editor is open. Probing on page view would
 start a subprocess per harness every time anyone opened a teammate. Concurrent
@@ -76,6 +90,23 @@ There *is* an Install action, and it is not the same thing. It enrols nothing
 and records no state — it fetches the ACP adapter, then re-runs the same probe
 every other row runs. Afterward the harness is usable for exactly the reason
 it always was: something is installed and signed in on this machine.
+
+This is why a harness row reports **"N agents bound"** and never "connected",
+the word the providers list beside it uses for a credential the company holds.
+A harness holds nothing company-wide; some number of teammates each picked it.
+
+### Who is bound
+
+The detail view resolves that count from the roster read's `harness` field
+(`boundAgents`, `lib/harnesses.ts`), mirroring `agents_on` in
+`harness/lanes.rs`: a teammate that declares no harness is served by the
+**default** one and by no other. `None` there means "the default harness", not
+"undeclared", so the two rules have to be the same rule — the count is a claim
+about which lane a turn will actually route to. There is no endpoint for it;
+duplicating the rule host-side is how the list and the runtime would drift.
+
+Each bound teammate links to its own **Model** tab. The detail view is not a
+second place to change a binding — one editing surface, addressed from here.
 
 ---
 
