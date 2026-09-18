@@ -296,3 +296,45 @@ export function readinessNote(row: HarnessRow): string {
       return "A coding CLI runs on your own machine, so only the desktop app can see it.";
   }
 }
+
+/** The roster fields {@link boundAgents} resolves a lane from. */
+export interface HarnessBinding {
+  id: string;
+  /** The declared binding, absent when this teammate names none. */
+  harness?: string;
+}
+
+/**
+ * Which teammates run their turns on `harnessId`.
+ *
+ * `defaultHarnessId` is the id of the harness marked `default = true`, and it
+ * is required rather than optional because the rule turns on it: a teammate
+ * that declares no harness is served by the default one **and by no other**.
+ * This is `agents_on` in `harness/lanes.rs`, resolved on the roster read rather
+ * than duplicated as an endpoint — the count is a claim about which lane the
+ * runtime will actually route to, so the two rules have to be the same rule.
+ *
+ * A company whose host names no default passes `undefined`, and an undeclared
+ * teammate then matches nothing: where it lands is a fact this read does not
+ * carry, and picking a row for it would be inventing one.
+ */
+export function boundAgents<T extends HarnessBinding>(
+  members: readonly T[],
+  harnessId: string,
+  defaultHarnessId: string | undefined,
+): T[] {
+  return members.filter((member) => (member.harness ?? defaultHarnessId) === harnessId);
+}
+
+/**
+ * How a harness reports its teammates.
+ *
+ * Deliberately not "connected", the word the Providers page uses for a
+ * credential this company holds: a harness holds nothing company-wide, and
+ * borrowing that word would promise a shared persisted state that does not
+ * exist. Some number of teammates each picked it, which is what this says.
+ */
+export function boundLabel(count: number): string {
+  if (count === 0) return "No agents bound";
+  return `${count} agent${count === 1 ? "" : "s"} bound`;
+}
