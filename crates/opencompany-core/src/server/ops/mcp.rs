@@ -797,10 +797,12 @@ async fn probe_and_persist(runtime: &CompanyRuntime, name: &str) -> Option<McpHe
     .await
     .ok()?;
     let decl = decls.iter().find(|d| d.name == name)?;
-    // `probe_server` already scrubs its message; persist that scrubbed health.
-    let health = crate::harness::mcp_probe::probe_server(decl).await;
-    let _ = mcp::save_health(runtime.id(), name, &health, runtime.secrets().as_ref()).await;
-    Some(health)
+    // The probe already scrubs its message; what is persisted is that scrubbed
+    // health, plus the inventory the same listing yielded.
+    Some(
+        crate::harness::mcp_probe::probe_and_record(runtime.id(), decl, runtime.secrets().as_ref())
+            .await,
+    )
 }
 
 /// Without the `openhuman` feature there is no MCP transport, so probing is a
