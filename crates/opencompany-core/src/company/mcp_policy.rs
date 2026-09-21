@@ -486,6 +486,115 @@ pub fn blocked_refusal(server: &str, tool: &str) -> String {
     )
 }
 
+/// A server's discovered tools and the tier each one is suggested under.
+///
+/// Persisted because the suggestion is only obtainable while the server
+/// answers. Without it a transient outage would empty the console's row set and
+/// drop every tool a stored tier default reaches — the policy would appear to
+/// change because the network hiccuped.
+///
+/// Holds names and tiers only. A tool's description is what the suggestion was
+/// computed *from*, is marked untrusted by the transport that carries it, and
+/// is not needed again.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolInventory {
+    /// Discovered tool name to its suggested tier. Ordered so the document is
+    /// byte-stable across writes and a re-probe that discovers nothing new is a
+    /// no-op diff.
+    #[serde(default)]
+    pub tools: std::collections::BTreeMap<String, ToolTier>,
+    /// When discovery last succeeded, in unix milliseconds.
+    #[serde(default)]
+    pub discovered_at_millis: u64,
+}
+
+impl McpToolInventory {
+    /// The tier discovery suggested for `tool`, if it was seen.
+    pub fn suggested(&self, tool: &str) -> Option<ToolTier> {
+        self.tools.get(tool).copied()
+    }
+}
+
+/// The [`SecretStore`](crate::ports::SecretStore) key holding a declared
+/// server's [`McpToolInventory`].
+pub fn tool_inventory_key(name: &str) -> String {
+    format!("mcp/{name}/tool_inventory")
+}
+
+/// The [`SecretStore`](crate::ports::SecretStore) key holding a directory
+/// install's [`McpToolInventory`].
+pub fn registry_tool_inventory_key(server_id: &str) -> String {
+    format!("mcp_registry/{server_id}/tool_inventory")
+}
+
+/// Builds an inventory from a discovery pass, suggesting a tier for each tool.
+pub fn inventory_from_discovery<'a>(
+    tools: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+    discovered_at_millis: u64,
+) -> McpToolInventory {
+    McpToolInventory {
+        tools: tools
+            .into_iter()
+            .filter_map(|(name, description)| {
+                let name = name.trim();
+                (!name.is_empty()).then(|| (name.to_string(), suggest_tool_tier(name, description)))
+            })
+            .collect(),
+        discovered_at_millis,
+    }
+}
+
+/// Reads a server's tool inventory, degrading an unreadable one to the empty
+/// inventory.
+///
+/// Fail-closed: with no suggestion every tool resolves under the conservative
+/// middle tier and parks. Never surfaces an error, for the same reason
+/// [`load_tool_policies`] does not.
+pub async fn load_tool_inventory(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    key: &str,
+) -> McpToolInventory {
+    let raw = match secrets.get(company, key).await {
+        Ok(Some(SecretValue(raw))) => raw,
+        Ok(None) => return McpToolInventory::default(),
+        Err(err) => {
+            tracing::warn!(
+                company = %company,
+                key = %key,
+                error = %err,
+                "reading MCP tool inventory failed; this server suggests no tiers"
+            );
+            return McpToolInventory::default();
+        }
+    };
+    if raw.trim().is_empty() {
+        return McpToolInventory::default();
+    }
+    serde_json::from_str(&raw).unwrap_or_else(|err| {
+        tracing::warn!(
+            company = %company,
+            key = %key,
+            error = %err,
+            "MCP tool inventory is not valid JSON; this server suggests no tiers"
+        );
+        McpToolInventory::default()
+    })
+}
+
+/// Persists a server's tool inventory.
+pub async fn save_tool_inventory(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    key: &str,
+    inventory: &McpToolInventory,
+) -> Result<()> {
+    let raw = serde_json::to_string(inventory)
+        .map_err(|e| OpenCompanyError::Store(format!("serializing mcp tool inventory: {e}")))?;
+    secrets.set(company, key, SecretValue(raw)).await
+}
+
 #[cfg(test)]
 #[path = "mcp_policy_tests.rs"]
 mod tests;
