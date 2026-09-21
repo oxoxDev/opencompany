@@ -498,3 +498,138 @@ async fn a_stored_refusal_overrides_the_declaration() {
         "a stored refusal must win over the declaration"
     );
 }
+
+// ---- the inventory is what a tier default resolves against ------------
+
+use crate::company::mcp_policy::{
+    McpToolInventory, inventory_from_discovery, registry_tool_inventory_key, save_tool_inventory,
+    tool_inventory_key,
+};
+
+async fn seed_inventory(company: &CompanyId, secrets: &MemSecrets, server: &str, tools: &[&str]) {
+    let inventory = inventory_from_discovery(tools.iter().map(|t| (*t, None)), 1);
+    save_tool_inventory(company, secrets, &tool_inventory_key(server), &inventory)
+        .await
+        .unwrap();
+}
+
+/// The step-3 trap, pinned. A per-tier bulk default names no tools; the
+/// inventory is the only thing that says which tools it is *for*. Without it
+/// the operator's decision is silently not enforced — no error, no row, just a
+/// tool that keeps parking after they allowed it.
+#[tokio::test]
+async fn a_tier_default_reaches_the_tools_discovery_found() {
+    let company = CompanyId::new("acme");
+    let secrets = MemSecrets::default();
+    let manifest = vec![read_only_server(
+        "notion",
+        "https://notion.example/mcp",
+        &[],
+    )];
+    seed_inventory(&company, &secrets, "notion", &["search_pages", "move_page"]).await;
+
+    let mut stored = McpToolPolicies::default();
+    stored
+        .tier_defaults
+        .insert(ToolTier::ReadOnly, ApprovalMode::AlwaysAllow);
+    save_tool_policies(&company, &secrets, &tool_policies_key("notion"), &stored)
+        .await
+        .unwrap();
+
+    let decls = resolve_effective(&company, &[], &manifest, &secrets)
+        .await
+        .unwrap();
+    let allow = crate::company::mcp_policy::mcp_allow_set(&decls);
+    // `search_pages` is suggested read-only, so the bulk default reaches it.
+    assert!(allow.contains("notion", "search_pages"));
+    // `move_page` is not, so it keeps parking.
+    assert!(!allow.contains("notion", "move_page"));
+}
+
+/// The same company with no inventory: the tier default reaches nothing, which
+/// is the silent wrongness the threading exists to prevent.
+#[tokio::test]
+async fn without_an_inventory_a_tier_default_reaches_nothing() {
+    let company = CompanyId::new("acme");
+    let secrets = MemSecrets::default();
+    let manifest = vec![read_only_server(
+        "notion",
+        "https://notion.example/mcp",
+        &[],
+    )];
+    let mut stored = McpToolPolicies::default();
+    stored
+        .tier_defaults
+        .insert(ToolTier::ReadOnly, ApprovalMode::AlwaysAllow);
+    save_tool_policies(&company, &secrets, &tool_policies_key("notion"), &stored)
+        .await
+        .unwrap();
+
+    let decls = resolve_effective(&company, &[], &manifest, &secrets)
+        .await
+        .unwrap();
+    assert!(decls[0].tool_inventory.tools.is_empty());
+    assert!(crate::company::mcp_policy::mcp_allow_set(&decls).is_empty());
+}
+
+/// A suggested tier still cannot allow on its own — the inventory supplies the
+/// grouping, never the permission. Same rule as step 3, now with the suggestion
+/// arriving from storage rather than a literal.
+#[tokio::test]
+async fn an_inventory_alone_grants_nothing() {
+    let company = CompanyId::new("acme");
+    let secrets = MemSecrets::default();
+    let manifest = vec![read_only_server(
+        "notion",
+        "https://notion.example/mcp",
+        &[],
+    )];
+    seed_inventory(&company, &secrets, "notion", &["search_pages"]).await;
+
+    let decls = resolve_effective(&company, &[], &manifest, &secrets)
+        .await
+        .unwrap();
+    assert_eq!(
+        decls[0].tool_inventory.suggested("search_pages"),
+        Some(ToolTier::ReadOnly)
+    );
+    assert!(crate::company::mcp_policy::mcp_allow_set(&decls).is_empty());
+}
+
+/// An unreadable inventory degrades that server only, and the declaration it
+/// carries keeps working.
+#[tokio::test]
+async fn an_unreadable_inventory_does_not_disturb_the_declaration() {
+    let company = CompanyId::new("acme");
+    let secrets = MemSecrets::default();
+    let manifest = vec![read_only_server(
+        "notion",
+        "https://notion.example/mcp",
+        &["search_pages"],
+    )];
+    secrets
+        .set(
+            &company,
+            &tool_inventory_key("notion"),
+            SecretValue("{not json".into()),
+        )
+        .await
+        .unwrap();
+
+    let decls = resolve_effective(&company, &[], &manifest, &secrets)
+        .await
+        .unwrap();
+    assert_eq!(decls[0].tool_inventory, McpToolInventory::default());
+    assert!(
+        crate::company::mcp_policy::mcp_allow_set(&decls).contains("notion", "search_pages"),
+        "the declared read-only tool must survive an unreadable inventory"
+    );
+}
+
+#[test]
+fn the_registry_inventory_key_is_addressed_by_install_id() {
+    assert_eq!(
+        registry_tool_inventory_key("0b8f4b0e"),
+        "mcp_registry/0b8f4b0e/tool_inventory"
+    );
+}

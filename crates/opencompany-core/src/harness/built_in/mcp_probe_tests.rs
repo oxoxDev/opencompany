@@ -25,6 +25,7 @@ fn oauth_decl(name: &str, endpoint: &str, access_token: &str) -> McpServerDecl {
             expires_at: u64::MAX,
         },
         tool_policies: Default::default(),
+        tool_inventory: Default::default(),
     }
 }
 

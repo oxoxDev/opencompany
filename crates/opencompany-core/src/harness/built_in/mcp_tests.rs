@@ -15,6 +15,7 @@ pub(super) fn decl(name: &str, endpoint: &str) -> McpServerDecl {
         source: crate::company::mcp::McpSource::Runtime,
         auth: AuthMaterial::None,
         tool_policies: Default::default(),
+        tool_inventory: Default::default(),
     }
 }
 

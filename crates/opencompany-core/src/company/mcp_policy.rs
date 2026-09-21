@@ -388,31 +388,47 @@ pub async fn clear_tool_policies(
 /// approval gate lets run without parking, resolved through each server's tool
 /// policy.
 ///
-/// The successor to [`mcp_read_set`](super::mcp::mcp_read_set), which reads the flat declaration
-/// directly. Both produce the same shape, so one can be diffed against the
-/// other over a fixture.
+/// The successor to [`mcp_read_set`](super::mcp::mcp_read_set), which reads the
+/// flat declaration directly. Both produce the same shape, so one can be diffed
+/// against the other over a fixture.
 ///
-/// Enumerates the policy document's own entries and nothing else. A stored
-/// per-tier default can also produce an allow, but only for a tool some
-/// inventory names, and no inventory is persisted yet — so a tier default
-/// currently reaches exactly the tools that already have an entry. A disabled
-/// server contributes nothing: it hands out no tool, so a call through it could
-/// not have been made.
+/// Enumerates the union of the policy document's own entries and the tools
+/// discovery last saw. Both halves are needed: an entry names a tool the
+/// operator decided about, which discovery may not have reached; the inventory
+/// names the tools a per-tier bulk default is *for*, which have no entry by
+/// definition. A disabled server contributes nothing: it hands out no tool, so
+/// a call through it could not have been made.
 ///
-/// Never consults [`suggest_tool_tier`].
-/// A name heuristic deciding who skips the approval gate is the one thing that
-/// would make this a behaviour change rather than a restatement.
+/// Never consults [`suggest_tool_tier`] directly. The suggestion reaches the
+/// resolution only through the stored inventory, and only as a tier — a
+/// suggestion alone still cannot grant [`ApprovalMode::AlwaysAllow`], which is
+/// what keeps a name heuristic out of the decision to skip the approval gate.
 pub fn mcp_allow_set(servers: &[McpServerDecl]) -> crate::policy::McpReadSet {
     crate::policy::McpReadSet::from_pairs(servers.iter().filter(|s| s.enabled).flat_map(|server| {
-        server
-            .tool_policies
-            .overrides
-            .keys()
+        policy_tool_names(&server.tool_policies, &server.tool_inventory)
             .filter(|tool| {
-                resolve_policy(&server.tool_policies, tool, None).mode == ApprovalMode::AlwaysAllow
+                resolve_policy(
+                    &server.tool_policies,
+                    tool,
+                    server.tool_inventory.suggested(tool),
+                )
+                .mode
+                    == ApprovalMode::AlwaysAllow
             })
-            .map(move |tool| (server.name.clone(), tool.clone()))
+            .map(move |tool| (server.name.clone(), tool))
     }))
+}
+
+/// Every tool name a policy decision can be stated about: the ones an operator
+/// already decided, plus the ones discovery found.
+pub fn policy_tool_names(
+    policies: &McpToolPolicies,
+    inventory: &McpToolInventory,
+) -> impl Iterator<Item = String> {
+    let mut names: std::collections::BTreeSet<String> =
+        policies.overrides.keys().cloned().collect();
+    names.extend(inventory.tools.keys().cloned());
+    names.into_iter()
 }
 
 /// Every granted server's resolved policy, addressed by server name.
@@ -422,7 +438,7 @@ pub fn mcp_allow_set(servers: &[McpServerDecl]) -> crate::policy::McpReadSet {
 /// answers one the bridge tool asks at the point it would dial.
 #[derive(Clone, Debug, Default)]
 pub struct McpToolPolicySet {
-    by_server: HashMap<String, McpToolPolicies>,
+    by_server: HashMap<String, (McpToolPolicies, McpToolInventory)>,
 }
 
 impl McpToolPolicySet {
@@ -437,7 +453,12 @@ impl McpToolPolicySet {
             by_server: servers
                 .into_iter()
                 .filter(|server| server.enabled)
-                .map(|server| (server.name.clone(), server.tool_policies.clone()))
+                .map(|server| {
+                    (
+                        server.name.clone(),
+                        (server.tool_policies.clone(), server.tool_inventory.clone()),
+                    )
+                })
                 .collect(),
         }
     }
@@ -449,9 +470,12 @@ impl McpToolPolicySet {
     /// reason to refuse. Nothing is granted by answering `false` either — the
     /// approval gate has already decided separately whether the call parks.
     pub fn is_blocked(&self, server: &str, tool: &str) -> bool {
-        self.by_server.get(server).is_some_and(|policies| {
-            resolve_policy(policies, tool, None).mode == ApprovalMode::Blocked
-        })
+        self.by_server
+            .get(server)
+            .is_some_and(|(policies, inventory)| {
+                resolve_policy(policies, tool, inventory.suggested(tool)).mode
+                    == ApprovalMode::Blocked
+            })
     }
 }
 

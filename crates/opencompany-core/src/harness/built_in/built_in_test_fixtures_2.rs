@@ -484,6 +484,7 @@ pub(super) fn belt(grants: &[&str], is_orchestrator: bool, wire_everything: bool
             source: crate::company::mcp::McpSource::Runtime,
             auth: crate::company::mcp::AuthMaterial::None,
             tool_policies: Default::default(),
+            tool_inventory: Default::default(),
         }];
     }
     let manifest_agent = ManifestAgent {

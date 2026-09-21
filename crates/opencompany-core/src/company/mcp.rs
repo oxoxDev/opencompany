@@ -290,6 +290,10 @@ pub struct McpServerDecl {
     /// [`effective_policies`](super::mcp_policy::effective_policies). Empty
     /// until [`resolve_effective`] fills it.
     pub tool_policies: super::mcp_policy::McpToolPolicies,
+    /// The tools discovery last saw on this server and the tier each was
+    /// suggested under. Empty until [`resolve_effective`] fills it, and empty
+    /// for a server discovery has never reached.
+    pub tool_inventory: super::mcp_policy::McpToolInventory,
 }
 
 impl McpServerDecl {
@@ -306,6 +310,7 @@ impl McpServerDecl {
             source,
             auth: AuthMaterial::None,
             tool_policies: super::mcp_policy::McpToolPolicies::default(),
+            tool_inventory: super::mcp_policy::McpToolInventory::default(),
         }
     }
 }
@@ -702,6 +707,15 @@ pub async fn resolve_effective(
         )
         .await;
         decl.tool_policies = super::mcp_policy::effective_policies(&decl.read_only_tools, stored);
+        // Threaded here, before any route can store a tier default. Without it
+        // a tier default resolves against nothing: the tool is never
+        // enumerated, so the operator's decision is silently not enforced.
+        decl.tool_inventory = super::mcp_policy::load_tool_inventory(
+            company,
+            secrets,
+            &super::mcp_policy::tool_inventory_key(&decl.name),
+        )
+        .await;
     }
     Ok(decls)
 }
