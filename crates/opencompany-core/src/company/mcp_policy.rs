@@ -115,6 +115,66 @@ pub fn default_mode_for(tier: ToolTier) -> ApprovalMode {
     }
 }
 
+/// Verb prefixes that suggest a tool only reads.
+///
+/// Deliberately short. A suggested `ReadOnly` is the one tier whose nominal
+/// default runs without a human, so every entry added here widens what a guess
+/// about a name can reach. `query` and `fetch` are absent for that reason — a
+/// "query" can carry a `DELETE`.
+const READ_VERBS: &[&str] = &["get", "list", "read", "search"];
+
+/// Verb prefixes that suggest a tool destroys something. Escalating into this
+/// tier never loosens anything: it and `Interactive` share a nominal default.
+const DESTRUCTIVE_VERBS: &[&str] = &["delete", "remove", "drop", "destroy", "purge"];
+
+/// The leading verb of a tool name, lowercased. Handles the three shapes remote
+/// servers use: `search_pages`, `search-pages`/`notion.search`, and
+/// `searchPages`.
+fn leading_verb(name: &str) -> String {
+    let head = name
+        .trim()
+        .split(['_', '-', '.', ':', '/'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or("");
+    let boundary = head
+        .char_indices()
+        .skip(1)
+        .find(|(_, c)| c.is_ascii_uppercase())
+        .map(|(i, _)| i)
+        .unwrap_or(head.len());
+    head[..boundary].to_ascii_lowercase()
+}
+
+/// Suggests a tier for a remote tool from its name, and its description only
+/// where that cannot make the suggestion more permissive.
+///
+/// **Non-authoritative.** This answers what a console should pre-select and
+/// group under, not what the gate enforces — see [`resolve_policy`], where a
+/// suggestion alone never grants [`ApprovalMode::AlwaysAllow`].
+///
+/// The name decides. A description is consulted only to escalate an otherwise
+/// unclassified tool into [`ToolTier::WriteDelete`]; it can never pull one down
+/// to [`ToolTier::ReadOnly`], because prose is written by whoever runs the
+/// remote server and that direction is the one that loosens a boundary.
+pub fn suggest_tool_tier(name: &str, description: Option<&str>) -> ToolTier {
+    let verb = leading_verb(name);
+    if DESTRUCTIVE_VERBS.contains(&verb.as_str()) {
+        return ToolTier::WriteDelete;
+    }
+    if READ_VERBS.contains(&verb.as_str()) {
+        return ToolTier::ReadOnly;
+    }
+    let described = description.unwrap_or("").to_ascii_lowercase();
+    if DESTRUCTIVE_VERBS.iter().any(|v| {
+        described
+            .split_whitespace()
+            .any(|word| word.trim_matches(|c: char| !c.is_ascii_alphabetic()) == *v)
+    }) {
+        return ToolTier::WriteDelete;
+    }
+    ToolTier::Interactive
+}
+
 #[cfg(test)]
 #[path = "mcp_policy_tests.rs"]
 mod tests;
