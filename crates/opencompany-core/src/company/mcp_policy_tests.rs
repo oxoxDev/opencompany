@@ -211,3 +211,129 @@ fn ambiguous_read_shaped_verbs_stay_out_of_the_read_tier() {
     );
     assert_eq!(suggest_tool_tier("fetch_url", None), ToolTier::Interactive);
 }
+
+// ---- the resolution ladder --------------------------------------------
+
+fn with_override(tool: &str, policy: ToolPolicy) -> McpToolPolicies {
+    let mut policies = McpToolPolicies::default();
+    policies.overrides.insert(tool.to_string(), policy);
+    policies
+}
+
+/// Nothing stored, nothing suggested: the conservative middle, which parks.
+#[test]
+fn an_unknown_tool_parks_under_the_middle_tier() {
+    let resolved = resolve_policy(&McpToolPolicies::default(), "move_page", None);
+    assert_eq!(resolved.tier, ToolTier::Interactive);
+    assert_eq!(resolved.mode, ApprovalMode::NeedsApproval);
+    assert!(!resolved.is_override);
+}
+
+/// The deviation that matters: a merely *suggested* read-only still parks. A
+/// name heuristic may group a row, never skip the gate for it.
+#[test]
+fn a_suggested_read_only_tool_still_parks() {
+    let resolved = resolve_policy(
+        &McpToolPolicies::default(),
+        "search_pages",
+        Some(ToolTier::ReadOnly),
+    );
+    assert_eq!(resolved.tier, ToolTier::ReadOnly);
+    assert_eq!(resolved.mode, ApprovalMode::NeedsApproval);
+    assert!(!resolved.is_override);
+}
+
+/// …whereas an operator who reclassified the row to read-only did make a risk
+/// statement, so the tier's nominal default is theirs to inherit.
+#[test]
+fn an_operator_confirmed_read_only_tool_inherits_allow() {
+    let policies = with_override(
+        "search_pages",
+        ToolPolicy {
+            tier: Some(ToolTier::ReadOnly),
+            mode: None,
+        },
+    );
+    let resolved = resolve_policy(&policies, "search_pages", None);
+    assert_eq!(resolved.mode, ApprovalMode::AlwaysAllow);
+    assert!(resolved.is_override);
+}
+
+/// Bulk allow stays one deliberate action away: a stored tier default reaches
+/// every tool the suggestion groups there.
+#[test]
+fn a_stored_tier_default_reaches_suggested_rows() {
+    let mut policies = McpToolPolicies::default();
+    policies
+        .tier_defaults
+        .insert(ToolTier::ReadOnly, ApprovalMode::AlwaysAllow);
+    let resolved = resolve_policy(&policies, "search_pages", Some(ToolTier::ReadOnly));
+    assert_eq!(resolved.mode, ApprovalMode::AlwaysAllow);
+    // Inherited from the tier, not decided on this row.
+    assert!(!resolved.is_override);
+}
+
+#[test]
+fn a_tool_override_wins_over_the_tier_default() {
+    let mut policies = with_override(
+        "search_pages",
+        ToolPolicy {
+            tier: None,
+            mode: Some(ApprovalMode::Blocked),
+        },
+    );
+    policies
+        .tier_defaults
+        .insert(ToolTier::ReadOnly, ApprovalMode::AlwaysAllow);
+    let resolved = resolve_policy(&policies, "search_pages", Some(ToolTier::ReadOnly));
+    assert_eq!(resolved.mode, ApprovalMode::Blocked);
+    assert_eq!(resolved.tier, ToolTier::ReadOnly);
+    assert!(resolved.is_override);
+}
+
+/// A mode-only override must not disturb the tier, or every press of a console's
+/// three-way control would silently revert a reclassification.
+#[test]
+fn a_mode_only_override_leaves_the_suggested_tier_in_place() {
+    let policies = with_override(
+        "move_page",
+        ToolPolicy {
+            tier: None,
+            mode: Some(ApprovalMode::AlwaysAllow),
+        },
+    );
+    let resolved = resolve_policy(&policies, "move_page", Some(ToolTier::WriteDelete));
+    assert_eq!(resolved.tier, ToolTier::WriteDelete);
+    assert_eq!(resolved.mode, ApprovalMode::AlwaysAllow);
+}
+
+/// An operator's reclassification beats the heuristic, including when the
+/// heuristic was the more permissive of the two.
+#[test]
+fn a_reclassification_beats_the_suggestion() {
+    let policies = with_override(
+        "search_pages",
+        ToolPolicy {
+            tier: Some(ToolTier::WriteDelete),
+            mode: None,
+        },
+    );
+    let resolved = resolve_policy(&policies, "search_pages", Some(ToolTier::ReadOnly));
+    assert_eq!(resolved.tier, ToolTier::WriteDelete);
+    assert_eq!(resolved.mode, ApprovalMode::NeedsApproval);
+}
+
+/// An entry that decides nothing resolves exactly as no entry does, so a reset
+/// is indistinguishable from never having touched the row.
+#[test]
+fn an_empty_entry_resolves_as_no_entry() {
+    let policies = with_override("search_pages", ToolPolicy::default());
+    let resolved = resolve_policy(&policies, "search_pages", Some(ToolTier::ReadOnly));
+    let untouched = resolve_policy(
+        &McpToolPolicies::default(),
+        "search_pages",
+        Some(ToolTier::ReadOnly),
+    );
+    assert_eq!(resolved, untouched);
+    assert!(!resolved.is_override);
+}

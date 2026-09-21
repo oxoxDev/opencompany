@@ -175,6 +175,57 @@ pub fn suggest_tool_tier(name: &str, description: Option<&str>) -> ToolTier {
     ToolTier::Interactive
 }
 
+/// One tool's resolved policy: what the gate enforces, plus what a console
+/// needs to render the row honestly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolvedPolicy {
+    /// The tier the row is grouped and defaulted under.
+    pub tier: ToolTier,
+    /// The enforced mode.
+    pub mode: ApprovalMode,
+    /// Whether an operator decided anything about this row, as opposed to it
+    /// inheriting. Derived, never stored — storing it lets the two disagree,
+    /// and the gate is the consumer of that disagreement.
+    pub is_override: bool,
+}
+
+/// Resolves one tool's policy from the stored document and a suggested tier.
+///
+/// Two ladders. The tier: an operator's reclassification, else the suggestion,
+/// else the conservative middle. The mode: this tool's own override, else the
+/// tier's stored bulk default, else a hardcoded fallback.
+///
+/// The hardcoded fallback is where this departs from a plain reading of the
+/// tier table. It grants [`ApprovalMode::AlwaysAllow`] only when an operator
+/// **confirmed** the tier; a tier that is merely *suggested* falls to
+/// [`ApprovalMode::NeedsApproval`] no matter what the suggestion says. A name
+/// heuristic is a guess, and letting a guess skip the approval gate would mean
+/// the day the heuristic gains a verb, calls that used to park stop parking.
+/// Bulk allow is still one action away — it is `tier_defaults`, which an
+/// operator writes deliberately.
+pub fn resolve_policy(
+    policies: &McpToolPolicies,
+    tool: &str,
+    suggested: Option<ToolTier>,
+) -> ResolvedPolicy {
+    let stored = policies.overrides.get(tool).copied().unwrap_or_default();
+    let tier = stored.tier.or(suggested).unwrap_or(ToolTier::Interactive);
+    let fallback = if stored.tier.is_some() {
+        default_mode_for(tier)
+    } else {
+        ApprovalMode::NeedsApproval
+    };
+    let mode = stored
+        .mode
+        .or_else(|| policies.tier_defaults.get(&tier).copied())
+        .unwrap_or(fallback);
+    ResolvedPolicy {
+        tier,
+        mode,
+        is_override: !stored.is_empty(),
+    }
+}
+
 #[cfg(test)]
 #[path = "mcp_policy_tests.rs"]
 mod tests;
