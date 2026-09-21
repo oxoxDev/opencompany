@@ -80,6 +80,11 @@ pub mod mcp;
 /// rather than starting with an empty tool surface somebody has to fill in by
 /// hand from the console before the company can do anything.
 pub mod mcp_file;
+/// Per-tool approval policy for MCP servers: the tier vocabulary, the
+/// operator's stored overrides, and the ladder that resolves one from the
+/// other. Ungated — the console route that edits a policy ships without the
+/// harness, and the gate that enforces one ships with it.
+pub mod mcp_policy;
 pub mod paypal;
 // Console MCP OAuth (issue #90): discovery + PKCE + DCR + token exchange for the
 // per-tenant browser sign-in flow. Needs the vendored `oh::mcp::config_servers` discovery
