@@ -115,7 +115,7 @@ use crate::harness::built_in::provider::HarnessModel;
 #[cfg(feature = "mcp")]
 use crate::harness::mcp::{
     OcMcpCallTool, OcMcpListServersTool, OcMcpRegistryScopedTool, capability_brief,
-    granted_secrets, registry_for_agent,
+    granted_policies, granted_secrets, registry_for_agent,
 };
 use crate::harness::orchestrator;
 use crate::harness::policy::ApprovalPolicy;
@@ -1092,6 +1092,7 @@ pub fn build_agent_with_model(
         // request: an empty request inherits the company belt and can therefore
         // reach servers even when `manifest_agent.tools` is empty.
         let secrets = granted_secrets(&deps.mcp_servers, grants);
+        let mcp_policies = granted_policies(&deps.mcp_servers, grants);
         tools.push(Box::new(OcMcpListServersTool::new(registry.clone())));
         tools.push(Box::new(McpListToolsTool::new(registry.clone())));
         // `OcMcpCallTool` replaces upstream's `McpCallTool`: same name/schema,
@@ -1112,6 +1113,7 @@ pub fn build_agent_with_model(
                 agent: manifest_agent.id.clone(),
                 meter: deps.meter.clone(),
             },
+            mcp_policies,
         )));
         // Stale-memory mitigation: direct the agent to answer capability
         // questions from a live `mcp_list_servers` call, never from memory.

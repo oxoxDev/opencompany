@@ -1,6 +1,8 @@
 use super::*;
 
-fn decl(name: &str, endpoint: &str) -> McpServerDecl {
+/// Shared with [`super::blocked_tests`], which builds the same declarations and
+/// then attaches a policy to them.
+pub(super) fn decl(name: &str, endpoint: &str) -> McpServerDecl {
     McpServerDecl {
         name: name.to_string(),
         endpoint: endpoint.to_string(),
@@ -16,7 +18,7 @@ fn decl(name: &str, endpoint: &str) -> McpServerDecl {
     }
 }
 
-fn grants(g: &[&str]) -> Vec<String> {
+pub(super) fn grants(g: &[&str]) -> Vec<String> {
     g.iter().map(|s| s.to_string()).collect()
 }
 
@@ -316,6 +318,7 @@ async fn oc_call_tool_scrubs_reflected_credential() {
         secrets,
         queue.clone(),
         McpMetering::off(),
+        Default::default(),
     );
 
     let result = tool
@@ -449,6 +452,7 @@ async fn a_completed_mcp_call_is_metered_and_a_failed_one_is_not() {
             agent: "ceo".to_string(),
             meter: Some(meter.clone()),
         },
+        Default::default(),
     );
 
     let ok = tool

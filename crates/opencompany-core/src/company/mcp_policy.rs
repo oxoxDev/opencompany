@@ -415,6 +415,56 @@ pub fn mcp_allow_set(servers: &[McpServerDecl]) -> crate::policy::McpReadSet {
     }))
 }
 
+/// Every granted server's resolved policy, addressed by server name.
+///
+/// The call-time face of the same documents [`mcp_allow_set`] flattens. The
+/// allow set answers a question the approval gate asks *before* a call; this
+/// answers one the bridge tool asks at the point it would dial.
+#[derive(Clone, Debug, Default)]
+pub struct McpToolPolicySet {
+    by_server: HashMap<String, McpToolPolicies>,
+}
+
+impl McpToolPolicySet {
+    /// Collects the enabled servers' policies. A disabled server hands out no
+    /// tool, so a call through it could not have been made.
+    ///
+    /// Takes an iterator so a caller can narrow the set first — the harness
+    /// hands it only the servers an agent's grants reach, the way it already
+    /// narrows the credential substrings it collects.
+    pub fn from_declarations<'a>(servers: impl IntoIterator<Item = &'a McpServerDecl>) -> Self {
+        Self {
+            by_server: servers
+                .into_iter()
+                .filter(|server| server.enabled)
+                .map(|server| (server.name.clone(), server.tool_policies.clone()))
+                .collect(),
+        }
+    }
+
+    /// Whether this call is refused outright.
+    ///
+    /// A server with no policy answers `false`: blocking is an explicit
+    /// operator act, and the absence of one is the absence of that act, not a
+    /// reason to refuse. Nothing is granted by answering `false` either — the
+    /// approval gate has already decided separately whether the call parks.
+    pub fn is_blocked(&self, server: &str, tool: &str) -> bool {
+        self.by_server.get(server).is_some_and(|policies| {
+            resolve_policy(policies, tool, None).mode == ApprovalMode::Blocked
+        })
+    }
+}
+
+/// The agent-facing refusal for a blocked call. One function so the two bridge
+/// families cannot come to word it differently.
+pub fn blocked_refusal(server: &str, tool: &str) -> String {
+    format!(
+        "The tool '{tool}' on MCP server '{server}' is blocked by this company's tool \
+         permissions, so the call was not made. This is not an approval that can be granted \
+         in the moment — do not retry, and surface it to the operator if the work needs it."
+    )
+}
+
 #[cfg(test)]
 #[path = "mcp_policy_tests.rs"]
 mod tests;
