@@ -18,6 +18,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::mcp::McpServerDecl;
+
 use crate::Result;
 use crate::error::OpenCompanyError;
 use crate::ports::SecretStore;
@@ -381,6 +383,36 @@ pub async fn clear_tool_policies(
     key: &str,
 ) -> Result<()> {
     save_tool_policies(company, secrets, key, &McpToolPolicies::default()).await
+}
+/// Flattens a company's effective MCP servers into the `(server, tool)` set the
+/// approval gate lets run without parking, resolved through each server's tool
+/// policy.
+///
+/// The successor to [`mcp_read_set`](super::mcp::mcp_read_set), which reads the flat declaration
+/// directly. Both produce the same shape, so one can be diffed against the
+/// other over a fixture.
+///
+/// Enumerates the policy document's own entries and nothing else. A stored
+/// per-tier default can also produce an allow, but only for a tool some
+/// inventory names, and no inventory is persisted yet — so a tier default
+/// currently reaches exactly the tools that already have an entry. A disabled
+/// server contributes nothing: it hands out no tool, so a call through it could
+/// not have been made.
+///
+/// Never consults [`suggest_tool_tier`].
+/// A name heuristic deciding who skips the approval gate is the one thing that
+/// would make this a behaviour change rather than a restatement.
+pub fn mcp_allow_set(servers: &[McpServerDecl]) -> crate::policy::McpReadSet {
+    crate::policy::McpReadSet::from_pairs(servers.iter().filter(|s| s.enabled).flat_map(|server| {
+        server
+            .tool_policies
+            .overrides
+            .keys()
+            .filter(|tool| {
+                resolve_policy(&server.tool_policies, tool, None).mode == ApprovalMode::AlwaysAllow
+            })
+            .map(move |tool| (server.name.clone(), tool.clone()))
+    }))
 }
 
 #[cfg(test)]
