@@ -686,3 +686,13 @@ fn inventory_keys_are_namespaced_per_server_kind() {
         "mcp_registry/0b8f4b0e-3c2a-4a1d-9e77-6d5a2f1c8e40/tool_inventory"
     );
 }
+
+/// The wire string and the serde representation must not drift: the console
+/// keys its tier sections off one and reads rows through the other.
+#[test]
+fn the_tier_wire_string_matches_its_serde_form() {
+    for tier in ToolTier::ALL {
+        let serialized = serde_json::to_string(&tier).unwrap();
+        assert_eq!(serialized, format!("\"{}\"", tier.as_str()), "{tier:?}");
+    }
+}

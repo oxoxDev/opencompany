@@ -38,6 +38,15 @@ pub enum ToolTier {
 }
 
 impl ToolTier {
+    /// The stable wire string, matching the serde representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ToolTier::Interactive => "interactive",
+            ToolTier::ReadOnly => "read_only",
+            ToolTier::WriteDelete => "write_delete",
+        }
+    }
+
     /// Every tier, in the order a console lists them.
     pub const ALL: [ToolTier; 3] = [
         ToolTier::ReadOnly,

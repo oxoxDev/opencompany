@@ -300,8 +300,8 @@ fn auth_material_from(
 
 /// The sub-resource path (`name`).
 #[derive(Debug, Deserialize)]
-struct NamePath {
-    name: String,
+pub(super) struct NamePath {
+    pub(super) name: String,
 }
 
 /// Loads the company's committed `[[mcp_server]]` entries from its record.
