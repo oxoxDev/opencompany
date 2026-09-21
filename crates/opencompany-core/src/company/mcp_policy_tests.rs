@@ -337,3 +337,235 @@ fn an_empty_entry_resolves_as_no_entry() {
     assert_eq!(resolved, untouched);
     assert!(!resolved.is_override);
 }
+
+// ---- migration and storage --------------------------------------------
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use async_trait::async_trait;
+
+#[derive(Default)]
+struct MemSecrets {
+    map: Mutex<HashMap<String, String>>,
+    fail_reads: bool,
+}
+
+#[async_trait]
+impl SecretStore for MemSecrets {
+    async fn get(&self, _c: &CompanyId, key: &str) -> Result<Option<SecretValue>> {
+        if self.fail_reads {
+            return Err(OpenCompanyError::Store("store is down".into()));
+        }
+        Ok(self
+            .map
+            .lock()
+            .unwrap()
+            .get(key)
+            .map(|v| SecretValue(v.clone())))
+    }
+    async fn set(&self, _c: &CompanyId, key: &str, value: SecretValue) -> Result<()> {
+        self.map.lock().unwrap().insert(key.to_string(), value.0);
+        Ok(())
+    }
+}
+
+fn company() -> CompanyId {
+    CompanyId::new("acme")
+}
+
+/// The restatement writes both fields concretely. A future tidy that drops
+/// either one would change what the gate enforces, so it fails here first.
+#[test]
+fn migration_states_both_the_tier_and_the_mode() {
+    let policies = migrate_read_only_tools(&["search_pages".into(), "  ".into()]);
+    assert_eq!(policies.overrides.len(), 1);
+    let entry = policies.overrides.get("search_pages").unwrap();
+    assert_eq!(entry.tier, Some(ToolTier::ReadOnly));
+    assert_eq!(entry.mode, Some(ApprovalMode::AlwaysAllow));
+    assert!(policies.tier_defaults.is_empty());
+}
+
+/// The whole point of the migration: a legacy read-only tool keeps running
+/// without a human, and everything else keeps parking.
+#[test]
+fn the_legacy_baseline_reproduces_todays_behaviour() {
+    let policies = effective_policies(&["search_pages".into()], McpToolPolicies::default());
+    assert_eq!(
+        resolve_policy(&policies, "search_pages", None).mode,
+        ApprovalMode::AlwaysAllow
+    );
+    assert_eq!(
+        resolve_policy(&policies, "move_page", None).mode,
+        ApprovalMode::NeedsApproval
+    );
+}
+
+/// A stored entry naming only a mode keeps the baseline's tier, so editing one
+/// row cannot quietly regroup it.
+#[test]
+fn a_stored_entry_layers_field_by_field_over_the_baseline() {
+    let mut stored = McpToolPolicies::default();
+    stored.overrides.insert(
+        "search_pages".into(),
+        ToolPolicy {
+            tier: None,
+            mode: Some(ApprovalMode::NeedsApproval),
+        },
+    );
+    let policies = effective_policies(&["search_pages".into()], stored);
+    let resolved = resolve_policy(&policies, "search_pages", None);
+    assert_eq!(resolved.mode, ApprovalMode::NeedsApproval);
+    assert_eq!(resolved.tier, ToolTier::ReadOnly);
+}
+
+/// Editing one row must not retire the declaration's remaining rows.
+#[test]
+fn editing_one_row_leaves_the_other_declared_rows_alone() {
+    let mut stored = McpToolPolicies::default();
+    stored.overrides.insert(
+        "move_page".into(),
+        ToolPolicy {
+            tier: None,
+            mode: Some(ApprovalMode::Blocked),
+        },
+    );
+    let policies = effective_policies(&["search_pages".into(), "get_page".into()], stored);
+    assert_eq!(
+        resolve_policy(&policies, "search_pages", None).mode,
+        ApprovalMode::AlwaysAllow
+    );
+    assert_eq!(
+        resolve_policy(&policies, "get_page", None).mode,
+        ApprovalMode::AlwaysAllow
+    );
+    assert_eq!(
+        resolve_policy(&policies, "move_page", None).mode,
+        ApprovalMode::Blocked
+    );
+}
+
+#[tokio::test]
+async fn an_absent_document_reads_as_the_empty_one() {
+    let secrets = MemSecrets::default();
+    let key = tool_policies_key("notion");
+    assert_eq!(
+        load_tool_policies(&company(), &secrets, &key).await,
+        McpToolPolicies::default()
+    );
+    assert_eq!(
+        load_tool_policies_strict(&company(), &secrets, &key)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn a_document_round_trips_through_the_store() {
+    let secrets = MemSecrets::default();
+    let key = tool_policies_key("notion");
+    let mut policies = McpToolPolicies::default();
+    policies
+        .tier_defaults
+        .insert(ToolTier::ReadOnly, ApprovalMode::AlwaysAllow);
+    policies.overrides.insert(
+        "move_page".into(),
+        ToolPolicy {
+            tier: Some(ToolTier::WriteDelete),
+            mode: Some(ApprovalMode::Blocked),
+        },
+    );
+    save_tool_policies(&company(), &secrets, &key, &policies)
+        .await
+        .unwrap();
+    assert_eq!(
+        load_tool_policies(&company(), &secrets, &key).await,
+        policies
+    );
+}
+
+/// An entry deciding nothing is never persisted, so a reset leaves no residue
+/// for a later reader to treat as an override.
+#[tokio::test]
+async fn saving_prunes_entries_that_decide_nothing() {
+    let secrets = MemSecrets::default();
+    let key = tool_policies_key("notion");
+    let mut policies = McpToolPolicies::default();
+    policies
+        .overrides
+        .insert("search_pages".into(), ToolPolicy::default());
+    save_tool_policies(&company(), &secrets, &key, &policies)
+        .await
+        .unwrap();
+    let read_back = load_tool_policies(&company(), &secrets, &key).await;
+    assert!(read_back.overrides.is_empty());
+    assert!(!resolve_policy(&read_back, "search_pages", None).is_override);
+}
+
+/// The two faces disagree on purpose: the gate degrades to all-park, the
+/// operator-facing read refuses.
+#[tokio::test]
+async fn an_unreadable_document_degrades_for_the_gate_and_surfaces_for_an_operator() {
+    let secrets = MemSecrets::default();
+    let key = tool_policies_key("notion");
+    secrets
+        .set(&company(), &key, SecretValue("{not json".into()))
+        .await
+        .unwrap();
+
+    let degraded = load_tool_policies(&company(), &secrets, &key).await;
+    assert_eq!(degraded, McpToolPolicies::default());
+    assert_eq!(
+        resolve_policy(&degraded, "search_pages", Some(ToolTier::ReadOnly)).mode,
+        ApprovalMode::NeedsApproval
+    );
+
+    assert!(
+        load_tool_policies_strict(&company(), &secrets, &key)
+            .await
+            .is_err()
+    );
+}
+
+/// A store that cannot be read at all degrades the same way. It must never
+/// travel up as an error: the caller above treats one as "this company gets no
+/// MCP servers", which would strip every server over one unreadable key.
+#[tokio::test]
+async fn a_failing_store_degrades_rather_than_propagating() {
+    let secrets = MemSecrets {
+        fail_reads: true,
+        ..Default::default()
+    };
+    let key = tool_policies_key("notion");
+    assert_eq!(
+        load_tool_policies(&company(), &secrets, &key).await,
+        McpToolPolicies::default()
+    );
+    assert!(
+        load_tool_policies_strict(&company(), &secrets, &key)
+            .await
+            .is_err()
+    );
+}
+
+/// Clearing writes the empty document rather than leaving the unparseable one,
+/// which is the only repair available where the store has no delete.
+#[tokio::test]
+async fn clearing_replaces_an_unparseable_document() {
+    let secrets = MemSecrets::default();
+    let key = tool_policies_key("notion");
+    secrets
+        .set(&company(), &key, SecretValue("{not json".into()))
+        .await
+        .unwrap();
+    clear_tool_policies(&company(), &secrets, &key)
+        .await
+        .unwrap();
+    assert_eq!(
+        load_tool_policies_strict(&company(), &secrets, &key)
+            .await
+            .unwrap(),
+        Some(McpToolPolicies::default())
+    );
+}
