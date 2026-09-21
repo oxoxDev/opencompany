@@ -254,14 +254,35 @@ pub fn migrate_read_only_tools(read_only_tools: &[String]) -> McpToolPolicies {
     policies
 }
 
-/// Layers a stored policy document over the baseline a server's
-/// `read_only_tools` declares.
+/// What a read of a server's policy key found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoredPolicies {
+    /// Nothing written yet — the server's declaration is the whole policy.
+    Absent,
+    /// A document the operator's edits produced.
+    Stored(McpToolPolicies),
+    /// Present but unreadable. Distinct from [`Self::Absent`] because the two
+    /// must resolve differently: an unreadable document may have carried a
+    /// refusal, so falling back to the declaration would restore an allow the
+    /// operator had taken away.
+    Unreadable,
+}
+
+/// Layers what a read found over the baseline a server's `read_only_tools`
+/// declares.
 ///
 /// Field-level, not entry-level: a stored entry that names only a mode keeps
 /// the baseline's tier. The declaration stays a live input rather than a
 /// one-shot seed, so the first operator edit to any row cannot silently retire
 /// the manifest's remaining read-only declarations.
-pub fn effective_policies(read_only_tools: &[String], stored: McpToolPolicies) -> McpToolPolicies {
+///
+/// An unreadable document drops the baseline too, and resolves to all-park.
+pub fn effective_policies(read_only_tools: &[String], stored: StoredPolicies) -> McpToolPolicies {
+    let stored = match stored {
+        StoredPolicies::Unreadable => return McpToolPolicies::default(),
+        StoredPolicies::Absent => McpToolPolicies::default(),
+        StoredPolicies::Stored(policies) => policies,
+    };
     let mut out = migrate_read_only_tools(read_only_tools);
     out.tier_defaults.extend(stored.tier_defaults);
     for (tool, policy) in stored.overrides {
@@ -279,20 +300,20 @@ fn parse_policies(raw: &str) -> std::result::Result<McpToolPolicies, String> {
     serde_json::from_str(raw).map_err(|e| e.to_string())
 }
 
-/// Reads a policy document, degrading an unreadable one to the empty document.
+/// Reads a policy document for the gate, reporting an unreadable one as such
+/// rather than as an error.
 ///
-/// The empty document parks everything, so the degrade is fail-closed — and it
-/// is scoped to the one server named in the warning. Surfacing the parse error
-/// instead would travel up through MCP resolution, which a caller already
-/// treats as "this company gets no MCP servers at all".
+/// Surfacing an error instead would travel up through MCP resolution, which a
+/// caller already treats as "this company gets no MCP servers at all", so one
+/// unreadable key would strip every server from every agent behind one warn.
 pub async fn load_tool_policies(
     company: &CompanyId,
     secrets: &dyn SecretStore,
     key: &str,
-) -> McpToolPolicies {
+) -> StoredPolicies {
     let raw = match secrets.get(company, key).await {
         Ok(Some(SecretValue(raw))) => raw,
-        Ok(None) => return McpToolPolicies::default(),
+        Ok(None) => return StoredPolicies::Absent,
         Err(err) => {
             tracing::warn!(
                 company = %company,
@@ -300,18 +321,21 @@ pub async fn load_tool_policies(
                 error = %err,
                 "reading MCP tool policy failed; every tool on this server parks for approval"
             );
-            return McpToolPolicies::default();
+            return StoredPolicies::Unreadable;
         }
     };
-    parse_policies(&raw).unwrap_or_else(|err| {
-        tracing::warn!(
-            company = %company,
-            key = %key,
-            error = %err,
-            "MCP tool policy is not valid JSON; every tool on this server parks for approval"
-        );
-        McpToolPolicies::default()
-    })
+    match parse_policies(&raw) {
+        Ok(policies) => StoredPolicies::Stored(policies),
+        Err(err) => {
+            tracing::warn!(
+                company = %company,
+                key = %key,
+                error = %err,
+                "MCP tool policy is not valid JSON; every tool on this server parks for approval"
+            );
+            StoredPolicies::Unreadable
+        }
+    }
 }
 
 /// Reads a policy document, surfacing an unreadable one.

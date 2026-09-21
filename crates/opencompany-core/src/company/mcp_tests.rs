@@ -488,3 +488,115 @@ fn secret_in_query_is_a_non_blocking_advisory() {
     // No query string at all — no advisory.
     assert!(endpoint_secret_advisory("https://host/mcp").is_none());
 }
+
+// ---- per-tool policy resolution ---------------------------------------
+
+use crate::company::mcp_policy::{
+    ApprovalMode, McpToolPolicies, ToolPolicy, ToolTier, resolve_policy, save_tool_policies,
+    tool_policies_key,
+};
+
+fn read_only_server(name: &str, endpoint: &str, read_only: &[&str]) -> McpServer {
+    let mut s = server(name, endpoint);
+    s.read_only_tools = read_only.iter().map(|t| t.to_string()).collect();
+    s
+}
+
+/// A server with no stored document still resolves its declared read-only
+/// tools, so nothing about a company's approval behaviour moves on upgrade.
+#[tokio::test]
+async fn resolve_effective_layers_the_declared_read_only_list() {
+    let company = CompanyId::new("acme");
+    let secrets = MemSecrets::default();
+    let manifest = vec![read_only_server(
+        "notion",
+        "https://notion.example/mcp",
+        &["search_pages"],
+    )];
+
+    let decls = resolve_effective(&company, &[], &manifest, &secrets)
+        .await
+        .unwrap();
+    let policies = &decls[0].tool_policies;
+    assert_eq!(
+        resolve_policy(policies, "search_pages", None).mode,
+        ApprovalMode::AlwaysAllow
+    );
+    assert_eq!(
+        resolve_policy(policies, "move_page", None).mode,
+        ApprovalMode::NeedsApproval
+    );
+}
+
+#[tokio::test]
+async fn resolve_effective_layers_a_stored_document_over_the_declaration() {
+    let company = CompanyId::new("acme");
+    let secrets = MemSecrets::default();
+    let manifest = vec![read_only_server(
+        "notion",
+        "https://notion.example/mcp",
+        &["search_pages"],
+    )];
+    let mut stored = McpToolPolicies::default();
+    stored.overrides.insert(
+        "move_page".into(),
+        ToolPolicy {
+            tier: Some(ToolTier::WriteDelete),
+            mode: Some(ApprovalMode::Blocked),
+        },
+    );
+    save_tool_policies(&company, &secrets, &tool_policies_key("notion"), &stored)
+        .await
+        .unwrap();
+
+    let decls = resolve_effective(&company, &[], &manifest, &secrets)
+        .await
+        .unwrap();
+    let policies = &decls[0].tool_policies;
+    assert_eq!(
+        resolve_policy(policies, "move_page", None).mode,
+        ApprovalMode::Blocked
+    );
+    assert_eq!(
+        resolve_policy(policies, "search_pages", None).mode,
+        ApprovalMode::AlwaysAllow
+    );
+}
+
+/// One unreadable policy key degrades its own server and leaves every other
+/// server standing. Surfacing it would travel up as "this company gets no MCP
+/// servers at all".
+#[tokio::test]
+async fn an_unreadable_policy_key_does_not_strip_the_other_servers() {
+    let company = CompanyId::new("acme");
+    let secrets = MemSecrets::default();
+    let manifest = vec![
+        read_only_server("notion", "https://notion.example/mcp", &["search_pages"]),
+        read_only_server("linear", "https://linear.example/mcp", &["list_issues"]),
+    ];
+    secrets
+        .set(
+            &company,
+            &tool_policies_key("notion"),
+            SecretValue("{not json".into()),
+        )
+        .await
+        .unwrap();
+
+    let decls = resolve_effective(&company, &[], &manifest, &secrets)
+        .await
+        .unwrap();
+    assert_eq!(decls.len(), 2);
+    let notion = decls.iter().find(|d| d.name == "notion").unwrap();
+    let linear = decls.iter().find(|d| d.name == "linear").unwrap();
+    // The damaged server falls to all-park, losing even its declared read-only.
+    assert_eq!(
+        resolve_policy(&notion.tool_policies, "search_pages", None).mode,
+        ApprovalMode::NeedsApproval
+    );
+    // Its neighbour is untouched.
+    assert_eq!(
+        resolve_policy(&linear.tool_policies, "list_issues", None).mode,
+        ApprovalMode::AlwaysAllow
+    );
+}

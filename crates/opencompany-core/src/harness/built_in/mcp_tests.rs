@@ -12,6 +12,7 @@ fn decl(name: &str, endpoint: &str) -> McpServerDecl {
         enabled: true,
         source: crate::company::mcp::McpSource::Runtime,
         auth: AuthMaterial::None,
+        tool_policies: Default::default(),
     }
 }
 

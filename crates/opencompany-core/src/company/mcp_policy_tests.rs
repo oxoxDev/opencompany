@@ -390,7 +390,7 @@ fn migration_states_both_the_tier_and_the_mode() {
 /// without a human, and everything else keeps parking.
 #[test]
 fn the_legacy_baseline_reproduces_todays_behaviour() {
-    let policies = effective_policies(&["search_pages".into()], McpToolPolicies::default());
+    let policies = effective_policies(&["search_pages".into()], StoredPolicies::Absent);
     assert_eq!(
         resolve_policy(&policies, "search_pages", None).mode,
         ApprovalMode::AlwaysAllow
@@ -413,7 +413,7 @@ fn a_stored_entry_layers_field_by_field_over_the_baseline() {
             mode: Some(ApprovalMode::NeedsApproval),
         },
     );
-    let policies = effective_policies(&["search_pages".into()], stored);
+    let policies = effective_policies(&["search_pages".into()], StoredPolicies::Stored(stored));
     let resolved = resolve_policy(&policies, "search_pages", None);
     assert_eq!(resolved.mode, ApprovalMode::NeedsApproval);
     assert_eq!(resolved.tier, ToolTier::ReadOnly);
@@ -430,7 +430,10 @@ fn editing_one_row_leaves_the_other_declared_rows_alone() {
             mode: Some(ApprovalMode::Blocked),
         },
     );
-    let policies = effective_policies(&["search_pages".into(), "get_page".into()], stored);
+    let policies = effective_policies(
+        &["search_pages".into(), "get_page".into()],
+        StoredPolicies::Stored(stored),
+    );
     assert_eq!(
         resolve_policy(&policies, "search_pages", None).mode,
         ApprovalMode::AlwaysAllow
@@ -451,7 +454,7 @@ async fn an_absent_document_reads_as_the_empty_one() {
     let key = tool_policies_key("notion");
     assert_eq!(
         load_tool_policies(&company(), &secrets, &key).await,
-        McpToolPolicies::default()
+        StoredPolicies::Absent
     );
     assert_eq!(
         load_tool_policies_strict(&company(), &secrets, &key)
@@ -481,7 +484,7 @@ async fn a_document_round_trips_through_the_store() {
         .unwrap();
     assert_eq!(
         load_tool_policies(&company(), &secrets, &key).await,
-        policies
+        StoredPolicies::Stored(policies)
     );
 }
 
@@ -498,7 +501,10 @@ async fn saving_prunes_entries_that_decide_nothing() {
     save_tool_policies(&company(), &secrets, &key, &policies)
         .await
         .unwrap();
-    let read_back = load_tool_policies(&company(), &secrets, &key).await;
+    let StoredPolicies::Stored(read_back) = load_tool_policies(&company(), &secrets, &key).await
+    else {
+        panic!("a saved document reads back as stored");
+    };
     assert!(read_back.overrides.is_empty());
     assert!(!resolve_policy(&read_back, "search_pages", None).is_override);
 }
@@ -514,10 +520,15 @@ async fn an_unreadable_document_degrades_for_the_gate_and_surfaces_for_an_operat
         .await
         .unwrap();
 
-    let degraded = load_tool_policies(&company(), &secrets, &key).await;
-    assert_eq!(degraded, McpToolPolicies::default());
     assert_eq!(
-        resolve_policy(&degraded, "search_pages", Some(ToolTier::ReadOnly)).mode,
+        load_tool_policies(&company(), &secrets, &key).await,
+        StoredPolicies::Unreadable
+    );
+    // An unreadable document drops the declaration too: it may have carried a
+    // refusal, and falling back would restore an allow the operator removed.
+    let degraded = effective_policies(&["search_pages".into()], StoredPolicies::Unreadable);
+    assert_eq!(
+        resolve_policy(&degraded, "search_pages", None).mode,
         ApprovalMode::NeedsApproval
     );
 
@@ -540,7 +551,7 @@ async fn a_failing_store_degrades_rather_than_propagating() {
     let key = tool_policies_key("notion");
     assert_eq!(
         load_tool_policies(&company(), &secrets, &key).await,
-        McpToolPolicies::default()
+        StoredPolicies::Unreadable
     );
     assert!(
         load_tool_policies_strict(&company(), &secrets, &key)
