@@ -5728,12 +5728,12 @@ pub(crate) fn build_roster(
     let live_roster = company.effective_agents();
     let orchestrator = orchestrator::orchestrator_id(&live_roster);
 
-    // Issue #1124: the company's per-server read-only MCP declaration, resolved
-    // once and installed on every agent's policy so a server-declared read-only
-    // bridge call does not park under `auto`. Built from the same effective MCP
-    // servers the harness wires tools from, so the gate and the toolbelt cannot
-    // disagree about which server declared what.
-    let mcp_reads = crate::company::mcp::mcp_read_set(&deps.mcp_servers);
+    // The company's per-server tool policy, resolved once and installed on every
+    // agent's policy so a bridge call the operator allows does not park under
+    // `auto`. Built from the same effective MCP servers the harness wires tools
+    // from, so the gate and the toolbelt cannot disagree about which server
+    // allows what.
+    let mcp_reads = crate::company::mcp_policy::mcp_allow_set(&deps.mcp_servers);
 
     let mut roster =
         Vec::with_capacity(company.manifest.agents.len() + company.overlay_agents.len());
