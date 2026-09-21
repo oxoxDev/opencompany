@@ -974,3 +974,7 @@ fn normalize_tools(tools: &[String]) -> Vec<String> {
 #[cfg(test)]
 #[path = "mcp_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mcp_store_tests.rs"]
+mod store_tests;
