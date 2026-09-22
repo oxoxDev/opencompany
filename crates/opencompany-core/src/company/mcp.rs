@@ -285,6 +285,11 @@ pub struct McpServerDecl {
     pub source: McpSource,
     /// Resolved outbound credential (`None` until [`resolve_effective`] fills it).
     pub auth: AuthMaterial,
+    /// The operator's stored per-tool approval policy, layered over
+    /// [`read_only_tools`](Self::read_only_tools) by
+    /// [`effective_policies`](super::mcp_policy::effective_policies). Empty
+    /// until [`resolve_effective`] fills it.
+    pub tool_policies: super::mcp_policy::McpToolPolicies,
 }
 
 impl McpServerDecl {
@@ -300,6 +305,7 @@ impl McpServerDecl {
             enabled: server.enabled,
             source,
             auth: AuthMaterial::None,
+            tool_policies: super::mcp_policy::McpToolPolicies::default(),
         }
     }
 }
@@ -685,6 +691,17 @@ pub async fn resolve_effective(
             .find(|m| m.name.trim() == decl.name)
             .and_then(|m| m.auth_secret.clone());
         decl.auth = load_auth(company, &decl.name, secrets, override_key.as_deref()).await?;
+        // Never `?`: a caller treats an error out of here as "this company gets
+        // no MCP servers", so one unreadable policy key would strip every
+        // server from every agent. The gate's face degrades that one server to
+        // all-park instead.
+        let stored = super::mcp_policy::load_tool_policies(
+            company,
+            secrets,
+            &super::mcp_policy::tool_policies_key(&decl.name),
+        )
+        .await;
+        decl.tool_policies = super::mcp_policy::effective_policies(&decl.read_only_tools, stored);
     }
     Ok(decls)
 }
@@ -957,3 +974,7 @@ fn normalize_tools(tools: &[String]) -> Vec<String> {
 #[cfg(test)]
 #[path = "mcp_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mcp_store_tests.rs"]
+mod store_tests;

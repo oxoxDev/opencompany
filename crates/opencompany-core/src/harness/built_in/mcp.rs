@@ -112,6 +112,20 @@ pub fn granted_secrets(decls: &[McpServerDecl], grants: &[String]) -> Vec<String
         .collect()
 }
 
+/// The per-tool policies for the servers an agent's grants reach, narrowed the
+/// same way [`granted_secrets`] narrows credential substrings so the refusal and
+/// the toolbelt cannot disagree about which servers an agent can name.
+pub fn granted_policies(
+    decls: &[McpServerDecl],
+    grants: &[String],
+) -> crate::company::mcp_policy::McpToolPolicySet {
+    crate::company::mcp_policy::McpToolPolicySet::from_declarations(
+        decls
+            .iter()
+            .filter(|decl| grants_cover_server(grants, &decl.name)),
+    )
+}
+
 /// A persona brief appended when an agent is granted MCP tools: a stale-memory
 /// mitigation directing the agent to answer capability questions from a **live**
 /// `mcp_list_servers` / `mcp_list_tools` call, never from memory (the effective
@@ -169,10 +183,20 @@ pub fn embed_servers_for_agent(
         .iter()
         .filter(|decl| decl.enabled && grants_cover_server(grants, &decl.name))
         .map(|decl| {
+            // A blocked tool is denied here, not only in `OcMcpCallTool`: this
+            // attachment is the path a company agent actually takes, and the
+            // deny list is what the transport filters on. Deny outranks allow
+            // there, so a server with an allow list cannot re-admit one.
+            let mut denied = decl.disallowed_tools.clone();
+            for tool in crate::company::mcp_policy::blocked_tool_names(&decl.tool_policies) {
+                if !denied.contains(&tool) {
+                    denied.push(tool);
+                }
+            }
             openhuman_embed::McpServer::http(decl.name.clone(), decl.endpoint.clone())
                 .auth(auth_config(&decl.auth))
                 .allow_tools(decl.allowed_tools.clone())
-                .deny_tools(decl.disallowed_tools.clone())
+                .deny_tools(denied)
                 .timeout_secs(decl.timeout_secs)
                 .description(decl.description.clone().unwrap_or_default())
         })
@@ -424,6 +448,8 @@ pub struct OcMcpCallTool {
     /// Where a completed call is counted (issue #698). See
     /// [`McpMetering`].
     metering: McpMetering,
+    /// The granted servers' per-tool policies, consulted before dialling.
+    policies: crate::company::mcp_policy::McpToolPolicySet,
 }
 
 impl OcMcpCallTool {
@@ -436,6 +462,7 @@ impl OcMcpCallTool {
         secrets: Vec<String>,
         failures: McpFailureQueue,
         metering: McpMetering,
+        policies: crate::company::mcp_policy::McpToolPolicySet,
     ) -> Self {
         Self {
             registry,
@@ -443,6 +470,7 @@ impl OcMcpCallTool {
             secrets,
             failures,
             metering,
+            policies,
         }
     }
 
@@ -529,6 +557,14 @@ impl Tool for OcMcpCallTool {
 
         let server = required_string_arg(&args, "server")?;
         let tool = required_string_arg(&args, "tool")?;
+        // Gated on the cleaned names, which are the ones that would be
+        // dispatched. Placed here rather than on one of the other two entry
+        // points because both default to this one.
+        if self.policies.is_blocked(&server, &tool) {
+            return Ok(ToolResult::error(
+                crate::company::mcp_policy::blocked_refusal(&server, &tool),
+            ));
+        }
         let arguments = args
             .get("arguments")
             .cloned()
@@ -927,3 +963,7 @@ fn harness_error(error: impl std::fmt::Display) -> OpenCompanyError {
 #[cfg(test)]
 #[path = "mcp_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mcp_blocked_tests.rs"]
+mod blocked_tests;

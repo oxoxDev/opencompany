@@ -97,6 +97,12 @@ The classifications remain declared in
 [`policy::consequence`](../../src/policy/consequence.rs) for audit and for a
 future policy-HITL mode.
 
+## Per-tool permissions
+
+Each server carries a policy document saying, per remote tool, whether a call
+runs, parks for approval, or is refused outright. See
+[Per-tool permissions](mcp-tool-permissions.md).
+
 ## HTTP surface
 
 Both scope forms are registered (`…/companies/{id}/…` and the single-company
