@@ -114,8 +114,8 @@ use crate::harness::HarnessDeps;
 use crate::harness::built_in::provider::HarnessModel;
 #[cfg(feature = "mcp")]
 use crate::harness::mcp::{
-    OcMcpCallTool, OcMcpListServersTool, OcMcpRegistryScopedTool, capability_brief,
-    granted_policies, granted_secrets, registry_for_agent,
+    OcMcpCallTool, OcMcpListServersTool, OcMcpRegistryInstalledListTool, OcMcpRegistryScopedTool,
+    capability_brief, granted_policies, granted_secrets, registry_for_agent,
 };
 use crate::harness::orchestrator;
 use crate::harness::policy::ApprovalPolicy;
@@ -413,8 +413,17 @@ pub fn build_agent_with_model(
     if crate::company::grants_mcp_registry_explicit(grants) {
         match deps.mcp_home.clone() {
             Some(mcp_home) => {
-                let config =
-                    std::sync::Arc::new(crate::harness::mcp::McpRuntime::config_for(mcp_home));
+                let config = std::sync::Arc::new(crate::harness::mcp::McpRuntime::config_for(
+                    mcp_home.clone(),
+                ));
+                // Enumeration, so the two tools below have a `server_id` to
+                // name. OpenHuman's own answer to this question carries the
+                // dial string and the install's config blob, so this is our own
+                // tool rather than a decorator over it.
+                tools.push(Box::new(OcMcpRegistryInstalledListTool::new(
+                    std::sync::Arc::new(crate::harness::mcp::McpRuntime::new(mcp_home)),
+                    grants.to_vec(),
+                )));
                 tools.push(Box::new(OcMcpRegistryScopedTool::new(
                     Box::new(oh::mcp::registry::tools::McpRegistryListToolsTool::new(
                         config.clone(),
