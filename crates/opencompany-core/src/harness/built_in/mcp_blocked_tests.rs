@@ -160,3 +160,75 @@ fn a_disabled_server_contributes_no_policy() {
     let policies = granted_policies(std::slice::from_ref(&server), &grants(&["mcp:*"]));
     assert!(!policies.is_blocked("fixture", "delete_page"));
 }
+
+// ---- the path a company agent actually takes ---------------------------
+
+/// What `AgentSpec::mcp` will carry, read back the only way the type allows:
+/// its redacting `Debug`, which prints `disallowed_tools` verbatim. Asserting
+/// on the attachment itself rather than on a helper's return value is the
+/// point — the question is what the spec receives.
+fn attachment(server: McpServerDecl) -> String {
+    let attached = crate::harness::mcp::embed_servers_for_agent(&[server], &grants(&["mcp:*"]));
+    assert_eq!(attached.len(), 1);
+    format!("{attached:?}")
+}
+
+/// A company agent reaches a declared server through OpenHuman's own native
+/// `mcp_call_tool` over the servers `AgentSpec::mcp` carries, not through
+/// [`OcMcpCallTool`] — see `embed_servers_for_agent`'s doc comment. The refusal
+/// above is therefore not the enforcement on that path; the attached server's
+/// deny list is, and the transport's own filter puts deny above allow.
+#[test]
+fn a_blocked_tool_is_denied_on_the_attached_server() {
+    let debug = attachment(blocked_server("notion", "delete_page"));
+
+    assert!(
+        debug.contains(r#"disallowed_tools: ["delete_page"]"#),
+        "a blocked tool must not be reachable natively: {debug}"
+    );
+}
+
+/// The declaration's own deny list survives: the policy adds to it rather than
+/// replacing it, or an operator's `disallowed_tools` would be dropped the
+/// moment they blocked something else.
+#[test]
+fn the_declarations_own_deny_list_is_kept() {
+    let mut server = blocked_server("notion", "delete_page");
+    server.disallowed_tools = vec!["debug_dump".to_string()];
+
+    let debug = attachment(server);
+
+    assert!(
+        debug.contains(r#"disallowed_tools: ["debug_dump", "delete_page"]"#),
+        "{debug}"
+    );
+}
+
+/// A server nobody has blocked anything on is attached exactly as it was.
+#[test]
+fn an_unblocked_server_is_attached_unchanged() {
+    let debug = attachment(decl("notion", DEAD_ENDPOINT));
+
+    assert!(debug.contains("disallowed_tools: []"), "{debug}");
+}
+
+/// A tool the operator left at `needs_approval` is not denied — the deny list
+/// is the enforcement for `blocked` alone, and denying anything else would take
+/// away a tool the approval gate exists to let through.
+#[test]
+fn a_tool_that_merely_parks_is_not_denied() {
+    let mut server = decl("notion", DEAD_ENDPOINT);
+    let mut policies = McpToolPolicies::default();
+    policies.overrides.insert(
+        "update_page".to_string(),
+        ToolPolicy {
+            tier: None,
+            mode: Some(ApprovalMode::NeedsApproval),
+        },
+    );
+    server.tool_policies = policies;
+
+    let debug = attachment(server);
+
+    assert!(debug.contains("disallowed_tools: []"), "{debug}");
+}

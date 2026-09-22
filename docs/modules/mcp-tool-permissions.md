@@ -52,6 +52,24 @@ degrade is scoped to the one server named in the warning: the loader never
 surfaces the failure, because MCP resolution's caller treats an error as "this
 company gets no MCP servers at all".
 
+## Where a block is enforced
+
+A company agent does not reach a declared server through this crate's bridge
+tool. `AgentSpec::mcp` attaches the granted servers to the agent, and the names
+in `OPENHUMAN_NATIVE_TOOLS` — `mcp_call_tool` among them — always resolve to
+OpenHuman's own implementation over those attachments. The bridge tool's guard
+runs only where that tool is the one dispatched.
+
+So a blocked tool is denied where the server is attached: its name goes on the
+attachment's deny list, which the transport filters on before anything is
+listed or dialled, and where deny outranks allow. The declaration's own
+`disallowed_tools` is kept — the policy adds to that list rather than replacing
+it. Only `blocked` is denied this way; a tool that merely parks stays reachable,
+because parking is what the approval gate is for.
+
+The guard in the bridge tool stays as the same refusal for any path that does
+dispatch it, worded by one function so the two cannot drift.
+
 ## Not yet wired
 
 A directory install's policy is not loaded at harness-build time, so no
