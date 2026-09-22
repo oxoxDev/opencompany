@@ -314,6 +314,22 @@ which decides whether these tools are wired at all — accepts only a grant root
 at `mcp_registry`, and the scoping predicate matches it, so the two gates cannot
 come to disagree about what confers the namespace.
 
+### The agent learns which installs exist from an allowlist
+
+A `server_id` has to come from somewhere, so `mcp_registry_installed_list` is
+wired beside the two bridge tools under the same grant — OpenCompany's own tool,
+not OpenHuman's. Upstream answers with the install record serialised whole,
+which carries the dial string (`transport`, `command`, `args`) and the opaque
+`config` blob: an HTTP-remote URL can carry a query-parameter credential and a
+stdio install's arguments a flag one, the same leak `mcp_list_servers` is
+replaced to close.
+
+The answer here is an allowlist — install id, qualified and display name,
+description, enabled, the transport **kind** alone, last connection — so a field
+added upstream must be opted in rather than arriving on the agent's side because
+nobody noticed it. The listing is scoped by the same predicate the call path
+uses, so enumeration cannot be the way around the grant.
+
 A call naming an install the grants do not cover is refused with an error
 result naming the grant that would allow it; the inner tool is never reached
 and nothing is dialled. A call whose `server_id` is missing or blank is refused
