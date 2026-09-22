@@ -307,28 +307,26 @@ grants through `grants_cover_registry_server`
 | `*` alone | nothing — MCP stays an explicit opt-in |
 | `mcp*` | nothing — that grant is written for the `mcp:<server>` bridge |
 
-`mcp*` is worth its own row because the shared grant matcher treats `_` as a
-namespace boundary, so it would otherwise span from the bridge namespace into
-this one and reach every third-party install. `grants_mcp_registry_explicit` —
-which decides whether these tools are wired at all — accepts only a grant rooted
-at `mcp_registry`, and the scoping predicate matches it, so the two gates cannot
-come to disagree about what confers the namespace.
+`mcp*` earns its own row because the shared matcher treats `_` as a namespace
+boundary, so it would otherwise span from the bridge namespace into this one and
+reach every install. Both gates — `grants_mcp_registry_explicit`, which decides
+whether these tools are wired at all, and the scoping predicate — accept only a
+grant rooted at `mcp_registry`, so neither can widen without the other.
 
 ### The agent learns which installs exist from an allowlist
 
 A `server_id` has to come from somewhere, so `mcp_registry_installed_list` is
 wired beside the two bridge tools under the same grant — OpenCompany's own tool,
-not OpenHuman's. Upstream answers with the install record serialised whole,
-which carries the dial string (`transport`, `command`, `args`) and the opaque
-`config` blob: an HTTP-remote URL can carry a query-parameter credential and a
-stdio install's arguments a flag one, the same leak `mcp_list_servers` is
-replaced to close.
+not OpenHuman's, whose answer is the install record serialised whole: the dial
+string (`transport`, `command`, `args`) and the opaque `config` blob, where an
+HTTP-remote URL can carry a query-parameter credential and a stdio install's
+arguments a flag one.
 
 The answer here is an allowlist — install id, qualified and display name,
 description, enabled, the transport **kind** alone, last connection — so a field
-added upstream must be opted in rather than arriving on the agent's side because
-nobody noticed it. The listing is scoped by the same predicate the call path
-uses, so enumeration cannot be the way around the grant.
+added upstream must be opted in rather than arriving on the agent's side
+unnoticed. It is scoped by the predicate the call path uses, so enumeration
+cannot be the way around the grant.
 
 A call naming an install the grants do not cover is refused with an error
 result naming the grant that would allow it; the inner tool is never reached
