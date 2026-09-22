@@ -114,7 +114,8 @@ use crate::harness::HarnessDeps;
 use crate::harness::built_in::provider::HarnessModel;
 #[cfg(feature = "mcp")]
 use crate::harness::mcp::{
-    OcMcpCallTool, OcMcpListServersTool, capability_brief, granted_secrets, registry_for_agent,
+    OcMcpCallTool, OcMcpListServersTool, OcMcpRegistryScopedTool, capability_brief,
+    granted_secrets, registry_for_agent,
 };
 use crate::harness::orchestrator;
 use crate::harness::policy::ApprovalPolicy;
@@ -381,11 +382,14 @@ pub fn build_agent_with_model(
     // in-flight registry the server reads, which a belt tool cannot reach.
     // Installed-MCP-registry surface (`mcp_registry_list_tools` /
     // `mcp_registry_tool_call`) — distinct from the per-server `mcp:<name>`
-    // bridge below, and reaching further: `mcp_registry_tool_call` invokes an
-    // arbitrary tool on ANY server the company has installed and connected,
-    // addressed at call time by a bare `server_id` argument, with none of the
-    // bridge's per-server grant scoping. Two hard gates before either tool is
-    // wired, following the `composio`/`media`/`search` precedent above:
+    // bridge below: both tools address an install at call time by a `server_id`
+    // argument rather than by the grant they were wired under. Both are
+    // therefore wrapped in `OcMcpRegistryScopedTool`, which resolves that
+    // argument against the agent's grants (`grants_cover_registry_server`)
+    // before delegating, so a scoped `mcp_registry.<server_id>` grant reaches
+    // one install and a bare `mcp_registry` grant reaches all of them. Two hard
+    // gates before either tool is wired, following the
+    // `composio`/`media`/`search` precedent above:
     //
     //  1. an **EXPLICIT** `mcp_registry` grant
     //     (`grants_mcp_registry_explicit`) — the catch-all `*` does NOT confer
@@ -409,12 +413,18 @@ pub fn build_agent_with_model(
             Some(mcp_home) => {
                 let config =
                     std::sync::Arc::new(crate::harness::mcp::McpRuntime::config_for(mcp_home));
-                tools.push(Box::new(
-                    oh::mcp::registry::tools::McpRegistryListToolsTool::new(config.clone()),
-                ));
-                tools.push(Box::new(
-                    oh::mcp::registry::tools::McpRegistryToolCallTool::new(config),
-                ));
+                tools.push(Box::new(OcMcpRegistryScopedTool::new(
+                    Box::new(oh::mcp::registry::tools::McpRegistryListToolsTool::new(
+                        config.clone(),
+                    )),
+                    grants.to_vec(),
+                )));
+                tools.push(Box::new(OcMcpRegistryScopedTool::new(
+                    Box::new(oh::mcp::registry::tools::McpRegistryToolCallTool::new(
+                        config,
+                    )),
+                    grants.to_vec(),
+                )));
             }
             None => tracing::warn!(
                 company = %company,

@@ -79,6 +79,95 @@ fn wildcard_does_not_cover_mcp_servers() {
     assert!(!grants_cover_server(&["mcp:notion".into()], "linear"));
 }
 
+/// Registry-install grant scoping. Gated with the harness, where
+/// `grants_cover_registry_server`'s callers are compiled.
+#[cfg(feature = "openhuman")]
+mod registry_installs {
+    use super::*;
+
+    /// A bare `mcp_registry` grant keeps the reach it has always had, so upgrading
+    /// changes nothing for a company that never writes a scoped grant.
+    #[test]
+    fn bare_registry_grant_covers_every_install() {
+        let grants = vec!["mcp_registry".to_string()];
+        assert!(grants_cover_registry_server(
+            &grants,
+            "0b8f4b0e-3c2a-4a1d-9e77-6d5a2f1c8e40"
+        ));
+        assert!(grants_cover_registry_server(&grants, "any-other-install"));
+    }
+
+    /// The point of the change: a scoped grant reaches its own install and no
+    /// other.
+    #[test]
+    fn scoped_registry_grant_narrows_to_one_install() {
+        let a = "0b8f4b0e-3c2a-4a1d-9e77-6d5a2f1c8e40";
+        let b = "7f1c9d22-55ae-4f3b-8c10-2b9e4d6a3f51";
+        let grants = vec![format!("mcp_registry.{a}")];
+        assert!(grants_cover_registry_server(&grants, a));
+        assert!(!grants_cover_registry_server(&grants, b));
+    }
+
+    #[test]
+    fn registry_wildcard_grant_covers_every_install() {
+        let grants = vec!["mcp_registry.*".to_string()];
+        assert!(grants_cover_registry_server(&grants, "notion-install"));
+        assert!(grants_cover_registry_server(&grants, "linear-install"));
+    }
+
+    /// The catch-all confers nothing here, matching `grants_cover_server` and
+    /// `grants_mcp_registry_explicit`.
+    #[test]
+    fn wildcard_does_not_cover_registry_installs() {
+        assert!(!grants_cover_registry_server(
+            &["*".into()],
+            "notion-install"
+        ));
+        assert!(!grants_cover_registry_server(
+            &["composio".into()],
+            "notion-install"
+        ));
+        assert!(!grants_cover_registry_server(
+            &["mcp:notion".into()],
+            "notion-install"
+        ));
+    }
+
+    /// A uuid install id survives the boundary matcher unchanged: `-` is not a
+    /// separator, so a prefix grant cannot straddle one id into another.
+    #[test]
+    fn uuid_install_ids_match_exactly() {
+        let a = "0b8f4b0e-3c2a-4a1d-9e77-6d5a2f1c8e40";
+        let grants = vec![format!("mcp_registry.{a}")];
+        assert!(grants_cover_registry_server(&grants, a));
+        assert!(!grants_cover_registry_server(&grants, "0b8f4b0e"));
+        assert!(!grants_cover_registry_server(
+            &grants,
+            "0b8f4b0e-3c2a-4a1d-9e77-6d5a2f1c8e40-extra"
+        ));
+    }
+
+    /// `mcp*` is a grant written for the `mcp:<server>` bridge, and it does NOT
+    /// reach a directory install — even though `_` is a namespace boundary for
+    /// the shared matcher, which would otherwise let it span into
+    /// `mcp_registry.<id>`.
+    ///
+    /// `grants_mcp_registry_explicit` decides whether these tools are wired at
+    /// all and accepts only a grant rooted at `mcp_registry`, so honouring a
+    /// spanning wildcard here would leave the two gates disagreeing about what
+    /// confers the namespace — which is how a permission boundary widens
+    /// without anyone seeing it.
+    #[test]
+    fn a_bridge_prefix_grant_does_not_reach_an_install() {
+        assert!(!grants_cover_registry_server(
+            &["mcp*".into()],
+            "notion-install"
+        ));
+        // Unchanged for the bridge namespace it was written for.
+        assert!(grants_cover_server(&["mcp*".into()], "notion"));
+    }
+}
+
 /// Every grant shape the shipped `companies/*/company.toml` manifests use
 /// keeps working exactly as before — the fix must be invisible to them.
 #[test]

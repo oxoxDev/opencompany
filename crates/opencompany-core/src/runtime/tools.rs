@@ -122,6 +122,42 @@ pub(crate) fn grants_cover_server(grants: &[String], name: &str) -> bool {
         .any(|grant| grant_matches(grant, &want))
 }
 
+/// Whether an agent's effective tool `grants` cover the directory-installed MCP
+/// server identified by `server_id`, the registry-side sibling of
+/// [`grants_cover_server`].
+///
+/// `server_id` is the install's own identifier, not its display or qualified
+/// name: a scoped grant spells that identifier (`mcp_registry.<server_id>`).
+/// A bare `mcp_registry` grant covers every install, which is what the grant
+/// meant before scoping existed.
+///
+/// Serves two shapes of caller. A tool addressed by a `server_id` argument
+/// gates on this before dispatching; a tool that *enumerates* installs carries
+/// no such argument and must instead filter its rows through this, the way
+/// `registry_for_agent` filters declared servers with
+/// [`grants_cover_server`]. `grants` are the *effective* grants — resolve them
+/// with [`agent_effective_grants`](crate::runtime::builder::agent_effective_grants)
+/// first, never the raw per-agent `tools`.
+///
+/// Gated with the harness: every caller is behind `feature = "openhuman"`,
+/// unlike [`grants_cover_server`], which `server/ops/mcp.rs` also reads.
+#[cfg(feature = "openhuman")]
+pub(crate) fn grants_cover_registry_server(grants: &[String], server_id: &str) -> bool {
+    let want = format!("mcp_registry.{server_id}");
+    // Only a grant rooted at this namespace reaches it. The catch-all `*` never
+    // confers it, and neither does a prefix wildcard that merely spans into it:
+    // `_` is a boundary for the shared matcher, so `mcp*` — a grant written for
+    // the `mcp:<server>` bridge — would otherwise reach every third-party
+    // install. `grants_mcp_registry_explicit`, which decides whether the tools
+    // are wired at all, accepts neither, and two gates disagreeing about what
+    // confers a namespace is how a boundary widens without anyone seeing it.
+    grants.iter().any(|grant| {
+        let grant = grant.as_str();
+        grant == "mcp_registry"
+            || (grant.starts_with("mcp_registry.") && grant_matches(grant, &want))
+    })
+}
+
 #[async_trait]
 impl ToolProvider for StubToolProvider {
     async fn catalog(&self, _company: &CompanyId) -> Result<Vec<ToolSpec>> {
