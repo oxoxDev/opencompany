@@ -20,6 +20,7 @@ import {
   type Channel,
   type TimelineItem,
 } from "./model";
+import { JumpToLatest } from "./JumpToLatest";
 import { useBottomAnchor } from "./useBottomAnchor";
 
 interface Props {
@@ -283,7 +284,7 @@ export function MessageTimeline({
    * since #1323 — which end of the pane the whole block settles against.
    */
   const empty = items.length === 0 && !loading;
-  const { scroller, content, onScroll } = useBottomAnchor({
+  const { scroller, content, onScroll, atBottom, jumpToLatest } = useBottomAnchor({
     key: channel.id,
     pending: historyPending,
     growth: [items.length, typing, liveStepCount],
@@ -374,74 +375,81 @@ export function MessageTimeline({
   };
 
   return (
-    <div ref={scroller} onScroll={onScroll} className="flex-1 overflow-y-auto">
-      {/*
-       * Which end short content settles against (issue #1323).
-       *
-       * `justify-end` is right for a *transcript* shorter than the viewport:
-       * three messages should sit above the composer the way every chat client
-       * puts them, not float in the middle of the pane. It is wrong for a
-       * channel with no transcript at all, because then the only thing being
-       * bottom-pinned is the intro — a heading, a sentence, and the two action
-       * cards that are the whole point of an empty channel — and they end up
-       * crushed against the composer under most of a screen of dead canvas.
-       * The cards are the primary invitation and they were the last thing the
-       * eye reached.
-       *
-       * So an empty channel reads downward from the top, as the design
-       * reference draws it. `empty` is the same value `ChannelIntro` gets, and
-       * it is lifted here rather than recomputed so the two cannot disagree
-       * about what "empty" means — a channel whose intro claimed emptiness
-       * while the wrapper anchored for content would jump on every load.
-       */}
-      <div
-        ref={content}
-        className={cn("flex min-h-full flex-col pb-4", empty ? "justify-start" : "justify-end")}
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      <div ref={scroller}
+        onScroll={onScroll}
+        data-testid="channel-transcript"
+        className="min-h-0 flex-1 overflow-y-auto"
       >
-        {/* `empty` only drives the top padding, and the skeleton fills the
-            same space real rows will — so a loading channel is spaced like a
-            full one and the intro does not jump down and back up. That is also
-            why `loading` keeps the *bottom* anchor above: flipping to the top
-            while history is in flight would move the intro up and then drop it
-            back down the moment the rows land. */}
-        <ChannelIntro
-          channel={channel}
-          empty={empty}
-          loading={loading}
-          onStartBrief={onStartBrief}
-          onAddPeople={onAddPeople}
-        />
-        {loading && <HistorySkeleton />}
-        {items.map(renderRow)}
-        {receipt ? (
-          // The receipt for our own in-flight send (issue #1934) supersedes the
-          // typing dots and carries the live steps itself. It now rides a
-          // detached turn past its 202 into the queued/working window too (issue
-          // #2021), so `queued` words its base line and stills its pulse rather
-          // than dropping it back to the bare "Queued…"/step row.
-          <ChatLiveReceipt
+        {/*
+         * Which end short content settles against (issue #1323).
+         *
+         * `justify-end` is right for a *transcript* shorter than the viewport:
+         * three messages should sit above the composer the way every chat client
+         * puts them, not float in the middle of the pane. It is wrong for a
+         * channel with no transcript at all, because then the only thing being
+         * bottom-pinned is the intro — a heading, a sentence, and the two action
+         * cards that are the whole point of an empty channel — and they end up
+         * crushed against the composer under most of a screen of dead canvas.
+         * The cards are the primary invitation and they were the last thing the
+         * eye reached.
+         *
+         * So an empty channel reads downward from the top, as the design
+         * reference draws it. `empty` is the same value `ChannelIntro` gets, and
+         * it is lifted here rather than recomputed so the two cannot disagree
+         * about what "empty" means — a channel whose intro claimed emptiness
+         * while the wrapper anchored for content would jump on every load.
+         */}
+        <div
+          ref={content}
+          className={cn("flex min-h-full flex-col pb-4", empty ? "justify-start" : "justify-end")}
+        >
+          {/* `empty` only drives the top padding, and the skeleton fills the
+              same space real rows will — so a loading channel is spaced like a
+              full one and the intro does not jump down and back up. That is also
+              why `loading` keeps the *bottom* anchor above: flipping to the top
+              while history is in flight would move the intro up and then drop it
+              back down the moment the rows land. */}
+          <ChannelIntro
             channel={channel}
-            receipt={receipt}
-            agentNames={agentNames}
-            steps={openTurnSteps ?? []}
-            queued={queued}
+            empty={empty}
+            loading={loading}
+            onStartBrief={onStartBrief}
+            onAddPeople={onAddPeople}
           />
-        ) : liveStepCount > 0 && !queued ? (
-          <LiveTurnRow
-            channel={channel}
-            steps={openTurnSteps ?? []}
-            name={turnAgentName}
-          />
-        ) : (
-          typing && (
-            <TypingRow
+          {loading && <HistorySkeleton />}
+          {items.map(renderRow)}
+          {receipt ? (
+            // The receipt for our own in-flight send (issue #1934) supersedes the
+            // typing dots and carries the live steps itself. It now rides a
+            // detached turn past its 202 into the queued/working window too (issue
+            // #2021), so `queued` words its base line and stills its pulse rather
+            // than dropping it back to the bare "Queued…"/step row.
+            <ChatLiveReceipt
               channel={channel}
+              receipt={receipt}
+              agentNames={agentNames}
+              steps={openTurnSteps ?? []}
               queued={queued}
+            />
+          ) : liveStepCount > 0 && !queued ? (
+            <LiveTurnRow
+              channel={channel}
+              steps={openTurnSteps ?? []}
               name={turnAgentName}
             />
-          )
-        )}
+          ) : (
+            typing && (
+              <TypingRow
+                channel={channel}
+                queued={queued}
+                name={turnAgentName}
+              />
+            )
+          )}
+        </div>
       </div>
+      {!atBottom && <JumpToLatest onClick={jumpToLatest} />}
     </div>
   );
 }

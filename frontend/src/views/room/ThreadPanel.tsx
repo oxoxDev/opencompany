@@ -18,6 +18,7 @@ import { MessageComposer } from "./MessageComposer";
 import { TypingLine } from "./TypingLine";
 import { WorkingIndicator } from "./WorkingIndicator";
 import { channelTitle, formatTime, senderOf, type Channel } from "./model";
+import { JumpToLatest } from "./JumpToLatest";
 import { useBottomAnchor } from "./useBottomAnchor";
 import { type Mention, type Mentionable } from "./mentions";
 
@@ -312,7 +313,7 @@ export function ThreadPanel({
    * naming the running step, which is the channel's old bug one pane over.
    */
   const liveName = openTurn_?.key ? agentNames?.[liveAgentByTurn?.[openTurn_.key] ?? ""] : undefined;
-  const { scroller, content, onScroll } = useBottomAnchor({
+  const { scroller, content, onScroll, atBottom, jumpToLatest } = useBottomAnchor({
     key: parent.id,
     pending: historyPending,
     growth: [replies.length, openTurnSteps?.length ?? 0, typingNames.length],
@@ -329,46 +330,53 @@ export function ThreadPanel({
         </Button>
       </header>
 
-      <div ref={scroller} onScroll={onScroll} className="flex-1 overflow-y-auto">
-        {/* The column rule 2b's `ResizeObserver` watches. The rows were direct
-            children of the scroller, whose own border box never changes when
-            content overflows it — so without a wrapper of their own there is
-            nothing whose height the rows determine. */}
-        <div ref={content}>
-          <Line
-            channel={channel}
-            members={members}
-            message={parent}
-            youAvatar={youAvatar}
-            resolveAttachmentUrl={resolveAttachmentUrl}
-            cognition={cognition}
-            onRedeemBudgetPause={onRedeemBudgetPause}
-            redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
-            latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
-            onRetrySend={onRetrySend}
-          />
-          <div className="flex items-center gap-2 px-4 py-2">
-            <span className="text-xs font-medium text-muted-foreground">
-              {countedReplies} {countedReplies === 1 ? "reply" : "replies"}
-            </span>
-            <span className="h-px flex-1 bg-border" aria-hidden />
-          </div>
-          {replies.map((r) => (
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <div ref={scroller}
+          onScroll={onScroll}
+          data-testid="thread-transcript"
+          className="min-h-0 flex-1 overflow-y-auto"
+        >
+          {/* The column rule 2b's `ResizeObserver` watches. The rows were direct
+              children of the scroller, whose own border box never changes when
+              content overflows it — so without a wrapper of their own there is
+              nothing whose height the rows determine. */}
+          <div ref={content}>
             <Line
-              key={r.id}
               channel={channel}
               members={members}
-              message={r}
+              message={parent}
               youAvatar={youAvatar}
               resolveAttachmentUrl={resolveAttachmentUrl}
               cognition={cognition}
               onRedeemBudgetPause={onRedeemBudgetPause}
               redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
-              onRetrySend={onRetrySend}
               latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
+              onRetrySend={onRetrySend}
             />
-          ))}
+            <div className="flex items-center gap-2 px-4 py-2">
+              <span className="text-xs font-medium text-muted-foreground">
+                {countedReplies} {countedReplies === 1 ? "reply" : "replies"}
+              </span>
+              <span className="h-px flex-1 bg-border" aria-hidden />
+            </div>
+            {replies.map((r) => (
+              <Line
+                key={r.id}
+                channel={channel}
+                members={members}
+                message={r}
+                youAvatar={youAvatar}
+                resolveAttachmentUrl={resolveAttachmentUrl}
+                cognition={cognition}
+                onRedeemBudgetPause={onRedeemBudgetPause}
+                redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
+                onRetrySend={onRetrySend}
+                latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
+              />
+            ))}
+          </div>
         </div>
+        {!atBottom && <JumpToLatest onClick={jumpToLatest} />}
       </div>
 
       {/* A read-only thread gets the notice and no composer, the way its
