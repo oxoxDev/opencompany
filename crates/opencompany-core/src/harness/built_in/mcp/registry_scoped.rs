@@ -6,6 +6,7 @@
 //! argument against the agent's effective grants before delegating.
 
 use std::any::Any;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -15,7 +16,10 @@ use tinytools::{
     ToolScope, ToolTimeout,
 };
 
-use crate::policy::consequence::MCP_REGISTRY_SERVER_KEY;
+use crate::company::mcp_policy as policy;
+use crate::policy::consequence::{MCP_REGISTRY_SERVER_KEY, MCP_REGISTRY_TOOL_KEY};
+use crate::ports::SecretStore;
+use crate::ports::types::CompanyId;
 use crate::runtime::tools::grants_cover_registry_server;
 
 /// Scopes a directory-installed MCP server tool to the agent's own installs.
@@ -32,12 +36,28 @@ use crate::runtime::tools::grants_cover_registry_server;
 pub struct OcMcpRegistryScopedTool {
     inner: Box<dyn Tool>,
     grants: Vec<String>,
+    company: CompanyId,
+    secrets: Option<Arc<dyn SecretStore>>,
 }
 
 impl OcMcpRegistryScopedTool {
-    /// Wraps `inner`, gating it on the agent's *effective* grants.
-    pub fn new(inner: Box<dyn Tool>, grants: Vec<String>) -> Self {
-        Self { inner, grants }
+    /// Wraps `inner`, gating it on the agent's *effective* grants and on the
+    /// named install's stored tool policy.
+    ///
+    /// Without a secret store the policy cannot be read and the grant is the
+    /// whole gate.
+    pub fn new(
+        inner: Box<dyn Tool>,
+        grants: Vec<String>,
+        company: CompanyId,
+        secrets: Option<Arc<dyn SecretStore>>,
+    ) -> Self {
+        Self {
+            inner,
+            grants,
+            company,
+            secrets,
+        }
     }
 
     /// The refusal for a call naming an install this agent's grants do not
@@ -62,22 +82,62 @@ impl OcMcpRegistryScopedTool {
         ))
     }
 
-    /// Fails closed on anything but a grant-covered install.
+    /// Fails closed on anything but a grant-covered, policy-allowed install.
     ///
     /// Reads the argument with trim-only semantics, matching the vendored
     /// tool's own extraction, so the string authorised here is byte-identical
     /// to the one the inner tool will dispatch on.
-    fn authorize(&self, args: &Value) -> Option<ToolResult> {
+    ///
+    /// The policy is read here rather than carried in from the harness build: an
+    /// install is addressed by an argument, not by the grant the tool was wired
+    /// under, so there is no build-time snapshot to attach one to.
+    async fn authorize(&self, args: &Value) -> Option<ToolResult> {
         let server_id = args
             .get(MCP_REGISTRY_SERVER_KEY)
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|id| !id.is_empty());
-        match server_id {
-            None => Some(self.unaddressed()),
-            Some(id) if grants_cover_registry_server(&self.grants, id) => None,
-            Some(id) => Some(self.denied(id)),
+        let Some(id) = server_id else {
+            return Some(self.unaddressed());
+        };
+        if !grants_cover_registry_server(&self.grants, id) {
+            return Some(self.denied(id));
         }
+        let tool_name = args
+            .get(MCP_REGISTRY_TOOL_KEY)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        if !tool_name.is_empty() && self.blocked(id, tool_name).await {
+            return Some(ToolResult::error(policy::blocked_refusal(id, tool_name)));
+        }
+        None
+    }
+
+    /// Whether the install's stored policy refuses this tool outright.
+    ///
+    /// An unreadable document parks every tool for approval rather than blocking
+    /// it, so a store that will not answer cannot manufacture a refusal. An
+    /// install has no `read_only_tools` — that is a manifest affordance of a
+    /// declared server — so the stored document is the whole policy.
+    async fn blocked(&self, server_id: &str, tool: &str) -> bool {
+        let Some(secrets) = self.secrets.as_deref() else {
+            return false;
+        };
+        let stored = policy::load_tool_policies(
+            &self.company,
+            secrets,
+            &policy::registry_tool_policies_key(server_id),
+        )
+        .await;
+        let policies = policy::effective_policies(&[], stored);
+        let inventory = policy::load_tool_inventory(
+            &self.company,
+            secrets,
+            &policy::registry_tool_inventory_key(server_id),
+        )
+        .await;
+        policy::blocks_tool(&policies, &inventory, tool)
     }
 }
 
@@ -96,7 +156,7 @@ impl Tool for OcMcpRegistryScopedTool {
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
-        if let Some(refusal) = self.authorize(&args) {
+        if let Some(refusal) = self.authorize(&args).await {
             return Ok(refusal);
         }
         self.inner.execute(args).await
@@ -109,7 +169,7 @@ impl Tool for OcMcpRegistryScopedTool {
         args: Value,
         options: ToolCallOptions,
     ) -> anyhow::Result<ToolResult> {
-        if let Some(refusal) = self.authorize(&args) {
+        if let Some(refusal) = self.authorize(&args).await {
             return Ok(refusal);
         }
         self.inner.execute_with_options(args, options).await
@@ -121,7 +181,7 @@ impl Tool for OcMcpRegistryScopedTool {
         options: ToolCallOptions,
         context: Option<&dyn ToolRunContext>,
     ) -> anyhow::Result<ToolResult> {
-        if let Some(refusal) = self.authorize(&args) {
+        if let Some(refusal) = self.authorize(&args).await {
             return Ok(refusal);
         }
         self.inner
