@@ -234,11 +234,11 @@ test.describe("thread panel", () => {
   });
 
   test("re-anchors when the history it was opened over finally lands", async ({ page }) => {
-    // The thread pane's version of #1224. A panel that anchors once, against a
-    // one-screen box, before the rows it was meant to anchor to exist — and
-    // never runs again — is this bug's own historical failure mode shipped as
-    // its fix, and keying the arrival rule on the parent id alone is exactly
-    // how it comes back.
+    // The thread pane's version of the channel's own worst case. A panel
+    // that anchors once, against a one-screen box, before the rows it was
+    // meant to anchor to exist — and never runs again — is this bug's own
+    // historical failure mode shipped as its fix, and keying the arrival rule
+    // on the parent id alone is exactly how it comes back.
     //
     // Reaching that window needs the console to hold a message the host has not
     // confirmed yet: the channel's history is held open on a latch, a line is
