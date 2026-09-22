@@ -494,22 +494,18 @@ impl McpToolPolicySet {
     }
 }
 
-/// Every tool this document refuses outright, sorted.
+/// Every tool this server refuses outright, sorted.
 ///
-/// The attachment-time face of [`McpToolPolicySet::is_blocked`]: a company
-/// agent reaches a declared server through OpenHuman's own native
-/// `mcp_call_tool` rather than through this crate's bridge tool, and the only
-/// lever on that path is the server's deny list. A blocked tool therefore has
-/// to be denied where the server is attached, or the refusal never runs.
+/// The attachment-time face of [`blocks_tool`]: a company agent reaches a
+/// declared server through OpenHuman's native `mcp_call_tool`, and the only
+/// lever on that path is the attached server's deny list.
 ///
-/// Only tools the document names: without a discovered inventory there is no
-/// list of a server's tools to apply a tier default across.
-pub fn blocked_tool_names(policies: &McpToolPolicies) -> Vec<String> {
-    let mut names: Vec<String> = policies
-        .overrides
-        .keys()
-        .filter(|tool| resolve_policy(policies, tool, None).mode == ApprovalMode::Blocked)
-        .cloned()
+/// Reads the inventory as well as the overrides, so a tier default blocks the
+/// tools discovery found rather than only the ones an operator has already
+/// named one by one.
+pub fn blocked_tool_names(policies: &McpToolPolicies, inventory: &McpToolInventory) -> Vec<String> {
+    let mut names: Vec<String> = policy_tool_names(policies, inventory)
+        .filter(|tool| blocks_tool(policies, inventory, tool))
         .collect();
     names.sort();
     names
