@@ -227,7 +227,7 @@ fn not_found(name: &str) -> Response {
 
 /// The one repair a merge cannot perform: a document that will not parse has no
 /// fields to merge into, so the reset is the only way back.
-fn unreadable(name: &str) -> Response {
+pub fn policy_unreadable(name: &str) -> Response {
     (
         StatusCode::CONFLICT,
         Json(serde_json::json!({
@@ -257,7 +257,7 @@ async fn stored_strict(
         &mcp_policy::tool_policies_key(name),
     )
     .await
-    .map_err(|_| Box::new(unreadable(name)))
+    .map_err(|_| Box::new(policy_unreadable(name)))
     .map(Option::unwrap_or_default)
 }
 

@@ -234,3 +234,44 @@ fn an_inherited_row_is_not_marked_an_override() {
     // Suggested read-only still parks: the suggestion groups, never allows.
     assert_eq!(row.mode, ApprovalMode::NeedsApproval);
 }
+
+// ---- the two server kinds share logic but never share storage ---------
+
+/// A declared server and a directory install can carry the same string as a
+/// name and a server_id. Their policies must not collide: one operator decision
+/// would silently become two, on servers that are not the same server.
+#[test]
+fn the_two_server_kinds_never_share_a_policy_key() {
+    use crate::company::mcp_policy::{registry_tool_policies_key, tool_policies_key};
+    let same = "notion";
+    assert_ne!(tool_policies_key(same), registry_tool_policies_key(same));
+}
+
+/// …and the same for the inventory.
+#[test]
+fn the_two_server_kinds_never_share_an_inventory_key() {
+    use crate::company::mcp_policy::{registry_tool_inventory_key, tool_inventory_key};
+    let same = "notion";
+    assert_ne!(tool_inventory_key(same), registry_tool_inventory_key(same));
+}
+
+/// A directory install has no `read_only_tools` — that is a manifest
+/// affordance — so its stored document is the whole policy, with no legacy
+/// baseline underneath. Rendering it with an empty declaration must therefore
+/// produce exactly what was stored.
+#[test]
+fn an_install_has_no_legacy_baseline_under_its_document() {
+    use crate::company::mcp_policy::{StoredPolicies, effective_policies};
+    let mut stored = McpToolPolicies::default();
+    stored.overrides.insert(
+        "search_pages".into(),
+        ToolPolicy {
+            tier: None,
+            mode: Some(ApprovalMode::Blocked),
+        },
+    );
+    let policies = effective_policies(&[], StoredPolicies::Stored(stored.clone()));
+    assert_eq!(policies.overrides, stored.overrides);
+    // Nothing a manifest could have declared leaks in.
+    assert_eq!(policies.overrides.len(), 1);
+}
