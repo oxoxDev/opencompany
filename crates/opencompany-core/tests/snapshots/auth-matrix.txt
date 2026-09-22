@@ -117,6 +117,13 @@ DELETE /api/v1/companies/{id}/mcp/registry/{server_id} must-change-password-admi
 DELETE /api/v1/companies/{id}/mcp/registry/{server_id} platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/companies/{id}/mcp/registry/{server_id} tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/companies/{id}/mcp/registry/{server_id} tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy admin permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy member refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy platform permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy tenant-owner permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
 DELETE /api/v1/companies/{id}/mcp/servers/{name} admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/companies/{id}/mcp/servers/{name} anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/companies/{id}/mcp/servers/{name} member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
@@ -124,6 +131,13 @@ DELETE /api/v1/companies/{id}/mcp/servers/{name} must-change-password-admin refu
 DELETE /api/v1/companies/{id}/mcp/servers/{name} platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/companies/{id}/mcp/servers/{name} tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/companies/{id}/mcp/servers/{name} tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/servers/{name}/tools/policy admin permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/servers/{name}/tools/policy anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/servers/{name}/tools/policy member refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/servers/{name}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/servers/{name}/tools/policy platform permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/servers/{name}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/servers/{name}/tools/policy tenant-owner permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
 DELETE /api/v1/companies/{id}/memory/document/{source} admin permitted source=ops access=scoped features=openhuman blast=destructive note="Members may forget an ingested document." wait=-
 DELETE /api/v1/companies/{id}/memory/document/{source} anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=destructive note="Members may forget an ingested document." wait=-
 DELETE /api/v1/companies/{id}/memory/document/{source} member permitted source=ops access=scoped features=openhuman blast=destructive note="Members may forget an ingested document." wait=-
@@ -334,6 +348,13 @@ DELETE /api/v1/company/mcp/registry/{server_id} must-change-password-admin refus
 DELETE /api/v1/company/mcp/registry/{server_id} platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/company/mcp/registry/{server_id} tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/company/mcp/registry/{server_id} tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+DELETE /api/v1/company/mcp/registry/{server_id}/tools/policy admin permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/registry/{server_id}/tools/policy anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/registry/{server_id}/tools/policy member refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/registry/{server_id}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/registry/{server_id}/tools/policy platform permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/registry/{server_id}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/registry/{server_id}/tools/policy tenant-owner permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
 DELETE /api/v1/company/mcp/servers/{name} admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/company/mcp/servers/{name} anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/company/mcp/servers/{name} member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
@@ -341,6 +362,13 @@ DELETE /api/v1/company/mcp/servers/{name} must-change-password-admin refused:403
 DELETE /api/v1/company/mcp/servers/{name} platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/company/mcp/servers/{name} tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/company/mcp/servers/{name} tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+DELETE /api/v1/company/mcp/servers/{name}/tools/policy admin permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/servers/{name}/tools/policy anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/servers/{name}/tools/policy member refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/servers/{name}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/servers/{name}/tools/policy platform permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/servers/{name}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/servers/{name}/tools/policy tenant-owner permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
 DELETE /api/v1/company/memory/document/{source} admin permitted source=ops access=scoped features=openhuman blast=destructive note="Members may forget an ingested document." wait=-
 DELETE /api/v1/company/memory/document/{source} anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=destructive note="Members may forget an ingested document." wait=-
 DELETE /api/v1/company/memory/document/{source} member permitted source=ops access=scoped features=openhuman blast=destructive note="Members may forget an ingested document." wait=-
@@ -761,6 +789,13 @@ GET /api/v1/companies/{id}/mcp/registry/search must-change-password-admin refuse
 GET /api/v1/companies/{id}/mcp/registry/search platform permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/mcp/registry/search tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/mcp/registry/search tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy admin permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy member permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy platform permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
 GET /api/v1/companies/{id}/mcp/servers admin permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/mcp/servers anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/mcp/servers member permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
@@ -775,6 +810,13 @@ GET /api/v1/companies/{id}/mcp/servers/{name}/tools must-change-password-admin r
 GET /api/v1/companies/{id}/mcp/servers/{name}/tools platform permitted source=ops access=scoped features=openhuman blast=credential note="Members may discover tools using the stored server credential." wait=-
 GET /api/v1/companies/{id}/mcp/servers/{name}/tools tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=credential note="Members may discover tools using the stored server credential." wait=-
 GET /api/v1/companies/{id}/mcp/servers/{name}/tools tenant-owner permitted source=ops access=scoped features=openhuman blast=credential note="Members may discover tools using the stored server credential." wait=-
+GET /api/v1/companies/{id}/mcp/servers/{name}/tools/policy admin permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/servers/{name}/tools/policy anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/servers/{name}/tools/policy member permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/servers/{name}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/servers/{name}/tools/policy platform permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/servers/{name}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/servers/{name}/tools/policy tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
 GET /api/v1/companies/{id}/memory admin permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/memory anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/memory member permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
@@ -1377,6 +1419,13 @@ GET /api/v1/company/mcp/registry/search must-change-password-admin refused:403:p
 GET /api/v1/company/mcp/registry/search platform permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/mcp/registry/search tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/mcp/registry/search tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/company/mcp/registry/{server_id}/tools/policy admin permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/registry/{server_id}/tools/policy anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/registry/{server_id}/tools/policy member permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/registry/{server_id}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/registry/{server_id}/tools/policy platform permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/registry/{server_id}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/registry/{server_id}/tools/policy tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
 GET /api/v1/company/mcp/servers admin permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/mcp/servers anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/mcp/servers member permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
@@ -1391,6 +1440,13 @@ GET /api/v1/company/mcp/servers/{name}/tools must-change-password-admin refused:
 GET /api/v1/company/mcp/servers/{name}/tools platform permitted source=ops access=scoped features=openhuman blast=credential note="Members may discover tools using the stored server credential." wait=-
 GET /api/v1/company/mcp/servers/{name}/tools tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=credential note="Members may discover tools using the stored server credential." wait=-
 GET /api/v1/company/mcp/servers/{name}/tools tenant-owner permitted source=ops access=scoped features=openhuman blast=credential note="Members may discover tools using the stored server credential." wait=-
+GET /api/v1/company/mcp/servers/{name}/tools/policy admin permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/servers/{name}/tools/policy anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/servers/{name}/tools/policy member permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/servers/{name}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/servers/{name}/tools/policy platform permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/servers/{name}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/servers/{name}/tools/policy tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
 GET /api/v1/company/memory admin permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/memory anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/memory member permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
@@ -2952,6 +3008,13 @@ PUT /api/v1/companies/{id}/mcp/registry/{server_id}/env must-change-password-adm
 PUT /api/v1/companies/{id}/mcp/registry/{server_id}/env platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/mcp/registry/{server_id}/env tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/mcp/registry/{server_id}/env tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy admin permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy member refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy platform permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy tenant-owner permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
 PUT /api/v1/companies/{id}/mcp/servers/{name} admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/mcp/servers/{name} anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/mcp/servers/{name} member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
@@ -2959,6 +3022,13 @@ PUT /api/v1/companies/{id}/mcp/servers/{name} must-change-password-admin refused
 PUT /api/v1/companies/{id}/mcp/servers/{name} platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/mcp/servers/{name} tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/mcp/servers/{name} tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/mcp/servers/{name}/tools/policy admin permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/servers/{name}/tools/policy anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/servers/{name}/tools/policy member refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/servers/{name}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/servers/{name}/tools/policy platform permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/servers/{name}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/servers/{name}/tools/policy tenant-owner permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
 PUT /api/v1/companies/{id}/memory/engine admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/memory/engine anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/memory/engine member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
@@ -3204,6 +3274,13 @@ PUT /api/v1/company/mcp/registry/{server_id}/env must-change-password-admin refu
 PUT /api/v1/company/mcp/registry/{server_id}/env platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/mcp/registry/{server_id}/env tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/mcp/registry/{server_id}/env tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/mcp/registry/{server_id}/tools/policy admin permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/registry/{server_id}/tools/policy anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/registry/{server_id}/tools/policy member refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/registry/{server_id}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/registry/{server_id}/tools/policy platform permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/registry/{server_id}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/registry/{server_id}/tools/policy tenant-owner permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
 PUT /api/v1/company/mcp/servers/{name} admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/mcp/servers/{name} anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/mcp/servers/{name} member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
@@ -3211,6 +3288,13 @@ PUT /api/v1/company/mcp/servers/{name} must-change-password-admin refused:403:pa
 PUT /api/v1/company/mcp/servers/{name} platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/mcp/servers/{name} tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/mcp/servers/{name} tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/mcp/servers/{name}/tools/policy admin permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/servers/{name}/tools/policy anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/servers/{name}/tools/policy member refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/servers/{name}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/servers/{name}/tools/policy platform permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/servers/{name}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/servers/{name}/tools/policy tenant-owner permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
 PUT /api/v1/company/memory/engine admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/memory/engine anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/memory/engine member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-

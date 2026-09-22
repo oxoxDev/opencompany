@@ -180,9 +180,10 @@ async fn probe_and_persist(
     .await
     .ok()?;
     let decl = decls.iter().find(|d| d.name == name)?;
-    let health = crate::harness::mcp_probe::probe_server(decl).await;
-    let _ = mcp::save_health(runtime.id(), name, &health, runtime.secrets().as_ref()).await;
-    Some(health)
+    Some(
+        crate::harness::mcp_probe::probe_and_record(runtime.id(), decl, runtime.secrets().as_ref())
+            .await,
+    )
 }
 
 /// `Some(trimmed)` when a query value is present and non-blank.

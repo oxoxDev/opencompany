@@ -74,6 +74,12 @@ pub(super) fn router() -> Router<AppState> {
         ))
         .merge(scoped("/mcp/registry/{server_id}/env", put(update_env)))
         .merge(scoped("/mcp/registry/{server_id}", delete(uninstall)))
+        .merge(scoped(
+            "/mcp/registry/{server_id}/tools/policy",
+            get(read_tool_policy)
+                .put(write_tool_policy)
+                .delete(reset_tool_policy),
+        ))
 }
 
 // ---------------------------------------------------------------------------
@@ -387,7 +393,10 @@ pub(in crate::server::ops) mod catalogue;
 #[cfg(feature = "mcp")]
 mod wired;
 #[cfg(feature = "mcp")]
-use wired::{connect_server, disconnect_server, entry, install, search, uninstall, update_env};
+use wired::{
+    connect_server, disconnect_server, entry, install, read_tool_policy, reset_tool_policy, search,
+    uninstall, update_env, write_tool_policy,
+};
 #[cfg(feature = "mcp")]
 pub(super) use wired::{installs, remove_install};
 
@@ -455,10 +464,28 @@ mod unwired {
         let _ = company;
         crate::server::ops::not_wired("mcp registry")
     }
+
+    pub(super) async fn read_tool_policy(company: ScopedCompany) -> Response {
+        let _ = company;
+        crate::server::ops::not_wired("mcp registry")
+    }
+
+    pub(super) async fn write_tool_policy(company: AdminScopedCompany) -> Response {
+        let _ = company;
+        crate::server::ops::not_wired("mcp registry")
+    }
+
+    pub(super) async fn reset_tool_policy(company: AdminScopedCompany) -> Response {
+        let _ = company;
+        crate::server::ops::not_wired("mcp registry")
+    }
 }
 
 #[cfg(not(feature = "mcp"))]
-use unwired::{connect_server, disconnect_server, entry, install, search, uninstall, update_env};
+use unwired::{
+    connect_server, disconnect_server, entry, install, read_tool_policy, reset_tool_policy, search,
+    uninstall, update_env, write_tool_policy,
+};
 #[cfg(not(feature = "mcp"))]
 pub(super) use unwired::{installs, remove_install};
 

@@ -387,8 +387,10 @@ pub fn build_agent_with_model(
     // therefore wrapped in `OcMcpRegistryScopedTool`, which resolves that
     // argument against the agent's grants (`grants_cover_registry_server`)
     // before delegating, so a scoped `mcp_registry.<server_id>` grant reaches
-    // one install and a bare `mcp_registry` grant reaches all of them. Two hard
-    // gates before either tool is wired, following the
+    // one install and a bare `mcp_registry` grant reaches all of them. The same
+    // decorator reads that install's stored tool policy, so a blocked tool is
+    // refused at call time. Two hard gates before either tool is wired,
+    // following the
     // `composio`/`media`/`search` precedent above:
     //
     //  1. an **EXPLICIT** `mcp_registry` grant
@@ -418,12 +420,16 @@ pub fn build_agent_with_model(
                         config.clone(),
                     )),
                     grants.to_vec(),
+                    company.clone(),
+                    deps.secrets.clone(),
                 )));
                 tools.push(Box::new(OcMcpRegistryScopedTool::new(
                     Box::new(oh::mcp::registry::tools::McpRegistryToolCallTool::new(
                         config,
                     )),
                     grants.to_vec(),
+                    company.clone(),
+                    deps.secrets.clone(),
                 )));
             }
             None => tracing::warn!(

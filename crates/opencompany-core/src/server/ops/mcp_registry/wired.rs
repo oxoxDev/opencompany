@@ -392,3 +392,134 @@ pub(in crate::server::ops) async fn remove_install(
     };
     mcp.uninstall(server_id).await.map(|_| ()).map_err(ApiError)
 }
+
+// ---------------------------------------------------------------------------
+// Per-tool permissions for a directory install
+// ---------------------------------------------------------------------------
+
+use crate::company::mcp_policy;
+use crate::server::ops::mcp_tool_policy::{
+    PutToolPolicy, apply_tool_policy_patch, policy_unreadable, tool_policy_dto,
+};
+
+/// Reads an install's stored policy strictly, so an unreadable document is a
+/// `409` rather than silently rendered as "no overrides".
+async fn stored_strict(
+    runtime: &crate::company::runtime::CompanyRuntime,
+    server_id: &str,
+) -> Result<mcp_policy::McpToolPolicies, Box<Response>> {
+    mcp_policy::load_tool_policies_strict(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        &mcp_policy::registry_tool_policies_key(server_id),
+    )
+    .await
+    .map_err(|_| Box::new(policy_unreadable(server_id)))
+    .map(Option::unwrap_or_default)
+}
+
+/// Renders an install's resolved permission document.
+///
+/// A directory install carries no `read_only_tools` declaration — that field is
+/// a manifest affordance — so the stored document is the whole policy and there
+/// is no legacy baseline to layer it over.
+async fn registry_policy_response(
+    runtime: &crate::company::runtime::CompanyRuntime,
+    server_id: &str,
+    stored: mcp_policy::McpToolPolicies,
+) -> Response {
+    let inventory = mcp_policy::load_tool_inventory(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        &mcp_policy::registry_tool_inventory_key(server_id),
+    )
+    .await;
+    let policies = mcp_policy::effective_policies(&[], mcp_policy::StoredPolicies::Stored(stored));
+    Json(tool_policy_dto(server_id, &policies, &inventory)).into_response()
+}
+
+/// `GET …/mcp/registry/{server_id}/tools/policy`
+pub(super) async fn read_tool_policy(
+    company: ScopedCompany,
+    Path(ServerIdPath { server_id }): Path<ServerIdPath>,
+) -> Response {
+    let runtime = company.runtime.as_ref();
+    let Some(mcp) = runtime.mcp() else {
+        return not_wired("mcp registry");
+    };
+    if let Err(error) = mcp.get(&server_id) {
+        return ApiError(error).into_response();
+    }
+    match stored_strict(runtime, &server_id).await {
+        Ok(stored) => registry_policy_response(runtime, &server_id, stored).await,
+        Err(response) => *response,
+    }
+}
+
+/// `PUT …/mcp/registry/{server_id}/tools/policy`
+pub(super) async fn write_tool_policy(
+    company: AdminScopedCompany,
+    Path(ServerIdPath { server_id }): Path<ServerIdPath>,
+    body: Option<Json<PutToolPolicy>>,
+) -> Response {
+    let runtime = company.runtime.as_ref();
+    let Some(mcp) = runtime.mcp() else {
+        return not_wired("mcp registry");
+    };
+    // Membership first, as every other write here does: an unknown id must not
+    // leave a policy document behind for an install that does not exist.
+    if let Err(error) = mcp.get(&server_id) {
+        return ApiError(error).into_response();
+    }
+    let stored = match stored_strict(runtime, &server_id).await {
+        Ok(stored) => stored,
+        Err(response) => return *response,
+    };
+    let Some(Json(patch)) = body else {
+        return ApiError(OpenCompanyError::InvalidRequest(
+            "send a JSON body naming `tierDefaults`, `tools`, or both.".to_string(),
+        ))
+        .into_response();
+    };
+    let merged = match apply_tool_policy_patch(stored, patch) {
+        Ok(merged) => merged,
+        Err(reason) => return ApiError(OpenCompanyError::InvalidRequest(reason)).into_response(),
+    };
+    if let Err(error) = mcp_policy::save_tool_policies(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        &mcp_policy::registry_tool_policies_key(&server_id),
+        &merged,
+    )
+    .await
+    {
+        return ApiError(error).into_response();
+    }
+    registry_policy_response(runtime, &server_id, merged).await
+}
+
+/// `DELETE …/mcp/registry/{server_id}/tools/policy`
+pub(super) async fn reset_tool_policy(
+    company: AdminScopedCompany,
+    Path(ServerIdPath { server_id }): Path<ServerIdPath>,
+) -> Response {
+    let runtime = company.runtime.as_ref();
+    let Some(mcp) = runtime.mcp() else {
+        return not_wired("mcp registry");
+    };
+    if let Err(error) = mcp.get(&server_id) {
+        return ApiError(error).into_response();
+    }
+    // Does not read the stored document first: this is the repair for one that
+    // cannot be read.
+    if let Err(error) = mcp_policy::clear_tool_policies(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        &mcp_policy::registry_tool_policies_key(&server_id),
+    )
+    .await
+    {
+        return ApiError(error).into_response();
+    }
+    registry_policy_response(runtime, &server_id, mcp_policy::McpToolPolicies::default()).await
+}

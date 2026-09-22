@@ -188,7 +188,10 @@ pub fn embed_servers_for_agent(
             // deny list is what the transport filters on. Deny outranks allow
             // there, so a server with an allow list cannot re-admit one.
             let mut denied = decl.disallowed_tools.clone();
-            for tool in crate::company::mcp_policy::blocked_tool_names(&decl.tool_policies) {
+            for tool in crate::company::mcp_policy::blocked_tool_names(
+                &decl.tool_policies,
+                &decl.tool_inventory,
+            ) {
                 if !denied.contains(&tool) {
                     denied.push(tool);
                 }

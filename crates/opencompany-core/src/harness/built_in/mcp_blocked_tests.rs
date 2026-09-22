@@ -232,3 +232,34 @@ fn a_tool_that_merely_parks_is_not_denied() {
 
     assert!(debug.contains("disallowed_tools: []"), "{debug}");
 }
+
+/// A tier default blocks the tools discovery found, not only the ones an
+/// operator has already named — the widening the persisted inventory exists
+/// for, asserted where it has to hold: the attachment.
+#[test]
+fn a_blocked_tier_default_denies_the_inventoried_tools() {
+    let mut server = decl("notion", DEAD_ENDPOINT);
+    let mut policies = McpToolPolicies::default();
+    policies.tier_defaults.insert(
+        crate::company::mcp_policy::ToolTier::WriteDelete,
+        ApprovalMode::Blocked,
+    );
+    server.tool_policies = policies;
+    let mut inventory = crate::company::mcp_policy::McpToolInventory::default();
+    inventory.tools.insert(
+        "delete_page".to_string(),
+        crate::company::mcp_policy::ToolTier::WriteDelete,
+    );
+    inventory.tools.insert(
+        "read_page".to_string(),
+        crate::company::mcp_policy::ToolTier::ReadOnly,
+    );
+    server.tool_inventory = inventory;
+
+    let debug = attachment(server);
+
+    assert!(
+        debug.contains(r#"disallowed_tools: ["delete_page"]"#),
+        "{debug}"
+    );
+}

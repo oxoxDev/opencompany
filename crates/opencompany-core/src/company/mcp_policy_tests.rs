@@ -580,3 +580,119 @@ async fn clearing_replaces_an_unparseable_document() {
         Some(McpToolPolicies::default())
     );
 }
+
+// ---- the discovered tool inventory ------------------------------------
+
+#[test]
+fn discovery_suggests_a_tier_per_tool_and_drops_blanks() {
+    let inventory = inventory_from_discovery(
+        [
+            ("search_pages", None),
+            ("delete_page", None),
+            ("move_page", Some("Move a page.")),
+            ("  ", None),
+        ],
+        1_700_000_000_000,
+    );
+    assert_eq!(
+        inventory.suggested("search_pages"),
+        Some(ToolTier::ReadOnly)
+    );
+    assert_eq!(
+        inventory.suggested("delete_page"),
+        Some(ToolTier::WriteDelete)
+    );
+    assert_eq!(
+        inventory.suggested("move_page"),
+        Some(ToolTier::Interactive)
+    );
+    assert_eq!(inventory.tools.len(), 3);
+    assert_eq!(inventory.discovered_at_millis, 1_700_000_000_000);
+}
+
+/// A tool nobody discovered has no suggestion, which resolves under the
+/// conservative middle tier.
+#[test]
+fn an_undiscovered_tool_has_no_suggestion() {
+    let inventory = inventory_from_discovery([("search_pages", None)], 0);
+    assert_eq!(inventory.suggested("ghost"), None);
+    assert_eq!(
+        resolve_policy(
+            &McpToolPolicies::default(),
+            "ghost",
+            inventory.suggested("ghost")
+        )
+        .tier,
+        ToolTier::Interactive
+    );
+}
+
+/// The map is ordered, so re-writing an unchanged inventory produces identical
+/// bytes rather than a spurious diff.
+#[test]
+fn an_unchanged_inventory_serializes_identically() {
+    let first = inventory_from_discovery([("b_tool", None), ("a_tool", None)], 7);
+    let second = inventory_from_discovery([("a_tool", None), ("b_tool", None)], 7);
+    assert_eq!(
+        serde_json::to_string(&first).unwrap(),
+        serde_json::to_string(&second).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn an_inventory_round_trips_through_the_store() {
+    let secrets = MemSecrets::default();
+    let key = tool_inventory_key("notion");
+    let inventory = inventory_from_discovery([("search_pages", None)], 42);
+    save_tool_inventory(&company(), &secrets, &key, &inventory)
+        .await
+        .unwrap();
+    assert_eq!(
+        load_tool_inventory(&company(), &secrets, &key).await,
+        inventory
+    );
+}
+
+/// An unreadable inventory suggests nothing rather than failing the read, so a
+/// damaged document parks tools instead of hiding them.
+#[tokio::test]
+async fn an_unreadable_inventory_suggests_nothing() {
+    let secrets = MemSecrets::default();
+    let key = tool_inventory_key("notion");
+    secrets
+        .set(&company(), &key, SecretValue("{not json".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        load_tool_inventory(&company(), &secrets, &key).await,
+        McpToolInventory::default()
+    );
+
+    let failing = MemSecrets {
+        fail_reads: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        load_tool_inventory(&company(), &failing, &key).await,
+        McpToolInventory::default()
+    );
+}
+
+#[test]
+fn inventory_keys_are_namespaced_per_server_kind() {
+    assert_eq!(tool_inventory_key("notion"), "mcp/notion/tool_inventory");
+    assert_eq!(
+        registry_tool_inventory_key("0b8f4b0e-3c2a-4a1d-9e77-6d5a2f1c8e40"),
+        "mcp_registry/0b8f4b0e-3c2a-4a1d-9e77-6d5a2f1c8e40/tool_inventory"
+    );
+}
+
+/// The wire string and the serde representation must not drift: the console
+/// keys its tier sections off one and reads rows through the other.
+#[test]
+fn the_tier_wire_string_matches_its_serde_form() {
+    for tier in ToolTier::ALL {
+        let serialized = serde_json::to_string(&tier).unwrap();
+        assert_eq!(serialized, format!("\"{}\"", tier.as_str()), "{tier:?}");
+    }
+}

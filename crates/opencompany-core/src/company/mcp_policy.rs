@@ -38,6 +38,15 @@ pub enum ToolTier {
 }
 
 impl ToolTier {
+    /// The stable wire string, matching the serde representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ToolTier::Interactive => "interactive",
+            ToolTier::ReadOnly => "read_only",
+            ToolTier::WriteDelete => "write_delete",
+        }
+    }
+
     /// Every tier, in the order a console lists them.
     pub const ALL: [ToolTier; 3] = [
         ToolTier::ReadOnly,
@@ -388,31 +397,56 @@ pub async fn clear_tool_policies(
 /// approval gate lets run without parking, resolved through each server's tool
 /// policy.
 ///
-/// The successor to [`mcp_read_set`](super::mcp::mcp_read_set), which reads the flat declaration
-/// directly. Both produce the same shape, so one can be diffed against the
-/// other over a fixture.
+/// The successor to [`mcp_read_set`](super::mcp::mcp_read_set), which reads the
+/// flat declaration directly. Both produce the same shape, so one can be diffed
+/// against the other over a fixture.
 ///
-/// Enumerates the policy document's own entries and nothing else. A stored
-/// per-tier default can also produce an allow, but only for a tool some
-/// inventory names, and no inventory is persisted yet — so a tier default
-/// currently reaches exactly the tools that already have an entry. A disabled
-/// server contributes nothing: it hands out no tool, so a call through it could
-/// not have been made.
+/// Enumerates the union of the policy document's own entries and the tools
+/// discovery last saw. Both halves are needed: an entry names a tool the
+/// operator decided about, which discovery may not have reached; the inventory
+/// names the tools a per-tier bulk default is *for*, which have no entry by
+/// definition. A disabled server contributes nothing: it hands out no tool, so
+/// a call through it could not have been made.
 ///
-/// Never consults [`suggest_tool_tier`].
-/// A name heuristic deciding who skips the approval gate is the one thing that
-/// would make this a behaviour change rather than a restatement.
+/// Never consults [`suggest_tool_tier`] directly. The suggestion reaches the
+/// resolution only through the stored inventory, and only as a tier — a
+/// suggestion alone still cannot grant [`ApprovalMode::AlwaysAllow`], which is
+/// what keeps a name heuristic out of the decision to skip the approval gate.
 pub fn mcp_allow_set(servers: &[McpServerDecl]) -> crate::policy::McpReadSet {
     crate::policy::McpReadSet::from_pairs(servers.iter().filter(|s| s.enabled).flat_map(|server| {
-        server
-            .tool_policies
-            .overrides
-            .keys()
+        policy_tool_names(&server.tool_policies, &server.tool_inventory)
             .filter(|tool| {
-                resolve_policy(&server.tool_policies, tool, None).mode == ApprovalMode::AlwaysAllow
+                resolve_policy(
+                    &server.tool_policies,
+                    tool,
+                    server.tool_inventory.suggested(tool),
+                )
+                .mode
+                    == ApprovalMode::AlwaysAllow
             })
-            .map(move |tool| (server.name.clone(), tool.clone()))
+            .map(move |tool| (server.name.clone(), tool))
     }))
+}
+
+/// Every tool name a policy decision can be stated about: the ones an operator
+/// already decided, plus the ones discovery found.
+pub fn policy_tool_names(
+    policies: &McpToolPolicies,
+    inventory: &McpToolInventory,
+) -> impl Iterator<Item = String> {
+    let mut names: std::collections::BTreeSet<String> =
+        policies.overrides.keys().cloned().collect();
+    names.extend(inventory.tools.keys().cloned());
+    names.into_iter()
+}
+
+/// Whether one server's stored policy refuses `tool` outright.
+///
+/// The single definition of "blocked": both the declared-server set and the
+/// registry decorator resolve through this, so a tool refused on one path is
+/// refused identically on the other.
+pub fn blocks_tool(policies: &McpToolPolicies, inventory: &McpToolInventory, tool: &str) -> bool {
+    resolve_policy(policies, tool, inventory.suggested(tool)).mode == ApprovalMode::Blocked
 }
 
 /// Every granted server's resolved policy, addressed by server name.
@@ -422,7 +456,7 @@ pub fn mcp_allow_set(servers: &[McpServerDecl]) -> crate::policy::McpReadSet {
 /// answers one the bridge tool asks at the point it would dial.
 #[derive(Clone, Debug, Default)]
 pub struct McpToolPolicySet {
-    by_server: HashMap<String, McpToolPolicies>,
+    by_server: HashMap<String, (McpToolPolicies, McpToolInventory)>,
 }
 
 impl McpToolPolicySet {
@@ -437,7 +471,12 @@ impl McpToolPolicySet {
             by_server: servers
                 .into_iter()
                 .filter(|server| server.enabled)
-                .map(|server| (server.name.clone(), server.tool_policies.clone()))
+                .map(|server| {
+                    (
+                        server.name.clone(),
+                        (server.tool_policies.clone(), server.tool_inventory.clone()),
+                    )
+                })
                 .collect(),
         }
     }
@@ -449,28 +488,24 @@ impl McpToolPolicySet {
     /// reason to refuse. Nothing is granted by answering `false` either — the
     /// approval gate has already decided separately whether the call parks.
     pub fn is_blocked(&self, server: &str, tool: &str) -> bool {
-        self.by_server.get(server).is_some_and(|policies| {
-            resolve_policy(policies, tool, None).mode == ApprovalMode::Blocked
-        })
+        self.by_server
+            .get(server)
+            .is_some_and(|(policies, inventory)| blocks_tool(policies, inventory, tool))
     }
 }
 
-/// Every tool this document refuses outright, sorted.
+/// Every tool this server refuses outright, sorted.
 ///
-/// The attachment-time face of [`McpToolPolicySet::is_blocked`]: a company
-/// agent reaches a declared server through OpenHuman's own native
-/// `mcp_call_tool` rather than through this crate's bridge tool, and the only
-/// lever on that path is the server's deny list. A blocked tool therefore has
-/// to be denied where the server is attached, or the refusal never runs.
+/// The attachment-time face of [`blocks_tool`]: a company agent reaches a
+/// declared server through OpenHuman's native `mcp_call_tool`, and the only
+/// lever on that path is the attached server's deny list.
 ///
-/// Only tools the document names: without a discovered inventory there is no
-/// list of a server's tools to apply a tier default across.
-pub fn blocked_tool_names(policies: &McpToolPolicies) -> Vec<String> {
-    let mut names: Vec<String> = policies
-        .overrides
-        .keys()
-        .filter(|tool| resolve_policy(policies, tool, None).mode == ApprovalMode::Blocked)
-        .cloned()
+/// Reads the inventory as well as the overrides, so a tier default blocks the
+/// tools discovery found rather than only the ones an operator has already
+/// named one by one.
+pub fn blocked_tool_names(policies: &McpToolPolicies, inventory: &McpToolInventory) -> Vec<String> {
+    let mut names: Vec<String> = policy_tool_names(policies, inventory)
+        .filter(|tool| blocks_tool(policies, inventory, tool))
         .collect();
     names.sort();
     names
@@ -484,6 +519,115 @@ pub fn blocked_refusal(server: &str, tool: &str) -> String {
          permissions, so the call was not made. This is not an approval that can be granted \
          in the moment — do not retry, and surface it to the operator if the work needs it."
     )
+}
+
+/// A server's discovered tools and the tier each one is suggested under.
+///
+/// Persisted because the suggestion is only obtainable while the server
+/// answers. Without it a transient outage would empty the console's row set and
+/// drop every tool a stored tier default reaches — the policy would appear to
+/// change because the network hiccuped.
+///
+/// Holds names and tiers only. A tool's description is what the suggestion was
+/// computed *from*, is marked untrusted by the transport that carries it, and
+/// is not needed again.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolInventory {
+    /// Discovered tool name to its suggested tier. Ordered so the document is
+    /// byte-stable across writes and a re-probe that discovers nothing new is a
+    /// no-op diff.
+    #[serde(default)]
+    pub tools: std::collections::BTreeMap<String, ToolTier>,
+    /// When discovery last succeeded, in unix milliseconds.
+    #[serde(default)]
+    pub discovered_at_millis: u64,
+}
+
+impl McpToolInventory {
+    /// The tier discovery suggested for `tool`, if it was seen.
+    pub fn suggested(&self, tool: &str) -> Option<ToolTier> {
+        self.tools.get(tool).copied()
+    }
+}
+
+/// The [`SecretStore`](crate::ports::SecretStore) key holding a declared
+/// server's [`McpToolInventory`].
+pub fn tool_inventory_key(name: &str) -> String {
+    format!("mcp/{name}/tool_inventory")
+}
+
+/// The [`SecretStore`](crate::ports::SecretStore) key holding a directory
+/// install's [`McpToolInventory`].
+pub fn registry_tool_inventory_key(server_id: &str) -> String {
+    format!("mcp_registry/{server_id}/tool_inventory")
+}
+
+/// Builds an inventory from a discovery pass, suggesting a tier for each tool.
+pub fn inventory_from_discovery<'a>(
+    tools: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+    discovered_at_millis: u64,
+) -> McpToolInventory {
+    McpToolInventory {
+        tools: tools
+            .into_iter()
+            .filter_map(|(name, description)| {
+                let name = name.trim();
+                (!name.is_empty()).then(|| (name.to_string(), suggest_tool_tier(name, description)))
+            })
+            .collect(),
+        discovered_at_millis,
+    }
+}
+
+/// Reads a server's tool inventory, degrading an unreadable one to the empty
+/// inventory.
+///
+/// Fail-closed: with no suggestion every tool resolves under the conservative
+/// middle tier and parks. Never surfaces an error, for the same reason
+/// [`load_tool_policies`] does not.
+pub async fn load_tool_inventory(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    key: &str,
+) -> McpToolInventory {
+    let raw = match secrets.get(company, key).await {
+        Ok(Some(SecretValue(raw))) => raw,
+        Ok(None) => return McpToolInventory::default(),
+        Err(err) => {
+            tracing::warn!(
+                company = %company,
+                key = %key,
+                error = %err,
+                "reading MCP tool inventory failed; this server suggests no tiers"
+            );
+            return McpToolInventory::default();
+        }
+    };
+    if raw.trim().is_empty() {
+        return McpToolInventory::default();
+    }
+    serde_json::from_str(&raw).unwrap_or_else(|err| {
+        tracing::warn!(
+            company = %company,
+            key = %key,
+            error = %err,
+            "MCP tool inventory is not valid JSON; this server suggests no tiers"
+        );
+        McpToolInventory::default()
+    })
+}
+
+/// Persists a server's tool inventory.
+pub async fn save_tool_inventory(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    key: &str,
+    inventory: &McpToolInventory,
+) -> Result<()> {
+    let raw = serde_json::to_string(inventory)
+        .map_err(|e| OpenCompanyError::Store(format!("serializing mcp tool inventory: {e}")))?;
+    secrets.set(company, key, SecretValue(raw)).await
 }
 
 #[cfg(test)]

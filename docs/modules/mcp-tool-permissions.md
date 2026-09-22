@@ -67,14 +67,33 @@ listed or dialled, and where deny outranks allow. The declaration's own
 it. Only `blocked` is denied this way; a tool that merely parks stays reachable,
 because parking is what the approval gate is for.
 
+That is resolved when the agent is built, so a block reaches the native path on
+the next build. A **directory install** is the other shape: it is addressed by a
+`server_id` argument at call time rather than by the grant its tool was wired
+under, so there is no build-time snapshot to attach a policy to. Its scoping
+decorator reads the install's document when the call arrives — the grant answers
+whether this agent may name the install at all, the policy whether that tool may
+run, and both refuse before anything is dialled. A deployment with no secret
+store cannot read a policy and does not invent one; the grant stays the whole
+gate.
+
+An install carries no `read_only_tools`: that is a manifest affordance of a
+declared server, so for the registry the stored document is the whole policy and
+the persisted inventory is the only thing that can say which tier a tool is in.
+
 The guard in the bridge tool stays as the same refusal for any path that does
-dispatch it, worded by one function so the two cannot drift.
+dispatch it, and both paths word it with one function so an agent cannot tell
+from the message which one refused it.
 
-## Not yet wired
+## Where the tiers come from
 
-A directory install's policy is not loaded at harness-build time, so no
-`blocked` can exist for the registry bridge tool yet, and nothing writes a
-policy document at all until the tool-permissions routes land. Per-tier defaults
-reach only tools that already have an entry, because no tool inventory is
-persisted for them to name.
+A tier default can only reach tools something has named. Discovery persists an
+inventory — tool name to suggested tier — beside the policy, from the same
+listing the health probe already performs, so a bulk "block everything
+write/delete on this server" reaches the tools that server actually has. A
+failed probe leaves the previous inventory standing rather than emptying it, and
+neither write can fail the probe.
 
+An inventory on its own grants and blocks nothing. It is a proposal the console
+renders and the resolver reads as a suggestion; only a stored decision changes
+what happens to a call.
