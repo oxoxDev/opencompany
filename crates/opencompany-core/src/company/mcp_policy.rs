@@ -440,6 +440,15 @@ pub fn policy_tool_names(
     names.into_iter()
 }
 
+/// Whether one server's stored policy refuses `tool` outright.
+///
+/// The single definition of "blocked": both the declared-server set and the
+/// registry decorator resolve through this, so a tool refused on one path is
+/// refused identically on the other.
+pub fn blocks_tool(policies: &McpToolPolicies, inventory: &McpToolInventory, tool: &str) -> bool {
+    resolve_policy(policies, tool, inventory.suggested(tool)).mode == ApprovalMode::Blocked
+}
+
 /// Every granted server's resolved policy, addressed by server name.
 ///
 /// The call-time face of the same documents [`mcp_allow_set`] flattens. The
@@ -481,10 +490,7 @@ impl McpToolPolicySet {
     pub fn is_blocked(&self, server: &str, tool: &str) -> bool {
         self.by_server
             .get(server)
-            .is_some_and(|(policies, inventory)| {
-                resolve_policy(policies, tool, inventory.suggested(tool)).mode
-                    == ApprovalMode::Blocked
-            })
+            .is_some_and(|(policies, inventory)| blocks_tool(policies, inventory, tool))
     }
 }
 
