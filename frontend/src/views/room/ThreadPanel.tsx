@@ -18,6 +18,7 @@ import { MessageComposer } from "./MessageComposer";
 import { TypingLine } from "./TypingLine";
 import { WorkingIndicator } from "./WorkingIndicator";
 import { channelTitle, formatTime, senderOf, type Channel } from "./model";
+import { useBottomAnchor } from "./useBottomAnchor";
 import { type Mention, type Mentionable } from "./mentions";
 
 interface Props {
@@ -31,6 +32,14 @@ interface Props {
   /** The message the thread hangs off. */
   parent: ChatMessage;
   replies: ChatMessage[];
+  /**
+   * The channel's persisted history has not arrived yet, so the absence of
+   * replies is not evidence of anything — the same prop, and the same value,
+   * `MessageTimeline` gets. The anchor below needs it: a panel opened over a
+   * transcript still on the wire would anchor once against a one-screen box
+   * and never run again.
+   */
+  historyPending?: boolean;
   /**
    * The subset of `replies` already laid out inline in the channel, from
    * {@link inlineReplyIds} — excluded from the count above the list, never
@@ -235,6 +244,7 @@ export function ThreadPanel({
   members,
   parent,
   replies,
+  historyPending = false,
   inlineReplyIds,
   liveStepsByMessage,
   liveAgentByTurn,
@@ -302,6 +312,11 @@ export function ThreadPanel({
    * naming the running step, which is the channel's old bug one pane over.
    */
   const liveName = openTurn_?.key ? agentNames?.[liveAgentByTurn?.[openTurn_.key] ?? ""] : undefined;
+  const { scroller, content, onScroll } = useBottomAnchor({
+    key: parent.id,
+    pending: historyPending,
+    growth: [replies.length, openTurnSteps?.length ?? 0, typingNames.length],
+  });
   return (
     <aside className="flex w-96 shrink-0 flex-col border-l bg-background">
       <header className="flex h-13 shrink-0 items-center gap-2 border-b px-3">
@@ -314,40 +329,46 @@ export function ThreadPanel({
         </Button>
       </header>
 
-      <div className="flex-1 overflow-y-auto">
-        <Line
-          channel={channel}
-          members={members}
-          message={parent}
-          youAvatar={youAvatar}
-          resolveAttachmentUrl={resolveAttachmentUrl}
-          cognition={cognition}
-          onRedeemBudgetPause={onRedeemBudgetPause}
-          redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
-          latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
-          onRetrySend={onRetrySend}
-        />
-        <div className="flex items-center gap-2 px-4 py-2">
-          <span className="text-xs font-medium text-muted-foreground">
-            {countedReplies} {countedReplies === 1 ? "reply" : "replies"}
-          </span>
-          <span className="h-px flex-1 bg-border" aria-hidden />
-        </div>
-        {replies.map((r) => (
+      <div ref={scroller} onScroll={onScroll} className="flex-1 overflow-y-auto">
+        {/* The column rule 2b's `ResizeObserver` watches. The rows were direct
+            children of the scroller, whose own border box never changes when
+            content overflows it — so without a wrapper of their own there is
+            nothing whose height the rows determine. */}
+        <div ref={content}>
           <Line
-            key={r.id}
             channel={channel}
             members={members}
-            message={r}
+            message={parent}
             youAvatar={youAvatar}
             resolveAttachmentUrl={resolveAttachmentUrl}
             cognition={cognition}
             onRedeemBudgetPause={onRedeemBudgetPause}
             redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
-            onRetrySend={onRetrySend}
             latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
+            onRetrySend={onRetrySend}
           />
-        ))}
+          <div className="flex items-center gap-2 px-4 py-2">
+            <span className="text-xs font-medium text-muted-foreground">
+              {countedReplies} {countedReplies === 1 ? "reply" : "replies"}
+            </span>
+            <span className="h-px flex-1 bg-border" aria-hidden />
+          </div>
+          {replies.map((r) => (
+            <Line
+              key={r.id}
+              channel={channel}
+              members={members}
+              message={r}
+              youAvatar={youAvatar}
+              resolveAttachmentUrl={resolveAttachmentUrl}
+              cognition={cognition}
+              onRedeemBudgetPause={onRedeemBudgetPause}
+              redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
+              onRetrySend={onRetrySend}
+              latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
+            />
+          ))}
+        </div>
       </div>
 
       {/* A read-only thread gets the notice and no composer, the way its
