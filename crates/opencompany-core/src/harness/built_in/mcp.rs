@@ -183,10 +183,20 @@ pub fn embed_servers_for_agent(
         .iter()
         .filter(|decl| decl.enabled && grants_cover_server(grants, &decl.name))
         .map(|decl| {
+            // A blocked tool is denied here, not only in `OcMcpCallTool`: this
+            // attachment is the path a company agent actually takes, and the
+            // deny list is what the transport filters on. Deny outranks allow
+            // there, so a server with an allow list cannot re-admit one.
+            let mut denied = decl.disallowed_tools.clone();
+            for tool in crate::company::mcp_policy::blocked_tool_names(&decl.tool_policies) {
+                if !denied.contains(&tool) {
+                    denied.push(tool);
+                }
+            }
             openhuman_embed::McpServer::http(decl.name.clone(), decl.endpoint.clone())
                 .auth(auth_config(&decl.auth))
                 .allow_tools(decl.allowed_tools.clone())
-                .deny_tools(decl.disallowed_tools.clone())
+                .deny_tools(denied)
                 .timeout_secs(decl.timeout_secs)
                 .description(decl.description.clone().unwrap_or_default())
         })
