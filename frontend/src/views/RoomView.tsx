@@ -3234,6 +3234,12 @@ export function RoomView({
                   parent={parent}
                   replies={threadReplies}
                   inlineReplyIds={threadInlineReplyIds}
+                  // The same value the channel timeline gets, because it is the
+                  // same question: `threadReplies` is derived synchronously from
+                  // `messages` by `repliesInThread`, so a thread has no fetch of
+                  // its own to be pending on. Without it the panel's anchor runs
+                  // once against a transcript that has not arrived.
+                  historyPending={historyPending}
                   // A query typed into this panel renders only here — parented
                   // messages never reach the channel timeline — so the panel needs
                   // the per-query rows too, or its turns show nothing at all.
