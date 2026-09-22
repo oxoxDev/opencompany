@@ -75,7 +75,10 @@ function render(channel: Channel) {
  * would pass by construction.
  */
 function mark(): HTMLElement {
-  const intro = container.firstElementChild!.firstElementChild!.firstElementChild!;
+  // One level deeper than the scroller itself: the component's root is the
+  // positioned wrapper the jump control is a sibling in.
+  const scroller = container.querySelector('[data-testid="channel-transcript"]')!;
+  const intro = scroller.firstElementChild!.firstElementChild!;
   return intro.firstElementChild as HTMLElement;
 }
 
