@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { isAtBottom } from "./bottomAnchor";
 
@@ -42,12 +42,39 @@ export function useBottomAnchor({ key, pending, growth }: BottomAnchorOptions) {
   const following = useRef(true);
   /** The channel the growth effect has already settled on. See rule 2. */
   const settledOn = useRef<string | null>(null);
+  /**
+   * The same answer as {@link following}, for rendered output — a control that
+   * only exists while the reader has scrolled away.
+   *
+   * Two holders rather than one because the ref's reason above still stands: a
+   * scroll handler runs at frame rate, and re-rendering the transcript on every
+   * wheel tick is what the ref avoids. So the state is written only when the
+   * answer *crosses* the threshold, which happens once per gesture. The mirror
+   * ref is what makes that test free of the handler's own render cycle.
+   */
+  const [atBottom, setAtBottom] = useState(true);
+  const shown = useRef(true);
+
+  const settle = useCallback((next: boolean) => {
+    following.current = next;
+    if (next === shown.current) return;
+    shown.current = next;
+    setAtBottom(next);
+  }, []);
 
   const onScroll = useCallback(() => {
     const el = scroller.current;
     if (!el) return;
-    following.current = isAtBottom(el);
-  }, []);
+    settle(isAtBottom(el));
+  }, [settle]);
+
+  /** Resumes following and travels to the newest row. */
+  const jumpToLatest = useCallback(() => {
+    const el = scroller.current;
+    if (!el) return;
+    settle(true);
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  }, [settle]);
 
   // Rule 1 — arriving at a channel. `useLayoutEffect` so the jump happens
   // before paint: with `useEffect` the browser paints the un-anchored position
@@ -69,8 +96,11 @@ export function useBottomAnchor({ key, pending, growth }: BottomAnchorOptions) {
     const el = scroller.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-    following.current = true;
-  }, [key, pending]);
+    // Not `following.current = true`: programmatic scrolling emits no event on
+    // a transcript that does not overflow, so a pane switched to from a
+    // scrolled-away one would keep showing the control it no longer needs.
+    settle(true);
+  }, [key, pending, settle]);
 
   // Rule 2 — growth while the channel is open. Each new tool row grows the
   // block at the bottom, so the scroll has to follow it as the turn works, not
@@ -167,5 +197,5 @@ export function useBottomAnchor({ key, pending, growth }: BottomAnchorOptions) {
     return () => observer.disconnect();
   }, [pending]);
 
-  return { scroller, content, onScroll, following };
+  return { scroller, content, onScroll, following, atBottom, jumpToLatest };
 }
