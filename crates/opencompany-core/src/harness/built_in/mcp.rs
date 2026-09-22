@@ -39,8 +39,10 @@ use crate::ports::types::CompanyId;
 use crate::ports::usage::UsageMeter;
 use crate::runtime::tools::grants_cover_server;
 
+mod registry_list;
 mod registry_scoped;
 
+pub use registry_list::OcMcpRegistryInstalledListTool;
 pub use registry_scoped::OcMcpRegistryScopedTool;
 
 /// Builds a registry from a set of decls, keeping only the enabled ones.
