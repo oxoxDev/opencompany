@@ -314,6 +314,9 @@ chart's desk level, since no desk can name a parent desk. See
 | `MessageRow.tsx` | One line — avatar gutter, author, body, reactions, hover action bar, the board-card chip (link plus its dismissal, issue #984), and the utterance chip on a row an episode committed (`components/episode/UtteranceChip`). |
 | `MessageComposer.tsx` | The composer dock; also used compact in the thread panel. |
 | `ThreadPanel.tsx` | Replies to one message, with their own composer. |
+| `bottomAnchor.ts` | How close to the bottom still counts as the bottom. Pure. |
+| `useBottomAnchor.ts` | The four rules that keep a transcript on its newest row — arrival, growth, scroller resize, content resize — plus whether it is still parked there. Used by both panes above. |
+| `JumpToLatest.tsx` | The control offered while the reader has scrolled away; a sibling of the scroller, never a child. |
 | `MembersPane.tsx` | Who is in this channel, then the rest of the roster. |
 | `AddMemberDialog.tsx` | Define a teammate. |
 
