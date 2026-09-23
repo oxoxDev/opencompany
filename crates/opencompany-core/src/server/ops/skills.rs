@@ -418,7 +418,8 @@ async fn list_skills(
 ///    empty registry means this host serves no shared library at all
 ///    (platform-provisioned mode, no `skills_root`), so there is nothing to
 ///    resolve against and refusing every install would break hosted tenants
-///    outright.
+///    outright. The row records [`SkillSource::Custom`], because the document
+///    is the client's own and no library copy exists to compare it against.
 ///
 /// A *configured* library that fails to load is a `500`, never case 3: silently
 /// degrading a broken shared library to "no library" would hand the client
@@ -452,6 +453,10 @@ async fn install(
             // instead of skipping a content-less delta. A client that supplies no
             // description gets the name as one: an empty scalar is a document the
             // parser refuses, and the delta it stored reached no agent.
+            //
+            // `Custom` is the honest provenance: nothing about this document
+            // came from a shared library, so nothing can ever be diffed against
+            // one to say it is stale or authentic.
             let name = meta
                 .name
                 .filter(|n| !n.trim().is_empty())
