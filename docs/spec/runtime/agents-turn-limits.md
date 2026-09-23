@@ -9,6 +9,9 @@ file. That page owns how a teammate is declared and what reaches its prompt;
 this one owns what a turn built from it may spend.
 
 Two ceilings bound one turn, and they bound different things.
+Two ceilings bound one turn, and they bound different things. Split out of
+[agents.md](agents.md), which declares the teammate; this page is what happens
+when one of them runs.
 
 ## Tool iterations — 25
 
@@ -60,6 +63,8 @@ window in proportion. How far over depends on whether anything is watching from
 inside: for the plan-level token ceiling, and for a teammate who declares no
 daily budget, nothing is, and the overshoot is unbounded. A teammate who does
 declare one gets the in-turn brake below, which bounds it to a single call.
+under a cap can finish arbitrarily far over it, and raising the iteration ceiling
+widens that window in proportion.
 
 A running turn is therefore additionally metered by an in-turn brake — openhuman's
 `BudgetStopHook` — an after-call threshold check installed between iterations.
@@ -92,3 +97,10 @@ with work still to do and can be resumed via the "continue" bubble above; a
 budget halt means it ran out of money, returns whatever reply the model produced
 before the hook fired, and gets no such bubble today. Anything that renders one
 to an operator must not label it with the other.
+
+## Where this lives
+
+| Concern | File |
+| --- | --- |
+| Iteration cap, stated on every built agent | `src/harness/build.rs` |
+| In-turn spend brake, installed per turn | `src/harness/mod.rs` |
