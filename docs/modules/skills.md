@@ -62,20 +62,23 @@ later validation work.
 ### Spec deltas worth knowing
 
 The published Agent Skills format requires `name` ≤ 64 characters, lowercase
-letters, digits and hyphens, matching the directory, and `description` ≤ 1024
-characters. What this repo enforces today is narrower:
+letters, digits and hyphens, matching the directory, no leading or trailing
+hyphen and no consecutive hyphens, and `description` ≤ 1024 characters. What
+this repo enforces today is narrower:
 
 - `skill_effective::valid_slug` requires a leading lowercase letter or digit
   followed by lowercase letters, digits or hyphens, and exists to stop path
-  traversal (a slug becomes a directory name). It sets **no length cap**.
+  traversal (a slug becomes a directory name). It sets **no length cap**, and
+  it constrains only the first character and the alphabet — so `deploy-` and
+  `deploy--helper` both pass here and neither is a legal published name.
 - `parse_skill_md` treats `name` as a display string that only has to be
   non-empty, ignores unknown keys, and does **not** check that `name` matches
   the slug.
 - `MAX_SKILL_DOC_BYTES` (256 KiB) bounds only the *assembled* document.
 
-So the 64-character name limit, the name-equals-directory rule and the
-1024-character description limit are recorded here as known gaps, not as
-enforced rules.
+So the 64-character name limit, the name-equals-directory rule, the hyphen
+placement rules and the 1024-character description limit are recorded here as
+known gaps, not as enforced rules.
 
 ## The four sources
 
