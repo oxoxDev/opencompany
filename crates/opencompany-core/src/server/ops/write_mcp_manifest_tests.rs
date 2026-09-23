@@ -404,3 +404,58 @@ async fn mcp_reachability_is_empty_for_a_disabled_server() {
         "the list reader applies the same enabled filter as the harness"
     );
 }
+
+/// Issue #2373 prerequisite (c): a build with `openhuman` but without `mcp` must
+/// not answer a probe with a result it cannot act on.
+///
+/// `mcp` implies `openhuman`, so `--features openhuman` alone is the build where
+/// the transport exists — the probe really would dial — while the agent-side
+/// bridge tools in `harness::built_in::build`, which are `#[cfg(feature =
+/// "mcp")]`, do not. Before the short-circuit, adding a server here ran a live
+/// probe and reported its outcome, so a reachable endpoint produced a green
+/// `Test connection` on a build that wires the server to nobody.
+///
+/// The endpoint below is a closed loopback port, which is the case that
+/// distinguishes the two behaviours without touching the network: a real probe
+/// would come back `error` (connection refused), so `unknown` can only mean the
+/// probe was skipped. `rust-gated` runs `--features openhuman` with `--tests`
+/// and no filter, which is the lane that executes this.
+#[cfg(all(feature = "openhuman", not(feature = "mcp")))]
+#[tokio::test]
+async fn without_the_mcp_feature_a_probe_is_skipped_rather_than_reported() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, added) = send(
+        &state,
+        "POST",
+        "/api/v1/company/mcp/servers",
+        Some(json!({
+            "name": "closed",
+            "endpoint": "https://127.0.0.1:9/mcp",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let test = &added["test"];
+    assert_eq!(
+        test["status"], "unknown",
+        "a build without `mcp` must not report a probe outcome: {added}"
+    );
+    assert!(
+        test["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("`mcp` feature"),
+        "the message must name the build rather than the endpoint: {added}"
+    );
+    assert_eq!(test["toolCount"], 0);
+
+    // The read-back agrees with the mutation response, the same invariant
+    // `mutation_response` keeps for a live probe.
+    let (status, listed) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed[0]["health"]["status"], "unknown");
+}
