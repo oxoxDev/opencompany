@@ -399,10 +399,6 @@ Moved to [agents-turn-limits.md](agents-turn-limits.md): the 25-round tool
 iteration cap and the reasoning behind the number, the in-turn spend brake armed
 only for a teammate with a declared daily budget, and why a cap pause and a
 budget halt are reported separately.
-The 25-round tool-iteration ceiling and the in-turn spend brake moved to
-[agents-turn-limits.md](agents-turn-limits.md) when this file reached the
-500-line cap. What a teammate *is* stays here; what happens when one of its
-turns runs out lives there.
 
 ## `classes`
 
