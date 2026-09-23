@@ -1535,21 +1535,6 @@ function OpenTasks({ tasks }: { tasks: Task[] | null }) {
 }
 
 /**
- * The tool grants, resolved — and, for an admin, editable.
- *
- * Three facts, because the difference between them is the whole reason this
- * section exists. What the agent holds. Whether it holds it because it asked or
- * because it asked for nothing and inherited the company's grant. And what it
- * asked for and did not get, which is the line an operator checking a tool
- * change is actually looking for and which no surface showed before — and
- * which, as of this card becoming an editor, has a way to act on it.
- *
- * The edit surface is deliberately live: the preview of what will be stored is
- * computed against the same ceilings the host applies when it re-derives
- * `effective`, so a glob that would land struck-through is flagged while the
- * operator types, not after the write.
- */
-/**
  * Which skills this teammate may read, as switches over the company's enabled
  * set.
  *
@@ -1744,6 +1729,21 @@ function Skills({
   );
 }
 
+/**
+ * The tool grants, resolved — and, for an admin, editable.
+ *
+ * Three facts, because the difference between them is the whole reason this
+ * section exists. What the agent holds. Whether it holds it because it asked or
+ * because it asked for nothing and inherited the company's grant. And what it
+ * asked for and did not get, which is the line an operator checking a tool
+ * change is actually looking for and which no surface showed before — and
+ * which, as of this card becoming an editor, has a way to act on it.
+ *
+ * The edit surface is deliberately live: the preview of what will be stored is
+ * computed against the same ceilings the host applies when it re-derives
+ * `effective`, so a glob that would land struck-through is flagged while the
+ * operator types, not after the write.
+ */
 function Tools({
   agent,
   saving,
