@@ -4320,6 +4320,7 @@ pub async fn assert_skill_state_store(skills: Arc<dyn SkillStateStore>) {
                 source: SkillSource::Registry,
                 custom_doc: Some("---\nname: Pinned\nversion: 1.2.0\n---\nsteps".to_string()),
                 install: Some(pinned.clone()),
+                updated_at_millis: None,
             },
         )
         .await

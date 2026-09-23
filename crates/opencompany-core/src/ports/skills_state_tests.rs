@@ -35,6 +35,7 @@ fn an_absent_timestamp_is_left_out_of_the_serialized_row() {
         source: SkillSource::Registry,
         custom_doc: None,
         updated_at_millis: None,
+        install: None,
     };
 
     let json = serde_json::to_string(&state).expect("serializes");
@@ -55,6 +56,7 @@ fn a_stamped_row_round_trips() {
         source: SkillSource::Custom,
         custom_doc: Some("---\nname: Mine\ndescription: Does a thing\n---\nbody\n".to_string()),
         updated_at_millis: Some(1_759_000_000_000),
+        install: None,
     };
 
     let json = serde_json::to_string(&state).expect("serializes");

@@ -25,6 +25,8 @@ fn disabling_delta(slug: &str) -> SkillState {
         enabled: false,
         source: SkillSource::Company,
         custom_doc: None,
+        install: None,
+        updated_at_millis: None,
     }
 }
 

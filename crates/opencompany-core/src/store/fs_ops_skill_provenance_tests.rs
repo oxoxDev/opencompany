@@ -24,6 +24,7 @@ fn installed(slug: &str) -> SkillState {
             }),
             installed_at_millis: 1_700_000_000_000,
         }),
+        updated_at_millis: None,
     }
 }
 
@@ -114,6 +115,7 @@ async fn a_row_without_provenance_writes_no_install_key() {
             source: SkillSource::Company,
             custom_doc: None,
             install: None,
+            updated_at_millis: None,
         },
     )
     .await
