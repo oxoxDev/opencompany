@@ -130,6 +130,10 @@ mod skill_file;
 /// the write plane runs it on every install in every build, and the sanitizer
 /// is the structural half of the same control.
 pub mod skill_scan;
+/// Reading a skill an operator uploaded — a bare `SKILL.md`, or an archive
+/// carrying one — with the archive's shape refused before anything is
+/// decompressed.
+pub mod skill_upload;
 /// The rules a skill document must satisfy before the product will store it.
 /// Always compiled: registry install, the empty-registry fallback and console
 /// authoring share it, and three entry points that validated separately are
