@@ -1093,6 +1093,7 @@ pub fn build_agent_with_model(
             deps.skills_source_dir.as_deref(),
             &deps.skills_registry,
             skill_deltas,
+            manifest_agent.skills.as_deref(),
         ) {
             Ok(effective) => {
                 if !effective.is_empty() {
