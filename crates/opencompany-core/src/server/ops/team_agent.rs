@@ -2516,5 +2516,8 @@ mod tests_harness_and_model_persist;
 #[path = "team_agent_requested_grants_reads_overlay_tests.rs"]
 mod tests_requested_grants_reads_overlay;
 #[cfg(test)]
+#[path = "team_agent_skill_scope_tests.rs"]
+mod tests_skill_scope;
+#[cfg(test)]
 #[path = "team_agent_the_roster_list_carries_tests.rs"]
 mod tests_the_roster_list_carries;
