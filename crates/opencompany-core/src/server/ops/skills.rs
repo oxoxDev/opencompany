@@ -410,7 +410,8 @@ async fn list_skills(
 ///    empty registry means this host serves no shared library at all
 ///    (platform-provisioned mode, no `skills_root`), so there is nothing to
 ///    resolve against and refusing every install would break hosted tenants
-///    outright.
+///    outright. The row records [`SkillSource::Custom`], because the document
+///    is the client's own and no library copy exists to compare it against.
 ///
 /// A *configured* library that fails to load is a `500`, never case 3: silently
 /// degrading a broken shared library to "no library" would hand the client
@@ -430,8 +431,8 @@ async fn install(
     let lock = write_lock(company.id());
     let _guard = lock.lock().await;
     let registry = state.shared_skill_registry()?;
-    let doc = match registry.iter().find(|doc| doc.slug == slug) {
-        Some(doc) => render_skill_md(doc),
+    let (doc, source) = match registry.iter().find(|doc| doc.slug == slug) {
+        Some(doc) => (render_skill_md(doc), SkillSource::Registry),
         None if !registry.is_empty() => {
             return Err(ApiError(OpenCompanyError::NotFound(
                 language::SKILL_NOT_IN_REGISTRY.to_string(),
@@ -444,6 +445,10 @@ async fn install(
             // instead of skipping a content-less delta. A client that supplies no
             // description gets the name as one: an empty scalar is a document the
             // parser refuses, and the delta it stored reached no agent.
+            //
+            // `Custom` is the honest provenance: nothing about this document
+            // came from a shared library, so nothing can ever be diffed against
+            // one to say it is stale or authentic.
             let name = meta
                 .name
                 .filter(|n| !n.trim().is_empty())
@@ -452,7 +457,10 @@ async fn install(
                 .description
                 .filter(|description| !description.trim().is_empty())
                 .unwrap_or_else(|| name.clone());
-            skill_md(&name, &description, meta.category.as_deref(), &description)
+            (
+                skill_md(&name, &description, meta.category.as_deref(), &description),
+                SkillSource::Custom,
+            )
         }
     };
     check_skill_doc_size(&doc)?;
@@ -460,7 +468,7 @@ async fn install(
     let delta = SkillState {
         slug,
         enabled: true,
-        source: SkillSource::Registry,
+        source,
         custom_doc: Some(doc),
     };
     company.runtime.skills().set(company.id(), &delta).await?;

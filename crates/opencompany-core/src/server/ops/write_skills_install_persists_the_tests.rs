@@ -118,7 +118,19 @@ async fn skills_install_falls_back_to_client_metadata_when_no_registry_is_served
         "an empty registry must not 404 every install"
     );
     assert_eq!(skill["name"], "Tenant Only");
-    assert_eq!(skill["source"], "registry");
+    // The document came from the request body, so the row must not claim a
+    // library provenance it cannot be checked against.
+    assert_eq!(
+        skill["source"], "custom",
+        "a client-authored document is custom, whatever route stored it"
+    );
+
+    let deltas = persisted_skills(&state).await;
+    let row = deltas
+        .iter()
+        .find(|s| s.slug == "tenant-only-skill")
+        .expect("the fallback persisted a row");
+    assert_eq!(row.source, crate::ports::skills_state::SkillSource::Custom);
 }
 
 /// A *configured* shared library that cannot load must not degrade to the
@@ -299,7 +311,9 @@ async fn skills_install_toggle_custom_and_builtin_uninstall_conflict() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(skill["source"], "registry");
+    // This company serves no shared library, so the document is the request
+    // body's own and the row is custom, not registry.
+    assert_eq!(skill["source"], "custom");
     assert!(skill["enabled"].as_bool().unwrap());
     // The install response reflects the persisted custom_doc (parsed back), so a
     // non-empty description proves content was stored — the fix for the agent
