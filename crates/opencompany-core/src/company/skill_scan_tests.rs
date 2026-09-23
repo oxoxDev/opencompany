@@ -82,6 +82,22 @@ fn hard_coded_credentials_block() {
             "an assigned literal",
             "api_key = \"9f2c8a1be7d4550ab3ce61f0\"",
         ),
+        (
+            "an AWS secret access key, whose name is not a superstring of `secret_key`",
+            "aws_secret_access_key = \"notreal7value9here3\"",
+        ),
+        (
+            "an AWS session token",
+            "aws_session_token = \"notreal4session8val2\"",
+        ),
+        (
+            "a refresh token",
+            "refresh_token = \"notreal5refresh1val7\"",
+        ),
+        (
+            "a webhook signing secret",
+            "webhook_secret = \"notreal2webhook6val4\"",
+        ),
     ] {
         let mut doc = benign();
         doc.body = poison.to_string();
