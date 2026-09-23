@@ -64,6 +64,10 @@ Supporting docs:
     than in a `before_send`, and why Session Replay is evaluated and declined
 - [events.md](events.md) — the `CompanyEvent` vocabulary those ports carry, and
   the run/task/approval correlation rules a journal reader folds on
+  - [events-approvals.md](events-approvals.md) — the approval half of those
+    rules: the card link on `ApprovalParked`, which of the two correlation keys
+    is authoritative, and the event that raises a request inside the
+    conversation that produced it (issues #333/#379)
   - [workflow-events.md](workflow-events.md) — the workflow-run progress
     brackets (`WorkflowRunStarted` / `WorkflowNodeStarted` /
     `WorkflowNodeFinished` / `WorkflowRunFinished`), run-id correlation, the
