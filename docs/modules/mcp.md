@@ -8,7 +8,7 @@ filter over remote tool metadata.
 
 Hosted v1 boundary: **HTTP transport only**. Stdio / subprocess servers are
 rejected with a clear error — the tenant image ships no Node, Python or package
-manager to launch one with. Still out of scope: live pool invalidation.
+manager to launch one with.
 
 Directory browsing landed in issue #1270; see [The directory](#the-directory).
 
@@ -337,10 +337,19 @@ store", true of neither half of it.
 - **What a disconnect reaches**: the tool belt on the next turn, and nothing at
   the server's own end. A manifest server says it cannot be removed at all.
 
-## Pool-staleness caveat
+## When a config change reaches an agent
 
-Agents materialize their MCP registry once, when the
-[`HarnessPool`](../../src/harness/mod.rs) builds a company's roster. Mid-session
-edits (add / disable / token rotation) therefore reach a live agent only on the
-next `HarnessPool.ensure()` rebuild — practically, a company restart. Every
-mutating API response says so. Live pool invalidation is out of scope for v1.
+An agent materializes its MCP registry when the
+[`HarnessPool`](../../src/harness/mod.rs) builds a company's roster, but the
+pool re-checks that registry on the way into every turn. `ensure_with_policy`
+re-resolves the effective server set, hashes it with `mcp_fingerprint`, and
+rebuilds the roster when the hash moved against the cached `mcp_fingerprints`
+entry. A mid-session edit — add, disable, token rotation, a per-tool permission
+change — therefore reaches a live agent on its **next turn**, with no company
+restart. Every mutating API response says as much (`NEXT_TURN_NOTE` in
+`src/server/ops/mcp.rs`).
+
+The check is a store read plus a hash, not a rebuild, so it costs the same
+whether or not anything moved. What it does not reach is a turn already in
+flight: an agent mid-turn finishes on the belt it started with, because the
+fingerprint is compared before the turn, not during it.
