@@ -66,6 +66,10 @@ impl EffectiveSkills {
     /// enabled entries out; a disabled one is reported by the readers and never
     /// materialized.
     ///
+    /// `agent` is the teammate's id, carried through so the warning
+    /// `resolve_for_agent` raises over a scope entry the company does not have
+    /// enabled names which teammate's scope it came from.
+    ///
     /// `agent_skills` is the teammate's own scope, and it is applied **before**
     /// anything is written. An unlisted skill never reaches this tree, so the
     /// catalogue and the three read tools — which are derived from the tree and
@@ -80,10 +84,11 @@ impl EffectiveSkills {
         source_dir: Option<&Path>,
         registry: &[SkillDoc],
         deltas: &[SkillState],
+        agent: &str,
         agent_skills: Option<&[String]>,
     ) -> crate::Result<Self> {
         let effective =
-            skill_effective::resolve_for_agent(source_dir, registry, deltas, agent_skills)?;
+            skill_effective::resolve_for_agent(source_dir, registry, deltas, agent, agent_skills)?;
 
         let skills_out = workspace_dir.join("skills");
         if skills_out.exists() {

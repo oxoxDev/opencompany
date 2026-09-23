@@ -47,6 +47,7 @@ fn each_agent_gets_only_the_skills_its_scope_admits() {
         Some(src.path()),
         &[],
         &[],
+        "agent-under-test",
         Some(&finance),
     )
     .unwrap();
@@ -55,6 +56,7 @@ fn each_agent_gets_only_the_skills_its_scope_admits() {
         Some(src.path()),
         &[],
         &[],
+        "agent-under-test",
         Some(&brand),
     )
     .unwrap();
@@ -84,6 +86,7 @@ async fn an_agent_cannot_read_a_resource_of_a_skill_scoped_to_another() {
         Some(src.path()),
         &[],
         &[],
+        "agent-under-test",
         Some(&brand),
     )
     .unwrap();
@@ -151,6 +154,7 @@ fn an_explicit_empty_scope_materializes_nothing() {
         Some(src.path()),
         &[],
         &[],
+        "agent-under-test",
         Some(&[]),
     )
     .unwrap();
@@ -169,8 +173,15 @@ fn an_absent_scope_materializes_every_enabled_skill() {
     seed(src.path(), "brand-voice", "BRAND-MARKER");
 
     let ws = tempfile::tempdir().unwrap();
-    EffectiveSkills::materialize(ws.path().to_path_buf(), Some(src.path()), &[], &[], None)
-        .unwrap();
+    EffectiveSkills::materialize(
+        ws.path().to_path_buf(),
+        Some(src.path()),
+        &[],
+        &[],
+        "agent-under-test",
+        None,
+    )
+    .unwrap();
 
     assert!(ws.path().join("skills/finance-playbook").is_dir());
     assert!(ws.path().join("skills/brand-voice").is_dir());
@@ -190,6 +201,7 @@ fn a_scope_cannot_restore_a_skill_the_company_disabled() {
         Some(src.path()),
         &[],
         &[disabling_delta("brand-voice")],
+        "agent-under-test",
         Some(&brand),
     )
     .unwrap();
