@@ -207,6 +207,43 @@ pub fn resolve(
     Ok(entries.into_values().collect())
 }
 
+/// One agent's slice of [`resolve`]: the company's effective set narrowed to
+/// the skills that agent's scope admits.
+///
+/// `None` admits every enabled skill, which is what every company had before a
+/// scope could be written, so an unscoped roster materializes exactly what it
+/// did before.
+///
+/// Disabled entries are dropped rather than carried through. [`resolve`] reports
+/// them so the console can render the switch that turns them back on; an agent
+/// has no such switch, and the harness skips them anyway.
+///
+/// The narrowing itself is
+/// [`agent_effective_skills`](crate::runtime::builder::agent_effective_skills),
+/// the same function the agent detail route reports from, so what the console
+/// says a teammate has and what the harness writes for it cannot drift.
+pub fn resolve_for_agent(
+    source_dir: Option<&Path>,
+    registry: &[SkillDoc],
+    deltas: &[SkillState],
+    agent_skills: Option<&[String]>,
+) -> Result<Vec<EffectiveSkill>> {
+    let effective = resolve(source_dir, registry, deltas)?;
+    let enabled: Vec<String> = effective
+        .iter()
+        .filter(|skill| skill.enabled)
+        .map(|skill| skill.slug.clone())
+        .collect();
+    let scoped: HashSet<String> =
+        crate::runtime::builder::agent_effective_skills(&enabled, agent_skills)
+            .into_iter()
+            .collect();
+    Ok(effective
+        .into_iter()
+        .filter(|skill| scoped.contains(&skill.slug))
+        .collect())
+}
+
 /// The document a delta contributes, or `None` when it contributes none.
 fn delta_content(delta: &SkillState, registry: &[SkillDoc]) -> Option<SkillContent> {
     let src = delta.custom_doc.as_deref()?;
