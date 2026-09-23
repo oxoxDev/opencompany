@@ -156,6 +156,34 @@ pub fn validate_skill_md(slug: &str, src: &str) -> Result<ValidSkill, Vec<String
     Ok(ValidSkill { doc, deltas })
 }
 
+/// Turns a display name into a slug the slug-bearing routes accept: a
+/// filesystem-and-URL-safe name within [`MAX_SLUG_CHARS`].
+///
+/// Authoring and upload both derive a store key and a directory name from free
+/// text, so whatever this returns has to pass [`validate_slug`]. Truncating
+/// keeps a long name authorable; refusing it would leave the operator renaming
+/// a skill to satisfy a limit they cannot see.
+pub fn slugify(name: &str) -> String {
+    let mut slug = String::with_capacity(name.len());
+    let mut prev_dash = false;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    let capped: String = slug.chars().take(MAX_SLUG_CHARS).collect();
+    let trimmed = capped.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "skill".to_string()
+    } else {
+        trimmed
+    }
+}
+
 #[cfg(test)]
 #[path = "skill_validate_tests.rs"]
 mod tests;

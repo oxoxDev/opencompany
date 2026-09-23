@@ -2,6 +2,8 @@ use std::path::Path as FsPath;
 
 use super::*;
 
+use crate::company::skill_validate::MAX_SLUG_CHARS;
+
 fn write_bundle(root: &FsPath, slug: &str, contents: &str) {
     let dir = root.join("skills").join(slug);
     std::fs::create_dir_all(&dir).unwrap();

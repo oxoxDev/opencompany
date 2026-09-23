@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::company::skill_effective::{self, EffectiveSkill};
 use crate::company::skill_scan::{Verdict, scan_skill};
-use crate::company::skill_validate::{MAX_SLUG_CHARS, validate_skill_md, validate_slug};
+use crate::company::skill_validate::{slugify, validate_skill_md, validate_slug};
 use crate::company::{SkillDoc, parse_skill_md, render_skill_md};
 use crate::error::OpenCompanyError;
 use crate::ports::skills_state::{SkillSource, SkillState};
@@ -553,34 +553,6 @@ fn skill_md(name: &str, description: &str, category: Option<&str>, content: &str
         frontmatter.push_str(&format!("category: {}\n", one_line(category).trim()));
     }
     format!("---\n{frontmatter}---\n{content}\n")
-}
-
-/// Turns a display name into a filesystem-and-URL-safe slug, within
-/// [`MAX_SLUG_CHARS`].
-///
-/// Authoring derives its store key and directory name from a free-text display
-/// name, so whatever this returns has to be a slug the slug-bearing routes
-/// accept. Truncating keeps a long name authorable; refusing it would leave the
-/// operator renaming a skill to satisfy a limit they cannot see.
-fn slugify(name: &str) -> String {
-    let mut slug = String::with_capacity(name.len());
-    let mut prev_dash = false;
-    for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch.to_ascii_lowercase());
-            prev_dash = false;
-        } else if !prev_dash {
-            slug.push('-');
-            prev_dash = true;
-        }
-    }
-    let capped: String = slug.chars().take(MAX_SLUG_CHARS).collect();
-    let trimmed = capped.trim_matches('-').to_string();
-    if trimmed.is_empty() {
-        "skill".to_string()
-    } else {
-        trimmed
-    }
 }
 
 /// Turns a slug into a human title (`web-research` → `Web Research`).
