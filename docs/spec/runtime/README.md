@@ -140,6 +140,10 @@ Supporting docs:
     - [api-tool-grants.md](api-tool-grants.md) — the three tool-grant routes
       that widen `[tools].allow` from a connect page, and when a grant takes
       effect
+    - [api-write-plane-credentials.md](api-write-plane-credentials.md) — the
+      subset that writes to the `SecretStore`: the company credential, the
+      custom domain, SMTP's password-as-patch rule, and the retired native
+      OAuth bridge
   - [api-graphql.md](api-graphql.md) — the `/graphql` read plane
 - [credentials.md](credentials.md) — the company's own TinyHumans key: the one
   seam a brokered surface resolves through (Composio today), why rotating it
