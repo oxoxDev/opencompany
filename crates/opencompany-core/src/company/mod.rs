@@ -142,6 +142,7 @@ pub mod skill_upload;
 /// authoring share it, and three entry points that validated separately are
 /// exactly how they drift apart.
 pub mod skill_validate;
+pub mod skill_provenance;
 // Steer (issue #111): pause / cancel / redirect an in-flight task or delegation
 // from the operator chat. Always compiled + openhuman-free so the operator
 // control plane can steer in any build and no agent tool can ever reach it.
@@ -222,6 +223,7 @@ pub use skill_effective::{EffectiveSkill, SkillBody, SkillContent};
 pub use skill_file::{
     SkillDoc, load_catalog_skills, load_dir_skills, parse_skill_md, render_skill_md,
 };
+pub use skill_provenance::{SkillDrift, VersionChange, drift, skill_digest, trust_tier};
 pub use task_file::{TASKS_FILE, TaskSeed, has_task_file, load_dir_tasks};
 pub use types::{
     ACP_AGENTS, ACP_TRANSPORTS, AcpHarness, Agent, BRAIN_MODES, Brain, Budget, ChannelConfig,

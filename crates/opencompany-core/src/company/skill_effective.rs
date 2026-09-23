@@ -108,6 +108,7 @@ pub fn globals_skill_disables(disable: &[String]) -> Vec<SkillState> {
             source: SkillSource::Company,
             custom_doc: None,
             updated_at_millis: None,
+            install: None,
         })
         .collect()
 }
