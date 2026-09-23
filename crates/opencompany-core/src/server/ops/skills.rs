@@ -36,6 +36,7 @@ use crate::company::skill_validate::{
 };
 use crate::company::{SkillDoc, parse_skill_md, render_skill_md};
 use crate::error::OpenCompanyError;
+use crate::ports::now_millis;
 use crate::ports::skills_state::{SkillSource, SkillState};
 use crate::ports::types::CompanyId;
 use crate::server::error::ApiError;
@@ -215,6 +216,10 @@ struct InstalledSkill {
     /// Lets a future "update available" affordance diff an install against the
     /// live registry without any extra stored state.
     version: Option<String>,
+    /// When the operator last wrote this skill's delta, in epoch milliseconds.
+    /// `None` for a skill no delta covers — a bundled or baseline skill nobody
+    /// has touched — and for a row stored before the field existed.
+    updated_at_millis: Option<u64>,
     /// What the scan said, on the write that stored this skill. Absent on a
     /// read: the report belongs to the write that produced the document, and
     /// re-deriving one on every list would report a verdict nobody acted on.
@@ -257,6 +262,7 @@ impl InstalledSkill {
             source: state.source,
             enabled: state.enabled,
             version,
+            updated_at_millis: state.updated_at_millis,
             scan: None,
         }
     }
@@ -284,6 +290,7 @@ impl InstalledSkill {
             source: skill.source,
             enabled: skill.enabled,
             version: doc.and_then(|doc| doc.version.clone()),
+            updated_at_millis: skill.updated_at_millis,
             scan: None,
         }
     }
@@ -470,6 +477,7 @@ async fn install(
         enabled: true,
         source,
         custom_doc: Some(doc),
+        updated_at_millis: Some(now_millis()),
     };
     company.runtime.skills().set(company.id(), &delta).await?;
     Ok(Json(InstalledSkill::from_state(&delta).with_scan(scan)))
@@ -552,6 +560,7 @@ async fn set_enabled(
             .map(|s| s.source)
             .unwrap_or(SkillSource::Company),
         custom_doc: existing.and_then(|s| s.custom_doc),
+        updated_at_millis: Some(now_millis()),
     };
     company.runtime.skills().set(company.id(), &state).await?;
     Ok(Json(InstalledSkill::from_state(&state)))
@@ -592,6 +601,7 @@ async fn create_custom(
         enabled: true,
         source: SkillSource::Custom,
         custom_doc: Some(doc),
+        updated_at_millis: Some(now_millis()),
     };
     company.runtime.skills().set(company.id(), &state).await?;
     Ok(Json(InstalledSkill::from_state(&state).with_scan(scan)))
