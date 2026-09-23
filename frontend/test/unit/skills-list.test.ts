@@ -54,6 +54,13 @@ describe("skillSourceLabel", () => {
     expect(skillSourceLabel({ source: "marketplace" })).toBe("Marketplace");
     expect(skillSourceLabel({ source: "" })).toBe("Unknown");
   });
+
+  // An upload response is folded into the list without a re-read, so a row can
+  // arrive missing fields the type says are there. Costing that row its label
+  // is fine; throwing inside render takes the whole tab down with it.
+  it("survives a row the host served without a source", () => {
+    expect(skillSourceLabel({ source: undefined as unknown as string })).toBe("Unknown");
+  });
 });
 
 describe("canUninstallSkill / canEditSkill", () => {
@@ -185,6 +192,15 @@ describe("visibleSkills", () => {
       "Echo",
       "Oscar",
     ]);
+  });
+
+  it("filters and sorts a partial row instead of throwing on it", () => {
+    const partial = [{ name: "Press Outreach" } as unknown as SkillListRow, ...skills];
+    expect(() => visibleSkills(partial, DEFAULT_SKILL_FILTERS, "edited")).not.toThrow();
+    expect(visibleSkills(partial, { ...DEFAULT_SKILL_FILTERS, query: "press" }, "name")).toHaveLength(
+      1,
+    );
+    expect(skillCategories(partial)).toEqual(["Ops", "Research"]);
   });
 
   it("never mutates the array the view holds as state", () => {

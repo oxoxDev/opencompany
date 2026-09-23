@@ -39,6 +39,19 @@ export const SKILL_SORT_LABELS: Record<SkillSort, string> = {
 export const SKILL_BUILTIN_UNINSTALL_REASON =
   "This is a built-in skill and can't be uninstalled — you can disable it instead.";
 
+/**
+ * Reads a field that is typed as a string but arrives as JSON.
+ *
+ * Rows reach this module straight from a host response, including the ones an
+ * upload or a saved draft folds in optimistically without a re-read. A host
+ * that omits a field — an older one, a partial projection — must cost that row
+ * its label, not the whole tab: `undefined.trim()` throws inside render and
+ * takes every other skill down with it.
+ */
+function text(value: string | null | undefined): string {
+  return typeof value === "string" ? value : "";
+}
+
 /** The shape of a row this module orders. A subset of `@/api/skills`'s `Skill`. */
 export interface SkillListRow {
   name: string;
@@ -80,9 +93,9 @@ export const DEFAULT_SKILL_FILTERS: SkillListFilters = {
  * not know would hide the row's provenance entirely.
  */
 export function skillSourceLabel(skill: Pick<SkillListRow, "source"> & { version?: string | null }): string {
-  const source = skill.source.trim();
+  const source = text(skill.source).trim();
   if (source === "registry") {
-    const version = skill.version?.trim();
+    const version = text(skill.version).trim();
     if (!version) return "Registry";
     return `Registry ${version.toLowerCase().startsWith("v") ? version : `v${version}`}`;
   }
@@ -152,8 +165,8 @@ function plural(count: number, unit: string): string {
  * anything else.
  */
 export function skillCategories(skills: readonly SkillListRow[]): string[] {
-  return [...new Set(skills.map((s) => s.category).filter((c) => c.trim() !== ""))].sort((a, b) =>
-    a.localeCompare(b),
+  return [...new Set(skills.map((s) => text(s.category)).filter((c) => c.trim() !== ""))].sort(
+    (a, b) => a.localeCompare(b),
   );
 }
 
@@ -177,7 +190,11 @@ export function visibleSkills(
 ): SkillListRow[] {
   const q = filters.query.trim().toLowerCase();
   const matching = skills.filter((skill) => {
-    if (q && !skill.name.toLowerCase().includes(q) && !skill.description.toLowerCase().includes(q))
+    if (
+      q &&
+      !text(skill.name).toLowerCase().includes(q) &&
+      !text(skill.description).toLowerCase().includes(q)
+    )
       return false;
     if (filters.source !== "all" && skill.source !== filters.source) return false;
     if (filters.enabled === "enabled" && !skill.enabled) return false;
@@ -186,7 +203,7 @@ export function visibleSkills(
     return true;
   });
 
-  const byName = (a: SkillListRow, b: SkillListRow) => a.name.localeCompare(b.name);
+  const byName = (a: SkillListRow, b: SkillListRow) => text(a.name).localeCompare(text(b.name));
   if (sort === "name") return matching.sort(byName);
   return matching.sort((a, b) => {
     const left = a.updatedAtMillis ?? null;
