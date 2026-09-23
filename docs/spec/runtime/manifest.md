@@ -149,6 +149,9 @@ approval_ttl_hours = 24            # default 24; how long a parked approval
 
 [place]                            # see company-as-agent/
 discoverable = false               # default false: going public is opt-in
+# `[place].skills` are priced A2A capabilities this company SELLS, served at
+# `GET /a2a/{handle}/skill.md`. Unrelated to the `SKILL.md` bundles an agent
+# reads, which `[[agent]].skills` above scopes — see manifest-semantics.md.
 skills = [
   { id = "seo.audit", price_usd = "25.00", description = "Full SEO audit" },
 ]
