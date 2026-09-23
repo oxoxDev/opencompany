@@ -91,6 +91,7 @@ fn a_pre_fix_registry_stub_is_healed_from_the_live_library() {
         None,
         &library,
         &[registry_delta("competitor-scan", stub)],
+        "agent-under-test",
         None,
     )
     .unwrap();
@@ -122,6 +123,7 @@ fn a_post_fix_registry_snapshot_is_left_pinned() {
         None,
         &[newer],
         &[registry_delta("competitor-scan", pinned)],
+        "agent-under-test",
         None,
     )
     .unwrap();
@@ -146,6 +148,7 @@ fn a_custom_skill_is_never_healed_even_when_its_body_is_one_line() {
         None,
         &[library_doc("competitor-scan")],
         &[delta],
+        "agent-under-test",
         None,
     )
     .unwrap();
@@ -172,6 +175,7 @@ fn an_unparseable_registry_snapshot_is_healed_rather_than_dropped() {
         None,
         &[library_doc("competitor-scan")],
         &[registry_delta("competitor-scan", broken)],
+        "agent-under-test",
         None,
     )
     .unwrap();
@@ -198,6 +202,7 @@ fn an_unparseable_snapshot_the_library_lacks_stays_dropped() {
             "social-scheduler",
             "---\nname: X\ndescription: \n---\n",
         )],
+        "agent-under-test",
         None,
     )
     .unwrap();
@@ -219,6 +224,7 @@ fn a_stub_for_a_slug_the_library_lacks_is_left_alone() {
         None,
         &[library_doc("competitor-scan")],
         &[registry_delta("retired", stub)],
+        "agent-under-test",
         None,
     )
     .unwrap();
@@ -237,9 +243,15 @@ fn company_dir_skills_materialize_with_resources() {
     let ws = tempfile::tempdir().unwrap();
     seed_company_skill(src.path(), "web-research", "Web Research", Some("# spec"));
 
-    let eff =
-        EffectiveSkills::materialize(ws.path().to_path_buf(), Some(src.path()), &[], &[], None)
-            .unwrap();
+    let eff = EffectiveSkills::materialize(
+        ws.path().to_path_buf(),
+        Some(src.path()),
+        &[],
+        &[],
+        "agent-under-test",
+        None,
+    )
+    .unwrap();
 
     // The parsed doc surfaces in the catalogue.
     assert_eq!(eff.docs.len(), with_baseline(&["web-research"]));
@@ -273,6 +285,7 @@ fn disabled_delta_drops_a_company_skill() {
         Some(src.path()),
         &[],
         &[delta("drop", false, None)],
+        "agent-under-test",
         None,
     )
     .unwrap();
@@ -298,6 +311,7 @@ fn custom_doc_installs_a_new_skill() {
         None,
         &[],
         &[delta("invoicing", true, Some(body))],
+        "agent-under-test",
         None,
     )
     .unwrap();
@@ -324,6 +338,7 @@ fn a_traversal_slug_delta_is_skipped_not_written_outside() {
         None,
         &[],
         &[delta("..", true, Some(body))],
+        "agent-under-test",
         None,
     )
     .unwrap();
@@ -357,6 +372,7 @@ fn custom_doc_supersedes_company_body() {
         Some(src.path()),
         &[],
         &[delta("report", true, Some(body))],
+        "agent-under-test",
         None,
     )
     .unwrap();
@@ -376,6 +392,7 @@ fn malformed_custom_doc_is_skipped_not_fatal() {
         None,
         &[],
         &[delta("broken", true, Some("no frontmatter here"))],
+        "agent-under-test",
         None,
     )
     .expect("malformed custom doc must not fail the build");
@@ -394,8 +411,15 @@ fn a_manifest_opt_out_drops_a_global_skill() {
     let dropped = crate::globals::skills()[0].slug.clone();
     let deltas = skill_effective::globals_skill_disables(&[format!("skill:{dropped}")]);
 
-    let eff =
-        EffectiveSkills::materialize(ws.path().to_path_buf(), None, &[], &deltas, None).unwrap();
+    let eff = EffectiveSkills::materialize(
+        ws.path().to_path_buf(),
+        None,
+        &[],
+        &deltas,
+        "agent-under-test",
+        None,
+    )
+    .unwrap();
 
     assert!(eff.docs.iter().all(|doc| doc.slug != dropped));
     assert_eq!(eff.docs.len(), crate::globals::skills().len() - 1);
@@ -408,7 +432,15 @@ fn a_company_with_no_sources_still_gets_the_global_baseline() {
     // the baseline is simply installed in every company, including one with
     // no source dir and no deltas — a platform-provisioned tenant.
     let ws = tempfile::tempdir().unwrap();
-    let eff = EffectiveSkills::materialize(ws.path().to_path_buf(), None, &[], &[], None).unwrap();
+    let eff = EffectiveSkills::materialize(
+        ws.path().to_path_buf(),
+        None,
+        &[],
+        &[],
+        "agent-under-test",
+        None,
+    )
+    .unwrap();
     assert_eq!(eff.docs.len(), with_baseline(&[]));
     assert!(!eff.is_empty());
     assert!(!eff.catalogue().is_empty());
@@ -419,9 +451,15 @@ fn read_tools_expose_three_named_tools() {
     let src = tempfile::tempdir().unwrap();
     let ws = tempfile::tempdir().unwrap();
     seed_company_skill(src.path(), "web-research", "Web Research", None);
-    let eff =
-        EffectiveSkills::materialize(ws.path().to_path_buf(), Some(src.path()), &[], &[], None)
-            .unwrap();
+    let eff = EffectiveSkills::materialize(
+        ws.path().to_path_buf(),
+        Some(src.path()),
+        &[],
+        &[],
+        "agent-under-test",
+        None,
+    )
+    .unwrap();
 
     let tools = eff.read_tools();
     let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
@@ -478,6 +516,7 @@ async fn console_custom_docs_surface_content_through_read_tools() {
         None,
         &[],
         &[registry, empty_body],
+        "agent-under-test",
         None,
     )
     .unwrap();
@@ -532,9 +571,15 @@ async fn list_skills_tool_sees_the_materialized_skill() {
     let src = tempfile::tempdir().unwrap();
     let ws = tempfile::tempdir().unwrap();
     seed_company_skill(src.path(), "web-research", "Web Research", None);
-    let eff =
-        EffectiveSkills::materialize(ws.path().to_path_buf(), Some(src.path()), &[], &[], None)
-            .unwrap();
+    let eff = EffectiveSkills::materialize(
+        ws.path().to_path_buf(),
+        Some(src.path()),
+        &[],
+        &[],
+        "agent-under-test",
+        None,
+    )
+    .unwrap();
 
     let tools = eff.read_tools();
     let list = tools
