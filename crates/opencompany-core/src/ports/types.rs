@@ -3921,6 +3921,13 @@ pub struct OverlayAgent {
     /// serializing exactly as it did before (no `tools` key).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<String>>,
+    /// The per-teammate skill scope, carried the same way as
+    /// [`Agent::skills`](crate::company::types::Agent::skills) — see that
+    /// field's docs for the three states. `None` (the default, and how every
+    /// overlay record written before this field existed deserializes) inherits
+    /// every skill the company has enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
     /// A per-agent model override, carried the same way as
     /// [`Agent::model`](crate::company::types::Agent) — see that field's docs.
     /// `None` (the default, and how every record written before this field
@@ -4018,6 +4025,29 @@ pub struct AgentOverride {
         skip_serializing_if = "Option::is_none"
     )]
     pub tools: Option<Option<Vec<String>>>,
+    /// The operator's replacement skill scope, in the same double-option shape
+    /// [`tools`](Self::tools) uses, so "not overridden" stays apart from
+    /// "override it to inherit":
+    ///
+    /// | value | means |
+    /// |---|---|
+    /// | `None` | not overridden — the manifest `skills` line flows through unchanged |
+    /// | `Some(None)` | override to **inherit** every enabled skill |
+    /// | `Some(Some(vec![]))` | override to an **explicit no-skills** scope |
+    /// | `Some(Some(slugs))` | override to **narrow** to those slugs |
+    ///
+    /// The inner value is assigned verbatim onto
+    /// [`Agent::skills`](crate::company::Agent::skills) by
+    /// [`CompanyRecord::effective_manifest_agent`], so the manifest field's own
+    /// contract carries the meaning; this layer only adds "was it set at all".
+    /// Still intersected with the company's effective set at read time, so it can
+    /// only narrow a teammate within what the company already enabled.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub skills: Option<Option<Vec<String>>>,
     /// The operator's replacement persona prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
@@ -6224,6 +6254,9 @@ impl CompanyRecord {
         }
         if let Some(tools) = entry.tools.as_ref() {
             merged.tools = tools.clone();
+        }
+        if let Some(skills) = entry.skills.as_ref() {
+            merged.skills = skills.clone();
         }
         if let Some(instructions) = entry.instructions.as_ref() {
             merged.prompt = Some(instructions.clone());

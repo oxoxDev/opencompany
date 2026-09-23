@@ -115,6 +115,7 @@ async fn overlay_agent_is_built_as_a_real_roster_agent() {
         role: "Growth Lead".into(),
         description: Some("Owns acquisition experiments.".into()),
         tools: None,
+        skills: None,
         model: None,
         harness: None,
     });
@@ -188,6 +189,7 @@ async fn overlay_agent_id_colliding_with_manifest_agent_is_skipped() {
         role: "Shadow CEO".into(),
         description: None,
         tools: None,
+        skills: None,
         model: None,
         harness: None,
     });
@@ -312,6 +314,7 @@ async fn a_roster_rebuild_writes_nothing_to_the_workspace() {
         role: "Designer".into(),
         description: None,
         tools: None,
+        skills: None,
         model: None,
         harness: None,
     });

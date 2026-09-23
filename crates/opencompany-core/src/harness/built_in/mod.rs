@@ -5975,6 +5975,10 @@ fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
         // A non-empty list is intersected with `[tools].allow` by that same
         // function below (narrow-only, never a widen).
         tools: overlay.tools.clone(),
+        // The overlay's own skill scope, carried the same way, so a
+        // console-created teammate is scoped exactly as a manifest one is.
+        // `None` is every enabled skill, unchanged from before the field.
+        skills: overlay.skills.clone(),
         // An overlay teammate declares no delegation allowlist, and an empty
         // list is unrestricted (`delegation_tools::reach_is_unrestricted`): it
         // carries the hand-off tools like every roster agent and may reach
