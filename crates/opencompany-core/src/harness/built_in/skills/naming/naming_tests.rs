@@ -21,7 +21,8 @@ fn tools_for(slug: &str, name: &str) -> (tempfile::TempDir, Vec<Box<dyn Tool>>) 
     )
     .unwrap();
     let eff =
-        EffectiveSkills::materialize(ws.path().to_path_buf(), Some(src.path()), &[], &[]).unwrap();
+        EffectiveSkills::materialize(ws.path().to_path_buf(), Some(src.path()), &[], &[], None)
+            .unwrap();
     // `ws` is dropped by the caller holding the returned handle; `src` is only
     // read during materialize, so only `ws` has to outlive the tools.
     let tools = eff.read_tools();
@@ -224,7 +225,8 @@ fn persona_catalogue_names_the_skill_tools() {
     )
     .unwrap();
     let eff =
-        EffectiveSkills::materialize(ws.path().to_path_buf(), Some(src.path()), &[], &[]).unwrap();
+        EffectiveSkills::materialize(ws.path().to_path_buf(), Some(src.path()), &[], &[], None)
+            .unwrap();
 
     let catalogue = eff.catalogue();
     assert!(catalogue.contains(LIST_SKILLS_TOOL), "{catalogue}");
@@ -333,7 +335,8 @@ fn tools_for_many(n: usize) -> (tempfile::TempDir, Vec<Box<dyn Tool>>) {
         .unwrap();
     }
     let eff =
-        EffectiveSkills::materialize(ws.path().to_path_buf(), Some(src.path()), &[], &[]).unwrap();
+        EffectiveSkills::materialize(ws.path().to_path_buf(), Some(src.path()), &[], &[], None)
+            .unwrap();
     let tools = eff.read_tools();
     (ws, tools)
 }
