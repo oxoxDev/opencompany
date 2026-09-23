@@ -132,6 +132,21 @@ which decides whether these tools are wired at all — accepts only a grant root
 at `mcp_registry`, and the scoping predicate matches it, so the two gates cannot
 come to disagree about what confers the namespace.
 
+### The agent learns which installs exist from an allowlist
+
+A `server_id` has to come from somewhere, so `mcp_registry_installed_list` is
+wired beside the two bridge tools under the same grant — OpenCompany's own tool,
+not OpenHuman's, whose answer is the install record serialised whole: the dial
+string (`transport`, `command`, `args`) and the opaque `config` blob, where an
+HTTP-remote URL can carry a query-parameter credential and a stdio install's
+arguments a flag one.
+
+The answer here is an allowlist — install id, qualified and display name,
+description, enabled, the transport **kind** alone, last connection — so a field
+added upstream must be opted in rather than arriving on the agent's side
+unnoticed. It is scoped by the predicate the call path uses, so enumeration
+cannot be the way around the grant.
+
 A call naming an install the grants do not cover is refused with an error
 result naming the grant that would allow it; the inner tool is never reached
 and nothing is dialled. A call whose `server_id` is missing or blank is refused
@@ -149,7 +164,7 @@ names are operator-mutable.
 A tool that *enumerates* installs rather than addressing one carries no
 `server_id` to gate on; such a tool must filter its rows through the same
 predicate, the way `registry_for_agent` filters declared servers with
-`grants_cover_server`. Nothing wired today enumerates.
+`grants_cover_server`. `mcp_registry_installed_list` is the one that does.
 
 A registry row's `reachableBy` has not caught up to this gate yet: it still
 lists the whole roster (and nobody when the install is disabled), the shape it
