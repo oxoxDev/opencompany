@@ -123,6 +123,9 @@ pub mod search;
 // polish pass and the fallback when that pass cannot run, so a company with no
 // inference credential still gets a real team.
 pub mod setup;
+/// One turn of the copilot that drafts a whole skill document, and what it is
+/// allowed to see.
+pub mod skill_draft;
 pub mod skill_effective;
 mod skill_file;
 /// The scan every skill an operator did not write passes through, and the

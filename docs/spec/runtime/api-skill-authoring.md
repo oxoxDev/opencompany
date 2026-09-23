@@ -1,9 +1,9 @@
 # Uploading a skill, and drafting one
 
-The console routes that create a skill from something other than the four-field
-form: an uploaded file, and a conversation with a teammate. Both are part of the
-write plane in [`api-write-plane.md`](api-write-plane.md); they live here so
-that file stays under the repository's 500-line ceiling.
+The two console routes that create a skill from something other than the
+four-field form: an uploaded file, and a conversation with a teammate. Both are
+part of the write plane in [`api-write-plane.md`](api-write-plane.md); they live
+here so that file stays under the repository's 500-line ceiling.
 
 Both sit behind the same admin gate as every other skill write. A skill's
 document joins **every** agent's effective prompt company-wide, so authoring one
@@ -81,3 +81,51 @@ bounds the assembled document, and the shared validator
 `block` verdict returns the report and writes nothing. There is deliberately no
 setting that silences a class of finding for a whole host — the override is a
 per-request flag on the one upload.
+
+## `POST …/skills/draft` — one copilot turn, writing nothing
+
+The same contract as the teammate copilot's draft routes
+([`api-team-drafting.md`](api-team-drafting.md)): the body carries `messages`,
+the conversation so far, oldest first, each `{role: "operator" | "copilot",
+text}`; empty means the opening turn. The console owns the transcript and the
+host stores nothing — no journal, no thread id, nothing to clean up when the
+dialog closes. It is bounded host-side all the same (the last 16 turns, 2,000
+characters each), because a transcript the caller composes is one the caller can
+grow without limit.
+
+The answer is `{reply, text?, source, reason?, scan?}`. `reply` is what the
+copilot says. `text` is the **whole** `SKILL.md` as it now stands, never a diff,
+and is absent on a turn that asked a question instead of drafting. `source` is
+`model` or `unavailable`, and `reason` names which of the refusals it was, so
+the console can say "wire up a model" rather than showing an empty box.
+
+**This route never writes.** It composes a prompt and returns text. The draft
+becomes a skill only if the operator takes it and saves it through `POST
+…/skills`, which runs the validator and the scan like any other write.
+
+### Availability
+
+Drafting needs a model, so it inherits the rule the teammate copilot already
+obeys: `runtime.profile_drafter()` is built from the embedded harness deps and
+is absent on a `sidecar` or `custom` cognition path. `GET …/inference` reports
+`designsProfiles` — the same `profile_drafter().is_some()` — and the console
+hides the draft control when it is `false`. Do not render a control that can
+only answer `no_model`.
+
+### The draft is scanned before it is shown
+
+The drafted document goes through the same validator and scan the save path
+runs. When the scan blocks it, `text` is withheld, `source` is `unavailable`
+and `reason` is `refused_by_scan`, with the findings in `scan`. The assistant
+must not be able to hand the operator a document that the Save button would
+then refuse, and a model writing a skill is untrusted text reaching a prompt
+like any other.
+
+### Prompting
+
+The system brief carries the spec's own authoring guidance: a description states
+what the skill does **and** when an agent should use it, because that line is
+what every agent reads when deciding whether to open the skill at all; the body
+stays short. The 1024-character description limit
+(`company::skill_validate::MAX_DESCRIPTION_CHARS`) is stated to the model, and
+the console shows a live count against the same number.

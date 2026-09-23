@@ -42,7 +42,7 @@ POST   …/skills                             add a custom skill
 GET    …/skills/registry                     browse the skill registry (every bundle's skills)
 POST   …/skills/{slug}/install · …/skills/{slug}/uninstall  install / uninstall a skill
 PUT    …/skills/{slug}                       enable / disable a skill
-POST   …/skills/upload                       upload `.md` / `.zip` / `.skill` skills (api-skill-authoring.md)
+POST   …/skills/upload · …/skills/draft      upload skills, or draft one with a teammate (api-skill-authoring.md)
 POST   …/team                               add an operator-overlay teammate
 GET    …/tools/catalog                       everything this company can grant
 GET    …/team/{agentId}                      one agent in full (tier, tools, desks)

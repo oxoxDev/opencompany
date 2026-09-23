@@ -144,12 +144,14 @@ fn write_lock(company: &CompanyId) -> Arc<tokio::sync::Mutex<()>> {
     )
 }
 
+mod draft;
 mod upload;
 
 /// Builds the skills route fragment.
 pub fn router() -> Router<AppState> {
     scoped("/skills/{slug}/install", post(install))
         .merge(upload::router())
+        .merge(draft::router())
         .merge(scoped("/skills/{slug}/uninstall", post(uninstall)))
         // `registry` is a static segment, so it wins over the `{slug}` pattern
         // above regardless of registration order (and the methods differ anyway).
