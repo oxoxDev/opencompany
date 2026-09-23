@@ -137,3 +137,18 @@ describe("a refused uninstall puts the skill back", () => {
     expect(container.textContent).toContain("Refund policy");
   });
 });
+
+describe("a row the host served without a category", () => {
+  // The badge is an identity tint, so an empty one is a coloured pill saying
+  // nothing — and a row can genuinely arrive without a category: the field is
+  // free-form frontmatter, and an upload row is folded in without a re-read.
+  it("renders no category badge rather than an empty one", async () => {
+    await show(clientWith({ skills: [skill({ category: "" })] }));
+
+    const card = cardNamed("Refund policy");
+    expect(card.querySelector('[data-testid="skill-category"]')).toBeNull();
+    // The rest of the row still reports itself.
+    expect(card.textContent).toContain("Registry");
+    expect(card.textContent).toContain("Never edited");
+  });
+});

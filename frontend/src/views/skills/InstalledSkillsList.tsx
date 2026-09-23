@@ -243,9 +243,15 @@ function InstalledCard({
         </div>
         <p className="text-sm text-muted-foreground">{skill.description}</p>
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pt-1">
-          <Badge variant="outline" className={cn("capitalize", categoryStyle(skill.category))}>
-            {skill.category}
-          </Badge>
+          {skill.category?.trim() ? (
+            <Badge
+              variant="outline"
+              data-testid="skill-category"
+              className={cn("capitalize", categoryStyle(skill.category))}
+            >
+              {skill.category}
+            </Badge>
+          ) : null}
           <span data-testid="skill-source" className="text-xs text-muted-foreground">
             {skillSourceLabel(skill)}
           </span>
