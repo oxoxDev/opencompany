@@ -212,9 +212,14 @@ input and was simply never named.
 **If a skill's text persuades an agent to take an action, that action still
 crosses every gate it would have crossed anyway.** The tool call is resolved by
 the three-level grant — `[tools].allow ∩ desk.tools ∩ agent.tools`
-([tools.md](../runtime/tools.md)) — and an effect that reaches the trust boundary
-still parks on the `ApprovalGate`
-([approvals.md](../company-brain/approvals.md)). A skill cannot widen a grant, add
+([tools.md](../runtime/tools.md)) — and whatever the company's approval policy
+would do with the effect, it does the same whether or not a skill argued for it
+([approvals.md](../company-brain/approvals.md)). What that is depends on the
+mode, and today on little else: `readonly` denies applicable effects and the
+emergency stop denies ahead of every policy rule, while policy HITL is disabled,
+so `supervised`, `auto`, `full` and `always_approve` are classification and audit
+data and an effect parks when an agent calls `request_approval`. A skill changes
+none of that. It cannot widen a grant, add
 a tool, name a credential, or mark an effect pre-approved. It has no field for
 any of those, and nothing reads it as configuration.
 
