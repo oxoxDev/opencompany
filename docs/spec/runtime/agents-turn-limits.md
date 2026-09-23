@@ -55,8 +55,11 @@ round, and `src/harness/built_in/brain.rs` for the notice.
 The company's other two spend controls — the plan-level token ceiling and a
 teammate's `budget_usd_daily` — are both **pre-dispatch**. They decide whether a
 turn may *start*; neither can see inside one. So a turn that begins one cent
-under a cap can finish arbitrarily far over it, and raising the iteration ceiling
-widens that window in proportion.
+under a cap can finish over it, and raising the iteration ceiling widens that
+window in proportion. How far over depends on whether anything is watching from
+inside: for the plan-level token ceiling, and for a teammate who declares no
+daily budget, nothing is, and the overshoot is unbounded. A teammate who does
+declare one gets the in-turn brake below, which bounds it to a single call.
 
 A running turn is therefore additionally metered by an in-turn brake — openhuman's
 `BudgetStopHook` — an after-call threshold check installed between iterations.
