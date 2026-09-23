@@ -4236,6 +4236,7 @@ pub async fn assert_skill_state_store(skills: Arc<dyn SkillStateStore>) {
         enabled,
         source,
         custom_doc: None,
+        install: None,
     };
 
     skills
@@ -4268,6 +4269,7 @@ pub async fn assert_skill_state_store(skills: Arc<dyn SkillStateStore>) {
                 enabled: true,
                 source: SkillSource::Custom,
                 custom_doc: Some("---\nname: Mine\n---\nbody".to_string()),
+                install: None,
             },
         )
         .await
