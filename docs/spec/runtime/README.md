@@ -90,6 +90,10 @@ Supporting docs:
   form and the one-file-per-teammate `agents/<id>.toml` bundle form, custom
   prompts, checked-in briefing documents versus routed workspace documents, and
   the `classes` routing exclusions
+  - [agents-turn-limits.md](agents-turn-limits.md) — the two ceilings on one
+    turn: the 25-round tool-iteration cap, the in-turn spend brake armed only
+    for a teammate with a declared daily budget, and why a cap pause and a
+    budget halt are reported separately
 - [tools.md](tools.md) — the three-level tool grant
   (`[tools].allow ∩ desk.tools ∩ agent.tools`), why an absent grant means
   "inherit" rather than "nothing" (and why an explicit empty agent grant is a
