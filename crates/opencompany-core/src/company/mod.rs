@@ -125,6 +125,11 @@ pub mod search;
 pub mod setup;
 pub mod skill_effective;
 mod skill_file;
+/// The rules a skill document must satisfy before the product will store it.
+/// Always compiled: registry install, the empty-registry fallback and console
+/// authoring share it, and three entry points that validated separately are
+/// exactly how they drift apart.
+pub mod skill_validate;
 // Steer (issue #111): pause / cancel / redirect an in-flight task or delegation
 // from the operator chat. Always compiled + openhuman-free so the operator
 // control plane can steer in any build and no agent tool can ever reach it.
