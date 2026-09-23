@@ -781,12 +781,40 @@ async fn mutation_response(
     }))
 }
 
+/// The health reported instead of a live probe when the build has `openhuman`
+/// but not `mcp`.
+///
+/// The probe would work in such a build — the transport is an `openhuman`
+/// concern — and could answer `ok`. But the agent-side bridge tools in
+/// `harness::built_in::build` are `#[cfg(feature = "mcp")]`, so no agent here
+/// can call the server whatever the endpoint says. Answering `ok` therefore
+/// reported reachability the build structurally cannot act on: an operator
+/// could add a server, see a green `Test connection`, and have it wired to
+/// nobody. `Unknown` is the honest tier, and the message names the build rather
+/// than blaming the endpoint.
+#[cfg(feature = "openhuman")]
+fn mcp_absent_health() -> McpHealth {
+    McpHealth {
+        status: mcp::McpStatus::Unknown,
+        message: "Not probed: this build was compiled without the `mcp` feature, so no agent in it can call this server."
+            .to_string(),
+        tool_count: 0,
+        checked_at_millis: crate::ports::now_millis(),
+        auth_hint: None,
+    }
+}
+
 /// Probe the named server and persist the (scrubbed) outcome as health, returning
 /// it. Under the `openhuman` feature this dials the server through the same
 /// registry the agent uses (auth INCLUDED); without it there is no MCP transport,
 /// so no probe runs and the console falls back to the declared shape.
 #[cfg(feature = "openhuman")]
 async fn probe_and_persist(runtime: &CompanyRuntime, name: &str) -> Option<McpHealth> {
+    if !cfg!(feature = "mcp") {
+        let health = mcp_absent_health();
+        let _ = mcp::save_health(runtime.id(), name, &health, runtime.secrets().as_ref()).await;
+        return Some(health);
+    }
     let manifest = manifest_servers(runtime).await.ok()?;
     let decls = resolve_effective(
         runtime.id(),
