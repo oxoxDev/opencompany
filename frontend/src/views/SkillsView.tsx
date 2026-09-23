@@ -8,7 +8,6 @@ import {
   Plus,
   Search,
   Sparkles,
-  Trash2,
   Upload,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -27,6 +26,7 @@ import {
 } from "@/api/skills";
 import { getInferenceStatus } from "@/api/inference";
 import { DraftSkillDialog } from "@/views/skills/DraftSkillDialog";
+import { InstalledSkillsList } from "@/views/skills/InstalledSkillsList";
 import { UploadSkillDialog } from "@/views/skills/UploadSkillDialog";
 import type { OpenCompanyClient } from "@/api/client";
 import { PageHeader } from "@/components/page-header";
@@ -52,11 +52,15 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Switch } from "@/components/ui/switch";
 import { PageTabPanel, PageTabs, type PageTab } from "@/components/page-tabs";
 import { useHashTab } from "@/hooks/use-hash-tab";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import {
+  DEFAULT_SKILL_FILTERS,
+  type SkillListFilters,
+  type SkillSort,
+} from "@/lib/skills-list";
 import {
   CATEGORY_STYLES,
   registryEmptyLabel,
@@ -66,7 +70,6 @@ import {
   skillDescriptionCount,
   SKILLS_READ_ONLY_NOTE,
   type SkillCategory,
-  skillReachLabel,
 } from "@/lib/skills";
 
 interface Props {
@@ -121,6 +124,11 @@ export function SkillsView({ client, company }: Props) {
   // ever return `no_model`.
   const [canDraft, setCanDraft] = useState<boolean | undefined>(undefined);
   const [query, setQuery] = useState("");
+  // The Installed tab's own filter/sort selection. Separate from `query`, which
+  // belongs to the registry tab: a search typed while browsing what could be
+  // added must not silently hide half of what already is.
+  const [filters, setFilters] = useState<SkillListFilters>(DEFAULT_SKILL_FILTERS);
+  const [sort, setSort] = useState<SkillSort>("edited");
   // A generation token so a response from a previous company scope (or after
   // unmount) can't overwrite the current one.
   const gen = useRef(0);
@@ -145,6 +153,7 @@ export function SkillsView({ client, company }: Props) {
     setUploadOpen(false);
     setDraftOpen(false);
     setCanDraft(undefined);
+    setFilters(DEFAULT_SKILL_FILTERS);
   }
 
   useEffect(() => {
@@ -248,7 +257,9 @@ export function SkillsView({ client, company }: Props) {
   }, [refresh]);
 
   const installedIds = useMemo(() => new Set(skills.map((s) => s.id)), [skills]);
-  const enabledCount = skills.filter((s) => s.enabled).length;
+  // One instant for the whole list, so no two rows date themselves against
+  // different "now"s within a single render.
+  const now = Date.now();
 
   async function toggle(skill: Skill) {
     const next = !skill.enabled;
@@ -382,20 +393,17 @@ export function SkillsView({ client, company }: Props) {
             ) : skills.length === 0 ? (
               <Empty label="No skills installed yet." />
             ) : (
-              <>
-                <p className="mb-3 text-xs text-muted-foreground">{enabledCount} enabled</p>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {skills.map((s) => (
-                    <InstalledCard
-                      key={s.id}
-                      skill={s}
-                      canManage={canManage}
-                      onToggle={() => void toggle(s)}
-                      onUninstall={() => void uninstall(s)}
-                    />
-                  ))}
-                </div>
-              </>
+              <InstalledSkillsList
+                skills={skills}
+                filters={filters}
+                onFilters={setFilters}
+                sort={sort}
+                onSort={setSort}
+                canManage={canManage}
+                now={now}
+                onToggle={(s) => void toggle(s)}
+                onUninstall={(s) => void uninstall(s)}
+              />
             )}
         </PageTabPanel>
 
@@ -467,62 +475,6 @@ export function SkillsView({ client, company }: Props) {
         onSaved={takeUploaded}
       />
     </div>
-  );
-}
-
-function InstalledCard({
-  skill,
-  canManage,
-  onToggle,
-  onUninstall,
-}: {
-  skill: Skill;
-  canManage: boolean;
-  onToggle: () => void;
-  onUninstall: () => void;
-}) {
-  return (
-    <Card data-testid="installed-card" className={cn(!skill.enabled && "opacity-70")}>
-      <CardContent className="space-y-2">
-        <div className="flex items-start justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <Sparkles className="size-4 text-muted-foreground" />
-            <p className="font-medium">{skill.name}</p>
-          </div>
-          <Switch
-            checked={skill.enabled}
-            disabled={!canManage}
-            onCheckedChange={canManage ? onToggle : undefined}
-            aria-label="Enable skill"
-          />
-        </div>
-        <p className="text-sm text-muted-foreground">{skill.description}</p>
-        <div className="flex items-center justify-between pt-1">
-          <div className="flex items-center gap-2">
-            <Badge variant="outline" className={cn("capitalize", categoryStyle(skill.category))}>
-              {skill.category}
-            </Badge>
-            <span className="text-xs text-muted-foreground capitalize">{skill.source}</span>
-            {/* What the switch above decides, in the terms it actually decides
-                them: reach, not capability (issue #569). */}
-            <span data-testid="skill-reach" className="text-xs text-muted-foreground">
-              · {skillReachLabel(skill.enabled)}
-            </span>
-          </div>
-          {canManage && skill.source !== "company" && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-7 text-muted-foreground hover:text-destructive"
-              onClick={onUninstall}
-              aria-label="Uninstall"
-            >
-              <Trash2 className="size-4" />
-            </Button>
-          )}
-        </div>
-      </CardContent>
-    </Card>
   );
 }
 
