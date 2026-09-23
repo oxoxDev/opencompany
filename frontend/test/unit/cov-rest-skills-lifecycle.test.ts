@@ -6,16 +6,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { Skill } from "@/api/skills";
+import { SKILL_BUILTIN_UNINSTALL_REASON } from "@/lib/skills-list";
 import { SkillsView } from "@/views/SkillsView";
 
 /**
  * SKILL-001's Rust half (`ops/skills.rs`) has slug-validation coverage but no
  * direct REST-route test for install/uninstall. The console's own lifecycle
  * surface — `SkillsView` — had none at all. Two properties: a company
- * (manifest-baked) skill offers no Uninstall, the one authority split this
+ * (manifest-baked) skill cannot be uninstalled, the one authority split this
  * screen actually draws; and an uninstall the host refuses puts the card back
  * rather than dropping it for good on a client that merely believed it
  * worked.
+ *
+ * The first property is now asserted as a *disabled* Uninstall carrying the
+ * host's own refusal, not as a missing one. An action that silently is not
+ * there teaches nothing, and the operator who goes looking for it has no way
+ * to find out why.
  */
 
 function skill(over: Partial<Skill> = {}): Skill {
@@ -58,8 +64,23 @@ function cards(): HTMLElement[] {
   return Array.from(container.querySelectorAll('[data-testid="installed-card"]'));
 }
 
-function uninstallButtonIn(card: HTMLElement): HTMLElement | null {
-  return card.querySelector('[aria-label="Uninstall"]');
+function cardNamed(name: string): HTMLElement {
+  const found = cards().find((card) => card.textContent?.includes(name));
+  if (!found) throw new Error(`no card named ${name}`);
+  return found;
+}
+
+/** Open a row's ⋮ menu. It renders through a portal, onto `document.body`. */
+async function openMenuIn(card: HTMLElement) {
+  await act(async () => {
+    card.querySelector<HTMLElement>('[data-testid="skill-row-menu"]')!.click();
+  });
+}
+
+function menuUninstall(): HTMLElement {
+  const found = document.querySelector<HTMLElement>('[data-testid="skill-menu-uninstall"]');
+  if (!found) throw new Error(`no Uninstall item in:\n${document.body.innerHTML}`);
+  return found;
 }
 
 beforeEach(() => {
@@ -75,8 +96,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("a manifest-baked skill offers no uninstall", () => {
-  it("withholds Uninstall from a company skill, and offers it on a registry one", async () => {
+describe("a manifest-baked skill cannot be uninstalled", () => {
+  it("greys Uninstall on a company skill and says why, and leaves it live on a registry one", async () => {
     const client = clientWith({
       skills: [
         skill({ id: "baked", name: "Baked-in playbook", source: "company" }),
@@ -85,9 +106,17 @@ describe("a manifest-baked skill offers no uninstall", () => {
     });
     await show(client);
 
-    const [baked, installed] = cards();
-    expect(uninstallButtonIn(baked)).toBeNull();
-    expect(uninstallButtonIn(installed)).not.toBeNull();
+    await openMenuIn(cardNamed("Baked-in playbook"));
+    expect(menuUninstall().getAttribute("aria-disabled")).toBe("true");
+    // The host's own sentence, so the menu and the route that refuses agree.
+    expect(document.body.textContent).toContain(SKILL_BUILTIN_UNINSTALL_REASON);
+    await act(async () => {
+      document.querySelector<HTMLElement>('[data-testid="skill-row-menu"]')!.click();
+    });
+
+    await openMenuIn(cardNamed("Installed skill"));
+    expect(menuUninstall().getAttribute("aria-disabled")).not.toBe("true");
+    expect(document.body.textContent).not.toContain(SKILL_BUILTIN_UNINSTALL_REASON);
   });
 });
 
@@ -99,8 +128,9 @@ describe("a refused uninstall puts the skill back", () => {
     });
     await show(client);
 
+    await openMenuIn(cards()[0]);
     await act(async () => {
-      uninstallButtonIn(cards()[0])!.click();
+      menuUninstall().click();
     });
 
     expect(cards()).toHaveLength(1);
