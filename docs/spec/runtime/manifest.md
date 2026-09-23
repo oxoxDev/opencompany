@@ -33,6 +33,8 @@ description = "Write ads, pages, and campaign copy."
 # NEW optional per-agent keys:
 tier = "reasoning"                 # cognition tier hint (see glossary)
 tools = ["docs.*", "email.send"]   # tool grant globs
+skills = ["brand-voice"]           # skill slugs this teammate may read;
+                                   # omit for every enabled skill
 delegates_to = ["research"]        # narrow hand-offs to these desks (omit = anywhere)
 budget_usd_daily = 5.0             # per-agent daily spend cap (UTC day)
 prompt = "Write for the reader."   # appended to the generated persona
