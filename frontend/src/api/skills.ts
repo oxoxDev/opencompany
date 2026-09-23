@@ -18,6 +18,12 @@ export interface Skill {
   enabled: boolean;
   /** The library revision this install snapshotted, when its doc carries one. */
   version?: string | null;
+  /** When the operator last wrote this skill, in epoch milliseconds.
+   *
+   * Absent for a skill no delta covers — a bundled or baseline skill nobody has
+   * touched — and for a row the host stored before it recorded timestamps. Read
+   * as "never edited here", never as a date. */
+  updatedAtMillis?: number | null;
 }
 
 /** The author-a-custom-skill body; the host slugs the name into the id. */
