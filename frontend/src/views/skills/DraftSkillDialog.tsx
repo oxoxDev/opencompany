@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Loader2, Sparkles } from "lucide-react";
 
 import {
@@ -58,6 +58,16 @@ export function DraftSkillDialog({
     setDraft(null);
     setError(null);
   }
+
+  // Closing is not always routed through this dialog's own handler — a
+  // company switch or any parent that just stops passing `open` leaves the
+  // last run's rows in state, and the next open shows the previous upload's
+  // verdicts as if they were this one's.
+  useEffect(() => {
+    if (!open) reset();
+    // `reset` only touches setters and a ref, both stable for the component's life.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   async function send() {
     const said = input.trim();

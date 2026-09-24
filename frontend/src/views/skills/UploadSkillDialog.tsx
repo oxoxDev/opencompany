@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Loader2, Upload } from "lucide-react";
 
 import { uploadSkills, type SkillUploadRow } from "@/api/skills";
@@ -51,6 +51,16 @@ export function UploadSkillDialog({
     setError(null);
     if (input.current) input.current.value = "";
   }
+
+  // Closing is not always routed through this dialog's own handler — a
+  // company switch or any parent that just stops passing `open` leaves the
+  // last run's rows in state, and the next open shows the previous upload's
+  // verdicts as if they were this one's.
+  useEffect(() => {
+    if (!open) reset();
+    // `reset` only touches setters and a ref, both stable for the component's life.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   async function send(force: boolean) {
     if (files.length === 0) return;
@@ -115,9 +125,9 @@ export function UploadSkillDialog({
 
         {rows.length > 0 && (
           <ul className="grid gap-2" data-testid="skill-upload-results">
-            {rows.map((row) => (
+            {rows.map((row, index) => (
               <li
-                key={row.file}
+                key={`${index}:${row.file}`}
                 data-testid="skill-upload-row"
                 className="rounded-md border border-border p-2 text-sm"
               >

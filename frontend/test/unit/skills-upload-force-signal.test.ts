@@ -31,19 +31,24 @@ function clientReturning(row: Omit<SkillUploadRow, "file">): OpenCompanyClient {
   } as unknown as OpenCompanyClient;
 }
 
-/** Renders the dialog, drops one file in, and sends it. */
-async function uploadOne(client: OpenCompanyClient) {
+/** Renders the dialog with `open` as given, leaving its own handler inert. */
+async function render(client: OpenCompanyClient, open: boolean) {
   await act(async () => {
     root.render(
       createElement(UploadSkillDialog, {
         client,
         company: "acme",
-        open: true,
+        open,
         onOpenChange: () => {},
         onUploaded: () => {},
       }),
     );
   });
+}
+
+/** Renders the dialog, drops one file in, and sends it. */
+async function uploadOne(client: OpenCompanyClient) {
+  await render(client, true);
 
   const input = document.querySelector('input[type="file"]') as HTMLInputElement;
   const file = new File(["---\nname: probe\n---\n"], "probe.md", { type: "text/markdown" });
@@ -113,5 +118,27 @@ describe("the override the dialog offers after a refusal", () => {
       }),
     );
     expect(force()).toBeNull();
+  });
+});
+
+describe("what the dialog keeps when it closes", () => {
+  it("drops the last run's rows when it is closed from outside its own handler", async () => {
+    const client = clientReturning({
+      ok: false,
+      error: "that skill was refused by the content scan.",
+      scanBlocked: true,
+    });
+    await uploadOne(client);
+    expect(force(), "the run happened").not.toBeNull();
+
+    // A parent that simply stops passing `open` — a company switch, a route
+    // change — never routes the close through this dialog's `onOpenChange`.
+    await render(client, false);
+    await render(client, true);
+
+    expect(
+      force(),
+      "reopening must not show the previous upload's verdicts as if they were this one's",
+    ).toBeNull();
   });
 });
