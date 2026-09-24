@@ -73,6 +73,19 @@ pub struct ValidSkill {
     /// Spec divergences worth reporting, none of which refused the document.
     pub deltas: Vec<SpecDelta>,
 }
+/// Slugs the skill routes cannot address, because a static route already holds
+/// that path.
+///
+/// `/skills/draft`, `/skills/upload` and `/skills/registry` sit at the same
+/// depth as `/skills/{slug}`, and a static segment wins, so a skill stored
+/// under one of these names answers 405 to every toggle rather than falling
+/// through — created, and then unreachable for the rest of its life. The names
+/// are refused at the point one would be created instead.
+///
+/// `skills::tests_scan` walks this list against the router, so a route added or
+/// renamed without updating it fails rather than reopening the hole.
+pub const RESERVED_SLUGS: &[&str] = &["draft", "upload", "registry"];
+
 /// The half of [`validate_slug`] that is about safety rather than about size.
 ///
 /// A slug is a path segment, and this is what keeps it one. The length cap is
@@ -101,6 +114,12 @@ pub fn validate_slug(slug: &str) -> Result<(), String> {
         return Err(format!(
             "that slug is {length} characters — a skill slug has to be {MAX_SLUG_CHARS} \
              characters or fewer."
+        ));
+    }
+    if RESERVED_SLUGS.contains(&slug) {
+        return Err(format!(
+            "`{slug}` is a reserved skill slug — the skill routes already use that path, so a \
+             skill stored under it could never be switched off again."
         ));
     }
     Ok(())

@@ -32,7 +32,7 @@ use crate::AppState;
 use crate::company::skill_effective::{self, EffectiveSkill};
 use crate::company::skill_scan::{Verdict, scan_skill};
 use crate::company::skill_validate::{
-    slugify, validate_skill_md, validate_slug, validate_slug_shape,
+    RESERVED_SLUGS, slugify, validate_skill_md, validate_slug, validate_slug_shape,
 };
 use crate::company::{SkillDoc, parse_skill_md, render_skill_md};
 use crate::error::OpenCompanyError;
@@ -560,7 +560,17 @@ async fn create_custom(
     }
     let lock = write_lock(company.id());
     let _guard = lock.lock().await;
-    let slug = slugify(&body.name);
+    // A display name is free text and can land on a name the routes already
+    // hold. Stepping off it keeps the skill addressable; refusing the name
+    // would ask the operator to rename a skill to avoid a URL they cannot see.
+    let slug = {
+        let base = slugify(&body.name);
+        if RESERVED_SLUGS.contains(&base.as_str()) {
+            format!("{base}-2")
+        } else {
+            base
+        }
+    };
     let doc = skill_md(
         &body.name,
         &body.description,

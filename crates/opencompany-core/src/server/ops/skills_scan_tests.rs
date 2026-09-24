@@ -344,3 +344,87 @@ async fn a_skill_stored_under_an_over_cap_slug_can_still_be_toggled() {
         .expect("the seeded skill is still there");
     assert!(!row.enabled, "the toggle must have landed: {raw}");
 }
+
+/// Every reserved slug is genuinely a static route, and nothing else is.
+///
+/// The list exists because a static segment beats `{slug}` at the same depth,
+/// so a skill stored under one of these names answers 405 to every toggle
+/// rather than falling through. Walking it against the real router is what
+/// keeps the list honest: a route added or renamed without updating it fails
+/// here instead of quietly reopening the hole, and a name left on the list
+/// after its route is gone stops costing operators a slug they could have had.
+#[tokio::test]
+async fn the_reserved_slugs_are_exactly_the_paths_the_routes_hold() {
+    use crate::company::skill_validate::RESERVED_SLUGS;
+
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+
+    let toggle = async |slug: &str| {
+        send(
+            &state,
+            "PUT",
+            &format!("/api/v1/company/skills/{slug}"),
+            Some(serde_json::json!({"enabled": false})),
+        )
+        .await
+        .0
+    };
+
+    for slug in RESERVED_SLUGS {
+        assert_eq!(
+            toggle(slug).await,
+            StatusCode::METHOD_NOT_ALLOWED,
+            "`{slug}` is on the reserved list but the router does not hold that path — \
+             either the route went away, or the list names something it never held"
+        );
+    }
+
+    assert_eq!(
+        toggle("ordinary").await,
+        StatusCode::OK,
+        "an ordinary slug still has to reach the toggle"
+    );
+}
+
+/// A display name landing on a reserved word still produces a usable skill.
+///
+/// Refusing the name would ask an operator to rename a skill to avoid a URL
+/// they cannot see, so authoring steps off the reserved slug instead — and
+/// what it steps onto has to be addressable, which is asserted by toggling it.
+#[tokio::test]
+async fn authoring_a_skill_named_for_a_reserved_slug_stays_addressable() {
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/skills",
+        Some(serde_json::json!({
+            "name": "Draft",
+            "description": "A skill whose name lands on a path the routes already hold.",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let slug = body["id"].as_str().expect("an id");
+    assert_ne!(
+        slug, "draft",
+        "authoring must step off the reserved slug: {body}"
+    );
+
+    let (status, raw) = send(
+        &state,
+        "PUT",
+        &format!("/api/v1/company/skills/{slug}"),
+        Some(serde_json::json!({"enabled": false})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the slug authoring chose has to be one the toggle can reach: {raw}"
+    );
+}
