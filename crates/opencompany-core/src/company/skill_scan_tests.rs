@@ -12,6 +12,7 @@ fn benign() -> SkillDoc {
         category: Some("Research".to_string()),
         version: Some("1.0.0".to_string()),
         body: "# Web Research\n\n## Steps\n\n1. Gather sources.\n2. Cite them.\n".to_string(),
+        extra_frontmatter: Vec::new(),
     }
 }
 
