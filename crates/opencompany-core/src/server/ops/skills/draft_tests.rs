@@ -47,6 +47,29 @@ fn a_draft_the_scan_blocks_is_withheld_with_a_reason_of_its_own() {
     );
 }
 
+/// A document that never validated is not a document the scan objected to.
+///
+/// Both refusals arrive from the same call, and reporting both as
+/// `refused_by_scan` told the operator to reword a draft the scan had never
+/// looked at — the console renders the two as different next moves, "say it
+/// differently" against "write it by hand". The reason has to follow which
+/// refusal it actually was.
+#[test]
+fn a_draft_that_never_validated_is_unreadable_rather_than_scan_refused() {
+    let dto = vet(SkillDraft::from_answer(
+        "Drafted.",
+        Some("no frontmatter here, so there is no name to store it under"),
+    ));
+    assert_eq!(dto.source, "unavailable");
+    assert_eq!(
+        dto.reason,
+        Some(DraftRefusal::Unreadable.as_str()),
+        "an unparseable draft is unreadable, not scan-refused: {:?}",
+        dto.reply
+    );
+    assert_eq!(dto.text, None);
+}
+
 /// A turn that asked a question instead of drafting is not a failure — it is
 /// what makes this a conversation rather than a hint box.
 #[test]

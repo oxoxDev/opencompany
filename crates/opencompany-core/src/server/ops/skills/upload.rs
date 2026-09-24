@@ -71,6 +71,10 @@ struct UploadRow {
     /// Why this file was not stored.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// Whether that refusal was a blocking scan verdict — the one refusal
+    /// resending with `force` overrides. Stated as a field so the console can
+    /// offer that without matching on the wording of `error`.
+    scan_blocked: bool,
 }
 
 impl UploadRow {
@@ -80,15 +84,17 @@ impl UploadRow {
             ok: true,
             skill: Some(skill),
             error: None,
+            scan_blocked: false,
         }
     }
 
-    fn refused(file: String, error: String) -> Self {
+    fn refused(file: String, refusal: Refusal) -> Self {
         Self {
             file,
             ok: false,
             skill: None,
-            error: Some(error),
+            error: Some(refusal.message),
+            scan_blocked: refusal.scan_blocked,
         }
     }
 }
@@ -185,10 +191,12 @@ async fn store(
     company: &AdminScopedCompany,
     part: &Part,
     force: bool,
-) -> Result<InstalledSkill, String> {
-    let read = read_upload(&part.filename, &part.bytes)?;
-    check_skill_doc_size(&read.doc).map_err(problem_text)?;
-    let scan: ScanSummary = vet_skill(&read.slug, &read.doc, force).map_err(problem_text)?;
+) -> Result<InstalledSkill, Refusal> {
+    let read = read_upload(&part.filename, &part.bytes).map_err(Refusal::plain)?;
+    check_skill_doc_size(&read.doc)
+        .map_err(problem_text)
+        .map_err(Refusal::plain)?;
+    let scan: ScanSummary = vet_skill(&read.slug, &read.doc, force).map_err(Refusal::from)?;
     let delta = SkillState {
         slug: read.slug,
         enabled: true,
@@ -200,8 +208,35 @@ async fn store(
         .skills()
         .set(company.id(), &delta)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| Refusal::plain(error.to_string()))?;
     Ok(InstalledSkill::from_state(&delta).with_scan(scan))
+}
+
+/// One file's refusal: the sentence an operator reads, and whether resending
+/// with `force` would store it after all.
+struct Refusal {
+    message: String,
+    scan_blocked: bool,
+}
+
+impl Refusal {
+    /// A refusal `force` cannot help with — a file that is not a skill, a
+    /// document over the size limit, a store that would not take it.
+    fn plain(message: String) -> Self {
+        Self {
+            message,
+            scan_blocked: false,
+        }
+    }
+}
+
+impl From<super::VetRefusal> for Refusal {
+    fn from(refusal: super::VetRefusal) -> Self {
+        Self {
+            scan_blocked: refusal.is_scan_block(),
+            message: refusal.message().to_string(),
+        }
+    }
 }
 
 /// The operator-facing sentence inside a refusal, for a per-file row.

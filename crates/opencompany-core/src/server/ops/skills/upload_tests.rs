@@ -319,3 +319,70 @@ async fn a_member_cannot_upload_a_skill() {
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert!(persisted_skills(&state).await.is_empty());
 }
+
+/// A refused row says whether resending with `force` would store it, as a
+/// field rather than as a turn of phrase in `error`.
+///
+/// The console offers "upload anyway" on exactly this signal. It used to decide
+/// by looking for the words "content scan" inside the sentence, so rewording
+/// the host's refusal would have removed the operator's only route past a
+/// blocking verdict — silently, with no test failing. The two rows here are the
+/// two answers: a document the scan blocked, and one that is simply not a
+/// skill, which resending cannot fix.
+#[tokio::test]
+async fn a_refused_row_states_whether_force_would_store_it() {
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+
+    let (status, body) = upload(
+        &state,
+        &[
+            ("poisoned.md", poisoned_doc().as_bytes()),
+            (
+                "nameless.md",
+                b"# No frontmatter, so no name to store it under.\n",
+            ),
+        ],
+        false,
+        &fixed_cookie("acme"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let blocked = &body["results"][0];
+    assert_eq!(blocked["ok"], false, "{body}");
+    assert_eq!(
+        blocked["scanBlocked"], true,
+        "a blocking scan verdict is the one refusal `force` overrides: {body}"
+    );
+
+    let invalid = &body["results"][1];
+    assert_eq!(invalid["ok"], false, "{body}");
+    assert_eq!(
+        invalid["scanBlocked"], false,
+        "a document that never validated is not something `force` can store: {body}"
+    );
+
+    assert!(
+        persisted_skills(&state).await.is_empty(),
+        "neither row should have reached the store"
+    );
+}
+
+/// A stored row carries the flag too, set false, so the console reads one shape
+/// for every row rather than treating an absent field as an answer.
+#[tokio::test]
+async fn a_stored_row_is_not_marked_scan_blocked() {
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+
+    let (_, body) = upload(
+        &state,
+        &[("fine.md", doc("Fine").as_bytes())],
+        false,
+        &fixed_cookie("acme"),
+    )
+    .await;
+    assert_eq!(body["results"][0]["ok"], true, "{body}");
+    assert_eq!(body["results"][0]["scanBlocked"], false, "{body}");
+}

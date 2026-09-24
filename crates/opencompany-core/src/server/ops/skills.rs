@@ -85,6 +85,42 @@ struct ScanSummary {
     /// Whether a blocking verdict was overridden for this one request.
     forced: bool,
 }
+/// Why [`vet_skill`] refused a document.
+///
+/// The two are not interchangeable to a caller: a blocking scan verdict is the
+/// one refusal `force` overrides, so the console offers to send it again and
+/// the drafting route reports it as a scan refusal. Everything else is a
+/// document that is simply not valid, which resending cannot fix. Carrying that
+/// as a variant rather than leaving callers to read the sentence keeps the
+/// distinction from depending on the wording of the sentence.
+enum VetRefusal {
+    /// The document did not validate — unparseable, or failing a stated limit.
+    Invalid { message: String },
+    /// The content scan blocked it, and `force` was not set.
+    Blocked { message: String },
+}
+
+impl VetRefusal {
+    /// The operator-facing sentence.
+    fn message(&self) -> &str {
+        match self {
+            Self::Invalid { message } | Self::Blocked { message } => message,
+        }
+    }
+
+    /// Whether resending with `force` would store this document.
+    fn is_scan_block(&self) -> bool {
+        matches!(self, Self::Blocked { .. })
+    }
+}
+
+impl From<VetRefusal> for ApiError {
+    fn from(refusal: VetRefusal) -> Self {
+        ApiError(OpenCompanyError::InvalidRequest(
+            refusal.message().to_string(),
+        ))
+    }
+}
 
 /// Validates and scans an assembled `SKILL.md` before it can be stored.
 ///
@@ -96,17 +132,20 @@ struct ScanSummary {
 /// the one request and records that it did; there is deliberately no setting
 /// that turns a class of finding off for a whole host, because a switch that
 /// silences an alarm is the failure this scan exists to prevent.
-fn vet_skill(slug: &str, doc: &str, force: bool) -> Result<ScanSummary, ApiError> {
-    let valid = validate_skill_md(slug, doc)
-        .map_err(|problems| ApiError(OpenCompanyError::InvalidRequest(problems.join(" "))))?;
+fn vet_skill(slug: &str, doc: &str, force: bool) -> Result<ScanSummary, VetRefusal> {
+    let valid = validate_skill_md(slug, doc).map_err(|problems| VetRefusal::Invalid {
+        message: problems.join(" "),
+    })?;
     let report = scan_skill(&valid.doc, &[]);
 
     if report.is_blocked() && !force {
-        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
-            "that skill was refused by the content scan: {}. Review it, or resend with \
-             `force: true` to install it anyway.",
-            report.messages().join("; ")
-        ))));
+        return Err(VetRefusal::Blocked {
+            message: format!(
+                "that skill was refused by the content scan: {}. Review it, or resend with \
+                 `force: true` to install it anyway.",
+                report.messages().join("; ")
+            ),
+        });
     }
 
     Ok(ScanSummary {
@@ -415,7 +454,7 @@ async fn install(
         }
     };
     check_skill_doc_size(&doc)?;
-    let scan = vet_skill(&slug, &doc, force)?;
+    let scan = vet_skill(&slug, &doc, force).map_err(ApiError::from)?;
     let delta = SkillState {
         slug,
         enabled: true,
@@ -527,7 +566,7 @@ async fn create_custom(
         body.body.as_deref().unwrap_or(""),
     );
     check_skill_doc_size(&doc)?;
-    let scan = vet_skill(&slug, &doc, body.force)?;
+    let scan = vet_skill(&slug, &doc, body.force).map_err(ApiError::from)?;
     let state = SkillState {
         slug,
         enabled: true,

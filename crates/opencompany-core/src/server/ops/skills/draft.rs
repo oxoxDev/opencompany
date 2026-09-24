@@ -184,11 +184,19 @@ fn vet(drafted: crate::company::skill_draft::SkillDraft) -> SkillDraftDto {
         Err(problem) => SkillDraftDto {
             reply: Some(format!(
                 "{reply}\n\nThat draft was refused before it reached you: {}",
-                problem.0
+                problem.message()
             )),
             text: None,
             source: "unavailable",
-            reason: Some(REFUSED_BY_SCAN),
+            // A document the scan blocked and one that never validated are
+            // different answers to "what do I do now": say it differently, or
+            // write it by hand. Reporting both as a scan refusal told the
+            // operator to reword a draft the scan had never objected to.
+            reason: Some(if problem.is_scan_block() {
+                REFUSED_BY_SCAN
+            } else {
+                crate::company::profile_draft::DraftRefusal::Unreadable.as_str()
+            }),
             scan: None,
         },
     }
