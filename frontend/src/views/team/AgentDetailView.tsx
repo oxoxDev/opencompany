@@ -1195,7 +1195,12 @@ export function AgentDetailView({
 
             <PageTabPanel idBase="agent" id="tools" value={tab}>
             <Tools agent={agent} saving={saving} onSave={(globs) => saveTools(globs)} />
-            <Skills agent={agent} saving={saving} onSave={(slugs) => saveSkills(slugs)} />
+            <Skills
+              key={agent.id}
+              agent={agent}
+              saving={saving}
+              onSave={(slugs) => saveSkills(slugs)}
+            />
             </PageTabPanel>
 
             <PageTabPanel idBase="agent" id="model" value={tab}>
