@@ -74,6 +74,12 @@ pub enum ScanField {
     Version,
     /// The Markdown body.
     Body,
+    /// A frontmatter line this parser does not recognise, verbatim.
+    ///
+    /// An uploaded document is stored as its own source, so an unknown key
+    /// reaches the agent exactly as written even though nothing reads it as a
+    /// field. Scanned under its own name so a finding says where it came from.
+    Frontmatter(String),
     /// A bundled file, by its path within the skill directory.
     Resource(String),
 }
@@ -87,6 +93,13 @@ impl ScanField {
             Self::Category => "category".to_string(),
             Self::Version => "version".to_string(),
             Self::Body => "the document body".to_string(),
+            Self::Frontmatter(line) => {
+                let key = line
+                    .split_once(':')
+                    .map(|(key, _)| key.trim())
+                    .unwrap_or(line);
+                format!("the frontmatter line `{key}`")
+            }
             Self::Resource(path) => format!("the bundled file `{path}`"),
         }
     }
@@ -175,6 +188,9 @@ pub fn scan_skill(doc: &super::SkillDoc, resources: &[ScanResource]) -> ScanRepo
         fields.push((ScanField::Version, version.as_str()));
     }
     fields.push((ScanField::Body, doc.body.as_str()));
+    for line in &doc.extra_frontmatter {
+        fields.push((ScanField::Frontmatter(line.clone()), line.as_str()));
+    }
 
     for (field, text) in fields {
         scan_text(&field, text, &mut findings);

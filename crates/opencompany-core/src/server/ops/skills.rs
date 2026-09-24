@@ -31,7 +31,10 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::company::skill_effective::{self, EffectiveSkill};
 use crate::company::skill_scan::{Verdict, scan_skill};
-use crate::company::skill_validate::{MAX_SLUG_CHARS, validate_skill_md, validate_slug};
+use crate::company::skill_validate::{
+    MAX_SLUG_CHARS, RESERVED_SLUGS, slugify, validate_skill_md, validate_slug,
+    validate_slug_shape,
+};
 use crate::company::{SkillDoc, parse_skill_md, render_skill_md};
 use crate::error::OpenCompanyError;
 use crate::ports::skills_state::{SkillSource, SkillState};
@@ -85,6 +88,42 @@ struct ScanSummary {
     /// Whether a blocking verdict was overridden for this one request.
     forced: bool,
 }
+/// Why [`vet_skill`] refused a document.
+///
+/// The two are not interchangeable to a caller: a blocking scan verdict is the
+/// one refusal `force` overrides, so the console offers to send it again and
+/// the drafting route reports it as a scan refusal. Everything else is a
+/// document that is simply not valid, which resending cannot fix. Carrying that
+/// as a variant rather than leaving callers to read the sentence keeps the
+/// distinction from depending on the wording of the sentence.
+enum VetRefusal {
+    /// The document did not validate — unparseable, or failing a stated limit.
+    Invalid { message: String },
+    /// The content scan blocked it, and `force` was not set.
+    Blocked { message: String },
+}
+
+impl VetRefusal {
+    /// The operator-facing sentence.
+    fn message(&self) -> &str {
+        match self {
+            Self::Invalid { message } | Self::Blocked { message } => message,
+        }
+    }
+
+    /// Whether resending with `force` would store this document.
+    fn is_scan_block(&self) -> bool {
+        matches!(self, Self::Blocked { .. })
+    }
+}
+
+impl From<VetRefusal> for ApiError {
+    fn from(refusal: VetRefusal) -> Self {
+        ApiError(OpenCompanyError::InvalidRequest(
+            refusal.message().to_string(),
+        ))
+    }
+}
 
 /// Validates and scans an assembled `SKILL.md` before it can be stored.
 ///
@@ -96,17 +135,20 @@ struct ScanSummary {
 /// the one request and records that it did; there is deliberately no setting
 /// that turns a class of finding off for a whole host, because a switch that
 /// silences an alarm is the failure this scan exists to prevent.
-fn vet_skill(slug: &str, doc: &str, force: bool) -> Result<ScanSummary, ApiError> {
-    let valid = validate_skill_md(slug, doc)
-        .map_err(|problems| ApiError(OpenCompanyError::InvalidRequest(problems.join(" "))))?;
+fn vet_skill(slug: &str, doc: &str, force: bool) -> Result<ScanSummary, VetRefusal> {
+    let valid = validate_skill_md(slug, doc).map_err(|problems| VetRefusal::Invalid {
+        message: problems.join(" "),
+    })?;
     let report = scan_skill(&valid.doc, &[]);
 
     if report.is_blocked() && !force {
-        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
-            "that skill was refused by the content scan: {}. Review it, or resend with \
-             `force: true` to install it anyway.",
-            report.messages().join("; ")
-        ))));
+        return Err(VetRefusal::Blocked {
+            message: format!(
+                "that skill was refused by the content scan: {}. Review it, or resend with \
+                 `force: true` to install it anyway.",
+                report.messages().join("; ")
+            ),
+        });
     }
 
     Ok(ScanSummary {
@@ -144,9 +186,14 @@ fn write_lock(company: &CompanyId) -> Arc<tokio::sync::Mutex<()>> {
     )
 }
 
+mod draft;
+mod upload;
+
 /// Builds the skills route fragment.
 pub fn router() -> Router<AppState> {
     scoped("/skills/{slug}/install", post(install))
+        .merge(upload::router())
+        .merge(draft::router())
         .merge(scoped("/skills/{slug}/uninstall", post(uninstall)))
         // `registry` is a static segment, so it wins over the `{slug}` pattern
         // above regardless of registration order (and the methods differ anyway).
@@ -410,7 +457,7 @@ async fn install(
         }
     };
     check_skill_doc_size(&doc)?;
-    let scan = vet_skill(&slug, &doc, force)?;
+    let scan = vet_skill(&slug, &doc, force).map_err(ApiError::from)?;
     let delta = SkillState {
         slug,
         enabled: true,
@@ -477,7 +524,7 @@ async fn set_enabled(
     Path(SlugPath { slug }): Path<SlugPath>,
     Json(body): Json<SetEnabled>,
 ) -> Result<Json<InstalledSkill>, ApiError> {
-    if let Err(problem) = validate_slug(&slug) {
+    if let Err(problem) = validate_slug_shape(&slug) {
         return Err(ApiError(OpenCompanyError::InvalidRequest(problem)));
     }
     let lock = write_lock(company.id());
@@ -517,10 +564,15 @@ async fn create_custom(
     }
     let lock = write_lock(company.id());
     let _guard = lock.lock().await;
-    let slug = unique_slug(
-        &slugify(&body.name),
-        &taken_slugs(&state, &company.runtime).await?,
-    );
+    let slug = {
+        let base = slugify(&body.name);
+        let base = if RESERVED_SLUGS.contains(&base.as_str()) {
+            format!("{base}-2")
+        } else {
+            base
+        };
+        unique_slug(&base, &taken_slugs(&state, &company.runtime).await?)
+    };
     let doc = skill_md(
         &body.name,
         &body.description,
@@ -528,7 +580,7 @@ async fn create_custom(
         body.body.as_deref().unwrap_or(""),
     );
     check_skill_doc_size(&doc)?;
-    let scan = vet_skill(&slug, &doc, body.force)?;
+    let scan = vet_skill(&slug, &doc, body.force).map_err(ApiError::from)?;
     let state = SkillState {
         slug,
         enabled: true,
@@ -560,34 +612,6 @@ fn skill_md(name: &str, description: &str, category: Option<&str>, content: &str
         frontmatter.push_str(&format!("category: {}\n", one_line(category).trim()));
     }
     format!("---\n{frontmatter}---\n{content}\n")
-}
-
-/// Turns a display name into a filesystem-and-URL-safe slug, within
-/// [`MAX_SLUG_CHARS`].
-///
-/// Authoring derives its store key and directory name from a free-text display
-/// name, so whatever this returns has to be a slug the slug-bearing routes
-/// accept. Truncating keeps a long name authorable; refusing it would leave the
-/// operator renaming a skill to satisfy a limit they cannot see.
-fn slugify(name: &str) -> String {
-    let mut slug = String::with_capacity(name.len());
-    let mut prev_dash = false;
-    for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch.to_ascii_lowercase());
-            prev_dash = false;
-        } else if !prev_dash {
-            slug.push('-');
-            prev_dash = true;
-        }
-    }
-    let capped: String = slug.chars().take(MAX_SLUG_CHARS).collect();
-    let trimmed = capped.trim_matches('-').to_string();
-    if trimmed.is_empty() {
-        "skill".to_string()
-    } else {
-        trimmed
-    }
 }
 
 /// Every slug the company already resolves — bundled, registry-installed and

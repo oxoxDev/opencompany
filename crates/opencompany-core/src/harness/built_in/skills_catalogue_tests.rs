@@ -24,6 +24,7 @@ fn catalogue_of(name: &str, description: &str) -> String {
             category: None,
             version: None,
             body: String::new(),
+            extra_frontmatter: Vec::new(),
         }],
     }
     .catalogue()
