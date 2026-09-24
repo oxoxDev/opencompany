@@ -333,7 +333,9 @@ fn hardcoded_credential(text: &str) -> Option<String> {
     if text.contains("PRIVATE KEY-----") {
         return Some("an embedded private key".to_string());
     }
-    for token in text.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ',')) {
+    for token in
+        text.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ',' | ':' | '='))
+    {
         let token = token.trim_matches(|c: char| matches!(c, '(' | ')' | ';' | '.'));
         for (prefix, min_len) in CREDENTIAL_PREFIXES {
             if token.starts_with(prefix) && token.len() >= *min_len {

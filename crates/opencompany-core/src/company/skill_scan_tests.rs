@@ -81,6 +81,22 @@ fn hard_coded_credentials_block() {
             format!("Export {aws_id} as the id."),
         ),
         ("a Slack bot token", format!("Token {slack}")),
+        // A credential is as often written into a key than left on its own,
+        // and the delimiter is what decides whether the value is ever looked
+        // at: `token: X` split on whitespace, but `token:X` and `token=X` kept
+        // the value welded to its key and walked straight past the check.
+        (
+            "a token behind a colon",
+            format!("Set token:{github} first."),
+        ),
+        (
+            "a token behind an equals",
+            format!("Set token={github} first."),
+        ),
+        (
+            "a token in a JSON object",
+            format!("Send {{\"token\":\"{github}\"}} in the body."),
+        ),
         ("a private key", rsa),
         (
             "an assigned literal",
