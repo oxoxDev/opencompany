@@ -92,3 +92,10 @@ with work still to do and can be resumed via the "continue" bubble above; a
 budget halt means it ran out of money, returns whatever reply the model produced
 before the hook fired, and gets no such bubble today. Anything that renders one
 to an operator must not label it with the other.
+
+## Where this lives
+
+| Concern | File |
+| --- | --- |
+| Iteration cap, stated on every built agent | `crates/opencompany-core/src/harness/built_in/build.rs` |
+| In-turn spend brake, installed per turn | `src/harness/mod.rs` |
