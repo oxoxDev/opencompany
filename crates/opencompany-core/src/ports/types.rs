@@ -6137,32 +6137,50 @@ impl CompanyRecord {
             .iter_mut()
             .find(|held| held.agent_id == entry.agent_id)
         {
-            if entry.name.is_some() {
-                held.name = entry.name;
+            // Destructured, so a field added to the struct is a compile error
+            // here rather than one this merge silently stops carrying.
+            let AgentOverride {
+                agent_id: _,
+                name,
+                role,
+                description,
+                tools,
+                skills,
+                instructions,
+                avatar,
+                model,
+                harness,
+                provider,
+            } = entry;
+            if name.is_some() {
+                held.name = name;
             }
-            if entry.role.is_some() {
-                held.role = entry.role;
+            if role.is_some() {
+                held.role = role;
             }
-            if entry.description.is_some() {
-                held.description = entry.description;
+            if description.is_some() {
+                held.description = description;
             }
-            if entry.tools.is_some() {
-                held.tools = entry.tools;
+            if tools.is_some() {
+                held.tools = tools;
             }
-            if entry.instructions.is_some() {
-                held.instructions = entry.instructions;
+            if skills.is_some() {
+                held.skills = skills;
             }
-            if entry.avatar.is_some() {
-                held.avatar = entry.avatar;
+            if instructions.is_some() {
+                held.instructions = instructions;
             }
-            if entry.model.is_some() {
-                held.model = entry.model;
+            if avatar.is_some() {
+                held.avatar = avatar;
             }
-            if entry.harness.is_some() {
-                held.harness = entry.harness;
+            if model.is_some() {
+                held.model = model;
             }
-            if entry.provider.is_some() {
-                held.provider = entry.provider;
+            if harness.is_some() {
+                held.harness = harness;
+            }
+            if provider.is_some() {
+                held.provider = provider;
             }
             return;
         }
