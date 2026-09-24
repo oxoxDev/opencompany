@@ -88,5 +88,5 @@ to an operator must not label it with the other.
 
 | Concern | File |
 | --- | --- |
-| Iteration cap, stated on every built agent | `src/harness/build.rs` |
+| Iteration cap, stated on every built agent | `crates/opencompany-core/src/harness/built_in/build.rs` |
 | In-turn spend brake, installed per turn | `src/harness/mod.rs` |
