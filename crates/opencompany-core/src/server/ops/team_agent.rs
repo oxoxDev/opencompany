@@ -569,7 +569,7 @@ pub(super) fn agent_skills(
         company_available: company_enabled.to_vec(),
         overridden: record
             .agent_override(agent_id)
-            .is_some_and(|entry| entry.skills.is_some()),
+            .is_some_and(|entry| entry.skills.as_ref().is_some_and(Option::is_some)),
     }
 }
 
