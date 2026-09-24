@@ -60,6 +60,7 @@ fn the_other_sources_ignore_the_baseline_flag() {
 
 fn library_doc(version: &str, body: &str) -> SkillDoc {
     SkillDoc {
+        extra_frontmatter: Vec::new(),
         slug: "web-research".to_string(),
         name: "Web research".to_string(),
         description: "research a topic on the web".to_string(),

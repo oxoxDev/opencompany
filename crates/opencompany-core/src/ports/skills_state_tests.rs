@@ -30,6 +30,7 @@ fn a_row_stored_without_a_timestamp_reads_back_with_none() {
 #[test]
 fn an_absent_timestamp_is_left_out_of_the_serialized_row() {
     let state = SkillState {
+        install: None,
         slug: "web-research".to_string(),
         enabled: true,
         source: SkillSource::Registry,
@@ -50,6 +51,7 @@ fn an_absent_timestamp_is_left_out_of_the_serialized_row() {
 #[test]
 fn a_stamped_row_round_trips() {
     let state = SkillState {
+        install: None,
         slug: "my-skill".to_string(),
         enabled: true,
         source: SkillSource::Custom,

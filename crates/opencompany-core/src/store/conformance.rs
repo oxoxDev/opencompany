@@ -4315,6 +4315,7 @@ pub async fn assert_skill_state_store(skills: Arc<dyn SkillStateStore>) {
         .set(
             &alpha,
             &SkillState {
+                updated_at_millis: None,
                 slug: "pinned".to_string(),
                 enabled: true,
                 source: SkillSource::Registry,

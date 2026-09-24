@@ -198,6 +198,7 @@ async fn store(
         .map_err(Refusal::plain)?;
     let scan: ScanSummary = vet_skill(&read.slug, &read.doc, force).map_err(Refusal::from)?;
     let delta = SkillState {
+        install: None,
         slug: read.slug,
         enabled: true,
         source: SkillSource::Custom,

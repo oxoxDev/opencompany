@@ -321,6 +321,7 @@ async fn a_skill_stored_under_an_over_cap_slug_can_still_be_toggled() {
         .set(
             runtime.id(),
             &SkillState {
+                install: None,
                 slug: slug.clone(),
                 enabled: true,
                 source: SkillSource::Custom,

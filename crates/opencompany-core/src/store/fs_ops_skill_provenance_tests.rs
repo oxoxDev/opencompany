@@ -11,6 +11,7 @@ fn tmp_root() -> tempfile::TempDir {
 
 fn installed(slug: &str) -> SkillState {
     SkillState {
+        updated_at_millis: None,
         slug: slug.to_string(),
         enabled: true,
         source: SkillSource::Registry,
@@ -109,6 +110,7 @@ async fn a_row_without_provenance_writes_no_install_key() {
         &ops,
         &company,
         &SkillState {
+            updated_at_millis: None,
             slug: "toggle-only".to_string(),
             enabled: false,
             source: SkillSource::Company,
