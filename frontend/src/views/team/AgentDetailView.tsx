@@ -1576,6 +1576,11 @@ function Skills({
   const showingInherited = inherits && !touched;
   const draftSet = new Set(draft);
   const held = (slug: string) => (showingInherited ? true : draftSet.has(slug));
+  const stored = agent.skills.requested;
+  const unchanged =
+    stored === null
+      ? draft.length === available.length && available.every((slug) => draftSet.has(slug))
+      : stored.length === draft.length && stored.every((slug) => draftSet.has(slug));
   const dropped = (agent.skills.requested ?? []).filter(
     (slug) => !agent.skills.effective.includes(slug),
   );
@@ -1684,7 +1689,7 @@ function Skills({
             )}
             <Button
               size="sm"
-              disabled={saving || !touched}
+              disabled={saving || !touched || unchanged}
               onClick={() => {
                 // An empty draft is a deliberate no-skills scope, not a reset —
                 // that is the separate button above.

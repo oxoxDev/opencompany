@@ -203,3 +203,64 @@ describe("the dropped-slug line", () => {
     expect(container.querySelector('[data-testid="agent-skills-dropped"]')).toBeNull();
   });
 });
+
+describe("restoring a scope to what was already stored", () => {
+  it("offers no save once an inherited scope is flicked off and back on", async () => {
+    // `touched` stays set after the second flick, so a Save gated on it alone
+    // would write the enabled set out as an explicit list. That reads as a
+    // no-op on screen and is not one: the teammate stops inheriting, so every
+    // skill the company enables afterwards passes it by.
+    const updateAgent = vi.fn();
+    await show(clientFor(detail(), updateAgent));
+
+    await click("agent-skills-edit");
+    await click("agent-skill-toggle-invoicing");
+    await click("agent-skill-toggle-invoicing");
+    for (const slug of ENABLED) {
+      expect(switchIsOn(slug), `${slug} is back on`).toBe(true);
+    }
+
+    await click("agent-skills-save");
+    expect(
+      updateAgent,
+      "the scope on screen is the inherited one, so there is nothing to store",
+    ).not.toHaveBeenCalled();
+  });
+
+  it("offers no save once an explicit scope is flicked back to its stored shape", async () => {
+    const updateAgent = vi.fn();
+    await show(
+      clientFor(
+        detail({ requested: ["brand-voice"], effective: ["brand-voice"] }),
+        updateAgent,
+      ),
+    );
+
+    await click("agent-skills-edit");
+    await click("agent-skill-toggle-invoicing");
+    await click("agent-skill-toggle-invoicing");
+
+    await click("agent-skills-save");
+    expect(updateAgent).not.toHaveBeenCalled();
+  });
+
+  it("still offers the save when the flick lands somewhere else", async () => {
+    const updateAgent = vi.fn(
+      (_id: string, _body: { skills: string[] | null }, _scope: null) =>
+        Promise.resolve(detail()),
+    );
+    await show(clientFor(detail(), updateAgent));
+
+    await click("agent-skills-edit");
+    await click("agent-skill-toggle-invoicing");
+    await click("agent-skill-toggle-brand-voice");
+    await click("agent-skill-toggle-brand-voice");
+
+    await click("agent-skills-save");
+    const [, body] = updateAgent.mock.calls[0];
+    expect([...(body.skills ?? [])].sort(), "invoicing is the only one left off").toEqual([
+      "brand-voice",
+      "web-research",
+    ]);
+  });
+});
