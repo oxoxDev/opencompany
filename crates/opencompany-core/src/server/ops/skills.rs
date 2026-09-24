@@ -416,6 +416,7 @@ async fn install(
         enabled: true,
         source: SkillSource::Registry,
         custom_doc: Some(doc),
+        install: None,
     };
     company.runtime.skills().set(company.id(), &delta).await?;
     Ok(Json(InstalledSkill::from_state(&delta).with_scan(scan)))
@@ -498,6 +499,7 @@ async fn set_enabled(
             .map(|s| s.source)
             .unwrap_or(SkillSource::Company),
         custom_doc: existing.and_then(|s| s.custom_doc),
+        install: None,
     };
     company.runtime.skills().set(company.id(), &state).await?;
     Ok(Json(InstalledSkill::from_state(&state)))
@@ -532,6 +534,7 @@ async fn create_custom(
         enabled: true,
         source: SkillSource::Custom,
         custom_doc: Some(doc),
+        install: None,
     };
     company.runtime.skills().set(company.id(), &state).await?;
     Ok(Json(InstalledSkill::from_state(&state).with_scan(scan)))

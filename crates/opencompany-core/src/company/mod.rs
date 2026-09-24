@@ -125,6 +125,7 @@ pub mod search;
 pub mod setup;
 pub mod skill_effective;
 mod skill_file;
+pub mod skill_provenance;
 /// The scan every skill an operator did not write passes through, and the
 /// sanitizer that renders untrusted catalogue text as data. Always compiled:
 /// the write plane runs it on every install in every build, and the sanitizer
@@ -215,6 +216,7 @@ pub use skill_effective::{EffectiveSkill, SkillBody, SkillContent};
 pub use skill_file::{
     SkillDoc, load_catalog_skills, load_dir_skills, parse_skill_md, render_skill_md,
 };
+pub use skill_provenance::{SkillDrift, VersionChange, drift, skill_digest, trust_tier};
 pub use task_file::{TASKS_FILE, TaskSeed, has_task_file, load_dir_tasks};
 pub use types::{
     ACP_AGENTS, ACP_TRANSPORTS, AcpHarness, Agent, BRAIN_MODES, Brain, Budget, ChannelConfig,
