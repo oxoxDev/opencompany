@@ -67,7 +67,7 @@ export function UploadSkillDialog({
     }
   }
 
-  const blocked = rows.some((row) => !row.ok && row.error?.includes("content scan"));
+  const blocked = rows.some((row) => !row.ok && row.scanBlocked === true);
 
   return (
     <Dialog

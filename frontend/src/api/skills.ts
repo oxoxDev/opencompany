@@ -138,6 +138,12 @@ export interface SkillUploadRow {
   skill?: Skill & { scan?: SkillScan };
   /** Why this file was not stored. */
   error?: string;
+  /**
+   * Whether that refusal was a blocking scan verdict — the one refusal
+   * resending with `force` overrides. The host states it so the override is
+   * not offered on a match against the wording of `error`.
+   */
+  scanBlocked?: boolean;
 }
 
 /** Upload `.md` / `.zip` / `.skill` files as skills — one row back per file.
