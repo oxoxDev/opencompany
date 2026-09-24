@@ -381,3 +381,32 @@ async fn clearing_an_unrelated_field_leaves_a_manifest_teammates_scope_alone() {
         );
     }
 }
+
+/// A scope handed back to inherit is not an override any more.
+///
+/// `overridden` says whether an override is *currently setting* the scope, and
+/// the console renders it as such. A reset leaves the row in place holding the
+/// reset itself, so a predicate that only asks whether the field was ever
+/// written reports an override on a teammate that inherits — with `requested`
+/// null beside it saying the opposite.
+#[tokio::test]
+async fn a_scope_reset_stops_reporting_as_an_override() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), ROSTER).await;
+    let enabled = available(&state, "ceo").await;
+    let first = enabled[0].clone();
+
+    let (_, scoped) = patch_agent(&state, "ceo", json!({"skills": [first]})).await;
+    assert_eq!(scoped["skills"]["overridden"], true, "{scoped}");
+
+    let (_, reset) = patch_agent(&state, "ceo", json!({"skills": null})).await;
+    assert!(reset["skills"]["requested"].is_null(), "{reset}");
+    assert_eq!(
+        reset["skills"]["overridden"], false,
+        "an inherited scope is not an override, whatever the row still holds: {reset}"
+    );
+
+    // A deny-all is still very much an override — the two must not collapse.
+    let (_, denied) = patch_agent(&state, "ceo", json!({"skills": []})).await;
+    assert_eq!(denied["skills"]["overridden"], true, "{denied}");
+}
