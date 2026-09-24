@@ -344,14 +344,14 @@ fn hardcoded_credential(text: &str) -> Option<String> {
         }
     }
     for line in text.lines() {
-        let lowered = line.to_ascii_lowercase();
+        let Some((key, value)) = assignment(line) else {
+            continue;
+        };
+        let lowered = key.to_ascii_lowercase();
         let Some(name) = SECRET_KEY_NAMES
             .iter()
             .find(|name| lowered.contains(**name))
         else {
-            continue;
-        };
-        let Some(value) = assigned_value(line) else {
             continue;
         };
         if looks_like_secret(&value) {
@@ -362,15 +362,23 @@ fn hardcoded_credential(text: &str) -> Option<String> {
 }
 
 /// The right-hand side of the first `=` or `:` on a line, unquoted.
-fn assigned_value(line: &str) -> Option<String> {
+fn assignment(line: &str) -> Option<(&str, String)> {
     let split = line.find('=').into_iter().chain(line.find(':')).min()?;
+    // Only the last word of the left side names what is being assigned. Taking
+    // the whole of it reads a sentence that merely mentions a credential as if
+    // it were setting one: "Rotate the password yearly, see https://host/path"
+    // splits at `https:`, leaves a URL with no spaces in it as the value, and
+    // blocks a document that was documenting rather than leaking. Telling an
+    // operator where their own credential goes is the common case.
+    let key = line[..split].split_whitespace().next_back()?;
     let value = line[split + 1..].trim();
-    Some(
+    Some((
+        key,
         value
             .trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | ',' | ';'))
             .trim()
             .to_string(),
-    )
+    ))
 }
 
 /// Whether a value reads as a secret rather than a setting or a placeholder.

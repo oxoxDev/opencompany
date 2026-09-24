@@ -141,6 +141,12 @@ fn documenting_where_a_credential_goes_is_not_a_finding() {
         "client_secret = os.environ[\"CLIENT_SECRET\"]",
         "password: changeme-before-you-deploy",
         "The sk- prefix identifies an OpenAI key.",
+        // Prose that mentions a credential and ends in a link. The first `:`
+        // belongs to the URL scheme, so the value is a URL with no spaces in
+        // it and the sentence was read as an assignment to `password`.
+        "Rotate the password yearly, see https://wiki.acme.io/sec/pw2",
+        "Store the api_key somewhere safe: https://docs.acme.io/keys/rotate7",
+        "The client_secret is issued by the provider: https://acme.io/oauth2",
     ] {
         let mut doc = benign();
         doc.body = benign_line.to_string();
