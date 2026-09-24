@@ -79,6 +79,7 @@ fn a_disabled_global_is_listed_as_disabled_rather_than_hidden() {
             source: SkillSource::Company,
             custom_doc: None,
             install: None,
+            updated_at_millis: None,
         }],
     );
 
@@ -116,6 +117,7 @@ fn the_list_unions_bundles_with_deltas() {
             source: SkillSource::Company,
             custom_doc: None,
             install: None,
+            updated_at_millis: None,
         },
         SkillState {
             slug: "my-skill".to_string(),
@@ -125,6 +127,7 @@ fn the_list_unions_bundles_with_deltas() {
                 "---\nname: My Skill\ndescription: Does a thing\n---\n# body\n".to_string(),
             ),
             install: None,
+            updated_at_millis: None,
         },
     ];
 
@@ -179,6 +182,7 @@ fn the_rest_list_and_the_graphql_resolver_agree() {
             source: SkillSource::Company,
             custom_doc: None,
             install: None,
+                    updated_at_millis: None,
         },
         SkillState {
             slug: "onboard".to_string(),
@@ -189,6 +193,7 @@ fn the_rest_list_and_the_graphql_resolver_agree() {
                     .to_string(),
             ),
             install: None,
+                    updated_at_millis: None,
         },
     ];
 
@@ -239,6 +244,7 @@ fn the_rest_list_and_the_harness_effective_set_agree() {
             source: SkillSource::Company,
             custom_doc: None,
             install: None,
+            updated_at_millis: None,
         },
         SkillState {
             slug: "my-skill".to_string(),
@@ -248,6 +254,7 @@ fn the_rest_list_and_the_harness_effective_set_agree() {
                 "---\nname: My Skill\ndescription: Does a thing\n---\n# body\n".to_string(),
             ),
             install: None,
+            updated_at_millis: None,
         },
     ];
 

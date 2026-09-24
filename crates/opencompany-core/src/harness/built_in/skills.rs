@@ -271,11 +271,11 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> crate::Result<()> {
     Ok(())
 }
 
+#[path = "skills_catalogue_tests.rs"]
+mod catalogue_tests;
 #[cfg(test)]
 #[path = "skills_scope_tests.rs"]
 mod scope_tests;
-#[path = "skills_catalogue_tests.rs"]
-mod catalogue_tests;
 #[cfg(test)]
 #[path = "skills_tests.rs"]
 mod tests;

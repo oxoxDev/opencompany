@@ -211,6 +211,7 @@ async fn company_skills_project_the_pinned_snapshot_of_a_registry_install() {
                     source: crate::ports::skills_state::SkillSource::Registry,
                     custom_doc: Some(doc.to_string()),
                     install: None,
+                    updated_at_millis: None,
                 },
             )
             .await
