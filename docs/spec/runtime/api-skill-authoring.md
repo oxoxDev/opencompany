@@ -115,11 +115,21 @@ only answer `no_model`.
 ### The draft is scanned before it is shown
 
 The drafted document goes through the same validator and scan the save path
-runs. When the scan blocks it, `text` is withheld, `source` is `unavailable`
-and `reason` is `refused_by_scan`, with the findings in `scan`. The assistant
-must not be able to hand the operator a document that the Save button would
-then refuse, and a model writing a skill is untrusted text reaching a prompt
-like any other.
+runs. Either can withhold it, and `reason` says which did, because the two ask
+the operator for different things:
+
+| What happened | `reason` | What the console tells the operator |
+|---|---|---|
+| The scan blocked the document | `refused_by_scan` | Say it differently and try again — the findings are in `scan` |
+| The document did not validate | `unreadable` | Say more about what the skill is for, or write it by hand |
+
+In both cases `text` is withheld and `source` is `unavailable`. Reporting a
+validation failure as a scan refusal told the operator to reword a draft the
+scan had never objected to.
+
+The assistant must not be able to hand the operator a document that the Save
+button would then refuse, and a model writing a skill is untrusted text
+reaching a prompt like any other.
 
 ### Prompting
 
