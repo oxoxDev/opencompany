@@ -264,3 +264,27 @@ describe("restoring a scope to what was already stored", () => {
     ]);
   });
 });
+
+describe("the line shown when a teammate reads nothing", () => {
+  it("separates a scope the company disabled from a deliberately empty one", async () => {
+    await show(clientFor(detail({ requested: ["retired-playbook"], effective: [] })));
+    const text = node("agent-skills-empty").textContent ?? "";
+    expect(
+      text,
+      "the teammate asked for a skill, so calling its scope empty misreports what is stored",
+    ).not.toContain("explicit empty scope");
+    expect(text).toContain("none of the skills it asks for");
+  });
+
+  it("still calls a stored empty list what it is", async () => {
+    await show(clientFor(detail({ requested: [], effective: [] })));
+    expect(node("agent-skills-empty").textContent).toContain("explicit empty scope");
+  });
+
+  it("names the company when an inheriting teammate reads nothing", async () => {
+    await show(
+      clientFor(detail({ requested: null, companyAvailable: [], effective: [] })),
+    );
+    expect(node("agent-skills-empty").textContent).toContain("company has none enabled");
+  });
+});
