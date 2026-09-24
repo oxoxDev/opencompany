@@ -4406,15 +4406,31 @@ impl AgentOverride {
     /// persisting a row the console would render as "overridden" — the same
     /// contract [`PolicyOverride`] draws for its own absent fields.
     pub fn is_empty(&self) -> bool {
-        self.name.is_none()
-            && self.role.is_none()
-            && self.description.is_none()
-            && self.tools.is_none()
-            && self.instructions.is_none()
-            && self.avatar.is_none()
-            && self.model.is_none()
-            && self.harness.is_none()
-            && self.provider.is_none()
+        // Destructured, so a field added to the struct is a compile error here
+        // rather than one this predicate silently stops counting.
+        let Self {
+            agent_id: _,
+            name,
+            role,
+            description,
+            tools,
+            skills,
+            instructions,
+            avatar,
+            model,
+            harness,
+            provider,
+        } = self;
+        name.is_none()
+            && role.is_none()
+            && description.is_none()
+            && tools.is_none()
+            && skills.is_none()
+            && instructions.is_none()
+            && avatar.is_none()
+            && model.is_none()
+            && harness.is_none()
+            && provider.is_none()
     }
 }
 
@@ -6471,22 +6487,7 @@ impl CompanyRecord {
     /// whose continued existence would move the harness's overlay fingerprint
     /// for no change.
     fn retain_nonempty_agent_edits(&mut self) {
-        // Every field the override can carry, not just the ones it carried
-        // when this was written. A predicate that names a subset deletes rows
-        // that are still holding the fields it forgot — here, resetting a
-        // teammate's instructions would take their harness and model with it,
-        // silently reverting both to the blueprint.
-        self.overlay_agent_edits.retain(|entry| {
-            entry.name.is_some()
-                || entry.role.is_some()
-                || entry.description.is_some()
-                || entry.tools.is_some()
-                || entry.instructions.is_some()
-                || entry.avatar.is_some()
-                || entry.model.is_some()
-                || entry.harness.is_some()
-                || entry.provider.is_some()
-        });
+        self.overlay_agent_edits.retain(|entry| !entry.is_empty());
     }
 
     /// Whether `wid` is switched on (issue #276) — the single predicate the

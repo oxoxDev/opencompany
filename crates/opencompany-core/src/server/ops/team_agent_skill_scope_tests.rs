@@ -345,3 +345,39 @@ async fn a_manifest_teammates_scope_survives_every_later_write() {
     );
     assert_eq!(strings(&reset["skills"]["effective"]), enabled, "{reset}");
 }
+
+/// Clearing an unrelated field must not widen a teammate's reach.
+///
+/// A manifest teammate's scope lives on an override row shared with their
+/// avatar and instructions, and clearing either of those prunes the row when it
+/// is left carrying nothing. A prune predicate that does not count the scope
+/// therefore deletes a row that is still holding one — and because a missing
+/// scope reads as "inherit", the teammate silently widens to every enabled
+/// skill on an edit that was about their face.
+#[tokio::test]
+async fn clearing_an_unrelated_field_leaves_a_manifest_teammates_scope_alone() {
+    for clearing in ["avatar", "instructions"] {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        let enabled = available(&state, "ceo").await;
+        let first = enabled[0].clone();
+
+        let (status, scoped) = patch_agent(&state, "ceo", json!({"skills": [first.clone()]})).await;
+        assert_eq!(status, StatusCode::OK, "{scoped}");
+
+        let (status, cleared) = patch_agent(&state, "ceo", json!({clearing: null})).await;
+        assert_eq!(status, StatusCode::OK, "clearing {clearing}: {cleared}");
+
+        let (_, reread) = get_agent(&state, "ceo").await;
+        assert_eq!(
+            strings(&reread["skills"]["requested"]),
+            vec![first.clone()],
+            "clearing {clearing} must not drop the scope: {reread}"
+        );
+        assert_eq!(
+            strings(&reread["skills"]["effective"]),
+            vec![first],
+            "and must not widen what the teammate actually holds: {reread}"
+        );
+    }
+}
