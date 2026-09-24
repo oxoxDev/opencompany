@@ -319,6 +319,7 @@ async fn a_skill_stored_under_an_over_cap_slug_can_still_be_toggled() {
                     "---\nname: Long\ndescription: Stored before the cap existed.\n---\nBody.\n"
                         .to_string(),
                 ),
+                updated_at_millis: None,
             },
         )
         .await
