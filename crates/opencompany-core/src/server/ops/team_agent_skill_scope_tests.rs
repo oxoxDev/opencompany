@@ -286,3 +286,62 @@ async fn scoping_a_manifest_teammate_is_reported_as_an_override() {
         "{scoped}"
     );
 }
+
+/// The same four rows as the first test, but on a manifest teammate, whose
+/// scope is stored as an override row rather than on the teammate itself.
+///
+/// The first write creates that row and every later one merges into it, so the
+/// two halves are different code with the same promise, and only the merge can
+/// fail this way: a second write that returns `200` and changes nothing reads
+/// as saved until the page is reloaded. A single write cannot see it, which is
+/// why the transitions are walked here rather than asserted once.
+#[tokio::test]
+async fn a_manifest_teammates_scope_survives_every_later_write() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), ROSTER).await;
+    let enabled = available(&state, "ceo").await;
+    assert!(
+        enabled.len() >= 2,
+        "re-narrowing needs a second slug to move to: {enabled:?}"
+    );
+    let first = enabled[0].clone();
+    let second = enabled[1].clone();
+
+    let (status, scoped) = patch_agent(&state, "ceo", json!({"skills": [first.clone()]})).await;
+    assert_eq!(status, StatusCode::OK, "{scoped}");
+
+    // Re-narrow to a different slug. The stored row already exists by now.
+    let (status, moved) = patch_agent(&state, "ceo", json!({"skills": [second.clone()]})).await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    assert_eq!(
+        strings(&moved["skills"]["requested"]),
+        vec![second.clone()],
+        "the second write must replace the scope, not be dropped: {moved}"
+    );
+    let (_, reread) = get_agent(&state, "ceo").await;
+    assert_eq!(
+        strings(&reread["skills"]["requested"]),
+        vec![second],
+        "and it must be the stored record that moved, not the handler's answer: {reread}"
+    );
+
+    let (status, denied) = patch_agent(&state, "ceo", json!({"skills": []})).await;
+    assert_eq!(status, StatusCode::OK, "{denied}");
+    assert_eq!(
+        strings(&denied["skills"]["requested"]),
+        Vec::<String>::new(),
+        "{denied}"
+    );
+    assert!(
+        strings(&denied["skills"]["effective"]).is_empty(),
+        "{denied}"
+    );
+
+    let (status, reset) = patch_agent(&state, "ceo", json!({"skills": null})).await;
+    assert_eq!(status, StatusCode::OK, "{reset}");
+    assert!(
+        reset["skills"]["requested"].is_null(),
+        "an admin has to be able to hand the scope back to inherit: {reset}"
+    );
+    assert_eq!(strings(&reset["skills"]["effective"]), enabled, "{reset}");
+}
