@@ -803,7 +803,45 @@ export function buildTimelineItems(
   // renders. `sort` is stable in every engine this ships to, so equal `at`
   // keeps insertion order — messages first, then cards.
   const ordered = items.sort((a, b) => a.at - b.at);
-  return episodes.length === 0 ? ordered : groupEpisodes(ordered, episodes, decided);
+  const all = [...episodes, ...parkedOnlyEpisodes(episodes, approvals, decided)];
+  return all.length === 0 ? ordered : groupEpisodes(ordered, all, decided);
+}
+
+/**
+ * An open episode for each seat approval whose episode the rows and frames do
+ * not know, so a seat parked before any reply still gets its band and waiting
+ * marker after a reload.
+ */
+function parkedOnlyEpisodes(
+  episodes: Episode[],
+  approvals: ApprovalSummary[],
+  decided: Record<string, DecidedApproval>,
+): Episode[] {
+  const known = new Set(episodes.map((episode) => episode.id));
+  const minted = new Map<string, Episode>();
+  for (const approval of approvals) {
+    const ref = approval.episode;
+    if (!ref || known.has(ref.id) || decided[approval.id]) continue;
+    let episode = minted.get(ref.id);
+    if (!episode) {
+      episode = {
+        id: ref.id,
+        participants: [],
+        status: "open",
+        rounds: [{ episodeId: ref.id, revision: 0, status: "open", seats: [], messageIds: [] }],
+        messageIds: [],
+        openedAt: approval.at_millis,
+        roundCount: 0,
+        referrals: [],
+        conversations: [],
+        live: false,
+      };
+      minted.set(ref.id, episode);
+    }
+    if (!episode.participants.includes(ref.seat)) episode.participants.push(ref.seat);
+    episode.openedAt = Math.min(episode.openedAt ?? approval.at_millis, approval.at_millis);
+  }
+  return [...minted.values()];
 }
 
 /**

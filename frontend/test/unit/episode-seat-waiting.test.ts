@@ -122,4 +122,28 @@ describe("episode seat waiting on an approval", () => {
     expect(text).toBe("Waiting for approval — a teammate");
     for (const raw of ["ceo", "ep-1", "ap-1"]) expect(text).not.toContain(raw);
   });
+
+  it("keeps the band and marker after a reload for a seat that parked before any reply", () => {
+    const rows = ROWS.slice(0, 1);
+    const pending = approval({ id: "ap-9", at_millis: 15, episode: { id: "ep-2", seat: "engineer" } });
+    const list = buildTimelineItems(
+      buildTimeline(rows, CHANNEL, []),
+      [pending],
+      {},
+      foldEpisodes(rows, undefined, "engineering"),
+    );
+    const band = list.find((i): i is Extract<TimelineItem, { kind: "round" }> => i.kind === "round");
+    expect(band?.episode.id).toBe("ep-2");
+    expect(band?.items.map((i) => i.key)).toEqual(["approval:solo:ap-9"]);
+    expect(list.some((i) => i.kind === "approval")).toBe(false);
+    expect(waiting(list).map((w) => w.seats)).toEqual([[{ agentId: "engineer", approvalIds: ["ap-9"] }]]);
+
+    const decided = buildTimelineItems(
+      buildTimeline(rows, CHANNEL, []),
+      [pending],
+      { "ap-9": { verdict: "approve", approval: pending } },
+      foldEpisodes(rows, undefined, "engineering"),
+    );
+    expect(decided.some((i) => i.kind === "round" || i.kind === "episode_waiting")).toBe(false);
+  });
 });
