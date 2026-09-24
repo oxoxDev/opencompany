@@ -107,6 +107,25 @@ fn read_markdown(bytes: &[u8]) -> Result<UploadedSkill, String> {
 }
 
 /// Reads an archive that carries exactly one `SKILL.md` and nothing else.
+/// Whether an archive entry is macOS bookkeeping rather than skill content.
+///
+/// Right-clicking a folder and choosing Compress is how an operator on a Mac
+/// makes a skill archive, and Finder puts an `__MACOSX/` tree of AppleDouble
+/// sidecars beside the folder plus a `.DS_Store` inside it. Counting those
+/// makes the archive read as two top-level directories carrying bundled
+/// extras, so the upload is refused for a shape the operator cannot see and
+/// did not choose. They are dropped after the path and symlink checks, which
+/// still apply to every entry.
+fn is_mac_metadata(path: &str) -> bool {
+    let mut segments = path.split('/');
+    if segments.clone().any(|segment| segment == "__MACOSX") {
+        return true;
+    }
+    segments
+        .next_back()
+        .is_some_and(|name| name == ".DS_Store" || name.starts_with("._"))
+}
+
 fn read_archive(bytes: &[u8]) -> Result<UploadedSkill, String> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
         .map_err(|error| format!("that archive could not be read: {error}."))?;
@@ -148,6 +167,9 @@ fn read_archive(bytes: &[u8]) -> Result<UploadedSkill, String> {
                 "`{path}` in that archive is itself an archive. An uploaded skill is read one \
                  level deep."
             ));
+        }
+        if is_mac_metadata(&path) {
+            continue;
         }
         files.push(path);
     }

@@ -386,3 +386,63 @@ async fn a_stored_row_is_not_marked_scan_blocked() {
     assert_eq!(body["results"][0]["ok"], true, "{body}");
     assert_eq!(body["results"][0]["scanBlocked"], false, "{body}");
 }
+
+/// A folder compressed in Finder is still just the skill inside it.
+///
+/// Right-clicking a folder and choosing Compress is how an operator on a Mac
+/// makes one of these, and Finder adds an `__MACOSX/` tree of AppleDouble
+/// sidecars beside the folder and a `.DS_Store` inside it. Counted as content,
+/// that archive holds two top-level directories and bundled extras, and the
+/// upload was refused for a shape the operator never chose and cannot see from
+/// the Finder window.
+#[tokio::test]
+async fn a_folder_compressed_on_a_mac_is_stored_as_its_skill() {
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+
+    let zip = archive(&[
+        ("press-kit/SKILL.md", doc("Press Kit").as_bytes()),
+        ("__MACOSX/press-kit/._SKILL.md", b"\x00\x05\x16\x07"),
+        ("press-kit/.DS_Store", b"\x00\x00\x00\x01Bud1"),
+    ]);
+    let (status, body) = upload(
+        &state,
+        &[("press-kit.zip", &zip)],
+        false,
+        &fixed_cookie("acme"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["results"][0]["ok"], true,
+        "Finder's own bookkeeping must not read as a second directory or as bundled extras: {body}"
+    );
+    assert_eq!(body["results"][0]["skill"]["id"], "press-kit", "{body}");
+    assert_eq!(persisted_skills(&state).await.len(), 1, "{body}");
+}
+
+/// The sidecars are dropped, not trusted: an entry that climbs out of the
+/// archive is still refused even when it wears macOS metadata's name.
+#[tokio::test]
+async fn mac_metadata_does_not_excuse_a_path_that_climbs_out() {
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+
+    let zip = archive(&[
+        ("press-kit/SKILL.md", doc("Press Kit").as_bytes()),
+        ("__MACOSX/../../escape/._SKILL.md", b"\x00\x05\x16\x07"),
+    ]);
+    let (status, body) = upload(
+        &state,
+        &[("press-kit.zip", &zip)],
+        false,
+        &fixed_cookie("acme"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["results"][0]["ok"], false, "{body}");
+    assert!(
+        persisted_skills(&state).await.is_empty(),
+        "nothing should have been stored: {body}"
+    );
+}
