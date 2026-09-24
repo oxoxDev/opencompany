@@ -1710,7 +1710,9 @@ function Skills({
         <p className="text-sm text-muted-foreground" data-testid="agent-skills-empty">
           {inherits
             ? "This teammate reads no skills, because the company has none enabled."
-            : "This teammate reads no skills: it was given an explicit empty scope."}
+            : agent.skills.requested?.length === 0
+              ? "This teammate reads no skills: it was given an explicit empty scope."
+              : "This teammate reads no skills: the company has none of the skills it asks for enabled."}
         </p>
       ) : (
         <div className="flex flex-wrap gap-1.5" data-testid="agent-skills-effective">
