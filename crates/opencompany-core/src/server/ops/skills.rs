@@ -504,6 +504,7 @@ async fn set_enabled(
 }
 
 async fn create_custom(
+    State(state): State<AppState>,
     company: AdminScopedCompany,
     Json(body): Json<CreateSkill>,
 ) -> Result<Json<InstalledSkill>, ApiError> {
@@ -514,7 +515,10 @@ async fn create_custom(
     }
     let lock = write_lock(company.id());
     let _guard = lock.lock().await;
-    let slug = slugify(&body.name);
+    let slug = unique_slug(
+        &slugify(&body.name),
+        &taken_slugs(&state, &company.runtime).await?,
+    );
     let doc = skill_md(
         &body.name,
         &body.description,
@@ -581,6 +585,58 @@ fn slugify(name: &str) -> String {
     } else {
         trimmed
     }
+}
+
+/// Every slug the company already resolves — bundled, registry-installed and
+/// authored alike.
+///
+/// Authoring has to avoid all three, not just the stored deltas: a bundled
+/// skill has no delta row at all, so a check against the store alone would
+/// still let an authored skill take `web-research` from the bundle.
+async fn taken_slugs(
+    state: &AppState,
+    runtime: &crate::company::runtime::CompanyRuntime,
+) -> Result<std::collections::HashSet<String>, ApiError> {
+    let mut deltas = runtime.skills().list(runtime.id()).await?;
+    deltas.extend(skill_effective::globals_skill_disables(
+        &runtime.globals_disable().await?,
+    ));
+    let registry = state.shared_skill_registry()?;
+    Ok(
+        skill_effective::resolve(runtime.source_dir(), &registry, &deltas)?
+            .into_iter()
+            .map(|skill| skill.slug)
+            .collect(),
+    )
+}
+
+/// `base`, or the first free `base-2`, `base-3`, … within [`MAX_SLUG_CHARS`].
+///
+/// A slug is a store key and a directory name, and authoring derives it from a
+/// free-text display name, so two names can arrive at one slug: they differ
+/// only past the truncation point, or they contain no alphanumerics at all and
+/// both fall back to `skill`. Writing under a taken slug replaces whatever
+/// holds it — another authored skill, or a bundled document an agent reads —
+/// so the collision is resolved here rather than at the store.
+fn unique_slug(base: &str, taken: &std::collections::HashSet<String>) -> String {
+    if !taken.contains(base) {
+        return base.to_string();
+    }
+    for n in 2..=1000 {
+        let suffix = format!("-{n}");
+        let room = MAX_SLUG_CHARS.saturating_sub(suffix.chars().count());
+        let stem = base.chars().take(room).collect::<String>();
+        let stem = stem.trim_end_matches('-');
+        let candidate = if stem.is_empty() {
+            format!("skill{suffix}")
+        } else {
+            format!("{stem}{suffix}")
+        };
+        if !taken.contains(&candidate) {
+            return candidate;
+        }
+    }
+    format!("skill-{}", crate::ports::now_millis())
 }
 
 /// Turns a slug into a human title (`web-research` → `Web Research`).
