@@ -73,6 +73,21 @@ pub struct ValidSkill {
     /// Spec divergences worth reporting, none of which refused the document.
     pub deltas: Vec<SpecDelta>,
 }
+/// The half of [`validate_slug`] that is about safety rather than about size.
+///
+/// A slug is a path segment, and this is what keeps it one. The length cap is
+/// a rule about what authoring may *create*, so a route addressing a skill that
+/// already exists asks only this: a row stored before the cap was introduced is
+/// still a row its owner has to be able to reach.
+pub fn validate_slug_shape(slug: &str) -> Result<(), String> {
+    if !super::skill_effective::valid_slug(slug) {
+        return Err(format!(
+            "`{slug}` is not a valid skill slug. Skills live under `skills/<slug>/`, so a slug \
+             is `[a-z0-9][a-z0-9-]*`."
+        ));
+    }
+    Ok(())
+}
 
 /// Whether `slug` is one the product will accept: a safe directory name
 /// (`^[a-z0-9][a-z0-9-]*$`) within [`MAX_SLUG_CHARS`].
@@ -80,12 +95,7 @@ pub struct ValidSkill {
 /// Returns the operator-facing reason on refusal, so each caller can wrap it in
 /// its own error type without restating the rule.
 pub fn validate_slug(slug: &str) -> Result<(), String> {
-    if !super::skill_effective::valid_slug(slug) {
-        return Err(format!(
-            "`{slug}` is not a valid skill slug. Skills live under `skills/<slug>/`, so a slug \
-             is `[a-z0-9][a-z0-9-]*`."
-        ));
-    }
+    validate_slug_shape(slug)?;
     let length = slug.chars().count();
     if length > MAX_SLUG_CHARS {
         return Err(format!(

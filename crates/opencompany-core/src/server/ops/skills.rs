@@ -31,7 +31,9 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::company::skill_effective::{self, EffectiveSkill};
 use crate::company::skill_scan::{Verdict, scan_skill};
-use crate::company::skill_validate::{slugify, validate_skill_md, validate_slug};
+use crate::company::skill_validate::{
+    slugify, validate_skill_md, validate_slug, validate_slug_shape,
+};
 use crate::company::{SkillDoc, parse_skill_md, render_skill_md};
 use crate::error::OpenCompanyError;
 use crate::ports::skills_state::{SkillSource, SkillState};
@@ -520,7 +522,7 @@ async fn set_enabled(
     Path(SlugPath { slug }): Path<SlugPath>,
     Json(body): Json<SetEnabled>,
 ) -> Result<Json<InstalledSkill>, ApiError> {
-    if let Err(problem) = validate_slug(&slug) {
+    if let Err(problem) = validate_slug_shape(&slug) {
         return Err(ApiError(OpenCompanyError::InvalidRequest(problem)));
     }
     let lock = write_lock(company.id());

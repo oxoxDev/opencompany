@@ -286,3 +286,61 @@ async fn a_very_long_display_name_derives_a_slug_within_the_cap() {
         "the authored skill is manageable by its own id: {body}"
     );
 }
+
+/// A skill stored before the length cap existed can still be switched off.
+///
+/// The cap is a rule about what authoring may create; the toggle addresses a
+/// row that is already there. Enforcing it on the way in meant a custom skill
+/// authored under the uncapped slug — the only kind there was until this
+/// change — answered 400 to every enable and disable, leaving its owner no way
+/// to switch off a skill their agents were already reading.
+#[tokio::test]
+async fn a_skill_stored_under_an_over_cap_slug_can_still_be_toggled() {
+    use crate::company::skill_validate::MAX_SLUG_CHARS;
+    use crate::ports::skills_state::{SkillSource, SkillState};
+
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+
+    let slug = "a".repeat(MAX_SLUG_CHARS + 6);
+    let runtime = state
+        .registry()
+        .get(&crate::ports::types::CompanyId::new("acme"))
+        .expect("company");
+    runtime
+        .skills()
+        .set(
+            runtime.id(),
+            &SkillState {
+                slug: slug.clone(),
+                enabled: true,
+                source: SkillSource::Custom,
+                custom_doc: Some(
+                    "---\nname: Long\ndescription: Stored before the cap existed.\n---\nBody.\n"
+                        .to_string(),
+                ),
+            },
+        )
+        .await
+        .expect("seeded");
+
+    let (status, raw) = send(
+        &state,
+        "PUT",
+        &format!("/api/v1/company/skills/{slug}"),
+        Some(serde_json::json!({"enabled": false})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a row that already exists has to stay reachable: {raw}"
+    );
+
+    let stored = persisted_skills(&state).await;
+    let row = stored
+        .iter()
+        .find(|s| s.slug == slug)
+        .expect("the seeded skill is still there");
+    assert!(!row.enabled, "the toggle must have landed: {raw}");
+}
