@@ -206,3 +206,16 @@ fn the_console_counts_against_the_same_description_limit() {
          together."
     );
 }
+
+/// Every caller of `slugify`, not only `create_custom`, gets a slug off the
+/// reserved list.
+#[test]
+fn slugify_steps_off_every_reserved_slug() {
+    for name in ["Draft", "Upload", "Registry"] {
+        let slug = slugify(name);
+        assert!(
+            !RESERVED_SLUGS.contains(&slug.as_str()),
+            "slugify({name:?}) returned the reserved slug {slug:?}"
+        );
+    }
+}

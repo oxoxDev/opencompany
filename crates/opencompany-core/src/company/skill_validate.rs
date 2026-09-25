@@ -208,6 +208,8 @@ pub fn slugify(name: &str) -> String {
     let trimmed = capped.trim_matches('-').to_string();
     if trimmed.is_empty() {
         "skill".to_string()
+    } else if RESERVED_SLUGS.contains(&trimmed.as_str()) {
+        format!("{trimmed}-2")
     } else {
         trimmed
     }
