@@ -35,6 +35,7 @@ function clientWith(options: {
 }): OpenCompanyClient {
   return {
     scopeFor: () => "/api/v1/companies/acme",
+    listTeam: () => Promise.resolve([]),
     get: (path: string) => {
       if (path.endsWith("/auth/me")) {
         return Promise.resolve({

@@ -53,6 +53,7 @@ function clientAs(opts: {
   const role = opts.role ?? "admin";
   return {
     scopeFor: () => "/api/v1/companies/acme",
+    listTeam: () => Promise.resolve([]),
     get: (path: string) => {
       if (path.includes("/skills/registry")) return Promise.resolve([REGISTRY]);
       if (path.endsWith("/auth/me"))

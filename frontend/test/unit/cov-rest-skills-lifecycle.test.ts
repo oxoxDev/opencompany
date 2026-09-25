@@ -40,6 +40,7 @@ function clientWith(opts: { skills: Skill[]; post?: (path: string) => Promise<un
   const post = vi.fn(opts.post ?? (() => Promise.resolve(undefined)));
   return {
     scopeFor: () => "/api/v1/company/acme",
+    listTeam: () => Promise.resolve([]),
     get: vi.fn((path: string) => {
       if (path.endsWith("/skills")) return Promise.resolve(opts.skills);
       if (path.endsWith("/skills/registry")) return Promise.resolve([]);
