@@ -24,6 +24,7 @@ import {
 import { toolkitSlug } from "@/lib/connections";
 import { mcpProvenanceNote, mcpRemovalNote } from "@/lib/mcp-registry";
 import { accountSummary, tallyAccounts } from "@/lib/provider-grid";
+import { McpToolPermissions } from "@/views/mcp/McpToolPermissions";
 import type { GridProvider } from "@/lib/provider-grid";
 
 /**
@@ -49,7 +50,10 @@ export type ConnectionSubject =
        */
       noCredential: boolean;
       onConnectAnother: (provider: GridProvider) => void;
-      onDisconnectAccount: (provider: GridProvider, account: ComposioConnectedAccount) => void;
+      onDisconnectAccount: (
+        provider: GridProvider,
+        account: ComposioConnectedAccount,
+      ) => void;
     }
   | {
       kind: "mcp";
@@ -61,6 +65,10 @@ export type ConnectionSubject =
        * panel's, not a detail — see `mcpStanding`.
        */
       health: McpHealth | undefined;
+      /** Bumped when a probe re-ran, so the permissions read is not stale. */
+      reloadKey: number;
+      /** Opened on the permissions section rather than the top of the panel. */
+      focusPermissions: boolean;
     };
 
 interface Props {
@@ -144,7 +152,14 @@ const USAGE_RANGE = "30d";
  * connected natively and offered by Composio — one connection object, one
  * inert secret beside it.
  */
-export function ProviderDetail({ client, company, subject, canManage, busy, onClose }: Props) {
+export function ProviderDetail({
+  client,
+  company,
+  subject,
+  canManage,
+  busy,
+  onClose,
+}: Props) {
   // The `byProvider` key this subject's calls land on. `null` for a closed
   // panel, and — unreachably, since the host rejects an unnamed server — for an
   // MCP server whose name normalizes away; the MCP arm renders that case rather
@@ -183,7 +198,8 @@ export function ProviderDetail({ client, company, subject, canManage, busy, onCl
       // is the honest render — not a zero, which claims the calls were counted
       // and there were none.
       .catch(() => {
-        if (alive) setLoaded({ key: usageKey, load: "unavailable", calls: null });
+        if (alive)
+          setLoaded({ key: usageKey, load: "unavailable", calls: null });
       });
     return () => {
       alive = false;
@@ -199,12 +215,23 @@ export function ProviderDetail({ client, company, subject, canManage, busy, onCl
 
   return (
     <Sheet open={subject !== null} onOpenChange={(next) => !next && onClose()}>
-      <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-md">
+      <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-lg">
         {subject?.kind === "composio" && (
-          <ComposioBody subject={subject} canManage={canManage} busy={busy} usage={usage} />
+          <ComposioBody
+            subject={subject}
+            canManage={canManage}
+            busy={busy}
+            usage={usage}
+          />
         )}
         {subject?.kind === "mcp" && (
-          <McpBody subject={subject} canManage={canManage} usage={usage} />
+          <McpBody
+            client={client}
+            company={company}
+            subject={subject}
+            canManage={canManage}
+            usage={usage}
+          />
         )}
       </SheetContent>
     </Sheet>
@@ -228,21 +255,33 @@ interface Usage {
  * endpoint, and a single generic line would be vague in the Composio case and
  * wrong in the MCP one.
  */
-function UsageSection({ usage, perConnection }: { usage: Usage; perConnection: string }) {
+function UsageSection({
+  usage,
+  perConnection,
+}: {
+  usage: Usage;
+  perConnection: string;
+}) {
   return (
-    <section className="space-y-1" aria-label="Usage" data-testid="connection-detail-usage">
-      <h4 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">Usage</h4>
+    <section
+      className="space-y-1"
+      aria-label="Usage"
+      data-testid="connection-detail-usage"
+    >
+      <h4 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+        Usage
+      </h4>
       {usage.key === null ? (
         <p className="text-xs text-muted-foreground">
-          This connection has no name to count calls against, so what has gone through it is not
-          attributable here.
+          This connection has no name to count calls against, so what has gone
+          through it is not attributable here.
         </p>
       ) : usage.load === "loading" ? (
         <p className="text-xs text-muted-foreground">Reading usage…</p>
       ) : usage.load === "unavailable" ? (
         <p className="text-xs text-muted-foreground">
-          This host does not report usage, so what has gone through this connection is not recorded
-          here.
+          This host does not report usage, so what has gone through this
+          connection is not recorded here.
         </p>
       ) : (
         <>
@@ -269,7 +308,8 @@ function ComposioBody({
   busy: boolean;
   usage: Usage;
 }) {
-  const { provider, noCredential, onConnectAnother, onDisconnectAccount } = subject;
+  const { provider, noCredential, onConnectAnother, onDisconnectAccount } =
+    subject;
   const accounts = provider.accounts ?? [];
   // Counted through the shared rule so this panel, the tile that opened it,
   // and the summary line above all mean one thing by "connected" (issue #923).
@@ -315,8 +355,8 @@ function ComposioBody({
                   provider that has never been connected is a third. The empty
                   case says which of them this is rather than "not connected",
                   which would cover all three. */}
-              No Composio account is connected for {provider.label}, so its agents have none of
-              its tools.
+              No Composio account is connected for {provider.label}, so its
+              agents have none of its tools.
             </p>
           )}
         </section>
@@ -330,10 +370,12 @@ function ComposioBody({
           <p className="flex items-start gap-2 rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
             <AlertTriangle className="mt-px size-3 shrink-0" />
             <span>
-              Holding several accounts is fine — they are the company&apos;s, and every agent
-              works through them. Which one an agent acts as is set under{" "}
-              <span className="font-medium">Which account agents act as</span> on the Connections
-              page; until one is chosen, Composio resolves it for the company as it always has.
+              Holding several accounts is fine — they are the company&apos;s,
+              and every agent works through them. Which one an agent acts as is
+              set under{" "}
+              <span className="font-medium">Which account agents act as</span>{" "}
+              on the Connections page; until one is chosen, Composio resolves it
+              for the company as it always has.
             </span>
           </p>
         )}
@@ -342,9 +384,9 @@ function ComposioBody({
           <p className="flex items-start gap-2 rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
             <AlertTriangle className="mt-px size-3 shrink-0" />
             <span>
-              This company also stores a self-hosted OAuth credential for {provider.label}. No
-              agent reads it (issue #396), it is not what the accounts above are, and
-              disconnecting here does not touch it.
+              This company also stores a self-hosted OAuth credential for{" "}
+              {provider.label}. No agent reads it (issue #396), it is not what
+              the accounts above are, and disconnecting here does not touch it.
             </span>
           </p>
         )}
@@ -354,7 +396,8 @@ function ComposioBody({
             open mode this panel opens over a catalog of 123 providers that have
             never been touched. A non-zero count on a disconnected provider is
             the opposite — it is the interesting case, so it stays. */}
-        {(provider.connected || (usage.load === "ready" && (usage.calls ?? 0) > 0)) && (
+        {(provider.connected ||
+          (usage.load === "ready" && (usage.calls ?? 0) > 0)) && (
           <>
             <Separator />
             <UsageSection
@@ -376,20 +419,24 @@ function ComposioBody({
                 data-testid="provider-detail-connect-another"
               >
                 <LogIn className="size-4" />
-                {accounts.length === 0 ? "Connect an account" : "Connect another account"}
+                {accounts.length === 0
+                  ? "Connect an account"
+                  : "Connect another account"}
               </Button>
               {noCredential && (
                 <p className="text-xs text-muted-foreground">
-                  There is no credential for this company to authorize against yet, so a sign-in has
-                  nothing to present. Set the company&apos;s TinyHumans credential on the Connections
-                  page first.
+                  There is no credential for this company to authorize against
+                  yet, so a sign-in has nothing to present. Set the
+                  company&apos;s TinyHumans credential on the Connections page
+                  first.
                 </p>
               )}
               {accounts.length > 0 && (
                 <p className="text-xs text-muted-foreground">
-                  Disconnecting removes the connection at Composio, so agents lose these tools on
-                  their next turn. It does not sign the company out of {provider.label}, and it does
-                  not delete anything there.
+                  Disconnecting removes the connection at Composio, so agents
+                  lose these tools on their next turn. It does not sign the
+                  company out of {provider.label}, and it does not delete
+                  anything there.
                 </p>
               )}
             </section>
@@ -407,23 +454,23 @@ function ComposioBody({
 }
 
 /**
- * A remote MCP server (issue #821).
- *
- * Read-only, deliberately: the enable toggle, Test, Tools and Remove stay on
- * the list behind this panel until the panel is proven. What the panel adds is
- * the answer the list cannot give — what this server *is*, what has gone
- * through it, and what removing it would and would not reach.
+ * A remote MCP server: what it is, what it may do, what has gone through it,
+ * and what removing it would and would not reach.
  */
 function McpBody({
+  client,
+  company,
   subject,
   canManage,
   usage,
 }: {
+  client: OpenCompanyClient;
+  company: string | null;
   subject: Extract<ConnectionSubject, { kind: "mcp" }>;
   canManage: boolean;
   usage: Usage;
 }) {
-  const { server, health } = subject;
+  const { server, health, reloadKey, focusPermissions } = subject;
   const standing = mcpStanding(server, health);
   const probedAt = probedOn(health?.checkedAtMillis);
 
@@ -456,10 +503,16 @@ function McpBody({
               against everything-else, which told an operator that a directory
               install "was added from the console and lives in this company's
               runtime store" — true of neither half of it. */}
-          <p className="text-xs text-muted-foreground" data-testid="mcp-detail-provenance">
+          <p
+            className="text-xs text-muted-foreground"
+            data-testid="mcp-detail-provenance"
+          >
             {mcpProvenanceNote(server.source)}
           </p>
-          <p className="text-xs text-muted-foreground" data-testid="mcp-detail-probe">
+          <p
+            className="text-xs text-muted-foreground"
+            data-testid="mcp-detail-probe"
+          >
             {standing.probe}
             {probedAt !== null && ` · ${probedAt}`}
           </p>
@@ -469,7 +522,10 @@ function McpBody({
           {health && health.status !== "ok" && health.message && (
             <p className="text-xs text-muted-foreground">{health.message}</p>
           )}
-          <p className="text-xs text-muted-foreground" data-testid="mcp-detail-connected-on">
+          <p
+            className="text-xs text-muted-foreground"
+            data-testid="mcp-detail-connected-on"
+          >
             {/* The same answer the native path gets, for the same reason: there
                 is no connect to record. Said rather than left blank, which
                 reads as "never". */}
@@ -484,9 +540,10 @@ function McpBody({
           <p className="flex items-start gap-2 rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
             <AlertTriangle className="mt-px size-3 shrink-0" />
             <span>
-              This server is turned off, so no agent receives its tools whatever their grants say
-              and whatever the endpoint answers. Its configuration and any stored credential survive
-              — turning it back on restores its tools on the next turn.
+              This server is turned off, so no agent receives its tools whatever
+              their grants say and whatever the endpoint answers. Its
+              configuration and any stored credential survive — turning it back
+              on restores its tools on the next turn.
             </span>
           </p>
         )}
@@ -509,8 +566,8 @@ function McpBody({
                 <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
                 <span>
                   No agent can reach this server — no tool grant covers{" "}
-                  <code className="font-mono">mcp:{server.name}</code>. Whatever usage says below
-                  happened before that was true.
+                  <code className="font-mono">mcp:{server.name}</code>. Whatever
+                  usage says below happened before that was true.
                 </span>
               </>
             ) : (
@@ -527,6 +584,19 @@ function McpBody({
 
         <Separator />
 
+        <section aria-label="Tool permissions">
+          <McpToolPermissions
+            client={client}
+            company={company}
+            server={server}
+            canManage={canManage}
+            reloadKey={reloadKey}
+            focus={focusPermissions}
+          />
+        </section>
+
+        <Separator />
+
         <UsageSection
           usage={usage}
           perConnection={`Successful tool calls your agents made through ${server.name}, counted under mcp:${server.name.trim().toLowerCase()} so a Composio provider of the same name cannot be read as this one.`}
@@ -538,9 +608,12 @@ function McpBody({
           <h4 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
             What a disconnect reaches
           </h4>
-          <p className="text-xs text-muted-foreground" data-testid="mcp-detail-disconnect-scope">
-            {mcpRemovalNote(server.source)}{" "}
-            Nothing is revoked at the server&apos;s own end: no token it issued is invalidated and no
+          <p
+            className="text-xs text-muted-foreground"
+            data-testid="mcp-detail-disconnect-scope"
+          >
+            {mcpRemovalNote(server.source)} Nothing is revoked at the
+            server&apos;s own end: no token it issued is invalidated and no
             session there is closed. Revoke those where they were issued.
           </p>
           {canManage ? (
@@ -602,7 +675,11 @@ function AccountRow({
           onClick={onDisconnect}
           aria-label={`Disconnect ${account.account ?? account.id}`}
         >
-          {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Unplug className="size-3.5" />}
+          {busy ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <Unplug className="size-3.5" />
+          )}
           Disconnect
         </Button>
       )}
