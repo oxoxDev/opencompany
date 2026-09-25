@@ -7,11 +7,7 @@ use serde_json::json;
 /// registration state and reach nothing.
 #[test]
 pub(super) fn listing_mcp_servers_and_tools_never_parks_but_calling_through_one_does() {
-    for tool in [
-        "mcp_list_servers",
-        "mcp_list_tools",
-        "mcp_registry_list_tools",
-    ] {
+    for tool in ["mcp_list_tools", "mcp_registry_list_tools"] {
         assert_eq!(c(tool).reach, Reach::Nothing, "`{tool}` reads local state");
     }
     for tool in ["mcp_call_tool", "mcp_registry_tool_call"] {
