@@ -202,7 +202,7 @@ fn the_rest_list_and_the_graphql_resolver_agree() {
         .iter()
         .map(|skill| InstalledSkill::from_effective(skill, &[]))
         .collect();
-    let gql = crate::server::graphql::skills::project(&effective, &[]);
+    let gql = crate::server::graphql::skills::project(&effective, &[], &[]);
 
     assert_eq!(rest.len(), gql.len());
     for (rest, gql) in rest.iter().zip(gql.iter()) {

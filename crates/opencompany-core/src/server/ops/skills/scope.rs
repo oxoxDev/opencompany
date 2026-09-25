@@ -10,7 +10,7 @@
 
 use crate::company::runtime::CompanyRuntime;
 use crate::company::skill_scope::{AgentSkillScope, SkillAgentScope};
-use crate::server::error::ApiError;
+use crate::error::Result;
 
 use super::InstalledSkill;
 
@@ -45,9 +45,11 @@ impl InstalledSkill {
 ///
 /// A company with no persisted record yet answers with no agents, the same
 /// soft-fail `GET {scope}/team` uses rather than a 404.
-pub(super) async fn roster_scopes(
-    runtime: &CompanyRuntime,
-) -> Result<Vec<AgentSkillScope>, ApiError> {
+///
+/// Errors in the crate's own vocabulary rather than a transport's, because the
+/// GraphQL resolver reads through here too — a second copy of this loop is how
+/// one transport comes to report a scope the other does not.
+pub(crate) async fn roster_scopes(runtime: &CompanyRuntime) -> Result<Vec<AgentSkillScope>> {
     let Some(record) = runtime.store().load(runtime.id()).await? else {
         return Ok(Vec::new());
     };
