@@ -17,6 +17,8 @@ import { describe, expect, it } from "vitest";
 const detail = readFileSync("src/views/team/AgentDetailView.tsx", "utf8");
 const session = readFileSync("src/views/team/AgentSession.tsx", "utf8");
 const client = readFileSync("src/api/client.ts", "utf8");
+const team = readFileSync("src/views/TeamView.tsx", "utf8");
+const shell = readFileSync("src/components/app-shell.tsx", "utf8");
 
 describe("the Session tab", () => {
   /**
@@ -84,7 +86,9 @@ describe("the Session tab", () => {
       "<ReferralConversation crossing={message.referralConversation} rowId={message.id} />",
     );
     expect(session).toContain('from "@/components/episode/UtteranceChip"');
-    expect(session).toContain("<UtteranceChip episode={message.episode} audience={message.audience} />");
+    expect(session).toContain(
+      "<UtteranceChip episode={message.episode} audience={message.audience} agentNames={agentNames} />",
+    );
     expect(session).not.toContain("asideConversation");
     expect(session).toContain("<StepTimeline steps={message.steps} />");
   });
@@ -94,6 +98,27 @@ describe("the Session tab", () => {
    * unreadable: two teammates answering in two desks interleave with nothing to
    * tell them apart, which is the one thing merging the channels costs.
    */
+  it("threads the roster's names from the shell down to the utterance chip", () => {
+    expect(shell).toMatch(/<TeamView[\s\S]*?agentNames=\{agentNames\}/);
+    // `TeamView` overlays the shell's roster snapshot with its own `members`
+    // state, so a rename saved on the detail page shows up immediately rather
+    // than waiting for the shell's next company-switch refetch.
+    expect(team).toMatch(/<AgentDetailView[\s\S]*?agentNames=\{currentAgentNames\}/);
+    expect(detail).toMatch(/<AgentSession[\s\S]*?agentNames=\{agentNames\}/);
+    expect(session).toContain("<SessionRow key={line.message.id} line={line} agentId={agentId} agentNames={agentNames} />");
+  });
+
+  /**
+   * A rename saved on the detail page must reach the chips this same view
+   * feeds, without waiting for the shell's roster refetch — the gap
+   * CodeRabbit flagged on PR #2469.
+   */
+  it("folds a saved rename back into TeamView's own roster map", () => {
+    expect(team).toContain("onAgentNameChange");
+    expect(team).toContain("member.id === agentId ? { ...member, name } : member");
+    expect(detail).toContain("onAgentNameChange?.(agentId, updated.name?.trim() || updated.role)");
+  });
+
   it("badges every row with the channel the host stamped", () => {
     expect(session).toContain("sessionChannel");
     expect(session).toContain('data-testid="agent-session-channel"');

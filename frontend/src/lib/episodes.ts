@@ -27,13 +27,102 @@ import type { RoutingPlanDto, UtteranceKind } from "@/api/types";
 import { hostMessageId, type ChatMessage } from "@/lib/chat";
 import {
   episodesOf,
+  type ConversationRecord,
   type EpisodeFrames,
   type EpisodeReferral,
   type EpisodeState,
   type SeatStatus,
 } from "@/lib/episode-frames";
 
-export type { SeatStatus } from "@/lib/episode-frames";
+export type { ConversationRecord, SeatStatus } from "@/lib/episode-frames";
+
+/**
+ * Waves this desk ran, which is not every wave the episode took.
+ *
+ * A seat that steps aside to ask another one runs its turns in the pair
+ * channel, and those take revisions of their own -- as does the row the
+ * library posts to conclude one. Counting them bills a private exchange to
+ * the desk's own round count, which is how a desk that ran two rounds came
+ * to sit under a band numbered 17.
+ *
+ * The host's `roundCount` is the library's raw wave total and counts them
+ * all, so it is deliberately NOT the fallback here: taking it whenever it was
+ * set is what let the band and the completion marker print different numbers
+ * for one episode. One definition, used by both.
+ */
+export function deskRounds(episode: Episode): number {
+  // Nothing folded: a transcript read back without round frames knows only
+  // what the host counted, and that is better than claiming none ran.
+  if (episode.rounds.length === 0) return episode.roundCount ?? 0;
+  return episode.rounds.filter(
+    (round) => !round.seats.length || !round.seats.every((seat) => seat.utterance?.kind === "dm"),
+  ).length;
+}
+
+/**
+ * The transcript with each episode's live exchanges attached to the row that
+ * provoked them.
+ *
+ * The host attaches the same thing on a reload, out of the pair channel it
+ * can read. Live it cannot: the console is watching a stream, the exchange's
+ * rows are in a channel this desk never shows, and until they are folded back
+ * onto a row the widget has nothing to render. That is why an exchange used
+ * to appear only at its start and again at its end -- both were reloads.
+ *
+ * The host's copy wins where both exist: it is the settled one, read back
+ * from the journal rather than assembled from whatever frames this session
+ * happened to see.
+ */
+export function withLiveExchanges(messages: ChatMessage[], episodes: Episode[]): ChatMessage[] {
+  const byRow = new Map<string, ConversationRecord[]>();
+  for (const episode of episodes) {
+    for (const conversation of episode.conversations) {
+      if (conversation.anchorId === undefined || conversation.lines.length === 0) continue;
+      const id = hostMessageId(String(conversation.anchorId));
+      byRow.set(id, [...(byRow.get(id) ?? []), conversation]);
+    }
+  }
+  if (byRow.size === 0) return messages;
+  // **What the host has already placed, anywhere in the transcript.**
+  //
+  // The two anchor differently on purpose: the host hangs a concluded
+  // exchange on the asker's report, which is where the answer comes home,
+  // and live there is no report yet -- so it hangs on the row that sent the
+  // seats aside. Deduplicating per row therefore missed it entirely and drew
+  // the same exchange twice, on two different rows, the moment it concluded.
+  const placed = new Set(
+    messages.flatMap((message) =>
+      (message.agentConversations ?? []).map((one) => String(one.root)),
+    ),
+  );
+  return messages.map((message) => {
+    const live = byRow.get(message.id);
+    if (!live) return message;
+    const settled = message.agentConversations ?? [];
+    const missing = live.filter((one) => !placed.has(String(one.root)));
+    if (missing.length === 0) return message;
+    return {
+      ...message,
+      agentConversations: [
+        ...settled,
+        ...missing.map((one) => ({
+          root: one.root,
+          askerId: one.asker,
+          askeeId: one.askee,
+          conversationId: one.conversationId,
+          concluded: one.endedAtMillis !== undefined,
+          forced: one.forced ?? false,
+          lines: one.lines.map((line) => ({
+            authorId: line.authorId,
+            authorLabel: line.outbound ? "" : one.askee,
+            text: line.text,
+            outbound: line.outbound,
+          })),
+        })),
+      ],
+    };
+  });
+}
 
 /** One seat of a round: who, what they are doing, and what they said. */
 export interface EpisodeSeat {
@@ -80,8 +169,15 @@ export interface Episode {
   /** Rounds the host counted, else the rounds seen here. */
   roundCount: number;
   referrals: EpisodeReferral[];
+  /** The private exchanges this episode opened, oldest first.
+   *
+   * Only the frames carry these: a conversation's own rows are in the pair
+   * channel, so a fold over this desk's transcript alone never sees them. */
+  conversations: ConversationRecord[];
   /** Whether any part of it came from live frames rather than rows alone. */
   live: boolean;
+  /** Seats the frames say are parked on the operator. Only the frames carry these. */
+  waiting?: { agentId: string; approvalIds: string[] }[];
 }
 
 interface Bucket {
@@ -117,6 +213,7 @@ export function foldEpisodes(
           messageIds: [],
           roundCount: 0,
           referrals: [],
+          conversations: [],
           live: false,
         },
         rounds: new Map(),
@@ -212,6 +309,13 @@ function layerFrames(bucket: Bucket, state: EpisodeState): void {
   }
   episode.openedAt = state.openedAtMillis ?? episode.openedAt;
   episode.referrals = state.referrals;
+  episode.conversations = Object.values(state.conversations).sort(
+    (one, two) => one.root - two.root,
+  );
+  episode.waiting = Object.values(state.parked).map(({ agentId, approvalIds }) => ({
+    agentId,
+    approvalIds,
+  }));
   if (state.status === "completed") {
     episode.status = "completed";
     episode.completedAt = state.completedAtMillis ?? episode.completedAt;

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Cpu,
   MessageSquare,
@@ -56,6 +56,8 @@ interface Props {
    * agent, refresh onto it, and use Back (issue #264).
    */
   sub: string | null;
+  /** Roster id to display name, for the teammates an agent's session mentions. */
+  agentNames?: Readonly<Record<string, string>>;
   /**
    * Open an agent, or return to the roster with `null`.
    *
@@ -101,6 +103,7 @@ export function TeamView({
   client,
   company,
   sub,
+  agentNames,
   onOpenAgent,
   refreshKey,
   onRunSetup,
@@ -125,6 +128,33 @@ export function TeamView({
    */
   const [hostEmpty, setHostEmpty] = useState(false);
   const [members, setMembers] = useState<TeamMember[]>([]);
+  /**
+   * `agentNames` is the shell's roster snapshot, re-fetched on company switch
+   * rather than on every rename — so a save on the detail page below would
+   * otherwise show the old name in every chip that resolves through it until
+   * the operator changes company. Overlaid with this view's own `members`,
+   * which {@link onAgentNameChange} keeps current the moment a save lands,
+   * and then with `nameOverrides` for a rename on an agent `members` doesn't
+   * hold: `#/team/<agentId>` is unvalidated (the detail page resolves it
+   * against the host directly), so an operator can rename an agent this
+   * view's own roster read omitted or hasn't returned yet, and a `members`-only
+   * update would silently no-op.
+   */
+  const [nameOverrides, setNameOverrides] = useState<Readonly<Record<string, string>>>({});
+  const currentAgentNames = useMemo(
+    () => ({
+      ...agentNames,
+      ...Object.fromEntries(members.map((member) => [member.id, member.name])),
+      ...nameOverrides,
+    }),
+    [agentNames, members, nameOverrides],
+  );
+  const onAgentNameChange = useCallback((agentId: string, name: string) => {
+    setMembers((current) =>
+      current.map((member) => (member.id === agentId ? { ...member, name } : member)),
+    );
+    setNameOverrides((current) => ({ ...current, [agentId]: name }));
+  }, []);
   /**
    * Ids of rows this console appended itself, because the host has no team
    * write plane (`addMember`'s 404 branch below).
@@ -245,6 +275,10 @@ export function TeamView({
     // `null` state exists to prevent.
     setWorkload(tasks && columns?.length ? workloadByAssignee(tasks, columns) : null);
   }, [client, company]);
+
+  useEffect(() => {
+    setNameOverrides({});
+  }, [company]);
 
   useEffect(() => {
     setLoad("loading");
@@ -431,6 +465,8 @@ export function TeamView({
         client={client}
         company={company}
         agentId={sub}
+        agentNames={currentAgentNames}
+        onAgentNameChange={onAgentNameChange}
         onBack={() => onOpenAgent(null)}
       />
     );

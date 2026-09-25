@@ -166,12 +166,118 @@ test("an admin adds and removes a runtime MCP server", async ({ page }) => {
     expect((body as { name: string }[]).map((server) => server.name)).toContain(name);
 
     await row.getByRole("button", { name: `Remove ${name}` }).click();
+
+    // Removing takes the stored credential with it, so the trash asks first.
+    // The row has to survive the question, or the confirmation is decorative.
+    const confirm = page.getByRole("alertdialog");
+    await expect(confirm).toContainText(`Remove ${name}?`);
+    await expect(row).toHaveCount(1);
+    await confirm.getByRole("button", { name: "Remove", exact: true }).click();
+
     await expect(row).toHaveCount(0, { timeout: 15_000 });
 
     expect(pageErrors, `the page threw: ${pageErrors.join(" | ")}`).toEqual([]);
   } finally {
     // Best-effort: a teardown that throws would replace the real failure with
     // its own, and the thing it is cleaning up is test residue either way.
+    await page.request
+      .delete(`/api/v1/company/mcp/servers/${encodeURIComponent(name)}`)
+      .catch(() => undefined);
+  }
+});
+
+test("the permissions panel reads a tier as set or unset, and says what is never sent", async ({
+  page,
+}) => {
+  // Issue #2373's console half, driven against the host rather than a mock.
+  //
+  // Two things here are only true end to end. The tier control renders "Not
+  // set" from a `stored` flag the host computes — a console that rendered the
+  // tier's nominal mode instead would show "Read-only: Runs" above read-only
+  // tools reading "Asks", and choosing the value already on screen would grant
+  // a bulk allow nobody asked for. And a tool the deny list keeps from ever
+  // being sent still carries a mode, which will never be consulted; the row
+  // has to say so or the mode invites an edit with no effect.
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+
+  const name = `pw-perm-${Date.now()}`;
+  const blocked = "never_sent_tool";
+
+  try {
+    const added = await page.request.post("/api/v1/company/mcp/servers", {
+      data: {
+        name,
+        endpoint: `https://mcp.example.test/${name}`,
+        disallowedTools: [blocked],
+      },
+    });
+    expect(added.ok(), "the host accepted the server the panel is about").toBeTruthy();
+
+    const policyPath = `/api/v1/company/mcp/servers/${encodeURIComponent(name)}/tools/policy`;
+
+    // Nothing has probed this server on a default-feature host, so the only
+    // row the panel can list is one an operator decided themselves.
+    const seeded = await page.request.put(policyPath, {
+      data: { tools: [{ tool: blocked, tier: "read_only" }] },
+    });
+    expect(seeded.ok(), "the host stored the per-tool decision").toBeTruthy();
+
+    await openMcpSettings(page);
+    const row = page.getByTestId("mcp-server-row").filter({ hasText: name });
+    await expect(row).toBeVisible({ timeout: 15_000 });
+    await row.getByRole("button", { name: `Tool permissions for ${name}` }).click();
+
+    const panel = page.getByTestId("mcp-tool-permissions");
+    await expect(panel).toBeVisible();
+
+    // No tier default was ever written, so every tier reads as unset — not as
+    // the mode it would fall back to.
+    for (const tier of ["read_only", "interactive", "write_delete"]) {
+      await expect(panel.locator(`#tier-${tier}`)).toContainText("Not set");
+    }
+    await expect(panel.locator("#tier-read_only")).not.toContainText("Runs");
+
+    await expect(panel.getByTestId("mcp-permission-row").filter({ hasText: blocked })).toContainText(
+      "Not sent",
+    );
+
+    // The round trip the wire shape exists for: a written tier comes back
+    // stored, and reads as the mode rather than as unset.
+    const wrote = await page.request.put(policyPath, {
+      data: { tierDefaults: { read_only: "always_allow" } },
+    });
+    expect(wrote.ok()).toBeTruthy();
+    await page.reload();
+    await openMcpSettings(page);
+    await page
+      .getByTestId("mcp-server-row")
+      .filter({ hasText: name })
+      .getByRole("button", { name: `Tool permissions for ${name}` })
+      .click();
+    await expect(page.getByTestId("mcp-tool-permissions").locator("#tier-read_only")).toContainText(
+      "Runs",
+    );
+
+    // And a tier named as nothing is cleared, which the wire could not say
+    // before: an omitted tier means "leave it alone".
+    const cleared = await page.request.put(policyPath, {
+      data: { tierDefaults: { read_only: null } },
+    });
+    expect(cleared.ok()).toBeTruthy();
+    await page.reload();
+    await openMcpSettings(page);
+    await page
+      .getByTestId("mcp-server-row")
+      .filter({ hasText: name })
+      .getByRole("button", { name: `Tool permissions for ${name}` })
+      .click();
+    await expect(page.getByTestId("mcp-tool-permissions").locator("#tier-read_only")).toContainText(
+      "Not set",
+    );
+
+    expect(pageErrors, `the page threw: ${pageErrors.join(" | ")}`).toEqual([]);
+  } finally {
     await page.request
       .delete(`/api/v1/company/mcp/servers/${encodeURIComponent(name)}`)
       .catch(() => undefined);

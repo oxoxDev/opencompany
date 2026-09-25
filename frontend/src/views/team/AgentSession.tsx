@@ -75,11 +75,13 @@ export function AgentSession({
   company,
   agentId,
   agentName,
+  agentNames,
 }: {
   client: OpenCompanyClient;
   company: string | null;
   agentId: string;
   agentName: string;
+  agentNames?: Readonly<Record<string, string>>;
 }) {
   const [lines, setLines] = useState<SessionLine[]>([]);
   const [load, setLoad] = useState<Load>("loading");
@@ -226,7 +228,7 @@ export function AgentSession({
         ) : (
           <ol className="space-y-4" data-testid="agent-session">
             {lines.map((line) => (
-              <SessionRow key={line.message.id} line={line} agentId={agentId} />
+              <SessionRow key={line.message.id} line={line} agentId={agentId} agentNames={agentNames} />
             ))}
           </ol>
         )}
@@ -275,7 +277,15 @@ function ViewToggle({
 }
 
 /** One line of the session, badged with where it was said. */
-function SessionRow({ line, agentId }: { line: SessionLine; agentId: string }) {
+function SessionRow({
+  line,
+  agentId,
+  agentNames,
+}: {
+  line: SessionLine;
+  agentId: string;
+  agentNames?: Readonly<Record<string, string>>;
+}) {
   const { message, channel } = line;
   // Who is speaking, from the reader's point of view. `from` is resolved
   // host-side against the *viewer*, so "you" here means the operator reading
@@ -319,7 +329,7 @@ function SessionRow({ line, agentId }: { line: SessionLine; agentId: string }) {
           <ReferralConversation crossing={message.referralConversation} rowId={message.id} />
         )}
         {message.episode && (
-          <UtteranceChip episode={message.episode} audience={message.audience} />
+          <UtteranceChip episode={message.episode} audience={message.audience} agentNames={agentNames} />
         )}
       </div>
     </li>

@@ -296,6 +296,8 @@ pub fn build_confined_agent(
 
     super::tool_posture::declare();
     Ok(AgentBlueprint {
+        // A confined turn delegates nothing; nothing to withhold.
+        unadvertised: Vec::new(),
         system_prompt: confined_persona(company_name, confinement),
         tools,
         native_tool_names: Vec::new(),
@@ -304,7 +306,7 @@ pub fn build_confined_agent(
         chat_model: deps.provider.clone(),
         model,
         workspace,
-        policy,
+        policy: std::sync::Arc::new(policy),
         definition_name: CONFINED_AGENT_ID.to_string(),
     })
 }

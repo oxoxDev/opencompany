@@ -41,24 +41,27 @@ async fn a_workspace_read_runs_without_asking_whatever_its_name_begins_with() {
 /// actually feels.
 #[tokio::test]
 async fn reading_workspace_state_parks_supervised_and_denies_readonly() {
-    assert!(
-        matches!(
-            policy("supervised", &[], None)
-                .check(&request("read_workspace_state", serde_json::json!({})))
-                .await,
-            ToolPolicyDecision::RequireApproval { .. }
-        ),
-        "running git under agent-authored config must reach an operator"
-    );
-    assert!(
-        matches!(
-            policy("readonly", &[], None)
-                .check(&request("read_workspace_state", serde_json::json!({})))
-                .await,
-            ToolPolicyDecision::Deny { .. }
-        ),
-        "`readonly` promises nothing runs; a git config key can name a command"
-    );
+    in_cycle(async {
+        assert!(
+            matches!(
+                policy("supervised", &[], None)
+                    .check(&request("read_workspace_state", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "running git under agent-authored config must reach an operator"
+        );
+        assert!(
+            matches!(
+                policy("readonly", &[], None)
+                    .check(&request("read_workspace_state", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "`readonly` promises nothing runs; a git config key can name a command"
+        );
+    })
+    .await;
 }
 
 /// …and the `readonly` denial says **why**, because this is the one an
@@ -106,95 +109,101 @@ async fn the_readonly_denial_of_a_read_shaped_tool_says_why() {
 /// outgoing email on the same handle.
 #[tokio::test]
 async fn a_standing_grant_on_a_composio_read_does_not_admit_a_send() {
-    let queue = ApprovalRequestQueue::default();
-    let grants = queue.grants();
-    let p = policy("supervised", &[], None)
-        .with_requests(queue)
-        .with_agent("ops");
-    grants.grant_standing(standing("ops", "composio_execute", far_future()));
+    in_cycle(async {
+        let queue = ApprovalRequestQueue::default();
+        let grants = queue.grants();
+        let p = policy("supervised", &[], None)
+            .with_requests(queue)
+            .with_agent("ops");
+        grants.grant_standing(standing("ops", "composio_execute", far_future()));
 
-    assert_eq!(
-        p.check(&request(
-            "composio_execute",
-            serde_json::json!({ "tool": "GITHUB_LIST_PULL_REQUESTS" })
-        ))
-        .await,
-        ToolPolicyDecision::Allow,
-        "the read the operator granted keeps running"
-    );
-    assert!(
-        matches!(
+        assert_eq!(
             p.check(&request(
                 "composio_execute",
-                serde_json::json!({ "tool": "GMAIL_SEND_EMAIL" })
+                serde_json::json!({ "tool": "GITHUB_LIST_PULL_REQUESTS" })
             ))
             .await,
-            ToolPolicyDecision::RequireApproval { .. }
-        ),
-        "a send on the same tool name parks despite the grant"
-    );
+            ToolPolicyDecision::Allow,
+            "the read the operator granted keeps running"
+        );
+        assert!(
+            matches!(
+                p.check(&request(
+                    "composio_execute",
+                    serde_json::json!({ "tool": "GMAIL_SEND_EMAIL" })
+                ))
+                .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "a send on the same tool name parks despite the grant"
+        );
+    })
+    .await;
 }
 
 /// External reads are decided before standing grants are consulted.
 #[tokio::test]
 async fn a_fetch_grant_does_not_narrow_free_external_reads() {
-    for tier in ["supervised", "auto"] {
-        let queue = ApprovalRequestQueue::default();
-        let grants = queue.grants();
-        let p = policy(tier, &[], None)
-            .with_requests(queue)
-            .with_agent("ops");
-        grants.grant_standing(scoped_standing(
-            "ops",
-            crate::policy::consequence::WEB_FETCH,
-            "https://docs.rs",
-            far_future(),
-        ));
+    in_cycle(async {
+        for tier in ["supervised", "auto"] {
+            let queue = ApprovalRequestQueue::default();
+            let grants = queue.grants();
+            let p = policy(tier, &[], None)
+                .with_requests(queue)
+                .with_agent("ops");
+            grants.grant_standing(scoped_standing(
+                "ops",
+                crate::policy::consequence::WEB_FETCH,
+                "https://docs.rs",
+                far_future(),
+            ));
 
-        assert!(
-            matches!(
+            assert!(
+                matches!(
+                    p.check(&request(
+                        "web_fetch",
+                        serde_json::json!({ "url": "https://docs.rs/serde" })
+                    ))
+                    .await,
+                    ToolPolicyDecision::Allow
+                ),
+                "a second fetch of the granted host must run unattended under `{tier}`"
+            );
+
+            assert_eq!(
                 p.check(&request(
                     "web_fetch",
-                    serde_json::json!({ "url": "https://docs.rs/serde" })
+                    serde_json::json!({ "url": "https://crates.io/crates/serde" })
                 ))
                 .await,
-                ToolPolicyDecision::Allow
-            ),
-            "a second fetch of the granted host must run unattended under `{tier}`"
-        );
+                ToolPolicyDecision::Allow,
+                "external reads do not depend on a host grant — `{tier}`"
+            );
 
-        assert_eq!(
-            p.check(&request(
-                "web_fetch",
-                serde_json::json!({ "url": "https://crates.io/crates/serde" })
-            ))
-            .await,
-            ToolPolicyDecision::Allow,
-            "external reads do not depend on a host grant — `{tier}`"
-        );
-
-        assert_eq!(
-            p.check(&request(
-                "web_fetch",
-                serde_json::json!({ "url": "https://evil.docs.rs/x" })
-            ))
-            .await,
-            ToolPolicyDecision::Allow,
-            "a subdomain is still an external read — `{tier}`"
-        );
-
-        assert!(
-            matches!(
+            assert_eq!(
                 p.check(&request(
                     "web_fetch",
-                    serde_json::json!({ "url": "not-a-url" })
+                    serde_json::json!({ "url": "https://evil.docs.rs/x" })
                 ))
                 .await,
-                ToolPolicyDecision::RequireApproval { .. }
-            ),
-            "a URL with no readable host stays gated rather than free — `{tier}`"
-        );
-    }
+                ToolPolicyDecision::Allow,
+                "a subdomain is still an external read — `{tier}`"
+            );
+
+            assert!(
+                matches!(
+                    p.check(&request(
+                        "web_fetch",
+                        serde_json::json!({ "url": "not-a-url" })
+                    ))
+                    .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "a URL with no readable host stays gated rather than free — `{tier}`"
+            );
+        }
+    })
+    .await;
 }
 
 /// Existing batch grants do not turn external reads back into parked calls.
@@ -297,66 +306,69 @@ async fn an_ungranted_fetch_runs_under_supervised_and_auto() {
 /// the ordering in `check()`.
 #[tokio::test]
 async fn a_grant_scoped_to_one_provider_does_not_admit_another_providers_read() {
-    let queue = ApprovalRequestQueue::default();
-    let grants = queue.grants();
-    let p = policy("supervised", &[], None)
-        .with_requests(queue)
-        .with_agent("ops");
-    grants.grant_standing(scoped_standing(
-        "ops",
-        "composio_execute",
-        "github",
-        far_future(),
-    ));
-
-    // A *different* GitHub read: the operator consented to the provider, so
-    // this is inside the sentence. Scoping by action slug instead would
-    // have refused here and made the grant worthless.
-    assert!(
-        p.standing_grant_allows(
+    in_cycle(async {
+        let queue = ApprovalRequestQueue::default();
+        let grants = queue.grants();
+        let p = policy("supervised", &[], None)
+            .with_requests(queue)
+            .with_agent("ops");
+        grants.grant_standing(scoped_standing(
+            "ops",
             "composio_execute",
-            &composio_args("GITHUB_LIST_PULL_REQUESTS")
-        ),
-        "the operator consented to a provider, not to one action slug"
-    );
+            "github",
+            far_future(),
+        ));
 
-    // A mailbox read. Also a catalogue read, also grantable, also `ops`,
-    // also `composio_execute` — every check upstream of the scope says yes,
-    // and the scope is the one thing that says no.
-    assert!(
-        !p.standing_grant_allows("composio_execute", &composio_args("GMAIL_FETCH_EMAILS")),
-        "'read from GitHub' is not consent to read the company's mail"
-    );
+        // A *different* GitHub read: the operator consented to the provider, so
+        // this is inside the sentence. Scoping by action slug instead would
+        // have refused here and made the grant worthless.
+        assert!(
+            p.standing_grant_allows(
+                "composio_execute",
+                &composio_args("GITHUB_LIST_PULL_REQUESTS")
+            ),
+            "the operator consented to a provider, not to one action slug"
+        );
 
-    // An action the catalogue cannot place carries no scope, so a scoped
-    // grant refuses it — unknown is a send, here too.
-    assert!(
-        !p.standing_grant_allows("composio_execute", &composio_unclassified_args()),
-        "an unplaceable action has no scope for a scoped grant to admit"
-    );
+        // A mailbox read. Also a catalogue read, also grantable, also `ops`,
+        // also `composio_execute` — every check upstream of the scope says yes,
+        // and the scope is the one thing that says no.
+        assert!(
+            !p.standing_grant_allows("composio_execute", &composio_args("GMAIL_FETCH_EMAILS")),
+            "'read from GitHub' is not consent to read the company's mail"
+        );
 
-    // Through the real gate, the unknown action still parks: it is a send,
-    // so the tier does not wave it through and the scoped grant will not
-    // admit it either. This half of the original test survives #559
-    // unchanged, because only the *read* branch moved.
-    assert!(matches!(
-        p.check(&request("composio_execute", composio_unclassified_args()))
-            .await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
+        // An action the catalogue cannot place carries no scope, so a scoped
+        // grant refuses it — unknown is a send, here too.
+        assert!(
+            !p.standing_grant_allows("composio_execute", &composio_unclassified_args()),
+            "an unplaceable action has no scope for a scoped grant to admit"
+        );
 
-    // Deliberately NOT asserting `check(read) == Allow` here. It would pass
-    // whether or not #559 landed — this policy holds a standing grant that
-    // admits a GitHub read at step 2b, so the tier never gets a say, and
-    // the assertion would prove nothing while looking like it proved the
-    // change. `a_composio_read_runs_under_supervision_without_parking` is
-    // the test for that, and it uses a policy with no grant at all.
+        // Through the real gate, the unknown action still parks: it is a send,
+        // so the tier does not wave it through and the scoped grant will not
+        // admit it either. This half of the original test survives #559
+        // unchanged, because only the *read* branch moved.
+        assert!(matches!(
+            p.check(&request("composio_execute", composio_unclassified_args()))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
 
-    assert_eq!(
-        grants.standing_count(),
-        1,
-        "none of those refusals spent the permission"
-    );
+        // Deliberately NOT asserting `check(read) == Allow` here. It would pass
+        // whether or not #559 landed — this policy holds a standing grant that
+        // admits a GitHub read at step 2b, so the tier never gets a say, and
+        // the assertion would prove nothing while looking like it proved the
+        // change. `a_composio_read_runs_under_supervision_without_parking` is
+        // the test for that, and it uses a policy with no grant at all.
+
+        assert_eq!(
+            grants.standing_count(),
+            1,
+            "none of those refusals spent the permission"
+        );
+    })
+    .await;
 }
 
 /// Companion to `a_grant_scoped_to_one_provider_does_not_admit_another_providers_read`,
@@ -417,49 +429,52 @@ fn a_web_fetch_grant_scoped_to_one_host_does_not_admit_another() {
 /// every permission an operator had already granted.
 #[tokio::test]
 async fn a_grant_from_before_scopes_existed_still_admits_its_tool() {
-    let queue = ApprovalRequestQueue::default();
-    let grants = queue.grants();
-    let p = policy("supervised", &[], None)
-        .with_requests(queue)
-        .with_agent("ops");
+    in_cycle(async {
+        let queue = ApprovalRequestQueue::default();
+        let grants = queue.grants();
+        let p = policy("supervised", &[], None)
+            .with_requests(queue)
+            .with_agent("ops");
 
-    // Deserialized from the pre-#457 wire shape rather than constructed, so
-    // this fails if the field ever stops defaulting.
-    let replayed: crate::runtime::grants::StandingGrant =
-        serde_json::from_value(serde_json::json!({
-            "id": "g-old",
-            "agent": "ops",
-            "tool": "composio_execute",
-            "granted_by": { "kind": "user", "id": "user-1" },
-            "approval_id": "appr-old",
-            "at_millis": 1_000,
-            "expires_at_millis": far_future(),
-        }))
-        .expect("an old journal line still replays");
-    assert_eq!(replayed.scope, None);
-    grants.grant_standing(replayed);
+        // Deserialized from the pre-#457 wire shape rather than constructed, so
+        // this fails if the field ever stops defaulting.
+        let replayed: crate::runtime::grants::StandingGrant =
+            serde_json::from_value(serde_json::json!({
+                "id": "g-old",
+                "agent": "ops",
+                "tool": "composio_execute",
+                "granted_by": { "kind": "user", "id": "user-1" },
+                "approval_id": "appr-old",
+                "at_millis": 1_000,
+                "expires_at_millis": far_future(),
+            }))
+            .expect("an old journal line still replays");
+        assert_eq!(replayed.scope, None);
+        grants.grant_standing(replayed);
 
-    for slug in ["GITHUB_LIST_PULL_REQUESTS", "GMAIL_FETCH_EMAILS"] {
-        assert_eq!(
+        for slug in ["GITHUB_LIST_PULL_REQUESTS", "GMAIL_FETCH_EMAILS"] {
+            assert_eq!(
+                p.check(&request(
+                    "composio_execute",
+                    serde_json::json!({ "tool": slug })
+                ))
+                .await,
+                ToolPolicyDecision::Allow,
+                "an unscoped grant behaves exactly as it did: {slug}"
+            );
+        }
+        // …and the boundary that was always there is untouched: a send still
+        // parks, because the live re-classification runs first.
+        assert!(matches!(
             p.check(&request(
                 "composio_execute",
-                serde_json::json!({ "tool": slug })
+                serde_json::json!({ "tool": "GMAIL_SEND_EMAIL" })
             ))
             .await,
-            ToolPolicyDecision::Allow,
-            "an unscoped grant behaves exactly as it did: {slug}"
-        );
-    }
-    // …and the boundary that was always there is untouched: a send still
-    // parks, because the live re-classification runs first.
-    assert!(matches!(
-        p.check(&request(
-            "composio_execute",
-            serde_json::json!({ "tool": "GMAIL_SEND_EMAIL" })
-        ))
-        .await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+    })
+    .await;
 }
 
 /// Issue #374 added the `deploy` arm. It still applies — to tools with no

@@ -3514,6 +3514,15 @@ impl RuntimeBuilder {
                                     crate::harness::policy::ApprovalRequestQueue::with_grants(
                                         grants.clone(),
                                     ),
+                                approval_parker: Some(
+                                    crate::runtime::approval_park::ApprovalParker::new(
+                                        gate.clone(),
+                                        journal.clone(),
+                                        grants.clone(),
+                                        continuations.clone(),
+                                        events.clone(),
+                                    ),
+                                ),
                                 secrets: Some(secrets.clone()),
                                 // Cell A: the `web` toolbelt SSRF allowlist.
                                 // Domains come straight from the manifest.
@@ -3651,6 +3660,8 @@ impl RuntimeBuilder {
                                         // for a blocked agent node so the resolve
                                         // path can find the run to re-dispatch.
                                         blocked_nodes: blocked_nodes.clone(),
+                                        grants: grants.clone(),
+                                        events: events.clone(),
                                     }),
                                     // Issue #529: the same journal the runner
                                     // writes its start/per-node trail to, so a

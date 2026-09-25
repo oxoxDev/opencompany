@@ -29,6 +29,7 @@ function episode(over: Partial<Episode> = {}): Episode {
     messageIds: [],
     roundCount: 3,
     referrals: [],
+    conversations: [],
     live: false,
     completedBy: "ceo",
     ...over,

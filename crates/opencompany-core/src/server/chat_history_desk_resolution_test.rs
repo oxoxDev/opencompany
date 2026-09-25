@@ -172,3 +172,133 @@ async fn resolve_unmatched_selector_passes_through_verbatim() {
         ("ad-hoc-thread".to_string(), "ad-hoc-thread".to_string())
     );
 }
+
+/// A DM resolves to **both** spellings it is journaled under.
+///
+/// The two are not interchangeable in the journal and both are correct: the
+/// console posts an ordinary teammate's DM under the bare id (`dmThreadId`),
+/// while a DM hive keys its episode -- and so every row that episode journals
+/// -- under `dm:<id>`. A reader handed one spelling and matching only it saw
+/// half its own conversation, which is what made an episode's transcript
+/// vanish on reload while the company stayed blocked on an approval raised in
+/// it.
+///
+/// The sibling rides in the **name** slot because `owns` compares either slot
+/// and renders neither.
+#[tokio::test]
+async fn a_dm_resolves_to_both_spellings_it_is_journaled_under() {
+    let store = RecordStore(Some(record_with_group_chat("eng-123", "Engineering")));
+    assert_eq!(
+        resolve(store, Some("ceo")).await,
+        ("ceo".to_string(), "dm:ceo".to_string()),
+        "asked bare, it still owns the rows its episode journaled prefixed"
+    );
+
+    let store = RecordStore(Some(record_with_group_chat("eng-123", "Engineering")));
+    assert_eq!(
+        resolve(store, Some("dm:ceo")).await,
+        ("dm:ceo".to_string(), "ceo".to_string()),
+        "and asked prefixed, it still owns what the console posted bare"
+    );
+}
+
+/// The sibling is a teammate's, and nobody else's.
+#[test]
+fn only_a_roster_teammate_has_a_sibling_spelling() {
+    let record = record_with_group_chat("eng-123", "Engineering");
+
+    assert_eq!(dm_sibling(&record, "ceo").as_deref(), Some("dm:ceo"));
+    assert_eq!(dm_sibling(&record, "dm:ceo").as_deref(), Some("ceo"));
+    assert_eq!(
+        dm_sibling(&record, "ad-hoc-thread"),
+        None,
+        "an ad-hoc thread owns its exact string and nothing else"
+    );
+    assert_eq!(
+        dm_sibling(&record, "eng-123"),
+        None,
+        "a desk is not a DM, so it grows no second key"
+    );
+    assert_eq!(
+        dm_sibling(&record, "dm:nobody"),
+        None,
+        "and a prefixed key naming no teammate folds to nothing"
+    );
+}
+
+/// A desk that shares a teammate's id keeps its own rows.
+///
+/// Both halves matter, and the second is the one that bit. A **manifest** desk
+/// is declined by `dm_sibling` because `resolve_desk_id` claims it; an
+/// **overlay** desk -- created from the console, absent from the manifest --
+/// is claimed by `resolve_desk_id` too, but `operator::resolve_desk` matches
+/// `manifest.group_chats` alone and so hands this an id that looks unmatched.
+/// Without the guard inside `dm_sibling` that desk's transcript would have
+/// taken the teammate's DM rows (tinysweeper on #2484).
+#[test]
+fn a_desk_sharing_a_teammates_id_grows_no_dm_sibling() {
+    let mut record = record_with_group_chat("ceo", "Chief's desk");
+    assert_eq!(
+        dm_sibling(&record, "ceo"),
+        None,
+        "a manifest desk owns the key outright, teammate of the same name or not"
+    );
+
+    let mut overlay = record_with_group_chat("growth_desk", "Growth");
+    overlay
+        .overlay_desks
+        .push(crate::ports::types::OverlayDesk {
+            id: "ceo".to_string(),
+            name: "Chief's overlay".to_string(),
+            description: None,
+            members: Vec::new(),
+            responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
+        });
+    assert_eq!(
+        dm_sibling(&overlay, "ceo"),
+        None,
+        "and so does a desk the console created, which the manifest never names"
+    );
+
+    record.overlay_desks.clear();
+}
+
+/// A teammate whose id carries the prefix is resolved exactly, not stripped.
+///
+/// Nothing forbids a teammate called `dm:ceo`, and this module already carries
+/// the mirror case of one named for a General spelling. Stripping first would
+/// answer that key with `ceo`'s sibling, handing one teammate's DM the other's
+/// rows.
+#[test]
+fn an_exact_teammate_id_beats_the_prefix() {
+    let manifest: crate::company::CompanyManifest = toml::from_str(
+        r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+
+[[agent]]
+id = "dm:ceo"
+role = "Impostor"
+"#,
+    )
+    .expect("valid manifest");
+    let mut record = record_with_group_chat("growth_desk", "Growth");
+    record.manifest = manifest;
+
+    assert_eq!(
+        dm_sibling(&record, "dm:ceo").as_deref(),
+        Some("dm:dm:ceo"),
+        "the teammate literally called `dm:ceo` gets its OWN prefixed line, \
+         not the one belonging to `ceo`"
+    );
+    assert_eq!(
+        dm_sibling(&record, "ceo").as_deref(),
+        Some("dm:ceo"),
+        "and `ceo` still resolves to its own"
+    );
+}

@@ -622,6 +622,48 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             format!("Episode {episode_id}: {from} messaged {}", to.join(", ")),
             "episode.dm_delivered",
         ),
+        CompanyEvent::ConversationOpened {
+            episode_id,
+            asker,
+            askee,
+            ..
+        } => (
+            Role::System,
+            "hive".to_string(),
+            format!("Episode {episode_id}: @{asker} asked @{askee}"),
+            "episode.conversation.opened",
+        ),
+        CompanyEvent::ConversationConcluded {
+            episode_id,
+            asker,
+            askee,
+            forced,
+            ..
+        } => (
+            Role::System,
+            "hive".to_string(),
+            format!(
+                "Episode {episode_id}: @{asker} and @{askee} concluded{}",
+                if *forced { " without an answer" } else { "" }
+            ),
+            "episode.conversation.concluded",
+        ),
+        CompanyEvent::EpisodeSeatParked {
+            episode_id, seat, ..
+        } => (
+            Role::System,
+            "hive".to_string(),
+            format!("Episode {episode_id}: @{seat} is waiting on the operator"),
+            "episode.seat.parked",
+        ),
+        CompanyEvent::EpisodeSeatResumed {
+            episode_id, seat, ..
+        } => (
+            Role::System,
+            "hive".to_string(),
+            format!("Episode {episode_id}: @{seat} resumed"),
+            "episode.seat.resumed",
+        ),
         CompanyEvent::EpisodeCompleted {
             episode_id,
             reason,

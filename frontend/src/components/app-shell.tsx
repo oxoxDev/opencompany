@@ -3913,6 +3913,7 @@ export function AppShell({
               client={client}
               company={company}
               sub={sub}
+              agentNames={agentNames}
               onOpenAgent={(agentId, options) =>
                 agentId
                   ? // Issue #1989: `?edit` lands on the detail page with its

@@ -225,11 +225,16 @@ export function AgentDetailView({
   client,
   company,
   agentId,
+  agentNames,
+  onAgentNameChange,
   onBack,
 }: {
   client: OpenCompanyClient;
   company: string | null;
   agentId: string;
+  agentNames?: Readonly<Record<string, string>>;
+  /** Told a rename that just saved, so a caller keeping its own name map can fold it in. */
+  onAgentNameChange?: (agentId: string, name: string) => void;
   onBack: () => void;
 }) {
   const [load, setLoad] = useState<Load>("loading");
@@ -617,6 +622,7 @@ export function AgentDetailView({
       setAgent(updated);
       setDraft(draftFrom(updated));
       setEditing(false);
+      onAgentNameChange?.(agentId, updated.name?.trim() || updated.role);
       toast.success("Agent updated.");
     } catch (error) {
       toast.error(
@@ -975,6 +981,7 @@ export function AgentDetailView({
                 company={company}
                 agentId={agent.id}
                 agentName={agent.name?.trim() || agent.role}
+                agentNames={agentNames}
               />
             </PageTabPanel>
 

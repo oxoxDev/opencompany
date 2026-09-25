@@ -398,6 +398,8 @@ async fn deps_with_parking_and_mail(
             continuations: Default::default(),
             gates: Default::default(),
             blocked_nodes: Default::default(),
+            grants: Default::default(),
+            events: Arc::new(crate::store::FsEventLog::new(dir)),
         }),
         events: Arc::new(crate::store::FsEventLog::new(dir)),
     });

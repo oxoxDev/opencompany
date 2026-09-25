@@ -1353,10 +1353,14 @@ async fn company_events(
     let authors: Arc<std::sync::RwLock<std::collections::HashMap<String, String>>> = Arc::new(
         std::sync::RwLock::new(author_labels(&scope.runtime).await.unwrap_or_default()),
     );
+    let names = Arc::new(std::sync::RwLock::new(
+        crate::server::readable::DisplayNames::load(&scope.runtime).await,
+    ));
     let (cancel, cancel_rx) = tokio::sync::oneshot::channel::<()>();
     let label_refresh = {
         let runtime = scope.runtime.clone();
         let shared = Arc::clone(&authors);
+        let shared_names = Arc::clone(&names);
         let is_admin_cell = Arc::clone(&is_admin);
         let actor = scope.actor.clone();
         tokio::spawn(async move {
@@ -1373,6 +1377,13 @@ async fn company_events(
                     *shared
                         .write()
                         .unwrap_or_else(|poisoned| poisoned.into_inner()) = fresh;
+                }
+                if let Some(fresh_names) =
+                    crate::server::readable::DisplayNames::try_load(&runtime).await
+                {
+                    *shared_names
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = fresh_names;
                 }
                 let previous = is_admin_cell.load(std::sync::atomic::Ordering::Relaxed);
                 let refreshed = refreshed_is_admin(&runtime, actor.as_ref(), previous).await;
@@ -1394,6 +1405,7 @@ async fn company_events(
         // Keep the teardown guard alive for the life of the stream.
         let _ = &guard;
         let authors = Arc::clone(&authors);
+        let names = Arc::clone(&names);
         let is_admin_cell = Arc::clone(&is_admin);
         let runtime = runtime.clone();
         let actor = actor.clone();
@@ -1404,7 +1416,10 @@ async fn company_events(
             let authors = authors
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            project_stream_item_for_viewer(&item, &authors, &viewer, is_admin)
+            let names = names
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            project_stream_item_for_viewer(&item, &authors, &names, &viewer, is_admin)
                 .map(|value| Ok(Event::default().data(value.to_string())))
         }
     });
@@ -1505,12 +1520,13 @@ async fn is_admin_for_item(
 fn project_stream_item_for_viewer(
     item: &EventStreamItem,
     authors: &std::collections::HashMap<String, String>,
+    names: &crate::server::readable::DisplayNames,
     viewer: &Viewer,
     is_admin: bool,
 ) -> Option<serde_json::Value> {
     match item {
         EventStreamItem::Event(stored) => {
-            project_event_for_viewer(stored, authors, viewer, is_admin)
+            project_event_for_viewer(stored, authors, names, viewer, is_admin)
         }
         EventStreamItem::Gap { missed } => Some(serde_json::json!({
             "type": "stream_gap",
@@ -1545,6 +1561,7 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
     project_event_for_viewer(
         stored,
         &std::collections::HashMap::new(),
+        &crate::server::readable::DisplayNames::default(),
         &Viewer::Operator,
         true,
     )
@@ -1562,6 +1579,7 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
 fn project_event_for_viewer(
     stored: &StoredEvent,
     authors: &std::collections::HashMap<String, String>,
+    names: &crate::server::readable::DisplayNames,
     viewer: &Viewer,
     is_admin: bool,
 ) -> Option<serde_json::Value> {
@@ -1597,29 +1615,12 @@ fn project_event_for_viewer(
             let mut o = envelope("agent_reply");
             o["chatId"] = json!(chat_id);
             o["agentId"] = json!(agent_id);
-            // The same pair `MessageView` ships on reload: the operator-facing
-            // body, and the body as the model wrote it. They differ only on a
-            // desk that deliberates, where `readable_moves` turns
-            // `!support #topic ^3` into prose — see `MessageView::cue_text`.
-            //
-            // Order matters here, and cost a PR to learn: the grammar has to
-            // reach `cueText` before `text` may lose it. The fold reads the
-            // room's moves to know an episode happened at all, so cleaning
-            // `text` while it was the only body on this frame took the
-            // deliberation panel with it.
+            // The same pair `MessageView` ships on reload: the body as the
+            // model wrote it, and the body a person reads. The journal and
+            // every agent-facing reader keep the first.
             o["cueText"] = json!(text);
-            // What the operator reads, rewritten exactly as the reload already
-            // rewrites it. A room's grammar is addressed to the fold, and the
-            // journal keeps it — a room whose own transcript had been cleaned
-            // could not count itself — so this lives at the display edge and
-            // nowhere earlier. Every agent-facing path (`EpisodePrompt`,
-            // `elsewhere_for`, `referral_prompt`, `chat_seed`) still reads the
-            // stored line, which is how a seat can cite `^16` against a row it
-            // can identify.
-            //
-            // A reply carrying no move is returned unchanged, which is every
-            // reply on every desk that does not deliberate.
-            o["text"] = json!(crate::server::chat_history::readable_moves(text.clone()));
+            let body = crate::server::readable::project_reply(text, mentions, names);
+            o["text"] = json!(body.text);
             // Keys rework #2306, round-2 review KR-L2-03: re-classifies the
             // same bare X9 sentence `spawn_chat_turn` wrote into `text` for
             // exactly this class of failure. Omitted (reads as absent/false)
@@ -1643,6 +1644,22 @@ fn project_event_for_viewer(
             if let Some(parent) = parent {
                 o["parentId"] = json!(parent.value().to_string());
             }
+            // **The episode this row belongs to**, when it belongs to one.
+            //
+            // The episode fold drops any frame that does not name an episode.
+            // That is right for an ordinary chat reply and wrong for this
+            // one: a row in a pair channel is a line of an exchange two seats
+            // are having inside an episode, and this frame is the only
+            // carrier those lines have -- the desk never shows them, so a
+            // reload was the only way to see what had been said. Without it
+            // the indicator can say an exchange opened and never that
+            // anything was said in it.
+            if let Some(episode) = episode.as_ref() {
+                o["episodeId"] = json!(episode.id);
+                // What the row committed, for the fold to tell a line of an
+                // exchange from the conclusion that restates its last one.
+                o["utteranceKind"] = json!(episode.kind);
+            }
             // Scrubbed timeline (same shape the POST body carries); omitted
             // when empty so a tool-less reply's wire form is unchanged.
             if !steps.is_empty() {
@@ -1659,7 +1676,10 @@ fn project_event_for_viewer(
             // Project the same viewer-relative metadata as chat/history. The
             // stream must carry complete ChatMentionDto values because the live
             // row is already durable and hydration intentionally skips it.
-            let projected = project_mentions(mentions, authors, viewer);
+            let mut projected = project_mentions(mentions, authors, viewer);
+            for mention in &mut projected {
+                mention.offset = body.offset(mention.offset);
+            }
             if !projected.is_empty() {
                 o["mentions"] = json!(
                     projected
@@ -2140,6 +2160,49 @@ fn project_event_for_viewer(
             o["messageSeq"] = json!(message_seq);
             o
         }
+        // The desk's reference to a private exchange. Deliberately carries
+        // no text: the question and the answer live in the pair channel, and
+        // this row exists so the desk can say two seats are talking and
+        // where, not so it can quote them.
+        CompanyEvent::ConversationOpened {
+            chat_id,
+            episode_id,
+            conversation_id,
+            root,
+            asker,
+            askee,
+        } => {
+            let mut o = envelope("conversation_opened");
+            o["chatId"] = json!(chat_id);
+            o["episodeId"] = json!(episode_id);
+            o["conversationId"] = json!(conversation_id);
+            o["root"] = json!(root);
+            o["asker"] = json!(asker);
+            o["askee"] = json!(askee);
+            o
+        }
+        CompanyEvent::ConversationConcluded {
+            chat_id,
+            episode_id,
+            conversation_id,
+            root,
+            asker,
+            askee,
+            forced,
+        } => {
+            let mut o = envelope("conversation_concluded");
+            o["chatId"] = json!(chat_id);
+            o["episodeId"] = json!(episode_id);
+            o["conversationId"] = json!(conversation_id);
+            o["root"] = json!(root);
+            o["asker"] = json!(asker);
+            o["askee"] = json!(askee);
+            // A conversation that ran out of turns concluded without an
+            // answer. An indicator that only watched for one would hang on
+            // exactly this case.
+            o["forced"] = json!(forced);
+            o
+        }
         CompanyEvent::EpisodeCompleted {
             chat_id,
             episode_id,
@@ -2161,6 +2224,34 @@ fn project_event_for_viewer(
             if let Some(summary_seq) = summary_seq {
                 o["summarySeq"] = json!(summary_seq);
             }
+            o
+        }
+        CompanyEvent::EpisodeSeatParked {
+            chat_id,
+            episode_id,
+            seat,
+            thread,
+            approval_ids,
+        } => {
+            let mut o = envelope("episode_seat_parked");
+            o["chatId"] = json!(chat_id);
+            o["episodeId"] = json!(episode_id);
+            o["seat"] = json!(seat);
+            if let Some(thread) = thread {
+                o["thread"] = json!(thread);
+            }
+            o["approvalIds"] = json!(approval_ids);
+            o
+        }
+        CompanyEvent::EpisodeSeatResumed {
+            chat_id,
+            episode_id,
+            seat,
+        } => {
+            let mut o = envelope("episode_seat_resumed");
+            o["chatId"] = json!(chat_id);
+            o["episodeId"] = json!(episode_id);
+            o["seat"] = json!(seat);
             o
         }
         // Issue #276: a workflow armed or paused, so a console holding the
@@ -3863,6 +3954,7 @@ async fn chat_and_emit(
     let turn_id = accepted.turn_id.clone();
     let message_id = accepted.message_seq.value().to_string();
     let detach = message.detach;
+    let reader = Arc::clone(&runtime);
     let turn = spawn_chat_turn(ChatTurn {
         runtime,
         company: id.clone(),
@@ -3918,7 +4010,8 @@ async fn chat_and_emit(
     }
 
     let (report, feedback_note) = join_chat_turn(turn).await?;
-    let responses = readable_responses(report.responses.clone());
+    let names = crate::server::readable::DisplayNames::load(&reader).await;
+    let responses = readable_responses(report.responses.clone(), &names);
     emit_cycle_webhooks(state, id, &report).await;
     if let Some(note) = feedback_note {
         emit_feedback_webhook(state, id, &note).await;
@@ -4212,23 +4305,20 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
 #[path = "operator_readable_responses_test.rs"]
 mod readable_responses_test;
 
-/// The same rendering `chat_history` applies, for replies going out on the POST
-/// rather than being read back.
-///
-/// A deliberation turn is journaled with its grammar and cleaned when the
-/// history is projected — but a reply returned to the caller never passes
-/// through that projection, so the console showed `!support #lazy-load ^3` on
-/// a row that arrived live and plain prose on the same row after a reload.
-/// Two readers of one message, disagreeing, with a page refresh between them.
-///
-/// The stored row keeps its markers either way; the fold reads them off the
-/// journal, not off this.
+/// The display projection `chat_history` applies, for replies going out on
+/// the POST rather than being read back, so a row reads the same live as it
+/// does after a reload. The stored row keeps what the model wrote.
 fn readable_responses(
     mut responses: Vec<crate::ports::types::OutboundMessage>,
+    names: &crate::server::readable::DisplayNames,
 ) -> Vec<crate::ports::types::OutboundMessage> {
     for response in &mut responses {
-        response.text =
-            crate::server::chat_history::readable_moves(std::mem::take(&mut response.text));
+        let body =
+            crate::server::readable::project_reply(&response.text, &response.mentions, names);
+        for mention in &mut response.mentions {
+            mention.offset = body.offset(mention.offset);
+        }
+        response.text = body.text;
     }
     responses
 }
@@ -4538,6 +4628,26 @@ pub(crate) struct ReferralLineDto {
     outbound: bool,
 }
 
+/// One agent-to-agent exchange, as the console renders it.
+///
+/// Mirrors [`ReferralConversationDto`] below, and carries the same
+/// `ReferralLineDto` rows: to a reader the two are the same thing — an
+/// exchange somebody on this desk had that the desk itself cannot show — and
+/// a second line shape would be a second thing to keep in step.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentConversationDto {
+    /// The `ask` row it is rooted at: its identity, and the only thing that
+    /// tells two exchanges between the same pair apart.
+    root: u64,
+    asker_id: String,
+    askee_id: String,
+    conversation_id: String,
+    concluded: bool,
+    forced: bool,
+    lines: Vec<ReferralLineDto>,
+}
+
 /// A crossing folded onto the report that brought it home, so the console can
 /// render it as one collapsed line naming both parties and counting the
 /// messages.
@@ -4647,8 +4757,8 @@ struct ChatHistoryMessageDto {
     /// The message text.
     text: String,
     /// **The body as the model wrote it** — [`MessageView::cue_text`], which
-    /// is [`Self::text`] before `readable_moves` rewrote the room's grammar
-    /// into operator-facing prose.
+    /// is [`Self::text`] before the display projection
+    /// ([`readable_moves`](crate::server::readable::readable_moves)).
     ///
     /// `AgentSessionMessageDto` has carried this since the raw-turns view
     /// needed it; this shape did not, so a reader that needs the *moves*
@@ -4669,6 +4779,11 @@ struct ChatHistoryMessageDto {
     /// every ordinary message, so the wire shape is unchanged for them.
     #[serde(skip_serializing_if = "Option::is_none")]
     referral_conversation: Option<ReferralConversationDto>,
+    /// The agent-to-agent exchanges this row reported, oldest first. Empty on
+    /// every ordinary message, and skipped then, so the wire shape is
+    /// unchanged for them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    agent_conversations: Vec<AgentConversationDto>,
     /// What this reply was inside the episode that produced it (plan
     /// hive-desks, Phase 4). Absent for every reply outside an episode.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4852,14 +4967,35 @@ impl From<MessageView> for ChatHistoryMessageDto {
         // text back). Cloned before `view.text` moves into the `text` field
         // below.
         let message = view.resolution_user_facing.then(|| view.text.clone());
-        // Only when the two differ, which is only on a desk that deliberates:
-        // `readable_moves` returns a body carrying no move untouched, so an
-        // ordinary reply adds nothing to the wire.
+        // Only when the display projection changed something, so an ordinary
+        // reply adds nothing to the wire.
         let cue_text = (view.cue_text != view.text).then(|| view.cue_text.clone());
         Self {
             cue_text,
             episode: view.episode.map(MessageEpisodeDto::from),
             audience: view.aside_audience,
+            agent_conversations: view
+                .agent_conversations
+                .into_iter()
+                .map(|exchange| AgentConversationDto {
+                    root: exchange.root,
+                    asker_id: exchange.asker_id,
+                    askee_id: exchange.askee_id,
+                    conversation_id: exchange.conversation_id,
+                    concluded: exchange.concluded,
+                    forced: exchange.forced,
+                    lines: exchange
+                        .lines
+                        .into_iter()
+                        .map(|line| ReferralLineDto {
+                            author_id: line.author_id,
+                            author_label: line.author_label,
+                            text: line.text,
+                            outbound: line.outbound,
+                        })
+                        .collect(),
+                })
+                .collect(),
             referral_conversation: view.referral_conversation.map(|crossing| {
                 ReferralConversationDto {
                     asker_id: crossing.asker_id,
@@ -4947,14 +5083,25 @@ async fn resolve_desk(
     };
     let record = runtime.store().load(runtime.id()).await?;
     let matched =
-        record.and_then(|record| {
-            record.manifest.group_chats.into_iter().find(|chat| {
+        record.as_ref().and_then(|record| {
+            record.manifest.group_chats.iter().find(|chat| {
                 chat.id.eq_ignore_ascii_case(desk) || chat.name.eq_ignore_ascii_case(desk)
             })
         });
     Ok(match matched {
-        Some(chat) => (chat.id, chat.name),
-        None => (desk.to_string(), desk.to_string()),
+        Some(chat) => (chat.id.clone(), chat.name.clone()),
+        // Not a declared desk. A DM is journaled under two spellings and this
+        // reader may have been handed either, so the sibling rides in the name
+        // slot -- `owns` matches either and renders neither. Without it the
+        // console, which addresses an ordinary DM by the bare teammate id, read
+        // none of the rows its episode journaled under `dm:<id>`.
+        None => {
+            let sibling = record
+                .as_ref()
+                .and_then(|record| crate::server::chat_history::dm_sibling(record, desk))
+                .unwrap_or_else(|| desk.to_string());
+            (desk.to_string(), sibling)
+        }
     })
 }
 
@@ -5091,8 +5238,8 @@ struct AgentSessionMessageDto {
     /// agent never saw. See [`cue_author`](crate::server::chat_history::cue_author).
     cue_author: String,
     /// **The text half of the cue line the model was actually handed** —
-    /// before [`readable_moves`](crate::server::chat_history::readable_moves)
-    /// rewrote it into operator-facing prose (Codex P2: the raw-turns surface
+    /// before [`readable_moves`](crate::server::readable::readable_moves)
+    /// projected it for a person (Codex P2: the raw-turns surface
     /// must show `!support #topic ^3`, not the prose it becomes for a person).
     /// Same reasoning as `cue_author`, for the other half of the line. See
     /// [`MessageView::cue_text`](crate::server::chat_history::MessageView::cue_text).
@@ -6122,7 +6269,10 @@ async fn run_resolve(
     emit_cycle_webhooks(state, company, &report).await;
     Ok(Json(ChatResponse {
         message_id: None,
-        responses: readable_responses(report.responses),
+        responses: readable_responses(
+            report.responses,
+            &crate::server::readable::DisplayNames::load(&runtime).await,
+        ),
         still_awaiting: Some(still_awaiting),
         outcome: Some(outcome),
         review_feedback_applied: None,
