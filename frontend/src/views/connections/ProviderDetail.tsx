@@ -2,7 +2,6 @@ import { AlertTriangle, Loader2, LogIn, Unplug } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { ComposioConnectedAccount } from "@/api/composio";
-import type { McpHealth, McpServer } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -13,21 +12,14 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import {
-  connectedOn,
-  mcpProviderSlug,
-  mcpStanding,
-  probedOn,
-} from "@/lib/connection-detail";
+import { connectedOn } from "@/lib/connection-detail";
 import { toolkitSlug } from "@/lib/connections";
-import { mcpProvenanceNote, mcpRemovalNote } from "@/lib/mcp-registry";
 import { accountSummary, tallyAccounts } from "@/lib/provider-grid";
 import {
   UsageSection,
   type Usage,
   useConnectionUsage,
 } from "@/views/connections/connection-usage";
-import { McpToolPermissions } from "@/views/mcp/McpToolPermissions";
 import type { GridProvider } from "@/lib/provider-grid";
 
 /**
@@ -42,37 +34,21 @@ import type { GridProvider } from "@/lib/provider-grid";
  * cannot be handed a Composio revoke, and a Composio subject cannot be opened
  * without one — neither is a rule a caller has to remember.
  */
-export type ConnectionSubject =
-  | {
-      kind: "composio";
-      provider: GridProvider;
-      /**
-       * Nothing to authorize against — no credential of any tier resolves, so a
-       * Connect could only fail. Stated here rather than only on the page behind
-       * the panel: this is where the button is.
-       */
-      noCredential: boolean;
-      onConnectAnother: (provider: GridProvider) => void;
-      onDisconnectAccount: (
-        provider: GridProvider,
-        account: ComposioConnectedAccount,
-      ) => void;
-    }
-  | {
-      kind: "mcp";
-      server: McpServer;
-      /**
-       * The live result of an on-demand Test, when one has been run this
-       * session; otherwise the server's own persisted `health`, which is
-       * `undefined` on a server nobody has probed. The distinction is the
-       * panel's, not a detail — see `mcpStanding`.
-       */
-      health: McpHealth | undefined;
-      /** Bumped when a probe re-ran, so the permissions read is not stale. */
-      reloadKey: number;
-      /** Opened on the permissions section rather than the top of the panel. */
-      focusPermissions: boolean;
-    };
+export type ConnectionSubject = {
+  kind: "composio";
+  provider: GridProvider;
+  /**
+   * Nothing to authorize against — no credential of any tier resolves, so a
+   * Connect could only fail. Stated here rather than only on the page behind
+   * the panel: this is where the button is.
+   */
+  noCredential: boolean;
+  onConnectAnother: (provider: GridProvider) => void;
+  onDisconnectAccount: (
+    provider: GridProvider,
+    account: ComposioConnectedAccount,
+  ) => void;
+};
 
 interface Props {
   client: OpenCompanyClient;
@@ -164,12 +140,7 @@ export function ProviderDetail({
   // panel, and — unreachably, since the host rejects an unnamed server — for an
   // MCP server whose name normalizes away; the MCP arm renders that case rather
   // than reading the host's shared `unknown` bucket as this server's total.
-  const usageKey =
-    subject === null
-      ? null
-      : subject.kind === "composio"
-        ? toolkitSlug(subject.provider.slug)
-        : mcpProviderSlug(subject.server.name);
+  const usageKey = subject === null ? null : toolkitSlug(subject.provider.slug);
   // The read carries the key it was made for. The sheet changes subject without
   // unmounting, and state set in an effect lands one render *after* the subject
   // does — so a figure kept as a bare number would paint against the new
@@ -179,24 +150,12 @@ export function ProviderDetail({
 
   return (
     <Sheet open={subject !== null} onOpenChange={(next) => !next && onClose()}>
-      <SheetContent
-        side="right"
-        className="w-full overflow-y-auto data-[side=right]:sm:max-w-lg"
-      >
+      <SheetContent side="right" className="w-full overflow-y-auto">
         {subject?.kind === "composio" && (
           <ComposioBody
             subject={subject}
             canManage={canManage}
             busy={busy}
-            usage={usage}
-          />
-        )}
-        {subject?.kind === "mcp" && (
-          <McpBody
-            client={client}
-            company={company}
-            subject={subject}
-            canManage={canManage}
             usage={usage}
           />
         )}
@@ -357,186 +316,6 @@ function ComposioBody({
             Only an admin can connect or disconnect an account here.
           </p>
         )}
-      </div>
-    </>
-  );
-}
-
-/**
- * A remote MCP server: what it is, what it may do, what has gone through it,
- * and what removing it would and would not reach.
- */
-function McpBody({
-  client,
-  company,
-  subject,
-  canManage,
-  usage,
-}: {
-  client: OpenCompanyClient;
-  company: string | null;
-  subject: Extract<ConnectionSubject, { kind: "mcp" }>;
-  canManage: boolean;
-  usage: Usage;
-}) {
-  const { server, health, reloadKey, focusPermissions } = subject;
-  const standing = mcpStanding(server, health);
-  const probedAt = probedOn(health?.checkedAtMillis);
-
-  return (
-    <>
-      <SheetHeader className="border-b">
-        <SheetTitle className="flex items-center gap-2">
-          <span className="truncate">{server.name}</span>
-        </SheetTitle>
-        <SheetDescription className="flex flex-wrap items-center gap-1.5 text-xs">
-          <Badge variant="outline" className="font-normal">
-            MCP
-          </Badge>
-          <span data-testid="mcp-detail-standing">{standing.summary}</span>
-        </SheetDescription>
-      </SheetHeader>
-
-      <div className="space-y-4 px-4 pb-6">
-        <section className="space-y-2" aria-label="What this server is">
-          <div className="space-y-1 rounded-lg border border-border px-3 py-2">
-            <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-              Endpoint
-            </p>
-            {/* Wrapped, not truncated: the list truncates it to keep rows
-                even, and "what URL are my agents actually calling" is a reason
-                to open the panel rather than a detail to hide again. */}
-            <p className="font-mono text-xs break-all">{server.endpoint}</p>
-          </div>
-          {/* One sentence per provenance (issue #1270). This read `manifest`
-              against everything-else, which told an operator that a directory
-              install "was added from the console and lives in this company's
-              runtime store" — true of neither half of it. */}
-          <p
-            className="text-xs text-muted-foreground"
-            data-testid="mcp-detail-provenance"
-          >
-            {mcpProvenanceNote(server.source)}
-          </p>
-          <p
-            className="text-xs text-muted-foreground"
-            data-testid="mcp-detail-probe"
-          >
-            {standing.probe}
-            {probedAt !== null && ` · ${probedAt}`}
-          </p>
-          {/* The host scrubs this string — it can carry no credential, no
-              response body and no query string — which is why it can be shown
-              verbatim rather than re-spelled into a category. */}
-          {health && health.status !== "ok" && health.message && (
-            <p className="text-xs text-muted-foreground">{health.message}</p>
-          )}
-          <p
-            className="text-xs text-muted-foreground"
-            data-testid="mcp-detail-connected-on"
-          >
-            {/* The same answer the native path gets, for the same reason: there
-                is no connect to record. Said rather than left blank, which
-                reads as "never". */}
-            {connectedOn(undefined)} —{" "}
-            {server.source === "registry"
-              ? "this host does connect a directory install, but records no date for it."
-              : "MCP has no connect step to record one."}
-          </p>
-        </section>
-
-        {!standing.live && (
-          <p className="flex items-start gap-2 rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
-            <AlertTriangle className="mt-px size-3 shrink-0" />
-            <span>
-              This server is turned off, so no agent receives its tools whatever
-              their grants say and whatever the endpoint answers. Its
-              configuration and any stored credential survive — turning it back
-              on restores its tools on the next turn.
-            </span>
-          </p>
-        )}
-
-        {/* Reachability (issue #568) restated where the panel can afford the
-            sentence the row could not. Scoped to an enabled server for the same
-            reason as the list: a disabled server is empty by construction, so
-            flagging it would cry wolf on intent. */}
-        {standing.live && server.reachableBy !== undefined && (
-          <p
-            className={
-              server.reachableBy.length === 0
-                ? "flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-xs font-medium text-destructive"
-                : "text-xs text-muted-foreground"
-            }
-            data-testid="mcp-detail-reachability"
-          >
-            {server.reachableBy.length === 0 ? (
-              <>
-                <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-                <span>
-                  No agent can reach this server — no tool grant covers{" "}
-                  <code className="font-mono">mcp:{server.name}</code>. Whatever
-                  usage says below happened before that was true.
-                </span>
-              </>
-            ) : (
-              <span>
-                Reachable by:{" "}
-                {/* Names, not ids (issue #931) — see `McpServersSection`. */}
-                <span className="font-medium text-foreground">
-                  {server.reachableBy.map((agent) => agent.name).join(", ")}
-                </span>
-              </span>
-            )}
-          </p>
-        )}
-
-        <Separator />
-
-        <section aria-label="Tool permissions">
-          <McpToolPermissions
-            client={client}
-            company={company}
-            server={server}
-            canManage={canManage}
-            reloadKey={reloadKey}
-            focus={focusPermissions}
-          />
-        </section>
-
-        <Separator />
-
-        <UsageSection
-          usage={usage}
-          perConnection={`Successful tool calls your agents made through ${server.name}, counted under mcp:${server.name.trim().toLowerCase()} so a Composio provider of the same name cannot be read as this one.`}
-        />
-
-        <Separator />
-
-        <section className="space-y-2" aria-label="Removing this server">
-          <h4 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-            What a disconnect reaches
-          </h4>
-          <p
-            className="text-xs text-muted-foreground"
-            data-testid="mcp-detail-disconnect-scope"
-          >
-            {mcpRemovalNote(server.source)} Nothing is revoked at the
-            server&apos;s own end: no token it issued is invalidated and no
-            session there is closed. Revoke those where they were issued.
-          </p>
-          {canManage ? (
-            <p className="text-xs text-muted-foreground">
-              {server.source === "manifest"
-                ? "Turn it off with the switch on its row behind this panel."
-                : "Turn it off or remove it from its row behind this panel."}
-            </p>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              Only an admin can turn a tool server off or remove one.
-            </p>
-          )}
-        </section>
       </div>
     </>
   );
