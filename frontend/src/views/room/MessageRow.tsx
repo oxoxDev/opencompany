@@ -403,16 +403,21 @@ export function MessageRow({
             // referral are `company` lines, so that test called every answer
             // an ask. Falling back to "asked" matches a host too old to say.
             direction={message.referredFrom.direction ?? "asked"}
+            agentNames={agentNames}
           />
         )}
         {/* And what actually crossed. The chip says a referral happened; this
             says what was asked and what came back, collapsed so the desk still
             reads as its own conversation. */}
         {message.referralConversation && (
-          <ReferralConversation crossing={message.referralConversation} rowId={message.id} />
+          <ReferralConversation
+            crossing={message.referralConversation}
+            rowId={message.id}
+            agentNames={agentNames}
+          />
         )}
         {message.agentConversations?.map((exchange) => (
-          <AgentConversation key={exchange.root} exchange={exchange} />
+          <AgentConversation key={exchange.root} exchange={exchange} agentNames={agentNames} />
         ))}
         {/* What this line was inside its episode — its speech act and, for a
             dm, who it went to. Absent for every ordinary reply, which is what

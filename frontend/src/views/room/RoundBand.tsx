@@ -34,7 +34,8 @@ import type { ReactNode } from "react";
 import { AlertTriangle, CheckCircle2, Clock, Loader2, MinusCircle } from "lucide-react";
 
 import { RoutingPlanChip } from "@/components/episode/RoutingPlanChip";
-import { UTTERANCE_LABEL } from "@/components/episode/UtteranceChip";
+import { teammateName } from "@/components/episode/teammate-name";
+import { utteranceLead } from "@/components/episode/UtteranceChip";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { deskRounds, type Episode, type EpisodeRound, type EpisodeSeat, type SeatStatus } from "@/lib/episodes";
 import { cn } from "@/lib/utils";
@@ -77,7 +78,7 @@ function SeatIcon({ status }: { status: SeatStatus }) {
 }
 
 function SeatLane({ seat, agentNames }: { seat: EpisodeSeat; agentNames?: Readonly<Record<string, string>> }) {
-  const name = agentNames?.[seat.agentId] ?? seat.agentId;
+  const name = teammateName(seat.agentId, agentNames);
   return (
     <li
       className={cn(
@@ -94,7 +95,7 @@ function SeatLane({ seat, agentNames }: { seat: EpisodeSeat; agentNames?: Readon
       <SeatIcon status={seat.status} />
       <span className="text-muted-foreground">
         {seat.status === "committed" && seat.utterance
-          ? UTTERANCE_LABEL[seat.utterance.kind] ?? seat.utterance.kind
+          ? utteranceLead(seat.utterance.kind, false)
           : SEAT_WORD[seat.status]}
       </span>
     </li>
@@ -153,7 +154,7 @@ export function RoundBand({ episode, round, items, renderRow, agentNames }: Prop
             className="rounded-full border border-dashed px-2 py-0.5"
             data-testid="round-referral"
           >
-            asked {referral.direct ? `@${agentNames?.[referral.target] ?? referral.target}` : `#${referral.toDesk}`}
+            asked {referral.direct ? `@${teammateName(referral.target, agentNames)}` : `#${referral.toDesk}`}
           </span>
         ))}
       </header>

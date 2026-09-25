@@ -23,6 +23,7 @@
 
 import { MessagesSquare } from "lucide-react";
 
+import { teammateName } from "@/components/episode/teammate-name";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import type { ConversationRecord } from "@/lib/episodes";
 import { cn } from "@/lib/utils";
@@ -48,7 +49,7 @@ const LABEL: Record<"live" | "answered" | "unanswered", string> = {
 
 export function ConversationChip({ conversation, agentNames, className }: Props) {
   const state = stateOf(conversation);
-  const name = (id: string) => agentNames?.[id] ?? id;
+  const name = (id: string) => teammateName(id, agentNames);
   return (
     <span
       data-testid="conversation-chip"

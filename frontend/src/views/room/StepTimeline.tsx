@@ -31,6 +31,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 
+import { teammateName } from "@/components/episode/teammate-name";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 
 import type { AgentConversationDto, ReferralConversationDto } from "@/api/types";
@@ -142,6 +143,7 @@ export function StepTimeline({
 export function ReferralConversation({
   crossing,
   rowId,
+  agentNames,
 }: {
   crossing: ReferralConversationDto;
   /**
@@ -150,6 +152,8 @@ export function ReferralConversation({
    * renders the finished wording, which is what every surface did before.
    */
   rowId?: string;
+  /** Roster id to display name, for the asker and the other side. */
+  agentNames?: Readonly<Record<string, string>>;
 }) {
   const [open, setOpen] = useState(false);
   const running = useCrossingRunning(rowId);
@@ -187,13 +191,19 @@ export function ReferralConversation({
               claim about something being over, so it waits until it is. */}
           {running
             ? crossing.inbound
-              ? `answering @${crossing.otherId}`
-              : `${crossing.askerId} is talking to ${
-                  crossing.direct ? `@${crossing.otherId}` : `#${crossing.otherDeskId}`
+              ? `answering @${teammateName(crossing.otherId, agentNames)}`
+              : `${teammateName(crossing.askerId, agentNames)} is talking to ${
+                  crossing.direct
+                    ? `@${teammateName(crossing.otherId, agentNames)}`
+                    : `#${crossing.otherDeskId}`
                 }`
             : crossing.inbound
-              ? `asked by @${crossing.otherId}`
-              : `asked ${crossing.direct ? `@${crossing.otherId}` : `#${crossing.otherDeskId}`}`}{" "}
+              ? `asked by @${teammateName(crossing.otherId, agentNames)}`
+              : `asked ${
+                  crossing.direct
+                    ? `@${teammateName(crossing.otherId, agentNames)}`
+                    : `#${crossing.otherDeskId}`
+                }`}{" "}
           {/* "so far" while it runs, because the number is not the total yet. */}
           · {count} message{count === 1 ? "" : "s"}
           {running ? " so far" : ""}
@@ -208,8 +218,8 @@ export function ReferralConversation({
         <ol className="mt-0.5 flex flex-col gap-2 rounded-lg border bg-card/60 px-2.5 py-2">
           {crossing.lines.map((line, i) => {
             const who = line.outbound
-              ? crossing.askerId
-              : line.authorLabel || line.authorId;
+              ? teammateName(crossing.askerId, agentNames)
+              : line.authorLabel || teammateName(line.authorId, agentNames);
             // The desk each side is speaking from — the asker's is this one, so
             // it goes unsaid; the answer comes from somewhere the reader may not
             // have open.
@@ -252,7 +262,14 @@ export function ReferralConversation({
  * conclusion is journaled, so there is no need to infer it from whether a turn
  * happens to be open.
  */
-export function AgentConversation({ exchange }: { exchange: AgentConversationDto }) {
+export function AgentConversation({
+  exchange,
+  agentNames,
+}: {
+  exchange: AgentConversationDto;
+  /** Roster id to display name, for the asker and the askee. */
+  agentNames?: Readonly<Record<string, string>>;
+}) {
   const [open, setOpen] = useState(false);
   const count = exchange.lines.length;
   if (count === 0) return null;
@@ -273,10 +290,10 @@ export function AgentConversation({ exchange }: { exchange: AgentConversationDto
               crossing above words it that way: past tense is a claim that
               something is over, and this one says so from the journal. */}
           {running
-            ? `${exchange.askerId} is talking to @${exchange.askeeId}`
+            ? `${teammateName(exchange.askerId, agentNames)} is talking to @${teammateName(exchange.askeeId, agentNames)}`
             : exchange.forced
-              ? `asked @${exchange.askeeId}, unanswered`
-              : `asked @${exchange.askeeId}`}{" "}
+              ? `asked @${teammateName(exchange.askeeId, agentNames)}, unanswered`
+              : `asked @${teammateName(exchange.askeeId, agentNames)}`}{" "}
           · {count} message{count === 1 ? "" : "s"}
           {running ? " so far" : ""}
         </span>
@@ -284,7 +301,9 @@ export function AgentConversation({ exchange }: { exchange: AgentConversationDto
       {open && (
         <ol className="mt-0.5 flex flex-col gap-2 rounded-lg border bg-card/60 px-2.5 py-2">
           {exchange.lines.map((line, i) => {
-            const who = line.outbound ? exchange.askerId : line.authorLabel || line.authorId;
+            const who = line.outbound
+              ? teammateName(exchange.askerId, agentNames)
+              : line.authorLabel || teammateName(line.authorId, agentNames);
             return (
               <li key={i} className="flex gap-2">
                 <TeammateAvatar name={who} className="mt-0.5 size-5 shrink-0" />
@@ -432,6 +451,7 @@ export function ReferralChip({
   sequence,
   direction,
   direct = false,
+  agentNames,
 }: {
   deskId: string;
   deskName: string;
@@ -439,11 +459,12 @@ export function ReferralChip({
   sequence: number;
   direction: "asked" | "answered";
   direct?: boolean;
+  agentNames?: Readonly<Record<string, string>>;
 }) {
   // Whoever was actually addressed. A crossing put to a PERSON never reached
   // their desk — that desk holds none of the exchange and its other members had
   // no part in it — so naming the desk here credited a room that was never asked.
-  const who = direct ? `@${askerId}` : deskName;
+  const who = direct ? `@${teammateName(askerId, agentNames)}` : deskName;
   const label = direction === "asked" ? `Asked by ${who}` : `Answered by ${who}`;
   const body = (
     <>

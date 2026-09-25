@@ -54,7 +54,12 @@ function episode(rounds: EpisodeRound[], over: Partial<Episode> = {}): Episode {
   };
 }
 
-function render(value: EpisodeRound, ep: Episode, items: TimelineItem[] = []) {
+function render(
+  value: EpisodeRound,
+  ep: Episode,
+  items: TimelineItem[] = [],
+  agentNames: Readonly<Record<string, string>> | undefined = NAMES,
+) {
   const rendered: string[] = [];
   act(() => {
     root.render(
@@ -66,7 +71,7 @@ function render(value: EpisodeRound, ep: Episode, items: TimelineItem[] = []) {
           rendered.push(item.key);
           return createElement("p", { key: item.key, "data-testid": "row" }, item.key);
         },
-        agentNames: NAMES,
+        agentNames,
       }),
     );
   });
@@ -122,8 +127,25 @@ describe("RoundBand", () => {
     expect(band.textContent).toContain("2/2 seats");
     // A committed seat's lane names its speech act.
     const lanes = [...band.querySelectorAll<HTMLElement>('[data-testid="round-seat"]')];
-    expect(lanes[0].textContent).toContain("post");
-    expect(lanes[1].textContent).toContain("dm");
+    expect(lanes[0].textContent).toContain("Posted");
+    expect(lanes[1].textContent).toContain("Private note");
+  });
+
+  it("names an unnamed seat a teammate and words an unknown act plainly, never raw", () => {
+    const value = round({
+      status: "committed",
+      seats: [
+        { agentId: "stranger-5e0d", status: "committed", utterance: { kind: "post" } },
+        { agentId: "ceo", status: "committed", utterance: { kind: "handoff" as never } },
+      ],
+    });
+    const { band } = render(value, episode([value]));
+    const lanes = [...band.querySelectorAll<HTMLElement>('[data-testid="round-seat"]')];
+    expect(lanes[0].textContent).toContain("a teammate");
+    expect(lanes[0].textContent).not.toContain("stranger-5e0d");
+    expect(lanes[0].title).toBe("a teammate: done");
+    expect(lanes[1].textContent).toContain("Replied");
+    expect(lanes[1].textContent).not.toContain("handoff");
   });
 
   it("words a seat that ended without speaking", () => {
@@ -156,6 +178,37 @@ describe("RoundBand", () => {
     const referrals = band.querySelectorAll('[data-testid="round-referral"]');
     expect(referrals).toHaveLength(1);
     expect(referrals[0].textContent).toBe("asked #content");
+  });
+
+  it("names a directly-asked teammate by roster, never by id", () => {
+    const value = round();
+    const { band } = render(
+      value,
+      episode([value], {
+        referrals: [
+          { toDesk: "content", target: "writer", asker: "engineer", direct: true, returning: false, sequence: 5, atMillis: 1 },
+        ],
+      }),
+    );
+    const referrals = band.querySelectorAll('[data-testid="round-referral"]');
+    expect(referrals).toHaveLength(1);
+    expect(referrals[0].textContent).toBe("asked @Writer");
+  });
+
+  it("falls back to 'a teammate' rather than the raw id when the roster has no name for it", () => {
+    const value = round();
+    const { band } = render(
+      value,
+      episode([value], {
+        referrals: [
+          { toDesk: "content", target: "writer", asker: "engineer", direct: true, returning: false, sequence: 5, atMillis: 1 },
+        ],
+      }),
+      [],
+      {},
+    );
+    const referrals = band.querySelectorAll('[data-testid="round-referral"]');
+    expect(referrals[0].textContent).toBe("asked @a teammate");
   });
 
   /**

@@ -16,6 +16,7 @@ import { CheckCircle2, MessageSquare, Radio, Send } from "lucide-react";
 
 import type { MessageEpisodeDto, UtteranceKind } from "@/api/types";
 import { RoutingPlanChip } from "@/components/episode/RoutingPlanChip";
+import { teammateName } from "@/components/episode/teammate-name";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -26,13 +27,55 @@ interface Props {
   className?: string;
 }
 
-/** The chip's word for each kind. */
+/** The chip's words for each kind, in the reader's terms rather than the tool's. */
 export const UTTERANCE_LABEL: Record<UtteranceKind, string> = {
-  post: "post",
-  broadcast: "broadcast",
-  dm: "dm",
-  complete_episode: "complete",
+  post: "Posted",
+  broadcast: "Shared with the desk",
+  dm: "Private note",
+  complete_episode: "Finished",
 };
+
+const UNKNOWN_LABEL = "Replied";
+
+/** The words before the recipients, or the whole label when there are none. */
+export function utteranceLead(kind: UtteranceKind, hasRecipients: boolean): string {
+  const label = UTTERANCE_LABEL[kind] ?? UNKNOWN_LABEL;
+  if (!hasRecipients) return label;
+  return kind === "dm" ? "Sent to" : `${label} to`;
+}
+
+/**
+ * Recipients by display name, never by roster id.
+ *
+ * Deduplicated by id, not by the name it resolves to — two distinct
+ * teammates sharing a display name are two recipients, not one. Unnamed ids
+ * still collapse to a single "a teammate" entry rather than repeating it.
+ */
+export function recipientNames(
+  ids: readonly string[],
+  agentNames?: Readonly<Record<string, string>>,
+): string[] {
+  const seenIds = new Set<string>();
+  const names: string[] = [];
+  let unnamedAdded = false;
+
+  for (const id of ids) {
+    if (seenIds.has(id)) continue;
+    seenIds.add(id);
+
+    if (agentNames?.[id] === undefined) {
+      if (unnamedAdded) continue;
+      unnamedAdded = true;
+    }
+    names.push(teammateName(id, agentNames));
+  }
+
+  return names;
+}
+
+export function roundTitle(revision: number): string {
+  return `Round ${revision + 1}`;
+}
 
 const ICON: Record<UtteranceKind, typeof MessageSquare> = {
   post: MessageSquare,
@@ -43,10 +86,6 @@ const ICON: Record<UtteranceKind, typeof MessageSquare> = {
 
 export function UtteranceChip({ episode, audience, agentNames, className }: Props) {
   const Icon = ICON[episode.kind] ?? MessageSquare;
-  const name = (id: string) => agentNames?.[id] ?? id;
-  // A dm names its recipients; the audience is the same list when the host
-  // narrowed the row, so the recipients are shown once, from whichever the
-  // host filled in.
   const to = episode.to?.length ? episode.to : episode.kind === "dm" ? audience : undefined;
   return (
     <span
@@ -63,14 +102,17 @@ export function UtteranceChip({ episode, audience, agentNames, className }: Prop
             ? "border-status-done/50 text-foreground"
             : "text-muted-foreground",
         )}
-        title={`round ${episode.revision + 1} of episode ${episode.id}`}
+        title={roundTitle(episode.revision)}
       >
         <Icon className="size-3 shrink-0" aria-hidden />
-        {UTTERANCE_LABEL[episode.kind] ?? episode.kind}
+        {utteranceLead(episode.kind, Boolean(to?.length))}
         {to?.length ? (
-          <span className="font-normal" data-testid="utterance-audience">
-            → {to.map((id) => `@${name(id)}`).join(", ")}
-          </span>
+          <>
+            {" "}
+            <span className="font-normal" data-testid="utterance-audience">
+              {recipientNames(to, agentNames).join(", ")}
+            </span>
+          </>
         ) : null}
       </span>
       {episode.routedBy && (
