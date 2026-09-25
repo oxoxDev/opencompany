@@ -1,11 +1,12 @@
-# Uploading a skill, and drafting one
+# Uploading a skill, drafting one, and updating an install
 
-The two console routes that create a skill from something other than the
-four-field form: an uploaded file, and a conversation with a teammate. Both are
-part of the write plane in [`api-write-plane.md`](api-write-plane.md); they live
-here so that file stays under the repository's 500-line ceiling.
+The three console routes that write a skill's document from something other than
+the four-field form: an uploaded file, a conversation with a teammate, and the
+shared library's current revision. All are part of the write plane in
+[`api-write-plane.md`](api-write-plane.md); they live here so that file stays
+under the repository's 500-line ceiling.
 
-Both sit behind the same admin gate as every other skill write. A skill's
+All three sit behind the same admin gate as every other skill write. A skill's
 document joins **every** agent's effective prompt company-wide, so authoring one
 decides something for the company rather than for the caller.
 
@@ -145,3 +146,61 @@ what every agent reads when deciding whether to open the skill at all; the body
 stays short. The 1024-character description limit
 (`company::skill_validate::MAX_DESCRIPTION_CHARS`) is stated to the model, and
 the console shows a live count against the same number.
+
+## `POST …/skills/{slug}/update` — take the library's current revision
+
+An install pins a snapshot: the library's `SKILL.md` is persisted verbatim and a
+later library edit never rewrites it. That is deliberate — a document every agent
+reads must not change under a company because a publisher republished it — so
+moving onto a newer revision takes an explicit act. This route is that act.
+
+Body: `{force?: boolean}`, or nothing at all. `force` overrides a blocking scan
+verdict for this request only, the same flag install and upload carry.
+
+The answer is the re-pinned `InstalledSkill`, carrying both the `scan` report of
+the write and its **post-update** drift, so a console folding it into the list
+clears the badge the update just fixed.
+
+### The four refusals
+
+Each is a `409` with its own sentence (`server::ops::language`), because they ask
+the operator for four different things and a shared "can't update this" would say
+none of them:
+
+| Situation | What the sentence says |
+| --- | --- |
+| No row for the slug, or a row that pinned nothing (authored here, or bundled) | there is no registry copy to move to |
+| The slug has left the library | nothing newer exists; the install keeps working from the copy it holds |
+| The stored copy was edited after it was pinned | updating would replace those changes, so it is left to a person — uninstall and install again to take the registry's version |
+| The install already matches the library | there is nothing to update |
+
+The yes/no is `SkillDrift::update_allowed()` — something newer exists **and** the
+stored copy still matches its pin — the same predicate both reads project as
+`updateAvailable`/`modified` and the console mirrors in `canUpdateSkill`. One
+rule, three surfaces, no second copy to drift.
+
+The modified refusal is the one the recorded digest exists for. The edit it would
+overwrite exists nowhere else — no route serves a skill's full text, so there is
+nothing to recover it from — and a host that silently chose the library's version
+would destroy an operator's work with no record that it had.
+
+### An update is a write, held to a write's gates
+
+The library document is re-rendered, size-checked against the same 256 KiB
+ceiling, and **re-scanned** before it is stored. A library entry that has since
+grown something the content scan refuses must not reach a company through an
+update when an install of the same slug would have been refused.
+
+`enabled` is **carried from the existing row**: taking a newer document says
+nothing about wanting a skill the operator switched off switched back on.
+
+The write is journaled as `SkillChanged { change: updated }`
+([`events.md`](events.md)) — the store rewrites one row per slug in place, so the
+journal is the only record that the document an agent reads was replaced.
+
+### Nothing is snoozed
+
+There is no "remind me later" flag, here or on the row. A console's Keep writes
+nothing, so the badge returns on the next read. That is correct: the library has
+genuinely moved on, and an install that stays behind is a fact about the company
+rather than a notification to be dismissed.

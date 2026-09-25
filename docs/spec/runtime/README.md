@@ -68,6 +68,9 @@ Supporting docs:
     rules: the card link on `ApprovalParked`, which of the two correlation keys
     is authoritative, and the event that raises a request inside the
     conversation that produced it (issues #333/#379)
+  - [hive-episodes.md](hive-episodes.md) — how a desk of two or more answers as
+    a room: the episode and round frames, the `RoutingPlan` shapes, and which of
+    those rows are permanent against prunable
   - [workflow-events.md](workflow-events.md) — the workflow-run progress
     brackets (`WorkflowRunStarted` / `WorkflowNodeStarted` /
     `WorkflowNodeFinished` / `WorkflowRunFinished`), run-id correlation, the

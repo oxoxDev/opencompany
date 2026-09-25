@@ -306,44 +306,45 @@ tell the operator their turn failed moments before its answer arrived.
 
 ## Hive episodes and rounds
 
-A desk of two or more answers as a room. The host opens one **episode** per
-operator message (or thread root) on that desk's hive, routes it to seats with
-a `RoutingPlan`, and runs the seats **concurrently** in **rounds** until one
-calls `complete_episode` — or the round cap, a timeout, a failed turn or a
-membership change ends it. Every step is journaled, and every journal row is
-projected onto `/events` under the frame name below, all on the usual
-`{type, seq, atMillis}` envelope with `chatId` = the desk:
+A desk of two or more answers as a room: one **episode** per operator message,
+routed to seats with a `RoutingPlan` and run **concurrently** in **rounds** until
+a seat calls `complete_episode` or the round cap, a timeout, a failed turn or a
+membership change ends it. That contract grew past this file's 500-line cap:
 
-| frame | fields |
+- [hive-episodes.md](hive-episodes.md) — the episode and round frames, the
+  `RoutingPlan` shapes, what a committed utterance carries, and which rows are
+  permanent against prunable.
+
+## Skill changes
+
+`SkillChanged` records every write that changes a skill's document. The store
+keeps one row per slug and rewrites it in place, so this journal is the whole
+record that a playbook every agent reads was installed, replaced or removed.
+
+| field | meaning |
 | --- | --- |
-| `episode_opened` | `episodeId, openedBySeq, parentId?, participants[], plan` |
-| `round_started` | `episodeId, revision, agentIds[]` — these seats run together |
-| `turn_started` (+) | `agentId?, episodeId?, roundRevision?` on the #983 bracket |
-| `turn_settled` | `turnId, agentId?, episodeId?, roundRevision?, outcome: committed \| failed \| timed_out \| no_utterance` — now on success too |
-| `round_committed` | `episodeId, revision, utterances[{agentId, sequence, kind, messageSeq?, to?}], actions[]` |
-| `broadcast_routed` | `episodeId, revision, agentId, messageSeq, plan, probabilities?, router: jev \| fallback \| explicit` |
-| `dm_delivered` | `episodeId, from, to[], messageSeq` |
-| `episode_completed` | `episodeId, revision, completedBy?, rounds, reason, summarySeq?` |
-| `referral` (+) | `episodeId?, toEpisodeId?` — the asking and the answering episode |
-| `desk_routing_configured` | `deskId, reset` (replaces `desk_hive_configured`) |
-| `tool_call` / `tool_result` / `thinking` (+) | `episodeId?, roundRevision?` (ephemeral) |
+| `slug` | the skill's id |
+| `change` | `installed` \| `updated` \| `removed` |
+| `tier` | `builtin` \| `company` \| `registry` \| `custom`, from the row's provenance at the moment of the change |
+| `digest` | SHA-256 of the document written; absent on a removal, which writes none |
+| `by` | who did it, when the surface carried an attributed actor |
 
-`plan` is `{kind:"one", primaryId}`, `{kind:"hive", primaryId, invitedIds[]}`,
-`{kind:"clarify", question?}` or `{kind:"fallback", reason}`. A seat's
-committed utterance is an ordinary `AgentReply` row carrying
-`episode: {id, revision, kind: post | broadcast | dm | complete_episode, to?,
-routedBy?: {plan, router}}` and, for a desk `dm`, `audience: [agent ids]` — so
-`chat/history` alone rebuilds every round after a reload, and the frames add
-only the present tense: which seats a round opened with, which is still
-working, which said nothing. The console folds the two in
-`frontend/src/lib/episodes.ts`; `scripts/measure-coordination.mjs` folds the
-frames alone into the coordination numbers (peak concurrent turns, same-agent
-overlaps — always zero, one agent runs one turn at a time across every desk it
-sits on — rounds per episode, dms, broadcasts, cross-desk referrals).
+Emitted by install (both arms), console authoring, each stored file of an upload,
+and `POST …/skills/{slug}/update`
+([api-skill-authoring.md](api-skill-authoring.md)). A **toggle emits nothing**:
+there is no variant for it, a toggle writes no document, and recording one as
+`updated` would tell a reader a re-pin happened that did not. The append
+propagates its failure rather than being dropped — an unrecordable change
+defeats the row's whole purpose.
 
-`EpisodeOpened` and `EpisodeCompleted` are **permanent**; the round, broadcast
-and dm rows are **prunable** — the reply rows they point at are the evidence,
-and a completed episode is replayed from those.
+**No document text rides the row**, the rule `WorkflowUpdated` and
+`DeskRoutingConfigured` follow: a skill body is instructions an agent will read,
+and this journal is shared by chat, audit and run history. `digest` pins *which*
+document without reproducing it, and is the value the install recorded, so a row
+and a pin can be matched. Projected as `skill_changed` with `slug`, `change` and
+`tier`; `by` is dropped, the deny-by-default actor omission every attributed
+frame uses, and `digest` with it, since a live console reacts by re-reading the
+row. Permanent, and low-cardinality because an operator authors these by hand.
 
 ## Workflow run progress (issue #371)
 
