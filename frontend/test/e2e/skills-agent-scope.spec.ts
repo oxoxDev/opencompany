@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
 /** The company's effective skills, as the host serves them. */
@@ -102,12 +104,13 @@ async function suppressTour(page: Page) {
  * build.
  */
 
-const AGENT_NAME = "Scope Probe";
-/** What the host slugs `AGENT_NAME` into, and the address the page lives at. */
-const AGENT_ID = "scope_probe";
+const AGENT_NAME = `Scope Probe ${randomUUID()}`;
+/** The id the host mints for `AGENT_NAME`, captured once it exists. */
+let AGENT_ID = "";
 const MEMBER_EMAIL = "member-skill-scope@example.test";
 
 async function removeAgent(request: APIRequestContext) {
+  if (!AGENT_ID) return;
   await request.delete(`/api/v1/company/team/${AGENT_ID}`).catch(() => undefined);
 }
 
@@ -131,7 +134,7 @@ test.beforeEach(async ({ page, request }) => {
     data: { name: AGENT_NAME, role: "Probe" },
   });
   expect(created.ok(), `creating ${AGENT_NAME} failed: ${await created.text()}`).toBeTruthy();
-  expect((await created.json()).id).toBe(AGENT_ID);
+  AGENT_ID = (await created.json()).id;
 });
 
 test.afterEach(async ({ request }) => {
