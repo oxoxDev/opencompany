@@ -170,8 +170,8 @@ describe("RoomView, mounted off its own route", () => {
     expect(chatView).toContain("currentPage={routeOpen}");
     const rail = read("views/room/ChannelRail.tsx");
     expect(rail).toContain('const activeAria: "page" | "true" = currentPage ? "page" : "true";');
-    // Every row shape reads the resolved value, so none of the three can drift.
-    expect(rail.match(/aria-current=\{active \? activeAria : undefined\}/g) ?? []).toHaveLength(3);
+    // Every row shape reads the resolved value, so neither can drift.
+    expect(rail.match(/aria-current=\{active \? activeAria : undefined\}/g) ?? []).toHaveLength(2);
     expect(rail).not.toContain('aria-current={active ? "page" : undefined}');
     // And a standalone rail — the unit tests, a rail beside its own transcript —
     // keeps saying `page` with nothing configured.
@@ -193,8 +193,8 @@ describe("RoomView, mounted off its own route", () => {
     // (Codex P2).
     expect(chatView).toContain("const entered = routeOpen && !wasRouteOpen.current;");
     expect(chatView).toContain("if (entered) setRoomVisits((n) => n + 1);");
-    // Cognition, the roster, the viewer's people, the desks, the Operator
-    // channel and the mention directory: everything the rail, the composer and
+    // Cognition, the roster, the viewer's people, the desks and the mention
+    // directory: everything the rail, the composer and
     // the warning strip draw. Cognition is in the set even though it refreshes
     // on `visibilitychange` — that event is about the tab, not the route, and an
     // admin who fixes Inference and comes back has never hidden the tab.
@@ -202,7 +202,7 @@ describe("RoomView, mounted off its own route", () => {
     // Deliberately NOT `reloadDirectory`'s own `useCallback`: that is a handle
     // other code calls after it changes something, not a read on a schedule, and
     // re-keying it would only churn its identity.
-    expect(chatView.match(/\}, \[client, company, roomVisits\]\);/g) ?? []).toHaveLength(6);
+    expect(chatView.match(/\}, \[client, company, roomVisits\]\);/g) ?? []).toHaveLength(5);
     expect(chatView).toContain("const reloadDirectory = useCallback");
 
     // On ENTRY, not on `routeOpen` itself: that moves in both directions, so
