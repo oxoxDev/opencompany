@@ -1153,8 +1153,11 @@ export function RoomView({
     // reload, and a remembered channel that has since been removed falls through
     // the same stale-id path as a bad deep link — raising issue #370's
     // unknown-channel notice rather than landing somewhere else in silence.
-    onNavigate(readLastChannel(scope) ?? channel.id);
-  }, [routeOpen, scope, sub, channel, onNavigate]);
+    const remembered = readLastChannel(scope);
+    const archived =
+      remembered !== null && isGeneralChannel(remembered) && !findChannel(sections, remembered);
+    onNavigate(remembered && !archived ? remembered : channel.id);
+  }, [routeOpen, scope, sub, channel, sections, onNavigate]);
 
   /**
    * The hash named a channel this company doesn't have, and the first-channel

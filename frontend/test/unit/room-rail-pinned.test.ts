@@ -61,14 +61,15 @@ describe("RoomView, mounted off its own route", () => {
     // And it is a dependency, so arriving on Room re-runs the restore rather
     // than skipping it for the life of the mount.
     expect(effect.slice(0, effect.indexOf("}, [") + 200)).toContain(
-      "[routeOpen, scope, sub, channel, onNavigate]",
+      "[routeOpen, scope, sub, channel, sections, onNavigate]",
     );
     // B-096 made this guard matter MORE, not less. The effect it replaced only
     // navigated when something was remembered (`if (remembered)`), so an
     // operator who had never opened a channel was accidentally spared; this one
     // always resolves — memory, else `channel.id` — and without the guard would
     // bounce every such operator out of Flows on the first paint.
-    expect(effect).toContain("onNavigate(readLastChannel(scope) ?? channel.id);");
+    expect(effect).toContain("const remembered = readLastChannel(scope);");
+    expect(effect).toContain("onNavigate(remembered && !archived ? remembered : channel.id);");
   });
 
   it("renders the transcript only on its own route", () => {

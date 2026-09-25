@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
+import { writeLastChannel } from "@/lib/last-channel";
+import { TOUR } from "@/tour/steps";
 import { RoomView } from "@/views/RoomView";
 
 /**
@@ -482,5 +484,58 @@ describe("a General address resolves to whichever channel holds the line", () =>
     expect(composerInput()).toBeNull();
     expect(container.textContent).toContain(READ_ONLY_NOTICE);
     expect(container.textContent).not.toContain("isn't a channel here");
+  });
+});
+
+/**
+ * The guided tour's composer stops land somewhere that has a composer.
+ *
+ * Two stops spotlight `[data-tour="chat-composer"]`, and one of them is the
+ * closing "You're all set". They name no channel, so they open whatever a bare
+ * `#/chat` restores. A missing anchor is skipped in silence, so both halves
+ * are pinned: a bare entry renders a composer, and it does not restore onto
+ * the read-only archive.
+ */
+describe("the tour's composer stops open a writable channel", () => {
+  const composerStops = TOUR.filter((s) => s.target === '[data-tour="chat-composer"]');
+
+  it("finds the two stops that spotlight the composer", () => {
+    expect(composerStops.length).toBe(2);
+    expect(composerStops.map((s) => s.title)).toEqual(["Talk to your company", "You're all set"]);
+  });
+
+  it("names no channel, so a bare #/chat decides", () => {
+    for (const stop of composerStops) {
+      expect(stop.view).toBe("chat");
+      expect(stop.sub).toBeUndefined();
+    }
+  });
+
+  it("mounts the spotlight anchor on a bare #/chat", async () => {
+    await mount("");
+
+    expect(container.querySelector('[data-tour="chat-composer"]')).not.toBeNull();
+    expect(onNavigate).toHaveBeenCalledWith(WRITABLE);
+  });
+
+  it("does not restore a bare #/chat onto a remembered archive", async () => {
+    writeLastChannel({ connection: "local", company: "acme" }, ARCHIVE);
+    await mount("");
+
+    expect(onNavigate).toHaveBeenCalledWith(WRITABLE);
+    expect(onNavigate).not.toHaveBeenCalledWith(ARCHIVE);
+  });
+
+  it("still restores a remembered writable channel", async () => {
+    writeLastChannel({ connection: "local", company: "acme" }, "dm:ada");
+    await mount("");
+
+    expect(onNavigate).toHaveBeenCalledWith("dm:ada");
+  });
+
+  it("mounts no anchor on the archive", async () => {
+    await mount(ARCHIVE);
+
+    expect(container.querySelector('[data-tour="chat-composer"]')).toBeNull();
   });
 });
