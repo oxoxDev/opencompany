@@ -535,7 +535,7 @@ pub(super) fn agent_tools(record: &CompanyRecord, agent_id: &str) -> AgentToolsD
 /// applied, or an overlay teammate's own scope. Returns the field's three-state
 /// value verbatim — `None` inherits, `Some(vec![])` is a deliberate no-skills
 /// scope, `Some(slugs)` narrows.
-pub(super) fn requested_skills(record: &CompanyRecord, agent_id: &str) -> Option<Vec<String>> {
+pub(crate) fn requested_skills(record: &CompanyRecord, agent_id: &str) -> Option<Vec<String>> {
     if let Some(agent) = record.effective_agent(agent_id) {
         return agent.skills.clone();
     }
