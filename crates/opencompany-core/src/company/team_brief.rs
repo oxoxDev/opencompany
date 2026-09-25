@@ -158,7 +158,8 @@ fn render(record: &CompanyRecord, agent_id: &str, audience: Audience) -> String 
              a conversation somebody opened with you — you can ask them directly and their \
              answer reaches you there. Otherwise the way to put work on a teammate is to open a \
              card for it with `spawn_task`, naming them; never say a teammate is out of \
-             reach.\n\nTeammates (name, role: mandate):\n",
+             reach. Call them by name when you write; an id is for a tool call.\n\nTeammates \
+             (name, role: mandate):\n",
         ),
     }
     for agent in &others {

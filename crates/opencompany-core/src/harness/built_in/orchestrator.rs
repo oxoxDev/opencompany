@@ -1640,10 +1640,7 @@ impl Tool for QueryCompanyTool {
                 );
                 md.push_str(&format!("- **{label}** (id `{id}` for tool calls) — "));
                 match lead {
-                    Some(lead) => md.push_str(&format!(
-                        "lead: {}\n",
-                        roster_name(&roster, lead)
-                    )),
+                    Some(lead) => md.push_str(&format!("lead: {}\n", roster_name(&roster, lead))),
                     // A leadless answer is two different facts (issue #1835):
                     // an `auto` channel has members but no lead by design —
                     // "cannot be handed work" would be a lie about a staffed
@@ -1653,9 +1650,7 @@ impl Tool for QueryCompanyTool {
                         .as_ref()
                         .is_some_and(|r| !r.desk_responder_mode(id).is_lead()) =>
                     {
-                        md.push_str(
-                            "channel without a lead; who answers is picked per message\n",
-                        )
+                        md.push_str("channel without a lead; who answers is picked per message\n")
                     }
                     None => md.push_str("no member on the roster, so it cannot be handed work\n"),
                 }
