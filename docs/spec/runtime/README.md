@@ -64,6 +64,9 @@ Supporting docs:
     than in a `before_send`, and why Session Replay is evaluated and declined
 - [events.md](events.md) — the `CompanyEvent` vocabulary those ports carry, and
   the run/task/approval correlation rules a journal reader folds on
+  - [hive-episodes.md](hive-episodes.md) — how a desk of two or more answers as
+    a room: the episode and round frames, the `RoutingPlan` shapes, and which of
+    those rows are permanent against prunable
   - [workflow-events.md](workflow-events.md) — the workflow-run progress
     brackets (`WorkflowRunStarted` / `WorkflowNodeStarted` /
     `WorkflowNodeFinished` / `WorkflowRunFinished`), run-id correlation, the
