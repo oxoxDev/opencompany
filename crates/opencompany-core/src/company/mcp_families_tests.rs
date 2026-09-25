@@ -1,0 +1,219 @@
+//! What the server-family brief says, for every shape of connected server.
+//!
+//! Ungated, like the renderer: these run in the default lane's bare `cargo test`
+//! and again in every lane above it, rather than only in a filtered one. The
+//! fixtures are local for the same reason — the harness's own are behind
+//! `feature = "openhuman"`.
+
+use super::*;
+use crate::company::mcp::{AuthMaterial, McpSource};
+
+fn decl(name: &str, endpoint: &str) -> McpServerDecl {
+    McpServerDecl {
+        name: name.to_string(),
+        endpoint: endpoint.to_string(),
+        description: None,
+        allowed_tools: Vec::new(),
+        disallowed_tools: Vec::new(),
+        read_only_tools: Vec::new(),
+        timeout_secs: 30,
+        enabled: true,
+        source: McpSource::Runtime,
+        auth: AuthMaterial::None,
+        tool_policies: Default::default(),
+        tool_inventory: Default::default(),
+    }
+}
+
+fn grants(g: &[&str]) -> Vec<String> {
+    g.iter().map(|s| s.to_string()).collect()
+}
+
+fn install(server_id: &str, display_name: &str, endpoint: Option<&str>) -> RegistryServerRow {
+    RegistryServerRow {
+        server_id: server_id.to_string(),
+        display_name: display_name.to_string(),
+        endpoint: endpoint.map(str::to_string),
+        enabled: true,
+    }
+}
+
+#[test]
+fn an_agent_reaching_no_mcp_server_is_told_nothing() {
+    assert_eq!(server_family_brief(&[], &[], &grants(&["*"])), "");
+}
+
+#[test]
+fn a_declared_server_names_the_call_tool_and_not_the_registry_one() {
+    let brief = server_family_brief(
+        &[decl("notion", "https://notion.example/mcp")],
+        &[],
+        &grants(&["mcp:notion"]),
+    );
+    assert!(brief.contains("`notion`"), "{brief}");
+    assert!(brief.contains("mcp_call_tool"), "{brief}");
+    assert!(
+        !brief.contains("mcp_registry_tool_call"),
+        "an agent holding no registry grant must not be told about a tool it does not have: \
+         {brief}"
+    );
+}
+
+#[test]
+fn a_directory_install_names_the_registry_tool_and_its_server_id() {
+    let brief = server_family_brief(
+        &[],
+        &[install(
+            "exa-7f3",
+            "Exa Search",
+            Some("https://exa.example/mcp"),
+        )],
+        &grants(&["mcp_registry"]),
+    );
+    assert!(brief.contains("Exa Search"), "{brief}");
+    assert!(brief.contains("exa-7f3"), "{brief}");
+    assert!(brief.contains("mcp_registry_tool_call"), "{brief}");
+    assert!(
+        !brief.contains("mcp_call_tool"),
+        "no declared server is reachable, so the declared tool must not be named: {brief}"
+    );
+}
+
+#[test]
+fn two_different_servers_get_a_line_each() {
+    let brief = server_family_brief(
+        &[decl("notion", "https://notion.example/mcp")],
+        &[install(
+            "exa-7f3",
+            "Exa Search",
+            Some("https://exa.example/mcp"),
+        )],
+        &grants(&["mcp:notion", "mcp_registry"]),
+    );
+    assert_eq!(
+        brief.lines().filter(|l| l.starts_with("- ")).count(),
+        2,
+        "{brief}"
+    );
+    assert!(brief.contains("mcp_call_tool"), "{brief}");
+    assert!(brief.contains("mcp_registry_tool_call"), "{brief}");
+}
+
+#[test]
+fn one_server_reached_two_ways_is_one_line_naming_both() {
+    let brief = server_family_brief(
+        &[decl("github", "https://gh.example/mcp")],
+        // Same server: default port and a trailing slash are not a difference.
+        &[install(
+            "gh-221",
+            "GitHub",
+            Some("https://gh.example:443/mcp/"),
+        )],
+        &grants(&["mcp:github", "mcp_registry"]),
+    );
+    assert_eq!(
+        brief.lines().filter(|l| l.starts_with("- ")).count(),
+        1,
+        "the console renders this as one row, so the prompt must not describe two: {brief}"
+    );
+    assert!(brief.contains("mcp_call_tool"), "{brief}");
+    assert!(brief.contains("gh-221"), "{brief}");
+    let line = brief.lines().find(|l| l.starts_with("- ")).expect("a line");
+    assert!(
+        line.find("github").unwrap() < line.find("gh-221").unwrap(),
+        "the declared name leads, because that is what `mcp_call_tool` takes: {line}"
+    );
+}
+
+#[test]
+fn a_stdio_install_has_no_address_and_so_reconciles_with_nothing() {
+    let brief = server_family_brief(
+        &[decl("github", "https://gh.example/mcp")],
+        &[install("local-1", "Filesystem", None)],
+        &grants(&["mcp:github", "mcp_registry"]),
+    );
+    assert_eq!(
+        brief.lines().filter(|l| l.starts_with("- ")).count(),
+        2,
+        "{brief}"
+    );
+}
+
+#[test]
+fn a_grant_reaching_one_declared_server_does_not_name_the_other() {
+    let brief = server_family_brief(
+        &[
+            decl("notion", "https://notion.example/mcp"),
+            decl("stripe", "https://stripe.example/mcp"),
+        ],
+        &[],
+        &grants(&["mcp:notion"]),
+    );
+    assert!(brief.contains("`notion`"), "{brief}");
+    assert!(!brief.contains("stripe"), "{brief}");
+}
+
+#[test]
+fn a_scoped_registry_grant_does_not_name_a_second_install() {
+    let brief = server_family_brief(
+        &[],
+        &[
+            install("exa-7f3", "Exa Search", Some("https://exa.example/mcp")),
+            install(
+                "brave-9a1",
+                "Brave Search",
+                Some("https://brave.example/mcp"),
+            ),
+        ],
+        &grants(&["mcp_registry.exa-7f3"]),
+    );
+    assert!(brief.contains("exa-7f3"), "{brief}");
+    assert!(!brief.contains("brave-9a1"), "{brief}");
+}
+
+#[test]
+fn a_disabled_server_reaches_nobody_and_is_named_to_nobody() {
+    let mut off = decl("notion", "https://notion.example/mcp");
+    off.enabled = false;
+    let mut shelved = install("exa-7f3", "Exa Search", Some("https://exa.example/mcp"));
+    shelved.enabled = false;
+    assert_eq!(
+        server_family_brief(&[off], &[shelved], &grants(&["mcp:notion", "mcp_registry"])),
+        ""
+    );
+}
+
+#[test]
+fn a_bulk_install_is_capped_and_says_how_many_it_left_out() {
+    let installs: Vec<RegistryServerRow> = (0..CAP + 4)
+        .map(|n| {
+            install(
+                &format!("id-{n}"),
+                &format!("Server {n}"),
+                Some(&format!("https://n{n}.example/mcp")),
+            )
+        })
+        .collect();
+    let brief = server_family_brief(&[], &installs, &grants(&["mcp_registry"]));
+    assert_eq!(
+        brief.lines().filter(|l| l.starts_with("- `")).count(),
+        CAP,
+        "{brief}"
+    );
+    assert!(brief.contains("…and 4 more"), "{brief}");
+}
+
+#[test]
+fn the_brief_never_claims_to_be_every_mcp_server_an_agent_has() {
+    // `mcp_call_tool` also reaches the internal `opencompany` server, which is
+    // attached to the spec elsewhere and described by its own brief.
+    let brief = server_family_brief(
+        &[decl("notion", "https://notion.example/mcp")],
+        &[],
+        &grants(&["mcp:notion"]),
+    );
+    assert!(
+        brief.contains("Other MCP servers may be attached to you as well"),
+        "{brief}"
+    );
+}

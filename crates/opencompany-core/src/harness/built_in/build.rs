@@ -1166,6 +1166,49 @@ pub fn build_agent_with_model(
         persona.push_str(&capability_brief());
     }
 
+    // Composed from the same inputs the two dispatch tools were wired from, so
+    // the brief is exactly as accurate as the belt it describes. The installs
+    // are read under the same condition that wires `mcp_registry_tool_call`,
+    // so the brief never names a tool this agent does not hold.
+    #[cfg(feature = "mcp")]
+    {
+        let installs: Vec<crate::company::mcp_families::RegistryServerRow> =
+            match deps.mcp_home.clone() {
+                Some(mcp_home) if crate::company::grants_mcp_registry_explicit(grants) => {
+                    match crate::harness::mcp::McpRuntime::new(mcp_home).list() {
+                        Ok(installs) => installs
+                            .iter()
+                            .map(|install| crate::company::mcp_families::RegistryServerRow {
+                                server_id: install.server_id.clone(),
+                                display_name: install.display_name.clone(),
+                                endpoint: install.transport.deployment_url().map(str::to_string),
+                                enabled: install.enabled,
+                            })
+                            .collect(),
+                        // A shorter brief, never a wrong one: the declared half
+                        // is still described, and "no installs" is not inferred
+                        // from a read that failed.
+                        Err(error) => {
+                            tracing::warn!(
+                                company = %company,
+                                agent = %manifest_agent.id,
+                                error = %error,
+                                "[build] MCP registry installs unreadable; the server-family \
+                                 brief names the declared servers only"
+                            );
+                            Vec::new()
+                        }
+                    }
+                }
+                _ => Vec::new(),
+            };
+        persona.push_str(&crate::company::mcp_families::server_family_brief(
+            &deps.mcp_servers,
+            &installs,
+            grants,
+        ));
+    }
+
     // Orchestrator seam (issues #53 + #67 + #71): the company's orchestrator agent
     // additionally gets the delegating-orchestrator persona + tools. `query_company`
     // reads the company's facts + recent events; `spawn_task` / `delegate_to_desk`
