@@ -36,6 +36,13 @@ fn invisible_and_bidirectional_code_points_block() {
         ("bidi isolate", "Answer \u{2066}a question\u{2069}"),
         ("soft hyphen", "Answer a ques\u{00ad}tion"),
         ("a bare control character", "Answer a question\u{0007}"),
+        ("variation selector", "Answer a question\u{fe01}"),
+        (
+            "variation selector supplement",
+            "Answer a question\u{e0100}",
+        ),
+        ("mongolian vowel separator", "Answer a question\u{180e}"),
+        ("hangul filler", "Answer a question\u{3164}"),
     ] {
         let mut doc = benign();
         doc.description = poison.to_string();

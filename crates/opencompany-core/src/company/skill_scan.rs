@@ -243,19 +243,30 @@ fn scan_text(field: &ScanField, text: &str, findings: &mut Vec<Finding>) {
 /// Whether `c` renders as nothing, or reorders what follows it.
 ///
 /// Covers the Unicode tag block (the smuggling channel the Cloud Security
-/// Alliance names), bidirectional overrides and isolates, the zero-width
-/// joiners and spaces, the soft hyphen, and every other control character bar
-/// the three whitespace ones Markdown needs.
+/// Alliance names), variation selectors (the same smuggling channel, in the
+/// block emoji presentation selectors also live in), bidirectional overrides
+/// and isolates, the zero-width joiners and spaces, Hangul filler characters,
+/// the soft hyphen, and every other control character bar the three
+/// whitespace ones Markdown needs.
+///
+/// `char::is_control` does not reach any of these — they are general category
+/// `Mn`/`Cf`, not `Cc` — so each has to be named here.
 pub fn is_invisible(c: char) -> bool {
     matches!(c,
         '\u{00ad}'
         | '\u{061c}'
+        | '\u{115f}' | '\u{1160}'
+        | '\u{180e}'
         | '\u{200b}'..='\u{200f}'
         | '\u{202a}'..='\u{202e}'
         | '\u{2060}'..='\u{2064}'
         | '\u{2066}'..='\u{2069}'
+        | '\u{3164}'
+        | '\u{fe00}'..='\u{fe0f}'
         | '\u{feff}'
+        | '\u{ffa0}'
         | '\u{e0000}'..='\u{e007f}'
+        | '\u{e0100}'..='\u{e01ef}'
     ) || (c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
 }
 
