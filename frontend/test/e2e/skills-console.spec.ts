@@ -107,10 +107,12 @@ test("a bundled skill reads as Company, never edited, and available to read", as
   // reporting a write that never happened.
   await expect(card.getByTestId("skill-last-edited")).toContainText("Never edited");
   await expect(card.getByTestId("skill-category")).toHaveText(bundled!.category);
-  // Reach, not capability — the switch decides what an agent may read. Matched
-  // on meaning: the per-agent scope work rewords this line, and a spec that
-  // pinned either sentence would fail on whichever of the two lands second.
-  await expect(card.getByTestId("skill-reach")).toContainText(/agents.*read/i);
+  // Reach, not capability — the switch decides what an agent may read, never
+  // whether one may run it. Matched on meaning rather than on wording: the label
+  // is a count now that the host reports who a skill is scoped to, and the six
+  // sentences it can be are pinned in `skill-scope.test.ts` instead.
+  await expect(card.getByTestId("skill-reach")).toContainText(/agents/i);
+  await expect(card.getByTestId("skill-reach")).not.toContainText(/run|execute/i);
 
   // The count line states the whole set, unfiltered.
   await expect(page.getByTestId("skills-count")).toHaveText(
