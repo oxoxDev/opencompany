@@ -12,10 +12,6 @@
 //! surface, which the server does not need, and gating on it would leave the
 //! harness lane's turns without their tools.)
 
-/// The company journal read as a tinyhivemind `SessionLog`, one desk at a
-/// time (ex `hivemind/log.rs`).
-/// This company as the host of one completion episode: the journal
-/// `tinyhivemind` commits through, and how a teammate is built as a seat.
 /// One completion episode on `tinyhivemind`'s own loop.
 #[cfg(feature = "openhuman")]
 pub mod conducted;
@@ -34,6 +30,8 @@ pub mod episode_store;
 /// One `OpenHumanHive` per desk over the company's live agents (Phase 4).
 #[cfg(feature = "openhuman")]
 pub mod graph;
+/// This company as the host of one completion episode: the journal
+/// `tinyhivemind` commits through, and how a teammate is built as a seat.
 #[cfg(feature = "openhuman")]
 pub mod host;
 /// Jev routing over the TinyHumans System One proxy: the host-owned
@@ -56,6 +54,8 @@ pub mod referral;
 pub mod routing;
 #[cfg(feature = "openhuman")]
 pub mod seating;
+/// The company journal read as a tinyhivemind `SessionLog`, one desk at a
+/// time (ex `hivemind/log.rs`).
 pub mod session_log;
 /// The in-flight turn registry, the speech fold and the tool adapter the
 /// server dispatches through (plan Phase 3).
