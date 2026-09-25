@@ -3606,6 +3606,7 @@ impl RuntimeBuilder {
                                         ));
                                         delivery_channels
                                     },
+                                    notifications: Some(ops.notifications.clone()),
                                     // Issue #227: the same gate and journal the
                                     // runtime gets below — one approvals queue,
                                     // so a report parked by a workflow lands in
