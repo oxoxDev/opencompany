@@ -177,6 +177,16 @@ pub(super) async fn post_chat(app: &Router, cookie: &str, body: &str) -> serde_j
     serde_json::from_slice(&bytes).unwrap()
 }
 
+/// The default agent's DM — where a message with no `chat` lands.
+pub(super) async fn default_dm(state: &AppState) -> String {
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    runtime
+        .default_agent_dm()
+        .await
+        .unwrap()
+        .expect("the company has a default agent")
+}
+
 /// Reads a desk's history. `desk` empty reads the default General thread.
 pub(super) async fn get_history(app: &Router, cookie: &str, desk: &str) -> Vec<serde_json::Value> {
     let uri = if desk.is_empty() {

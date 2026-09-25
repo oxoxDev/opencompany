@@ -2652,7 +2652,8 @@ struct ChatMessage {
     /// The operator's message text.
     #[serde(alias = "message")]
     text: String,
-    /// The desk the message is addressed to. Defaults to the "General" desk.
+    /// The desk the message is addressed to. Omitting it is deprecated; such a
+    /// message lands in the default agent's DM.
     #[serde(default)]
     chat: Option<String>,
     /// The message this one replies to, by its id (issue #364) — a thread reply
@@ -3794,14 +3795,25 @@ async fn chat_and_emit(
     state: &AppState,
     id: &CompanyId,
     runtime: Arc<CompanyRuntime>,
-    message: ChatMessage,
+    mut message: ChatMessage,
     by: Option<Actor>,
 ) -> Result<ChatOk, ApiError> {
-    // The default desk for an unaddressed message.
-    let desk = message
-        .chat
-        .clone()
-        .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string());
+    let desk = match message.chat.clone() {
+        Some(chat) => chat,
+        None => {
+            let desk = runtime
+                .default_agent_dm()
+                .await?
+                .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string());
+            tracing::warn!(
+                company = %id,
+                chat = %desk,
+                "[chat] a message with no `chat` is deprecated; routed to the default agent's DM"
+            );
+            message.chat = Some(desk.clone());
+            desk
+        }
+    };
     // Issue #1757: the Operator channel is a **read-only** aggregation surface —
     // a "what happened" feed of workflow reports, not a conversation. Refuse a
     // send addressed to it rather than journaling an `OperatorMessage` under the

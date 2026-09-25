@@ -229,16 +229,13 @@ async fn chat_addressed_to_a_desk_assigns_the_desk() {
     );
 }
 
-/// Everything that addresses nobody in particular opens a blank card when a
-/// workflow is asked for: no thread at all, the empty string, the console's
-/// legacy fallback desk id, and the default "General" desk this company does
-/// not have.
+/// A thread key that names nobody in particular opens a blank card when a
+/// workflow is asked for: the empty string, the console's legacy fallback
+/// desk id, and the default "General" desk this company does not have.
 ///
-/// This pins the direction of the change — *more* cards are operator-chosen,
-/// none fewer — and it is the clause that keeps the orchestrator's own queue
-/// working: a blank assignee is what hands a card to it.
+/// A blank assignee is what hands a card to the orchestrator's own queue.
 #[tokio::test]
-async fn an_unaddressed_chat_leaves_the_card_unassigned() {
+async fn a_chat_to_no_one_in_particular_leaves_the_card_unassigned() {
     let home_dir = home();
     let home = home_dir.path().to_path_buf();
     let state = state_with_roster(&home).await;
@@ -246,7 +243,7 @@ async fn an_unaddressed_chat_leaves_the_card_unassigned() {
     let runtime = state.registry().get(&id).unwrap();
     let app = router(state);
 
-    for thread in [None, Some(""), Some("main"), Some(DEFAULT_DESK)] {
+    for thread in [Some(""), Some("main"), Some(DEFAULT_DESK)] {
         let r = app
             .clone()
             .oneshot(workflow_chat_to(CROSSED, thread))
@@ -256,13 +253,47 @@ async fn an_unaddressed_chat_leaves_the_card_unassigned() {
     }
 
     let tasks = runtime.tasks().list(&id).await.unwrap();
-    assert_eq!(tasks.len(), 4, "one card per message: {tasks:?}");
+    assert_eq!(tasks.len(), 3, "one card per message: {tasks:?}");
     for card in &tasks {
         assert_eq!(
             card.assignee, "",
-            "an unaddressed message leaves the card for the orchestrator"
+            "a message to no one in particular leaves the card for the orchestrator"
         );
     }
+}
+
+/// A message with no `chat` at all is still accepted, but it is addressed to
+/// the default agent's DM: the card is the orchestrator's and answers there.
+#[tokio::test]
+async fn an_unaddressed_chat_lands_in_the_default_agents_dm() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_roster(&home).await;
+    let id = CompanyId::new("acme");
+    let runtime = state.registry().get(&id).unwrap();
+    let app = router(state);
+
+    let r = app.oneshot(workflow_chat_to(CROSSED, None)).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    let tasks = runtime.tasks().list(&id).await.unwrap();
+    assert_eq!(tasks.len(), 1, "one card: {tasks:?}");
+    assert_eq!(tasks[0].assignee, "product_manager");
+    assert_eq!(tasks[0].origin_chat_id(), Some("dm:product_manager"));
+
+    let events = runtime
+        .events()
+        .read_from(&id, EventSeq::new(0), usize::MAX)
+        .await
+        .unwrap();
+    let asked = events
+        .iter()
+        .find_map(|stored| match &stored.event {
+            CompanyEvent::OperatorMessage { chat, .. } => Some(chat.clone()),
+            _ => None,
+        })
+        .expect("the operator's message is journaled");
+    assert_eq!(asked.as_deref(), Some("dm:product_manager"));
 }
 
 /// A thread key that names nothing on the roster is not an error: the card
@@ -328,24 +359,10 @@ async fn a_chat_card_remembers_the_thread_it_was_opened_from() {
         .iter()
         .find(|c| c.title == "Draft the investor update")
         .expect("the second card");
-    // No desk, therefore no conversation and no thread inside one. Before
-    // #1890 step 5 this card carried a thread root beside no desk — the
-    // drifted pair — and the root was inert: `relay_reply` posts back
-    // through the desk, so a root with nothing to post into named nothing.
-    // `TaskOrigin` cannot hold that state, so it is simply absent now.
-    //
-    // Restoring a real origin here means stamping the General desk the
-    // route already folds this message into, which is a behaviour change
-    // and not this one.
     assert_eq!(
         unaddressed.origin_chat_id(),
-        None,
-        "an unaddressed message has no conversation to answer in"
-    );
-    assert_eq!(
-        unaddressed.origin_parent(),
-        None,
-        "and therefore no thread inside one either"
+        Some("dm:product_manager"),
+        "an unaddressed message answers in the default agent's DM"
     );
 
     // The addressed card, found by title rather than by index: the two are
