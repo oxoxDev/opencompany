@@ -729,7 +729,7 @@ async fn agent_detail(
 /// The same resolution `GET …/skills` reports, filtered to the enabled entries:
 /// that route keeps the disabled rows because they carry the switch that turns
 /// a skill back on, and a teammate has no such switch.
-async fn company_enabled_skills(
+pub(super) async fn company_enabled_skills(
     state: &AppState,
     company: &ScopedCompany,
 ) -> Result<Vec<String>, ApiError> {

@@ -304,3 +304,132 @@ async fn a_scope_naming_a_skill_the_company_lacks_confers_nothing() {
     assert_eq!(writer["state"], "included", "{row}");
     assert_eq!(writer["holds"], false, "{row}");
 }
+
+/// The whole roster read, keyed by agent id.
+async fn team(state: &AppState) -> std::collections::BTreeMap<String, Value> {
+    let (status, list, raw) = send(state, "GET", "/api/v1/company/team", None).await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    list.as_array()
+        .expect("an array")
+        .iter()
+        .map(|row| (row["id"].as_str().expect("an id").to_string(), row.clone()))
+        .collect()
+}
+
+/// **The pinning test.** The per-skill projection is the inversion of the
+/// teammate read over the same record and the same ceiling — asserted route
+/// against route, for every skill and every agent.
+///
+/// Without this the change installs the duplication it exists to remove. Two
+/// surfaces deriving a scope independently is how a console comes to advertise
+/// a skill the harness never materializes, and the two derivations here live in
+/// different modules behind different routes.
+///
+/// `holds` is checked against the teammate's own `effective`, and `state`
+/// against the teammate's own `requested` — the two questions separately, so a
+/// projection that answered one for both cannot pass.
+#[tokio::test]
+async fn the_per_skill_projection_inverts_the_teammate_read_exactly() {
+    let home = tempfile::tempdir().unwrap();
+    let state = state_with_roster(home.path()).await;
+    author_brand_voice(&state).await;
+    // One skill off, so the ceiling and the stored scopes disagree somewhere and
+    // the comparison has a case that a scope-only or effective-only projection
+    // would get wrong.
+    let (status, _, raw) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/skills/brand-voice",
+        Some(r#"{"enabled":false}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+
+    let team = team(&state).await;
+    let (status, skills, raw) = send(&state, "GET", "/api/v1/company/skills", None).await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    let skills = skills.as_array().expect("an array");
+    assert!(!skills.is_empty(), "{raw}");
+
+    let mut compared = 0usize;
+    for row in skills {
+        let slug = row["id"].as_str().expect("a slug");
+        for agent in row["agents"].as_array().expect("agents") {
+            let id = agent["id"].as_str().expect("an id");
+            let member = &team[id];
+            let scope = &member["skills"];
+
+            let effective: Vec<&str> = scope["effective"]
+                .as_array()
+                .expect("effective")
+                .iter()
+                .map(|slug| slug.as_str().expect("a slug"))
+                .collect();
+            assert_eq!(
+                agent["holds"].as_bool().expect("holds"),
+                effective.contains(&slug),
+                "`{slug}` / `{id}`: the panel and the teammate page disagree about \
+                 what is held: {agent} vs {scope}"
+            );
+
+            let expected = match scope["requested"].as_array() {
+                None => "inherited",
+                Some(slugs) if slugs.iter().any(|want| want == slug) => "included",
+                Some(_) => "excluded",
+            };
+            assert_eq!(
+                agent["state"], expected,
+                "`{slug}` / `{id}`: the projection does not invert the stored scope: \
+                 {agent} vs {scope}"
+            );
+            compared += 1;
+        }
+    }
+    assert!(
+        compared >= 3,
+        "the fixture has three agents and at least one skill, so this compared \
+         nothing: {compared}"
+    );
+}
+
+/// The roster read keeps `[]` apart from absent, which is where the distinction
+/// dies if it dies anywhere.
+///
+/// `Option<Vec<String>>` with a `skip_serializing_if` on it would send nothing
+/// for both, and the panel would then compute `hermit`'s next list from a scope
+/// it read as "inherits every skill" — handing it the company's whole ceiling on
+/// a save that was about one slug.
+#[tokio::test]
+async fn the_roster_read_keeps_an_empty_scope_apart_from_an_absent_one() {
+    let home = tempfile::tempdir().unwrap();
+    let state = state_with_roster(home.path()).await;
+    let team = team(&state).await;
+
+    assert!(
+        team["ceo"]["skills"]["requested"].is_null(),
+        "a teammate that declares no `skills` line inherits: {}",
+        team["ceo"]["skills"]
+    );
+    assert_eq!(
+        team["hermit"]["skills"]["requested"],
+        serde_json::json!([]),
+        "a deliberate empty scope survives as `[]`, not as absent: {}",
+        team["hermit"]["skills"]
+    );
+    assert_eq!(
+        team["writer"]["skills"]["requested"],
+        serde_json::json!(["brand-voice"]),
+        "{}",
+        team["writer"]["skills"]
+    );
+
+    // And the ceiling is on every row, because the panel's next-list arithmetic
+    // needs it to materialize an inherited scope.
+    for id in ["ceo", "writer", "hermit"] {
+        assert!(
+            team[id]["skills"]["companyAvailable"].is_array(),
+            "`{id}` carries the ceiling: {}",
+            team[id]["skills"]
+        );
+    }
+}
