@@ -5,6 +5,9 @@
 // skills exist lives on the client — a hardcoded registry array used to live
 // here, and it had already drifted from what the backend could actually serve.
 
+import type { SkillAgentScope } from "@/api/skills";
+import { skillReachSummary } from "@/lib/skill-scope";
+
 export type SkillCategory = "Marketing" | "Research" | "Ops" | "Content" | "Finance";
 
 /**
@@ -54,14 +57,23 @@ export const SKILLS_READ_ONLY_NOTE =
  * the switch decides whether a skill is visible to an agent, never whether one
  * can execute it.
  *
- * It does not say *every* agent, because that stopped being true once a
- * teammate could be scoped to a subset. This page has no roster, so it cannot
- * name which teammates hold a given skill — the teammate's own page answers
- * that. Claiming "every agent" here would be false for exactly the companies
- * that bothered to scope.
+ * Counts rather than names. The host now reports who a skill is scoped to, so
+ * the old unconditional "available for your agents to read" would have the card
+ * asserting what the panel behind it contradicts — and naming the teammates
+ * instead does not fit a card footer at phone width.
+ *
+ * `agents` absent is a fourth case, not a zero: a host that does not report the
+ * scope cannot be quoted as reporting nobody, so that arm keeps the claim the
+ * switch alone supports.
  */
-export function skillReachLabel(enabled: boolean): string {
-  return enabled ? "Available for your agents to read" : "Hidden from agents";
+export function skillReachLabel(enabled: boolean, agents?: SkillAgentScope[] | null): string {
+  if (!enabled) return "Hidden from agents";
+  const reach = skillReachSummary(agents);
+  if (reach === null) return "Available for your agents to read";
+  if (reach.total === 0) return "No agents to read it";
+  if (reach.held === reach.total) return "Available to all agents";
+  if (reach.held === 0) return "Available to no agents";
+  return `Available to ${reach.held} of ${reach.total} agents`;
 }
 
 /**
