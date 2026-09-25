@@ -29,6 +29,7 @@ fn delta(slug: &str, enabled: bool, custom_doc: Option<&str>) -> SkillState {
         },
         custom_doc: custom_doc.map(str::to_string),
         updated_at_millis: None,
+        install: None,
     }
 }
 
@@ -40,6 +41,7 @@ fn registry_delta(slug: &str, custom_doc: &str) -> SkillState {
         source: SkillSource::Registry,
         custom_doc: Some(custom_doc.to_string()),
         updated_at_millis: None,
+        install: None,
     }
 }
 
@@ -497,6 +499,7 @@ async fn console_custom_docs_surface_content_through_read_tools() {
                 .to_string(),
         ),
         updated_at_millis: None,
+        install: None,
     };
     // Console-authored custom skill with an empty body (frontmatter only).
     let empty_body = SkillState {
@@ -505,6 +508,7 @@ async fn console_custom_docs_surface_content_through_read_tools() {
         source: SkillSource::Custom,
         custom_doc: Some("---\nname: Quick Note\ndescription: Jot a quick note\n---\n".to_string()),
         updated_at_millis: None,
+        install: None,
     };
 
     let eff = EffectiveSkills::materialize(
