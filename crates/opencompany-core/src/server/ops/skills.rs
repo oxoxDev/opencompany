@@ -24,13 +24,14 @@ use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post, put};
+use axum::routing::{post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::company::skill_effective::{self, EffectiveSkill};
 use crate::company::skill_scan::{Verdict, scan_skill};
+use crate::company::skill_scope::agents_for_skill;
 use crate::company::skill_validate::{
     MAX_SLUG_CHARS, slugify, validate_skill_md, validate_slug, validate_slug_shape,
 };
@@ -48,8 +49,6 @@ use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 
 /// The default category stamped on a skill whose doc carries none.
 const DEFAULT_CATEGORY: &str = "Ops";
-/// The publisher stamped on shared-library skills (mirrors the GraphQL type).
-const REGISTRY_PUBLISHER: &str = "OpenCompany";
 
 /// The largest a skill's persisted `SKILL.md` (frontmatter and body together)
 /// may be.
@@ -192,6 +191,8 @@ fn write_lock(company: &CompanyId) -> Arc<tokio::sync::Mutex<()>> {
 mod draft;
 mod drift;
 mod journal;
+mod registry;
+mod scope;
 mod update;
 mod upload;
 
@@ -202,9 +203,7 @@ pub fn router() -> Router<AppState> {
         .merge(draft::router())
         .merge(update::router())
         .merge(scoped("/skills/{slug}/uninstall", post(uninstall)))
-        // `registry` is a static segment, so it wins over the `{slug}` pattern
-        // above regardless of registration order (and the methods differ anyway).
-        .merge(scoped("/skills/registry", get(list_registry)))
+        .merge(registry::router())
         .merge(scoped("/skills/{slug}", put(set_enabled)))
         .merge(scoped("/skills", post(create_custom).get(list_skills)))
 }
@@ -247,6 +246,17 @@ struct InstalledSkill {
     /// then have to decide whether to warn about a skill nothing can be said
     /// about.
     modified: bool,
+    /// Where every roster agent stands on this skill — the read-side inversion
+    /// of the per-agent allowlist ([`crate::company::skill_scope`]), which the
+    /// skill's detail panel renders its picker from.
+    ///
+    /// Absent means **this answer does not report the roster**, which the
+    /// console reads as "cannot say" and renders without a picker. An empty list
+    /// is a different statement — the company has no teammates — so the two must
+    /// not collapse, and the absent form is the safe one for a route that has
+    /// not resolved the roster.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agents: Option<Vec<crate::company::skill_scope::SkillAgentScope>>,
 }
 
 impl InstalledSkill {
@@ -288,6 +298,7 @@ impl InstalledSkill {
             scan: None,
             update_available: None,
             modified: false,
+            agents: None,
         }
     }
 
@@ -322,41 +333,9 @@ impl InstalledSkill {
             scan: None,
             update_available: None,
             modified: false,
+            agents: None,
         }
         .with_drift(effective_drift(skill, registry))
-    }
-}
-
-/// One skill in the shared library, as the console's registry tab browses it.
-///
-/// Deliberately **metadata only** — no `body`. Mirrors the GraphQL
-/// `RegistrySkill` type so the two transports agree field for field.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RegistrySkill {
-    id: String,
-    name: String,
-    description: String,
-    category: String,
-    publisher: String,
-    /// The library revision this entry ships, from frontmatter. `None` for a
-    /// skill authored before `version` existed.
-    version: Option<String>,
-}
-
-impl RegistrySkill {
-    fn from_doc(doc: &SkillDoc) -> Self {
-        Self {
-            id: doc.slug.clone(),
-            name: doc.name.clone(),
-            description: doc.description.clone(),
-            category: doc
-                .category
-                .clone()
-                .unwrap_or_else(|| DEFAULT_CATEGORY.to_string()),
-            publisher: REGISTRY_PUBLISHER.to_string(),
-            version: doc.version.clone(),
-        }
     }
 }
 
@@ -422,10 +401,17 @@ async fn list_skills(
     ));
     let registry = state.shared_skill_registry()?;
     let effective = skill_effective::resolve(company.runtime.source_dir(), &registry, &deltas)?;
+    let roster = scope::roster_scopes(&company.runtime).await?;
     Ok(Json(
         effective
             .iter()
-            .map(|skill| InstalledSkill::from_effective(skill, &registry))
+            .map(|skill| {
+                InstalledSkill::from_effective(skill, &registry).with_agents(agents_for_skill(
+                    &skill.slug,
+                    skill.enabled,
+                    &roster,
+                ))
+            })
             .collect(),
     ))
 }
@@ -534,33 +520,12 @@ async fn install(
     // from the same render: current and unmodified by construction, so this
     // needs no second comparison to say so.
     let stood = delta.install.as_ref().map(|_| SkillDrift::default());
+    let roster = scope::roster_scopes(&company.runtime).await?;
     Ok(Json(
         InstalledSkill::from_state(&delta)
             .with_scan(scan)
-            .with_drift(stood),
-    ))
-}
-
-/// `GET …/skills/registry` — the shared skill library the console's registry tab
-/// browses.
-///
-/// **Metadata only, by construction**: [`RegistrySkill`] has no `body` field, so
-/// the payload stays flat regardless of how large the library grows. Install is
-/// server-authoritative, so the client never needs a body — it posts a slug and
-/// the host resolves the content.
-///
-/// Scoped (and so authorized) like every other console route even though the
-/// library itself is host-global; the registry is not public.
-async fn list_registry(
-    State(state): State<AppState>,
-    _company: ScopedCompany,
-) -> Result<Json<Vec<RegistrySkill>>, ApiError> {
-    Ok(Json(
-        state
-            .shared_skill_registry()?
-            .iter()
-            .map(RegistrySkill::from_doc)
-            .collect(),
+            .with_drift(stood)
+            .with_agents(agents_for_skill(&delta.slug, delta.enabled, &roster)),
     ))
 }
 
@@ -631,7 +596,12 @@ async fn set_enabled(
     // — which the answer has to say, because the console folds this row into the
     // list it is already showing.
     let stood = drift::row_drift(&app.shared_skill_registry()?, &state);
-    Ok(Json(InstalledSkill::from_state(&state).with_drift(stood)))
+    let roster = scope::roster_scopes(&company.runtime).await?;
+    Ok(Json(
+        InstalledSkill::from_state(&state)
+            .with_drift(stood)
+            .with_agents(agents_for_skill(&state.slug, state.enabled, &roster)),
+    ))
 }
 
 async fn create_custom(
@@ -674,7 +644,12 @@ async fn create_custom(
         SkillChange::Installed,
     )
     .await?;
-    Ok(Json(InstalledSkill::from_state(&state).with_scan(scan)))
+    let roster = scope::roster_scopes(&company.runtime).await?;
+    Ok(Json(
+        InstalledSkill::from_state(&state)
+            .with_scan(scan)
+            .with_agents(agents_for_skill(&state.slug, state.enabled, &roster)),
+    ))
 }
 
 /// Builds a `SKILL.md` document from a name, description, optional category, and
