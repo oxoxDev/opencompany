@@ -100,7 +100,9 @@ export function SkillDetailPanel({
   const [moved, setMoved] = useState<Record<string, boolean>>({});
   // Whether the operator asked for the per-teammate list. Every teammate ticked
   // reads as "All agents", and choosing "Selected agents" has to reveal the list
-  // before anything is unticked or there is nothing to untick.
+  // before anything is unticked or there is nothing to untick. Ticking one also
+  // latches it, so tapping the last empty box cannot collapse the list underneath
+  // an edit in progress.
   const [revealed, setRevealed] = useState(false);
   const [saving, setSaving] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
@@ -348,12 +350,13 @@ export function SkillDetailPanel({
                                   checked={ticked(agent)}
                                   disabled={saving}
                                   data-testid={`skill-agent-toggle-${agent.id}`}
-                                  onChange={(e) =>
+                                  onChange={(e) => {
+                                    setRevealed(true);
                                     setMoved((all) => ({
                                       ...all,
                                       [agent.id]: e.target.checked,
-                                    }))
-                                  }
+                                    }));
+                                  }}
                                 />
                               ) : null}
                               <span className="min-w-0 truncate font-mono text-xs">
