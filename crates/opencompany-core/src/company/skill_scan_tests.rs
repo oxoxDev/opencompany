@@ -122,6 +122,7 @@ fn documenting_where_a_credential_goes_is_not_a_finding() {
         "client_secret = os.environ[\"CLIENT_SECRET\"]",
         "password: changeme-before-you-deploy",
         "The sk- prefix identifies an OpenAI key.",
+        "Rotate the password yearly, see https://wiki.acme.io/sec/pw2",
     ] {
         let mut doc = benign();
         doc.body = benign_line.to_string();

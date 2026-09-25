@@ -358,14 +358,15 @@ fn hardcoded_credential(text: &str) -> Option<String> {
         }
     }
     for line in text.lines() {
-        let lowered = line.to_ascii_lowercase();
-        let Some(name) = SECRET_KEY_NAMES
-            .iter()
-            .find(|name| lowered.contains(**name))
-        else {
+        let Some((key, value)) = assignment(line) else {
             continue;
         };
-        let Some(value) = assigned_value(line) else {
+        let lowered_key = key.to_ascii_lowercase();
+        let key = lowered_key
+            .rsplit(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-')))
+            .find(|part| !part.is_empty())
+            .unwrap_or_default();
+        let Some(name) = SECRET_KEY_NAMES.iter().find(|name| key.contains(**name)) else {
             continue;
         };
         if looks_like_secret(&value) {
@@ -375,16 +376,15 @@ fn hardcoded_credential(text: &str) -> Option<String> {
     None
 }
 
-/// The right-hand side of the first `=` or `:` on a line, unquoted.
-fn assigned_value(line: &str) -> Option<String> {
+/// The left side and the unquoted right side of the first `=` or `:` on a line.
+fn assignment(line: &str) -> Option<(&str, String)> {
     let split = line.find('=').into_iter().chain(line.find(':')).min()?;
-    let value = line[split + 1..].trim();
-    Some(
-        value
-            .trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | ',' | ';'))
-            .trim()
-            .to_string(),
-    )
+    let value = line[split + 1..]
+        .trim()
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | ',' | ';'))
+        .trim()
+        .to_string();
+    Some((&line[..split], value))
 }
 
 /// Whether a value reads as a secret rather than a setting or a placeholder.
