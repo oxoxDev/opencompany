@@ -585,3 +585,61 @@ async fn uploading_over_a_pinned_skill_keeps_the_pin_and_its_provenance() {
         "the edited document differs from the pin, so it reads as modified"
     );
 }
+
+/// Each stored file leaves its own journal row.
+///
+/// Per file, not per request: the route's whole shape is one outcome each, and a
+/// single row for a drop of three would leave two documents in every agent's
+/// prompt with nothing recording that they arrived.
+#[tokio::test]
+async fn each_stored_file_journals_its_own_installed_row() {
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+
+    let (status, body) = upload(
+        &state,
+        &[
+            ("press-outreach.md", doc("Press Outreach").as_bytes()),
+            ("deal-memo.md", doc("Deal Memo").as_bytes()),
+            ("not-a-skill.txt", b"plain text"),
+        ],
+        false,
+        &fixed_cookie("acme"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let runtime = state
+        .registry()
+        .get(&crate::ports::types::CompanyId::new("acme"))
+        .expect("company");
+    let rows: Vec<Value> = runtime
+        .events()
+        .read_from(runtime.id(), crate::ports::EventSeq::new(0), usize::MAX)
+        .await
+        .expect("journal")
+        .into_iter()
+        .filter_map(|stored| {
+            let value = serde_json::to_value(&stored.event).expect("serializes");
+            value
+                .get("kind")
+                .is_some_and(|kind| kind == "SkillChanged")
+                .then_some(value)
+        })
+        .collect();
+
+    let slugs: Vec<&str> = rows
+        .iter()
+        .map(|row| row["slug"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        slugs,
+        vec!["press-outreach", "deal-memo"],
+        "one row per stored file, and none for the refused one: {rows:?}"
+    );
+    for row in &rows {
+        assert_eq!(row["change"], serde_json::json!("installed"));
+        assert!(row["digest"].is_string(), "{row}");
+        assert!(row["by"].is_object(), "{row}");
+    }
+}

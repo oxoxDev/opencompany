@@ -41,7 +41,7 @@ use crate::company::{
 use crate::error::OpenCompanyError;
 use crate::ports::now_millis;
 use crate::ports::skills_state::{SkillInstall, SkillSource, SkillState};
-use crate::ports::types::CompanyId;
+use crate::ports::types::{CompanyId, SkillChange};
 use crate::server::error::ApiError;
 use crate::server::ops::language;
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
@@ -191,6 +191,7 @@ fn write_lock(company: &CompanyId) -> Arc<tokio::sync::Mutex<()>> {
 
 mod draft;
 mod drift;
+mod journal;
 mod upload;
 
 /// Builds the skills route fragment.
@@ -520,6 +521,13 @@ async fn install(
         install,
     };
     company.runtime.skills().set(company.id(), &delta).await?;
+    journal::journal_write(
+        &company.runtime,
+        &company.actor(),
+        &delta,
+        SkillChange::Installed,
+    )
+    .await?;
     // A pin minted from the library's current document, over a document stored
     // from the same render: current and unmodified by construction, so this
     // needs no second comparison to say so.
@@ -571,6 +579,8 @@ async fn uninstall(
         // Only registry installs and custom skills can be uninstalled.
         Some(state) if matches!(state.source, SkillSource::Registry | SkillSource::Custom) => {
             company.runtime.skills().remove(company.id(), &slug).await?;
+            journal::journal_removal(&company.runtime, &company.actor(), &slug, state.source)
+                .await?;
             Ok(StatusCode::NO_CONTENT)
         }
         // A built-in (company) skill — with or without a delta row — cannot be
@@ -655,6 +665,13 @@ async fn create_custom(
         updated_at_millis: Some(now_millis()),
     };
     company.runtime.skills().set(company.id(), &state).await?;
+    journal::journal_write(
+        &company.runtime,
+        &company.actor(),
+        &state,
+        SkillChange::Installed,
+    )
+    .await?;
     Ok(Json(InstalledSkill::from_state(&state).with_scan(scan)))
 }
 

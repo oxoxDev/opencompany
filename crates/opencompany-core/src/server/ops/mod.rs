@@ -185,6 +185,9 @@ mod tests_skills_install_persists_the;
 #[path = "write_skills_install_pin_tests.rs"]
 mod tests_skills_install_pin;
 #[cfg(test)]
+#[path = "write_skills_journal_tests.rs"]
+mod tests_skills_journal;
+#[cfg(test)]
 #[path = "write_streamed_multipart_tests.rs"]
 mod tests_streamed_multipart;
 #[cfg(test)]

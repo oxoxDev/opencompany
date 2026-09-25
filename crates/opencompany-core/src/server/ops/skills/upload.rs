@@ -32,6 +32,7 @@ use crate::AppState;
 use crate::company::skill_upload::read_upload;
 use crate::error::OpenCompanyError;
 use crate::ports::skills_state::{SkillSource, SkillState};
+use crate::ports::types::SkillChange;
 use crate::server::error::ApiError;
 use crate::server::ops::{AdminScopedCompany, scoped};
 
@@ -177,14 +178,30 @@ async fn upload(
     let mut results = Vec::with_capacity(parts.len());
     for part in parts {
         match store(&company, &registry, &part, force).await {
-            Ok(skill) => results.push(UploadRow::stored(part.filename, skill)),
+            Ok((skill, delta)) => {
+                // Out of the per-file rows on purpose. Those exist for a file
+                // that is not a skill; a journal the host cannot append to is
+                // not one file's problem, and an upload reported as stored
+                // with no record that it happened is the outcome this must
+                // never produce.
+                super::journal::journal_write(
+                    &company.runtime,
+                    &company.actor(),
+                    &delta,
+                    SkillChange::Installed,
+                )
+                .await?;
+                results.push(UploadRow::stored(part.filename, skill));
+            }
             Err(problem) => results.push(UploadRow::refused(part.filename, problem)),
         }
     }
     Ok(Json(UploadedDto { results }))
 }
 
-/// Reads, vets and stores one uploaded file.
+/// Reads, vets and stores one uploaded file, returning the response row and the
+/// delta that was persisted — the caller journals from the delta rather than
+/// from a second description of the same write.
 ///
 /// Returns the refusal as a sentence rather than an [`ApiError`] because it
 /// lands on one row of a multi-file answer; a status code cannot say which of
@@ -194,7 +211,7 @@ async fn store(
     registry: &[crate::company::SkillDoc],
     part: &Part,
     force: bool,
-) -> Result<InstalledSkill, Refusal> {
+) -> Result<(InstalledSkill, SkillState), Refusal> {
     let read = read_upload(&part.filename, &part.bytes).map_err(Refusal::plain)?;
     check_skill_doc_size(&read.doc)
         .map_err(problem_text)
@@ -234,9 +251,10 @@ async fn store(
     // row this answers with has to carry that: the console folds it straight
     // into the list, and a default would blank the badge it just earned.
     let stood = super::drift::row_drift(registry, &delta);
-    Ok(InstalledSkill::from_state(&delta)
+    let skill = InstalledSkill::from_state(&delta)
         .with_scan(scan)
-        .with_drift(stood))
+        .with_drift(stood);
+    Ok((skill, delta))
 }
 
 /// One file's refusal: the sentence an operator reads, and whether resending
