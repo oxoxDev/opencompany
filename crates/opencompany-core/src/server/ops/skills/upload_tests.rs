@@ -521,3 +521,67 @@ async fn forcing_past_a_poisoned_unrecognised_key_records_the_finding() {
         "the finding has to name where it was: {body}"
     );
 }
+
+/// An upload replaces a pinned skill's document without replacing its pin.
+///
+/// The pin is what "modified" is measured against, so a write that drops it
+/// does not merely lose provenance — it makes the modified state unreachable,
+/// and with it the refusal that is supposed to stop an update overwriting a
+/// locally-edited copy.
+#[tokio::test]
+async fn uploading_over_a_pinned_skill_keeps_the_pin_and_its_provenance() {
+    let home_dir = home();
+    let state = state_with_registry(home_dir.path()).await;
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/skills/competitor-scan/install",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let pinned = persisted_skills(&state)
+        .await
+        .into_iter()
+        .find(|row| row.slug == "competitor-scan")
+        .expect("the install stored a row")
+        .install
+        .expect("the install recorded a pin");
+
+    let edited = doc("Competitor Scan");
+    let (status, _) = upload(
+        &state,
+        &[("competitor-scan.md", edited.as_bytes())],
+        false,
+        &fixed_cookie("acme"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let row = persisted_skills(&state)
+        .await
+        .into_iter()
+        .find(|row| row.slug == "competitor-scan")
+        .expect("the upload stored a row");
+    assert_eq!(
+        row.custom_doc.as_deref(),
+        Some(edited.as_str()),
+        "the upload replaced the document"
+    );
+    assert_eq!(
+        row.install,
+        Some(pinned.clone()),
+        "the upload rewrote the row and dropped what the install had pinned"
+    );
+    assert_eq!(
+        row.source,
+        crate::ports::skills_state::SkillSource::Registry,
+        "a locally-edited registry install is still a registry install"
+    );
+    assert_ne!(
+        crate::company::skill_digest(&edited),
+        pinned.digest,
+        "the edited document differs from the pin, so it reads as modified"
+    );
+}

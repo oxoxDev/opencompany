@@ -179,6 +179,9 @@ mod tests_saving_an_unpublished_note;
 #[path = "write_skills_install_persists_the_tests.rs"]
 mod tests_skills_install_persists_the;
 #[cfg(test)]
+#[path = "write_skills_install_pin_tests.rs"]
+mod tests_skills_install_pin;
+#[cfg(test)]
 #[path = "write_streamed_multipart_tests.rs"]
 mod tests_streamed_multipart;
 #[cfg(test)]
