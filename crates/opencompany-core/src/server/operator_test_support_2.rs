@@ -89,23 +89,6 @@ pub(super) async fn put_desk_order(
         .status()
 }
 
-pub(super) async fn get_operator_channel(app: &axum::Router, cookie: &str) -> serde_json::Value {
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/company/operator-channel")
-                .header("cookie", cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    serde_json::from_slice(&bytes).unwrap()
-}
-
 /// Everything one agent said and heard, for a company with one reply in it.
 ///
 /// Fetched through the router so the assertion is about the wire, not about

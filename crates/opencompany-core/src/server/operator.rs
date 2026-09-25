@@ -130,11 +130,6 @@ pub fn router() -> Router<AppState> {
         // Desk member ordering / hierarchy (issue #131): set the operator's
         // explicit member order for a desk. Registered under both scope forms.
         .merge(scoped("/desks/{desk_id}/order", put(set_desk_order)))
-        // The always-present, durable Operator feed — its own surface, not a
-        // desk (issue #1757 rework). Read-only identity lookup: the console
-        // pins it below a divider in the chat rail rather than folding it
-        // into `GET {scope}/desks`.
-        .merge(scoped("/operator-channel", get(operator_channel)))
         // The company → operator attention feed (issue #66): a live SSE stream of
         // the attention-worthy events already on the company's event log, under
         // both scope forms.
@@ -308,65 +303,9 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
             manifest_desks.chain(overlay_desks).collect()
         })
         // A company that failed to load surfaces no desks — the console falls
-        // back to its static default threads (issue #1757 rework: the Operator
-        // feed is its own surface now, fetched through `GET
-        // {scope}/operator-channel` rather than injected here).
+        // back to its static default threads.
         .unwrap_or_default();
     Ok(Json(desks))
-}
-
-/// The identity of the company's always-present, durable Operator feed
-/// (issue #1757 rework). Mirrors `OperatorChannelDto` in
-/// `frontend/src/api/types.ts`.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct OperatorChannelDto {
-    /// The channel id — the `desk` query param `GET
-    /// {scope}/chat/history?desk=<id>` reads its transcript through.
-    id: String,
-    /// Always "Operator" — the console's pinned-row label.
-    name: String,
-    /// The channel's purpose line, shown under the name in the pinned row.
-    description: String,
-}
-
-/// `GET {scope}/operator-channel` — the identity of the company's dedicated,
-/// durable Operator feed: where "what happened and what needs you" workflow
-/// reports and the owner/no-mailbox fallback land. A pinned surface, not a
-/// desk — the console renders it as its own row below a divider rather than
-/// folding it into `GET {scope}/desks`, and it carries no member or mutation
-/// routes.
-///
-/// `id` resolves through
-/// [`CompanyRecord::operator_feed_channel`](crate::ports::types::CompanyRecord::operator_feed_channel)
-/// — ordinarily [`OPERATOR_CHANNEL`](crate::runtime::OPERATOR_CHANNEL), or
-/// [`OPERATOR_CHANNEL_COLLISION_FALLBACK`](crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK)
-/// for the one grandfathered company shape where a roster teammate already
-/// owns that id — so this and delivery
-/// (`workflows::delivery::send_to_channel_adapter`) always agree on where the
-/// feed lives. A company with no record yet still gets the default id, so the
-/// console always has a channel to point its history read at — but a store
-/// read failure is propagated as an error rather than silently answered with
-/// the default id: for the grandfathered collision-fallback company, treating
-/// a transient failure as "no record" would label the operator's real
-/// `operator-feed` transcript as `operator` while delivery keeps targeting the
-/// collision-aware address once the store recovers.
-async fn operator_channel(
-    scope: ScopedCompany,
-) -> Result<Json<OperatorChannelDto>, crate::server::Rejection> {
-    let id = scope
-        .runtime
-        .store()
-        .load(scope.id())
-        .await?
-        .map(|record| record.operator_feed_channel().to_string())
-        .unwrap_or_else(|| crate::runtime::OPERATOR_CHANNEL.to_string());
-    Ok(Json(OperatorChannelDto {
-        id,
-        name: "Operator".to_string(),
-        description: "Workflow reports and notifications — what happened and what needs you"
-            .to_string(),
-    }))
 }
 
 /// Whether `desk_id` names the built-in `#general` channel rather than a desk
