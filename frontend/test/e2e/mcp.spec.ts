@@ -88,14 +88,12 @@ test("the MCP page lists the company's servers instead of crashing on open", asy
   expect(pageErrors, `the page threw: ${pageErrors.join(" | ")}`).toEqual([]);
 });
 
-test("a server opens into the panel a Composio provider opens into", async ({
+test("a server opens into its own page, not a row that grew", async ({
   page,
 }) => {
-  // Issue #821. #819 gave a Composio provider a detail view and left MCP as a
-  // list — the uneven half of #404, and the wrong half to leave for a company
-  // routing its real work through MCP servers. What is asserted here is not
-  // "a sheet opened" but the four claims the sheet exists to make, because each
-  // has a plausible-looking wrong answer the list surface would have given.
+  // What is asserted here is not "a page opened" but the claims the page
+  // exists to make, because each has a plausible-looking wrong answer the list
+  // surface would have given.
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
 
@@ -111,31 +109,31 @@ test("a server opens into the panel a Composio provider opens into", async ({
   await expect(row).toBeVisible();
   await row.getByTestId("mcp-server-open").click();
 
-  const panel = page.getByRole("dialog");
+  const panel = page.getByTestId("mcp-server-page");
   await expect(panel).toBeVisible();
+  // A page, so the list it came from is gone rather than pushed down.
+  await expect(page.getByTestId("mcp-server-row")).toHaveCount(0);
+  await expect(panel.getByTestId("mcp-page-back")).toBeVisible();
 
-  // Which of the three connection systems this is, said rather than left to be
-  // inferred from the fact that a panel opened at all.
-  await expect(panel).toContainText("MCP");
   await expect(panel).toContainText("https://mcp.deepwiki.com/mcp");
 
   // The manifest server the harness declares has never been probed on this
   // host: `Test` needs the `openhuman` feature and reports `not_wired` here. So
   // this is the case with no honest single-badge rendering — not reachable, not
   // broken — and the panel has to say which.
-  await expect(panel.getByTestId("mcp-detail-probe")).toContainText(
+  await expect(panel.getByTestId("mcp-page-probe")).toContainText(
     "has not been probed",
   );
 
   // MCP records no connect, the same answer the native path gets and for the
   // same reason. A blank here reads as "never connected".
-  await expect(panel.getByTestId("mcp-detail-connected-on")).toContainText(
+  await expect(panel.getByTestId("mcp-page-connected-on")).toContainText(
     "connection date not recorded",
   );
 
   // What a disconnect reaches — and, for a manifest server, that the console
   // cannot remove it at all.
-  const scope = panel.getByTestId("mcp-detail-disconnect-scope");
+  const scope = panel.getByTestId("mcp-page-disconnect-scope");
   await expect(scope).toContainText("cannot be removed from the console");
   await expect(scope).toContainText(
     "Nothing is revoked at the server's own end",
@@ -260,11 +258,11 @@ test("the permissions panel reads a tier as set or unset, and says what is never
       .getByRole("button", { name: `Tool permissions for ${name}` })
       .click();
 
-    // In the connection detail sheet, not under the row. A panel that drifted
-    // back onto the row would satisfy every other assertion here.
-    const sheet = page.getByRole("dialog");
-    await expect(sheet).toBeVisible();
-    const panel = sheet.getByTestId("mcp-tool-permissions");
+    // On the server's own page, not under the row. A panel that drifted back
+    // onto the row would satisfy every other assertion here.
+    const detail = page.getByTestId("mcp-server-page");
+    await expect(detail).toBeVisible();
+    const panel = detail.getByTestId("mcp-tool-permissions");
     await expect(panel).toBeVisible();
 
     // No tier default was ever written, so every tier reads as unset — not as
