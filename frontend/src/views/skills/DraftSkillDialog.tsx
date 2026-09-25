@@ -74,12 +74,20 @@ export function DraftSkillDialog({
     const next: SkillDraftTurn[] = said
       ? [...messages, { role: "operator" as const, text: said }]
       : messages;
+    const request: SkillDraftTurn[] =
+      draft !== null
+        ? [
+            ...messages,
+            { role: "copilot" as const, text: draft },
+            ...(said ? [{ role: "operator" as const, text: said }] : []),
+          ]
+        : next;
     setMessages(next);
     setInput("");
     setBusy(true);
     setError(null);
     try {
-      const answer = await draftSkill(client, company, next);
+      const answer = await draftSkill(client, company, request);
       if (answer.source === "unavailable") {
         setError(reasonText(answer.reason));
         return;
