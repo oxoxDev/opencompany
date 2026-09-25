@@ -140,13 +140,17 @@ export function McpToolPermissions({
   const [state, setState] = useState<State>({ kind: "loading" });
   const [busy, setBusy] = useState(false);
   const [writeError, setWriteError] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState<
-    Partial<Record<ToolTier, boolean>>
-  >({});
+  const [opened, setOpened] = useState<Partial<Record<ToolTier, boolean>>>({});
   const [showAll, setShowAll] = useState<Partial<Record<ToolTier, boolean>>>(
     {},
   );
   const root = useRef<HTMLDivElement | null>(null);
+
+  const tools = state.kind === "ready" ? state.doc.tools : [];
+  const openByDefault =
+    SECTION_ORDER.find((tier) =>
+      tools.some((row) => row.effectiveTier === tier),
+    ) ?? SECTION_ORDER[0];
 
   const target = policyTarget(server);
   const targetKey = target
@@ -298,12 +302,12 @@ export function McpToolPermissions({
                 bulk={state.doc.tierDefaults[tier]}
                 canManage={canManage}
                 busy={busy}
-                open={!collapsed[tier]}
+                open={opened[tier] ?? tier === openByDefault}
                 showAll={showAll[tier] === true}
                 onToggleOpen={() =>
-                  setCollapsed((was) => ({
+                  setOpened((was) => ({
                     ...was,
-                    [tier]: !(was[tier] ?? false),
+                    [tier]: !(was[tier] ?? tier === openByDefault),
                   }))
                 }
                 onToggleShowAll={() =>

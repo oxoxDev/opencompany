@@ -410,6 +410,47 @@ function sectionRows(tier: string): string[] {
 }
 
 describe("the three tiers as sections", () => {
+  it("opens the riskiest section that has tools, and leaves the rest shut", async () => {
+    api.readToolPolicy.mockResolvedValue(
+      doc({
+        tools: [
+          tool({ tool: "archive_db", effectiveTier: "write_delete" }),
+          tool({ tool: "move_page", effectiveTier: "interactive" }),
+          tool({ tool: "get_page" }),
+        ],
+      }),
+    );
+
+    await mount(row({ source: "runtime" }));
+
+    expect(
+      el("mcp-tier-toggle-write_delete")?.getAttribute("aria-expanded"),
+    ).toBe("true");
+    expect(
+      el("mcp-tier-toggle-interactive")?.getAttribute("aria-expanded"),
+    ).toBe("false");
+    expect(el("mcp-tier-toggle-read_only")?.getAttribute("aria-expanded")).toBe(
+      "false",
+    );
+  });
+
+  it("skips an empty tier when choosing which section opens", async () => {
+    // Nothing writes or deletes, so opening that section would greet the
+    // operator with an empty box while eleven decided tools sat collapsed.
+    api.readToolPolicy.mockResolvedValue(
+      doc({ tools: [tool({ tool: "get_page" })] }),
+    );
+
+    await mount(row({ source: "runtime" }));
+
+    expect(
+      el("mcp-tier-toggle-write_delete")?.getAttribute("aria-expanded"),
+    ).toBe("false");
+    expect(el("mcp-tier-toggle-read_only")?.getAttribute("aria-expanded")).toBe(
+      "true",
+    );
+  });
+
   it("groups each tool under the tier the host resolved, not the one discovery guessed", async () => {
     api.readToolPolicy.mockResolvedValue(
       doc({
@@ -438,9 +479,16 @@ describe("the three tiers as sections", () => {
 
     await mount(row({ source: "runtime" }));
 
+    // Only the riskiest non-empty section is open on arrival, so the other two
+    // are opened to read what is filed under them.
+    expect(sectionRows("write_delete")).toEqual(["archive_db"]);
+    for (const tier of ["interactive", "read_only"]) {
+      await act(async () => {
+        el(`mcp-tier-toggle-${tier}`)?.click();
+      });
+    }
     expect(sectionRows("read_only")).toEqual(["delete_page"]);
     expect(sectionRows("interactive")).toEqual(["move_page"]);
-    expect(sectionRows("write_delete")).toEqual(["archive_db"]);
   });
 
   it("counts each section, so its size is readable while it is shut", async () => {
