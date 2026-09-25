@@ -209,6 +209,11 @@ tinyinference-voice = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/
 # entry, path rebased the same `../../` as every other entry in this table.
 [patch."https://github.com/tinyhumansai/openhuman"]
 openhuman-embed = { path = "../../vendor/openhuman/crates/openhuman-embed" }
+openhuman = { path = "../../vendor/openhuman/crates/openhuman-core" }
+
+[patch."https://github.com/tinyhumansai/tinytools"]
+tinytools = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinytools/crates/tinytools" }
+tinytools-agent = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinytools/crates/tinytools-agent" }
 
 [patch.crates-io]
 tinyflows = { path = "../../vendor/openhuman/vendor/tinyflows/crates/tinyflows" }
