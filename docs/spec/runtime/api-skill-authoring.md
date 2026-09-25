@@ -24,13 +24,17 @@ Accepted, by extension rather than by sniffing:
 | `.md` | the `SKILL.md` itself; its frontmatter must carry `name` and `description` |
 | `.zip`, `.skill` | an archive holding one `SKILL.md`, at the root or inside a single top directory |
 
-The answer is `{results: [{file, ok, skill?, error?}]}`, one row per file in the
-order they were sent, and the status is `200` whenever the request itself was
-well-formed. A refusal is **per file**: an operator who drops five files and
-mistypes one gets four stored skills and one row saying what was wrong with the
-fifth, rather than a status code that cannot say which file it meant. The
-request as a whole fails only for something true of all of it — a body over the
-8 MiB limit (`413`), more than 16 files, or no `file` part at all.
+The answer is `{results: [{file, ok, skill?, error?, scanBlocked}]}`, one row
+per file in the order they were sent, and the status is `200` whenever the
+request itself was well-formed. A refusal is **per file**: an operator who
+drops five files and mistypes one gets four stored skills and one row saying
+what was wrong with the fifth, rather than a status code that cannot say which
+file it meant. The request as a whole fails only for something true of all of
+it — a body over the 8 MiB limit (`413`), more than 16 files, or no `file`
+part at all.
+
+`scanBlocked` is `true` only when a blocking scan verdict refused the file —
+the one refusal a `force` resend overrides.
 
 A stored row's `skill` is the same `InstalledSkill` the create and install
 routes return, carrying the `scan` report of the write that stored it.
@@ -120,12 +124,13 @@ the operator for different things:
 
 | What happened | `reason` | What the console tells the operator |
 |---|---|---|
-| The scan blocked the document | `refused_by_scan` | Say it differently and try again — the findings are in `scan` |
+| The scan blocked the document | `refused_by_scan` | Say it differently and try again — the findings are in `reply` |
 | The document did not validate | `unreadable` | Say more about what the skill is for, or write it by hand |
 
-In both cases `text` is withheld and `source` is `unavailable`. Reporting a
-validation failure as a scan refusal told the operator to reword a draft the
-scan had never objected to.
+In both cases `text` and `scan` are withheld, and the findings that would have
+gone in `scan` are folded into `reply` instead. Reporting a validation failure
+as a scan refusal told the operator to reword a draft the scan had never
+objected to.
 
 The assistant must not be able to hand the operator a document that the Save
 button would then refuse, and a model writing a skill is untrusted text
