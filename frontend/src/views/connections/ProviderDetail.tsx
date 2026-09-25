@@ -215,7 +215,7 @@ export function ProviderDetail({
 
   return (
     <Sheet open={subject !== null} onOpenChange={(next) => !next && onClose()}>
-      <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-lg">
+      <SheetContent side="right" className="w-full overflow-y-auto data-[side=right]:sm:max-w-lg">
         {subject?.kind === "composio" && (
           <ComposioBody
             subject={subject}
