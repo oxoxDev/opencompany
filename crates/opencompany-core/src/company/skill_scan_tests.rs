@@ -244,12 +244,7 @@ fn an_undeclared_mcp_tool_reference_warns() {
 
 #[test]
 fn an_archive_or_executable_resource_name_warns() {
-    for path in [
-        "payload.zip",
-        "setup.sh",
-        "helper.dylib",
-        "../../etc/passwd",
-    ] {
+    for path in ["payload.zip", "setup.sh", "helper.dylib"] {
         let report = scan_skill(
             &benign(),
             &[ScanResource {
@@ -263,6 +258,45 @@ fn an_archive_or_executable_resource_name_warns() {
         );
         assert_eq!(report.verdict(), Verdict::Warn, "{path:?}");
     }
+}
+
+/// A resource whose path escapes the skill's own directory is a containment
+/// violation, so it blocks — an operator seeing it after the write already
+/// happened is too late.
+#[test]
+fn a_resource_path_that_escapes_the_skill_directory_blocks() {
+    for path in ["../../etc/passwd", "/etc/passwd", "sub\\..\\secret.txt"] {
+        let report = scan_skill(
+            &benign(),
+            &[ScanResource {
+                path: path.to_string(),
+                text: "harmless".to_string(),
+            }],
+        );
+        assert_eq!(report.verdict(), Verdict::Block, "{path:?}: {report:?}");
+        assert!(
+            checks(&report).contains(&ScanCheck::ResourceShape),
+            "{path:?}: {report:?}"
+        );
+    }
+}
+
+/// The resource path is as agent-visible as its content — a read tool reports
+/// the name — so it gets the same invisible-character check.
+#[test]
+fn an_invisible_character_in_a_resource_path_blocks() {
+    let report = scan_skill(
+        &benign(),
+        &[ScanResource {
+            path: "notes\u{202e}txt.md".to_string(),
+            text: "harmless".to_string(),
+        }],
+    );
+    assert_eq!(report.verdict(), Verdict::Block, "{report:?}");
+    assert!(
+        checks(&report).contains(&ScanCheck::InvisibleCodePoints),
+        "{report:?}"
+    );
 }
 
 #[test]

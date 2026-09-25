@@ -14,10 +14,11 @@
 //! ## Verdicts
 //!
 //! `pass`, `warn`, `block`. Warn is the default: a finding proceeds and the
-//! operator sees it. Two families block — invisible, bidirectional and
-//! zero-width code points, and hard-coded credentials — because neither has a
-//! legitimate reading in a skill and both are cheap to produce. An override is
-//! a per-request force flag on the one install, never a setting that silences a
+//! operator sees it. Three things block — invisible, bidirectional and
+//! zero-width code points; hard-coded credentials; and a bundled file whose
+//! path escapes the skill's own directory — because none has a legitimate
+//! reading in a skill and each is cheap to produce. An override is a
+//! per-request force flag on the one install, never a setting that silences a
 //! class of finding for a whole host.
 //!
 //! ## What this is not
@@ -182,14 +183,17 @@ pub fn scan_skill(doc: &super::SkillDoc, resources: &[ScanResource]) -> ScanRepo
 
     for resource in resources {
         let field = ScanField::Resource(resource.path.clone());
-        if let Some(detail) = resource_path_problem(&resource.path) {
+        if let Some((verdict, detail)) = resource_path_problem(&resource.path) {
             findings.push(Finding {
                 check: ScanCheck::ResourceShape,
-                verdict: Verdict::Warn,
+                verdict,
                 field: field.clone(),
                 detail,
             });
         }
+        // The path is as agent-visible as the content — a bundled file's name
+        // is what a read tool reports — so it gets the same text checks.
+        scan_text(&field, &resource.path, &mut findings);
         scan_text(&field, &resource.text, &mut findings);
     }
 
@@ -514,15 +518,21 @@ const UNEXPECTED_EXTENSIONS: &[&str] = &[
     ".bin", ".wasm", ".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd",
 ];
 
-fn resource_path_problem(path: &str) -> Option<String> {
+/// A path that escapes the skill's own directory is a containment violation,
+/// not an operator-visible curiosity, so it blocks; an unexpected extension is
+/// still only worth a warning.
+fn resource_path_problem(path: &str) -> Option<(Verdict, String)> {
     let lowered = path.to_ascii_lowercase();
     if path.starts_with('/') || path.contains("..") || path.contains('\\') {
-        return Some("a bundled file that escapes the skill's own directory".to_string());
+        return Some((
+            Verdict::Block,
+            "a bundled file that escapes the skill's own directory".to_string(),
+        ));
     }
     let extension = UNEXPECTED_EXTENSIONS
         .iter()
         .find(|extension| lowered.ends_with(**extension))?;
-    Some(format!("a bundled `{extension}` file"))
+    Some((Verdict::Warn, format!("a bundled `{extension}` file")))
 }
 
 /// Renders untrusted text so it can sit inside a prompt as data.
