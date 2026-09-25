@@ -129,6 +129,8 @@ export function SkillsView({ client, company }: Props) {
   // enabled control, so this defaults closed the way `HostingView` does.
   const [canManage, setCanManage] = useState(false);
   const [authorityScope, setAuthorityScope] = useState({ client, company });
+  // Bumped on a scope change; keys the authoring dialogs so they remount.
+  const [scopeGen, setScopeGen] = useState(0);
 
   // Closed *during* the render that first sees a new scope, not in the effect
   // that follows it. An effect runs after commit, so the frame carrying the new
@@ -145,6 +147,7 @@ export function SkillsView({ client, company }: Props) {
     setUploadOpen(false);
     setDraftOpen(false);
     setCanDraft(undefined);
+    setScopeGen((g) => g + 1);
   }
 
   useEffect(() => {
@@ -453,6 +456,7 @@ export function SkillsView({ client, company }: Props) {
         }}
       />
       <UploadSkillDialog
+        key={`upload-${scopeGen}`}
         client={client}
         company={company}
         open={uploadOpen}
@@ -460,6 +464,7 @@ export function SkillsView({ client, company }: Props) {
         onUploaded={takeUploaded}
       />
       <DraftSkillDialog
+        key={`draft-${scopeGen}`}
         client={client}
         company={company}
         open={draftOpen}
