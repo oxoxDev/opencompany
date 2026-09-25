@@ -1625,6 +1625,23 @@ export interface TeamMemberDto {
    */
   tools?: AgentToolsDto;
   /**
+   * This teammate's skill scope — the same three states, from the same host-side
+   * constructor, that `GET .../team/{agentId}` serves.
+   *
+   * On the list because a skill's detail panel scopes **one skill across many
+   * teammates**, and the write is that teammate's whole `skills` list. The next
+   * list is a function of the stored one: `["a","b"]` plus the slug is
+   * `["a","b",S]`, and a surface that sent `[S]` would strip every other skill
+   * that teammate has while reporting success. The per-skill `agents` projection
+   * cannot carry the stored lists — that payload is quadratic in skills — so this
+   * read does.
+   *
+   * **Optional on the type, not on the wire**, same rule as `tools`: absent means
+   * the host does not answer, and a panel that cannot read a teammate's stored
+   * list must not offer to change it.
+   */
+  skills?: AgentSkillsDto;
+  /**
    * The desks this teammate sits on (issue #601), same shape as the detail
    * read. Desks are the company's real grouping, so these are what the
    * overview graph draws its department pillars from.
