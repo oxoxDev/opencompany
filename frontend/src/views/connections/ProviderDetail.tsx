@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import { AlertTriangle, Loader2, LogIn, Unplug } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
@@ -15,7 +14,6 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import {
-  callsForProvider,
   connectedOn,
   mcpProviderSlug,
   mcpStanding,
@@ -24,6 +22,11 @@ import {
 import { toolkitSlug } from "@/lib/connections";
 import { mcpProvenanceNote, mcpRemovalNote } from "@/lib/mcp-registry";
 import { accountSummary, tallyAccounts } from "@/lib/provider-grid";
+import {
+  UsageSection,
+  type Usage,
+  useConnectionUsage,
+} from "@/views/connections/connection-usage";
 import { McpToolPermissions } from "@/views/mcp/McpToolPermissions";
 import type { GridProvider } from "@/lib/provider-grid";
 
@@ -82,9 +85,6 @@ interface Props {
   busy: boolean;
   onClose: () => void;
 }
-
-/** The window the usage figure covers. Matches the Usage view's own default. */
-const USAGE_RANGE = "30d";
 
 /**
  * A connection as an object you can open (issues #404, #821).
@@ -175,47 +175,14 @@ export function ProviderDetail({
   // does — so a figure kept as a bare number would paint against the new
   // provider for that frame, which is one provider's call count under another
   // provider's name. Nothing is read back unless the key still matches.
-  const [loaded, setLoaded] = useState<{
-    key: string;
-    load: "ready" | "unavailable";
-    calls: number | null;
-  } | null>(null);
-
-  useEffect(() => {
-    if (usageKey === null) return;
-    let alive = true;
-    client
-      .usage(USAGE_RANGE, company)
-      .then((usage) => {
-        if (!alive) return;
-        setLoaded({
-          key: usageKey,
-          load: "ready",
-          calls: callsForProvider(usage.byProvider, usageKey),
-        });
-      })
-      // A host without the usage route (older build) 404s. "Not recorded here"
-      // is the honest render — not a zero, which claims the calls were counted
-      // and there were none.
-      .catch(() => {
-        if (alive)
-          setLoaded({ key: usageKey, load: "unavailable", calls: null });
-      });
-    return () => {
-      alive = false;
-    };
-  }, [client, company, usageKey]);
-
-  const current = loaded !== null && loaded.key === usageKey ? loaded : null;
-  const usage = {
-    load: current?.load ?? ("loading" as const),
-    calls: current?.calls ?? null,
-    key: usageKey,
-  };
+  const usage = useConnectionUsage(client, company, usageKey);
 
   return (
     <Sheet open={subject !== null} onOpenChange={(next) => !next && onClose()}>
-      <SheetContent side="right" className="w-full overflow-y-auto data-[side=right]:sm:max-w-lg">
+      <SheetContent
+        side="right"
+        className="w-full overflow-y-auto data-[side=right]:sm:max-w-lg"
+      >
         {subject?.kind === "composio" && (
           <ComposioBody
             subject={subject}
@@ -235,64 +202,6 @@ export function ProviderDetail({
         )}
       </SheetContent>
     </Sheet>
-  );
-}
-
-/** The usage read, as both arms consume it. */
-interface Usage {
-  load: "loading" | "ready" | "unavailable";
-  calls: number | null;
-  /** The `byProvider` key, or `null` when this subject has none to look up. */
-  key: string | null;
-}
-
-/**
- * The Usage section, shared by both arms.
- *
- * `perConnection` is the sentence under the figure, and it is the arm's to
- * write: what "counted per connection rather than per account" rules out
- * differs between a toolkit with two Gmail accounts and a server with one
- * endpoint, and a single generic line would be vague in the Composio case and
- * wrong in the MCP one.
- */
-function UsageSection({
-  usage,
-  perConnection,
-}: {
-  usage: Usage;
-  perConnection: string;
-}) {
-  return (
-    <section
-      className="space-y-1"
-      aria-label="Usage"
-      data-testid="connection-detail-usage"
-    >
-      <h4 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-        Usage
-      </h4>
-      {usage.key === null ? (
-        <p className="text-xs text-muted-foreground">
-          This connection has no name to count calls against, so what has gone
-          through it is not attributable here.
-        </p>
-      ) : usage.load === "loading" ? (
-        <p className="text-xs text-muted-foreground">Reading usage…</p>
-      ) : usage.load === "unavailable" ? (
-        <p className="text-xs text-muted-foreground">
-          This host does not report usage, so what has gone through this
-          connection is not recorded here.
-        </p>
-      ) : (
-        <>
-          <p className="text-sm">
-            <span className="font-medium">{usage.calls}</span>{" "}
-            {usage.calls === 1 ? "call" : "calls"} in the last 30 days
-          </p>
-          <p className="text-xs text-muted-foreground">{perConnection}</p>
-        </>
-      )}
-    </section>
   );
 }
 
