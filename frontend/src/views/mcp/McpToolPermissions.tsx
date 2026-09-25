@@ -518,8 +518,10 @@ function ToolRow({
         <ModeChoice
           value={row.mode}
           label={`What happens when ${row.tool} is called`}
-          disabled={!canManage || busy}
-          onChange={(mode) => apply({ tools: [{ tool: row.tool, mode }] })}
+          disabled={!canManage}
+          onChange={(mode) => {
+            if (!busy) apply({ tools: [{ tool: row.tool, mode }] });
+          }}
         />
         <Select
           value={row.effectiveTier}
