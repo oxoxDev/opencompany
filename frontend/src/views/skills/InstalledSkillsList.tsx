@@ -234,6 +234,7 @@ function InstalledCard({
               checked={skill.enabled}
               disabled={!canManage}
               onCheckedChange={canManage ? onToggle : undefined}
+              onClick={(e) => e.stopPropagation()}
               aria-label="Enable skill"
             />
             {canManage && (
@@ -292,6 +293,7 @@ function SkillRowMenu({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
+        onClick={(e) => e.stopPropagation()}
         render={
           <Button
             variant="ghost"
