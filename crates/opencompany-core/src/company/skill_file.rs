@@ -29,12 +29,14 @@ pub struct SkillDoc {
     pub version: Option<String>,
     /// The Markdown body after the frontmatter, preserved verbatim.
     pub body: String,
-    /// Frontmatter lines this parser does not recognise, verbatim.
+    /// Frontmatter lines this parser does not keep as a scalar field, verbatim:
+    /// an unrecognised key, or a recognised key repeated after its first
+    /// occurrence.
     ///
-    /// The parser ignores an unknown key, but an uploaded document is stored
-    /// and materialized as its own source, so whatever those lines say is what
-    /// the agent reads. Keeping them means the scan can see the whole of what
-    /// will be stored rather than only the keys this struct names.
+    /// The parser drops these, but an uploaded document is stored and
+    /// materialized as its own source, so whatever those lines say is what the
+    /// agent reads. Keeping them means the scan can see the whole of what will
+    /// be stored rather than only the keys this struct names.
     pub extra_frontmatter: Vec<String>,
 }
 
@@ -69,10 +71,10 @@ pub fn parse_skill_md(slug: &str, src: &str) -> Result<SkillDoc> {
         };
         let value = value.trim().to_string();
         match key.trim().to_ascii_lowercase().as_str() {
-            "name" => name = Some(value),
-            "description" => description = Some(value),
-            "category" => category = Some(value),
-            "version" => version = Some(value),
+            "name" if name.is_none() => name = Some(value),
+            "description" if description.is_none() => description = Some(value),
+            "category" if category.is_none() => category = Some(value),
+            "version" if version.is_none() => version = Some(value),
             _ => extra_frontmatter.push(line.to_string()),
         }
     }
