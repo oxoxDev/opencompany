@@ -563,7 +563,7 @@ async fn a_card_open_failure_is_reported_in_the_channel_not_swallowed() {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: id.clone(),
-            manifest: manifest(),
+            manifest: roster_manifest(),
             ledger: Vec::new(),
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
@@ -584,7 +584,7 @@ async fn a_card_open_failure_is_reported_in_the_channel_not_swallowed() {
         })
         .await
         .unwrap();
-    let runtime = RuntimeBuilder::new(home, manifest())
+    let runtime = RuntimeBuilder::new(home, roster_manifest())
         .with_id(id.clone())
         .with_tasks(Arc::new(FailingTaskUpsert))
         .build()
@@ -628,16 +628,39 @@ async fn a_card_open_failure_is_reported_in_the_channel_not_swallowed() {
         .await
         .unwrap();
     let notice = events.into_iter().find_map(|stored| match stored.event {
-        CompanyEvent::AgentReply { agent_id, text, .. }
-            if agent_id == crate::ports::SYSTEM_AUTHOR =>
-        {
-            Some(text)
-        }
+        CompanyEvent::AgentReply {
+            agent_id,
+            text,
+            chat_id,
+            ..
+        } if agent_id == crate::ports::SYSTEM_AUTHOR => Some((chat_id, text)),
         _ => None,
     });
-    assert!(
-        notice.is_some_and(|text| text.to_lowercase().contains("card")),
+    let (chat_id, text) = notice.expect(
         "a card-open failure must leave a visible system note in the channel, not just a \
-         server-side log line"
+         server-side log line",
+    );
+    assert!(text.to_lowercase().contains("card"));
+    assert_eq!(
+        chat_id, "dm:product_manager",
+        "an unaddressed message's notice lands in the default agent's DM"
+    );
+}
+
+#[tokio::test]
+async fn a_notice_with_no_addressed_chat_goes_to_the_default_agents_dm() {
+    let home_dir = home();
+    let state = state_with_roster(home_dir.path()).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+    assert_eq!(
+        addressed_or_default_dm(&runtime, Some("engineering"))
+            .await
+            .as_deref(),
+        Some("engineering")
+    );
+    assert_eq!(
+        addressed_or_default_dm(&runtime, None).await.as_deref(),
+        Some("dm:product_manager")
     );
 }

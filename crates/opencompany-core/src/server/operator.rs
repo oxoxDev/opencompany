@@ -3134,29 +3134,34 @@ async fn run_chat(
             // as the turn-failure notice above: a direct `AgentReply` in the
             // same desk this card would have opened in, so it round-trips
             // through history like any other reply.
-            let notice = CompanyEvent::AgentReply {
-                audience: Vec::new(),
-                episode: None,
-                parent: reply_thread(accepted.thread_root(), accepted.message_seq),
-                chat_id: message
-                    .chat
-                    .clone()
-                    .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
-                agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
-                text: "This should have opened a task card, but the card could not be saved. \
-                       Nothing else was lost — send the message again, or open the card by hand."
-                    .to_string(),
-                steps: Vec::new(),
-                task_id: None,
-                outputs: Vec::new(),
-                mentions: Vec::new(),
-                mention_depth: 0,
-            };
-            if let Err(journal_err) = runtime.events().append(runtime.id(), notice).await {
-                tracing::warn!(
-                    error = %journal_err,
-                    "failed to journal the card-open failure notice itself"
-                );
+            match addressed_or_default_dm(&runtime, message.chat.as_deref()).await {
+                Some(chat_id) => {
+                    let notice = CompanyEvent::AgentReply {
+                        audience: Vec::new(),
+                        episode: None,
+                        parent: reply_thread(accepted.thread_root(), accepted.message_seq),
+                        chat_id,
+                        agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
+                        text: "This should have opened a task card, but the card could not be \
+                               saved. Nothing else was lost — send the message again, or open \
+                               the card by hand."
+                            .to_string(),
+                        steps: Vec::new(),
+                        task_id: None,
+                        outputs: Vec::new(),
+                        mentions: Vec::new(),
+                        mention_depth: 0,
+                    };
+                    if let Err(journal_err) = runtime.events().append(runtime.id(), notice).await {
+                        tracing::warn!(
+                            error = %journal_err,
+                            "failed to journal the card-open failure notice itself"
+                        );
+                    }
+                }
+                None => tracing::warn!(
+                    "no conversation to post the card-open failure notice in: the roster is empty"
+                ),
             }
         }
     }
@@ -3173,6 +3178,21 @@ async fn run_chat(
         )
         .await?;
     Ok((report, feedback_note))
+}
+
+/// The conversation a message addressed, else the default agent's DM. `None`
+/// only when the message named none and the roster is empty (or unreadable).
+pub(crate) async fn addressed_or_default_dm(
+    runtime: &CompanyRuntime,
+    chat: Option<&str>,
+) -> Option<String> {
+    if let Some(chat) = chat {
+        return Some(chat.to_string());
+    }
+    runtime.default_agent_dm().await.unwrap_or_else(|err| {
+        tracing::warn!(error = %err, "could not read the roster for the default agent's DM");
+        None
+    })
 }
 
 /// What accepting a chat turn produced, before any of the turn's work runs
