@@ -35,7 +35,7 @@ fn list(source_dir: Option<&FsPath>, deltas: &[SkillState]) -> Vec<InstalledSkil
     skill_effective::resolve(source_dir, &[], deltas)
         .expect("resolves")
         .iter()
-        .map(InstalledSkill::from_effective)
+        .map(|skill| InstalledSkill::from_effective(skill, &[]))
         .collect()
 }
 
@@ -200,9 +200,9 @@ fn the_rest_list_and_the_graphql_resolver_agree() {
     let effective = skill_effective::resolve(Some(tmp.path()), &[], &deltas).expect("resolves");
     let rest: Vec<InstalledSkill> = effective
         .iter()
-        .map(InstalledSkill::from_effective)
+        .map(|skill| InstalledSkill::from_effective(skill, &[]))
         .collect();
-    let gql = crate::server::graphql::skills::project(&effective);
+    let gql = crate::server::graphql::skills::project(&effective, &[]);
 
     assert_eq!(rest.len(), gql.len());
     for (rest, gql) in rest.iter().zip(gql.iter()) {

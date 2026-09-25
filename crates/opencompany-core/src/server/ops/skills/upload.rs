@@ -22,7 +22,7 @@
 //! override the install path carries applies here — there is deliberately no
 //! setting that silences a class of finding for a whole host.
 
-use axum::extract::{DefaultBodyLimit, Multipart, multipart::MultipartError};
+use axum::extract::{DefaultBodyLimit, Multipart, State, multipart::MultipartError};
 use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
@@ -120,6 +120,7 @@ struct Part {
 /// the files it applies to and a stream position must not decide whether an
 /// override was honoured.
 async fn upload(
+    State(app): State<AppState>,
     company: AdminScopedCompany,
     mut multipart: Multipart,
 ) -> Result<Json<UploadedDto>, ApiError> {
@@ -170,11 +171,12 @@ async fn upload(
         )));
     }
 
+    let registry = app.shared_skill_registry()?;
     let lock = write_lock(company.id());
     let _guard = lock.lock().await;
     let mut results = Vec::with_capacity(parts.len());
     for part in parts {
-        match store(&company, &part, force).await {
+        match store(&company, &registry, &part, force).await {
             Ok(skill) => results.push(UploadRow::stored(part.filename, skill)),
             Err(problem) => results.push(UploadRow::refused(part.filename, problem)),
         }
@@ -189,6 +191,7 @@ async fn upload(
 /// five files was the bad one.
 async fn store(
     company: &AdminScopedCompany,
+    registry: &[crate::company::SkillDoc],
     part: &Part,
     force: bool,
 ) -> Result<InstalledSkill, Refusal> {
@@ -227,7 +230,13 @@ async fn store(
         .set(company.id(), &delta)
         .await
         .map_err(|error| Refusal::plain(error.to_string()))?;
-    Ok(InstalledSkill::from_state(&delta).with_scan(scan))
+    // An upload over a pinned install is what makes one read as modified, so the
+    // row this answers with has to carry that: the console folds it straight
+    // into the list, and a default would blank the badge it just earned.
+    let stood = super::drift::row_drift(registry, &delta);
+    Ok(InstalledSkill::from_state(&delta)
+        .with_scan(scan)
+        .with_drift(stood))
 }
 
 /// One file's refusal: the sentence an operator reads, and whether resending

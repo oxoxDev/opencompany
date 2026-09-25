@@ -176,6 +176,9 @@ mod tests_put_smtp_without_a;
 #[path = "write_saving_an_unpublished_note_tests.rs"]
 mod tests_saving_an_unpublished_note;
 #[cfg(test)]
+#[path = "write_skills_drift_tests.rs"]
+mod tests_skills_drift;
+#[cfg(test)]
 #[path = "write_skills_install_persists_the_tests.rs"]
 mod tests_skills_install_persists_the;
 #[cfg(test)]

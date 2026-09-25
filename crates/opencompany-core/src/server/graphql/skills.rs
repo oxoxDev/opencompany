@@ -11,9 +11,9 @@ use std::sync::Arc;
 use async_graphql::{Context, ID, SimpleObject};
 
 use crate::AppState;
-use crate::company::SkillDoc;
 use crate::company::runtime::CompanyRuntime;
 use crate::company::skill_effective::{self, EffectiveSkill};
+use crate::company::{SkillDoc, VersionChange, effective_drift};
 use crate::ports::skills_state::SkillSource;
 
 /// One skill installed in a company. Mirrors the console's `@/api/skills` types.
@@ -34,6 +34,46 @@ pub struct SkillGql {
     pub enabled: bool,
     /// The library revision this skill's document carries, when it has one.
     pub version: Option<String>,
+    /// The revisions either side of a library change, when the library's
+    /// document has moved since this install pinned its snapshot. `None` when it
+    /// has not, and on a row that pinned nothing.
+    pub update_available: Option<SkillUpdateGql>,
+    /// Whether the stored document no longer matches the digest recorded at
+    /// install. `false` on a row that pinned nothing, so a reader never has to
+    /// tell "clean" apart from "absent".
+    pub modified: bool,
+}
+
+/// The two revisions either side of a library change.
+///
+/// A GraphQL type of its own rather than an `async_graphql` derive on
+/// [`VersionChange`]: that type is `company`'s vocabulary, shared with the REST
+/// projection and the store, and a transport's schema attributes have no
+/// business on it.
+///
+/// Neither side is ordered against the other — `version` is free text a
+/// publisher writes, so a reader may say the document *changed*, never that it
+/// is *newer*.
+#[derive(SimpleObject)]
+#[graphql(name = "SkillUpdate")]
+pub struct SkillUpdateGql {
+    /// The revision recorded when the install pinned its snapshot.
+    pub from: Option<String>,
+    /// The revision the library's current document declares.
+    pub to: Option<String>,
+}
+
+impl SkillUpdateGql {
+    /// Projects `company`'s [`VersionChange`] onto this transport's shape.
+    ///
+    /// A named constructor rather than a `From` impl: `from` is also one of this
+    /// type's own fields, and the derive generates a resolver for it.
+    fn of(change: VersionChange) -> Self {
+        Self {
+            from: change.from,
+            to: change.to,
+        }
+    }
 }
 
 /// One skill in the shared repo-level registry, installable into any company.
@@ -108,21 +148,28 @@ pub(crate) async fn resolve_company(
         &runtime.globals_disable().await?,
     ));
 
-    Ok(project(&skill_effective::resolve(
-        runtime.source_dir(),
+    Ok(project(
+        &skill_effective::resolve(runtime.source_dir(), &registry, &deltas)?,
         &registry,
-        &deltas,
-    )?))
+    ))
 }
 
 /// Projects a resolved effective set into the GraphQL shape.
-pub(crate) fn project(effective: &[EffectiveSkill]) -> Vec<SkillGql> {
-    effective.iter().map(from_effective).collect()
+///
+/// `registry` is the host's shared library, which a pinned install's drift is
+/// measured against — the same input the REST list projects from, so the two
+/// transports cannot report a different standing for one install.
+pub(crate) fn project(effective: &[EffectiveSkill], registry: &[SkillDoc]) -> Vec<SkillGql> {
+    effective
+        .iter()
+        .map(|skill| from_effective(skill, registry))
+        .collect()
 }
 
 /// Projects one effective entry into a `Skill`. An entry no layer supplied a
 /// document for is rendered from its slug alone.
-fn from_effective(skill: &EffectiveSkill) -> SkillGql {
+fn from_effective(skill: &EffectiveSkill, registry: &[SkillDoc]) -> SkillGql {
+    let drifted = effective_drift(skill, registry);
     let doc = skill.doc();
     SkillGql {
         id: ID(skill.slug.clone()),
@@ -136,6 +183,11 @@ fn from_effective(skill: &EffectiveSkill) -> SkillGql {
         source: source_str(skill.source).to_string(),
         enabled: skill.enabled,
         version: doc.and_then(|doc| doc.version.clone()),
+        update_available: drifted
+            .as_ref()
+            .and_then(|drifted| drifted.update_available.clone())
+            .map(SkillUpdateGql::of),
+        modified: drifted.is_some_and(|drifted| drifted.modified),
     }
 }
 
