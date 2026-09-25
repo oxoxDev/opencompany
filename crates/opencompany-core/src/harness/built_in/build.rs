@@ -1699,6 +1699,7 @@ pub fn agent_spec_for(
             // queues drain on a seated turn. Then both go.
             tools.retain(|tool| {
                 !crate::harness::built_in::EPISODE_WITHHELD_TOOLS.contains(&tool.name())
+                    && tool.name() != crate::hive::tools::READ_TOOL
             });
             let episode = loan.source.belt();
             // **`broadcast` is withheld in an operator's direct line.**
