@@ -40,6 +40,7 @@ const REGISTRY = [
 function clientAs(role: "admin" | "member"): OpenCompanyClient {
   return {
     scopeFor: () => "/api/v1/companies/acme",
+    listTeam: () => Promise.resolve([]),
     get: (path: string) => {
       if (path.endsWith("/auth/me")) {
         return Promise.resolve({
@@ -63,6 +64,7 @@ function clientAs(role: "admin" | "member"): OpenCompanyClient {
 function clientWithHungAuth(company = "beta"): OpenCompanyClient {
   return {
     scopeFor: () => `/api/v1/companies/${company}`,
+    listTeam: () => Promise.resolve([]),
     get: (path: string) => {
       if (path.endsWith("/auth/me")) return new Promise(() => {});
       if (path.endsWith("/skills/registry")) return Promise.resolve([]);

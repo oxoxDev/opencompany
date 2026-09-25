@@ -45,6 +45,7 @@ function skill(over: Partial<Skill> & { id: string }): Skill {
 function clientWith(skills: Skill[], posted: { path: string; body: unknown }[] = []) {
   return {
     scopeFor: () => "/api/v1/companies/acme",
+    listTeam: () => Promise.resolve([]),
     carriesPlatformBearer: false,
     get: (path: string) => {
       if (path.endsWith("/auth/me")) {

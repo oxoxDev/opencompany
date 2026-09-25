@@ -13,7 +13,7 @@
 // the meta row wraps and the filter bar collapses to one control per line on a
 // phone.
 
-import { ArrowUpCircle, MoreHorizontal, Pencil, Power, Sparkles, Trash2 } from "lucide-react";
+import { ArrowUpCircle, MoreHorizontal, Pencil, Power, Sparkles, Trash2, Users } from "lucide-react";
 
 import type { Skill } from "@/api/skills";
 import { Badge } from "@/components/ui/badge";
@@ -89,6 +89,7 @@ export function InstalledSkillsList({
   onToggle,
   onUninstall,
   onUpdate,
+  onOpen,
 }: {
   skills: Skill[];
   filters: SkillListFilters;
@@ -104,6 +105,11 @@ export function InstalledSkillsList({
   /** Opens the review the operator sees before a newer library document is
    * applied. The list never writes — it names the row and the view decides. */
   onUpdate: (skill: Skill) => void;
+  /** Opens the skill's detail panel, where its scope is set.
+   *
+   * One handler for both ways in — the card and the row menu's `Scope…` — so the
+   * two entry points cannot open different things. */
+  onOpen: (skill: Skill) => void;
 }) {
   const categories = skillCategories(skills);
   const rows = visibleSkills(skills, filters, sort) as Skill[];
@@ -171,6 +177,7 @@ export function InstalledSkillsList({
               onToggle={() => onToggle(s)}
               onUninstall={() => onUninstall(s)}
               onUpdate={() => onUpdate(s)}
+              onOpen={() => onOpen(s)}
             />
           ))}
         </div>
@@ -223,6 +230,7 @@ function InstalledCard({
   onToggle,
   onUninstall,
   onUpdate,
+  onOpen,
 }: {
   skill: Skill;
   canManage: boolean;
@@ -230,16 +238,25 @@ function InstalledCard({
   onToggle: () => void;
   onUninstall: () => void;
   onUpdate: () => void;
+  onOpen: () => void;
 }) {
   const drift = skillDriftLabel(skill);
   return (
     <Card data-testid="installed-card" className={cn(!skill.enabled && "opacity-70")}>
       <CardContent className="space-y-2">
         <div className="flex items-start justify-between gap-2">
-          <div className="flex min-w-0 items-center gap-2">
+          {/* A real button, not a click handler on the card: focus, Enter and
+              Space come free, and the switch and the ⋮ menu stay outside it —
+              nesting them inside would put one interactive element in another. */}
+          <button
+            type="button"
+            onClick={onOpen}
+            data-testid="skill-card-open"
+            className="flex min-w-0 items-center gap-2 text-left transition-opacity hover:opacity-80"
+          >
             <Sparkles className="size-4 shrink-0 text-muted-foreground" />
             <p className="truncate font-medium">{skill.name}</p>
-          </div>
+          </button>
           <div className="flex shrink-0 items-center gap-1">
             <Switch
               checked={skill.enabled}
@@ -254,6 +271,7 @@ function InstalledCard({
                 onToggle={onToggle}
                 onUninstall={onUninstall}
                 onUpdate={onUpdate}
+                onOpen={onOpen}
               />
             )}
           </div>
@@ -290,7 +308,7 @@ function InstalledCard({
           {/* What the switch above decides, in the terms it actually decides
               them: reach, not capability (issue #569). */}
           <span data-testid="skill-reach" className="text-xs text-muted-foreground">
-            · {skillReachLabel(skill.enabled)}
+            · {skillReachLabel(skill.enabled, skill.agents)}
           </span>
         </div>
       </CardContent>
@@ -311,11 +329,13 @@ function SkillRowMenu({
   onToggle,
   onUninstall,
   onUpdate,
+  onOpen,
 }: {
   skill: Skill;
   onToggle: () => void;
   onUninstall: () => void;
   onUpdate: () => void;
+  onOpen: () => void;
 }) {
   const removable = canUninstallSkill(skill.source);
   const editable = canEditSkill(skill.source);
@@ -353,6 +373,13 @@ function SkillRowMenu({
         <DropdownMenuItem onClick={onToggle} data-testid="skill-menu-toggle">
           <Power className="mr-2 size-4" />
           {skill.enabled ? "Disable" : "Enable"}
+        </DropdownMenuItem>
+        {/* Between Enable/Disable and Update, the position the screen flow
+            names. There is no `Details` entry beside it: the card click is the
+            way into the panel, and this opens the same one. */}
+        <DropdownMenuItem onClick={onOpen} data-testid="skill-menu-scope">
+          <Users className="mr-2 size-4" />
+          Scope…
         </DropdownMenuItem>
         <DropdownMenuItem
           disabled={!updatable}
