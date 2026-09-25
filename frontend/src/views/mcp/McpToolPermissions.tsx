@@ -158,6 +158,11 @@ export function McpToolPermissions({
       ? `registry:${target.serverId}`
       : `declared:${target.name}`
     : null;
+  // Read by `apply`/`reset` after their await resolves, so a write started
+  // against one server never lands on another's panel if the selection moves
+  // to a different server while the request is in flight.
+  const targetKeyRef = useRef(targetKey);
+  targetKeyRef.current = targetKey;
 
   useEffect(() => {
     if (!target) {
@@ -199,13 +204,14 @@ export function McpToolPermissions({
   const apply = useCallback(
     async (patch: ToolPolicyPatch) => {
       if (!target) return;
+      const key = targetKey;
       setBusy(true);
       setWriteError(null);
       try {
         const doc = await writeToolPolicy(client, company, target, patch);
-        setState({ kind: "ready", doc });
+        if (targetKeyRef.current === key) setState({ kind: "ready", doc });
       } catch (err) {
-        setWriteError(message(err));
+        if (targetKeyRef.current === key) setWriteError(message(err));
       } finally {
         setBusy(false);
       }
@@ -216,13 +222,14 @@ export function McpToolPermissions({
 
   const reset = useCallback(async () => {
     if (!target) return;
+    const key = targetKey;
     setBusy(true);
     setWriteError(null);
     try {
       const doc = await resetToolPolicy(client, company, target);
-      setState({ kind: "ready", doc });
+      if (targetKeyRef.current === key) setState({ kind: "ready", doc });
     } catch (err) {
-      setWriteError(message(err));
+      if (targetKeyRef.current === key) setWriteError(message(err));
     } finally {
       setBusy(false);
     }
