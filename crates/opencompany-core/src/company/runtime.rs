@@ -2350,6 +2350,18 @@ impl CompanyRuntime {
         Ok(())
     }
 
+    /// The DM channel of this company's default agent — where anything that
+    /// names no conversation lands. `None` on an empty roster or an unstored
+    /// company; see [`crate::runtime::assignee::default_agent_dm`].
+    pub(crate) async fn default_agent_dm(&self) -> Result<Option<String>> {
+        Ok(self
+            .store()
+            .load(&self.id)
+            .await?
+            .as_ref()
+            .and_then(crate::runtime::assignee::default_agent_dm))
+    }
+
     /// Runs one cycle over a batch of events, returning what happened.
     pub async fn run_cycle(&self, events: Vec<CompanyEvent>) -> Result<CycleReport> {
         self.ensure_accepting()?;
