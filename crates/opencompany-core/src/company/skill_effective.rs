@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 
 use crate::company::{SkillDoc, load_dir_skills, parse_skill_md, render_skill_md};
 use crate::error::Result;
-use crate::ports::skills_state::{SkillSource, SkillState};
+use crate::ports::skills_state::{SkillInstall, SkillSource, SkillState};
 
 /// Where an effective skill's `SKILL.md` comes from.
 #[derive(Clone, Debug, PartialEq)]
@@ -66,6 +66,15 @@ pub struct EffectiveSkill {
     /// skill is authored in the repository, not edited here, so it has no
     /// operator edit to date.
     pub updated_at_millis: Option<u64>,
+    /// What the install that produced this entry pinned, when one did.
+    ///
+    /// `None` for the baseline and bundle layers, for a delta that installed
+    /// nothing, and for an entry the library healed — a healed entry is serving
+    /// the library's live document rather than its own snapshot, so there is no
+    /// longer a pinned copy for
+    /// [`effective_drift`](crate::company::skill_provenance::effective_drift)
+    /// to measure against.
+    pub install: Option<SkillInstall>,
 }
 
 impl EffectiveSkill {
@@ -155,6 +164,7 @@ pub fn resolve(
                     body: SkillBody::Inline(render_skill_md(doc)),
                 }),
                 updated_at_millis: None,
+                install: None,
             },
         );
     }
@@ -175,6 +185,7 @@ pub fn resolve(
                         body: SkillBody::Bundle(bundle),
                     }),
                     updated_at_millis: None,
+                    install: None,
                 },
             );
         }
@@ -200,6 +211,7 @@ pub fn resolve(
                 source: delta.source,
                 content: None,
                 updated_at_millis: delta.updated_at_millis,
+                install: delta.install.clone(),
             });
         entry.enabled = delta.enabled;
         entry.source = delta.source;
@@ -209,8 +221,16 @@ pub fn resolve(
         if delta.updated_at_millis.is_some() {
             entry.updated_at_millis = delta.updated_at_millis;
         }
-        if let Some(content) = delta_content(delta, registry) {
-            entry.content = Some(content);
+        // Same reason as the stamp above: a manifest-synthesized disable pins
+        // nothing, and must not erase the pin the store's own row supplied.
+        if delta.install.is_some() {
+            entry.install = delta.install.clone();
+        }
+        if let Some(resolved) = delta_content(delta, registry) {
+            if resolved.healed {
+                entry.install = None;
+            }
+            entry.content = Some(resolved.content);
         }
     }
 
@@ -301,24 +321,39 @@ pub fn unmet_scope_slugs(
         .collect()
 }
 
+/// A delta's document and where it came from.
+struct Resolved {
+    content: SkillContent,
+    /// Whether [`registry_heal`] supplied the library's live document in place
+    /// of the delta's own snapshot.
+    healed: bool,
+}
+
 /// The document a delta contributes, or `None` when it contributes none.
-fn delta_content(delta: &SkillState, registry: &[SkillDoc]) -> Option<SkillContent> {
+fn delta_content(delta: &SkillState, registry: &[SkillDoc]) -> Option<Resolved> {
     let src = delta.custom_doc.as_deref()?;
     let parsed = parse_skill_md(&delta.slug, src);
     if let Some(live) = registry_heal(delta, parsed.as_ref().ok(), registry) {
         tracing::info!(
-            "[skills] healing pre-fix registry install '{}' from the shared library",
+            "[skills] healing pre-fix registry install '{}' from the shared library; its install \
+             pin no longer describes what is being served, so drift is not checkable for it",
             delta.slug
         );
-        return Some(SkillContent {
-            doc: live.clone(),
-            body: SkillBody::Inline(render_skill_md(live)),
+        return Some(Resolved {
+            content: SkillContent {
+                doc: live.clone(),
+                body: SkillBody::Inline(render_skill_md(live)),
+            },
+            healed: true,
         });
     }
     match parsed {
-        Ok(doc) => Some(SkillContent {
-            doc,
-            body: SkillBody::Inline(src.to_string()),
+        Ok(doc) => Some(Resolved {
+            content: SkillContent {
+                doc,
+                body: SkillBody::Inline(src.to_string()),
+            },
+            healed: false,
         }),
         Err(err) => {
             tracing::warn!(
