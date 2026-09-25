@@ -328,6 +328,7 @@ async fn harness(
     dir: &std::path::Path,
 ) -> (HarnessPool, HarnessDeps, CompanyRecord) {
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,

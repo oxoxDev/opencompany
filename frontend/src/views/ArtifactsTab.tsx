@@ -353,7 +353,16 @@ function EditedBadge({ diff }: { diff: ArtifactDiff }) {
   );
 }
 
-function ArtifactDetail({
+/**
+ * One artifact, opened. Exported so `#/artifacts/<id>` can mount it on its own
+ * (issue: a published deliverable addressed through its card).
+ *
+ * `publish_artifact` mints a card only because an `ArtifactRecord`'s identity
+ * is `(task_id, source)` and the store will not take an artifact without one.
+ * Addressing the deliverable *through* that card made the operator open a
+ * board item to reach the thing they were already looking at.
+ */
+export function ArtifactDetail({
   client,
   company,
   artifact,

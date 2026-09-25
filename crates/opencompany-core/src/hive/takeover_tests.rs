@@ -45,19 +45,38 @@ fn wrapped(
     Arc<MemoryLog>,
     Arc<Mutex<Vec<serde_json::Value>>>,
 ) {
+    let (tool, log, seen, _queue) = wrapped_with_queue(outcome);
+    (tool, log, seen)
+}
+
+/// [`wrapped`], keeping the queue the claim is staged onto.
+fn wrapped_with_queue(
+    outcome: impl Fn() -> ToolResult + Send + Sync + 'static,
+) -> (
+    TakeOverTool,
+    Arc<MemoryLog>,
+    Arc<Mutex<Vec<serde_json::Value>>>,
+    crate::hive::takeover::TakeoverQueue,
+) {
     let log = Arc::new(MemoryLog::default());
     let seen = Arc::new(Mutex::new(Vec::new()));
     let complete = Box::new(FakeComplete {
         outcome: Box::new(outcome),
         seen: Arc::clone(&seen),
     }) as Box<dyn Tool>;
+    let queue = crate::hive::takeover::TakeoverQueue::default();
     let loan = TakeoverLoan {
+        episode: EPISODE.into(),
         events: Arc::clone(&log) as Arc<dyn EventLog>,
         company: record(TWO_DESKS).id,
         agent: "engineer".into(),
+        queue: queue.clone(),
     };
-    (TakeOverTool::new(complete, loan, "desk_"), log, seen)
+    (TakeOverTool::new(complete, loan, "desk_"), log, seen, queue)
 }
+
+/// The episode the test's seat sits in, and the key its claims carry.
+const EPISODE: &str = "ep-webauthn";
 
 fn args() -> serde_json::Value {
     serde_json::json!({
@@ -199,5 +218,144 @@ fn the_guest_note_names_the_prefixed_tool() {
     assert!(
         !note.contains("`take_over`"),
         "and never the bare one, which is on no belt: {note}"
+    );
+}
+
+/// The note fires on **owning the work**, not on the shape of the reply.
+///
+/// Two live runs watched a guest hold the verb, be told its name, and not
+/// reach for it. The second said the quiet part out loud -- "Yes, I'll own the
+/// pricing launch campaign end to end. ... Tell the operator I've got it." --
+/// and the operator's own line stayed empty.
+///
+/// The old wording triggered on "rather than hand back an answer", and from
+/// that seat it *was* handing back an answer: it had been asked who should own
+/// the work and answered that it would. So the one case the tool exists for
+/// read as the case the note excluded. It now keys on becoming the owner,
+/// however the sentence is shaped.
+#[test]
+fn the_note_fires_on_owning_the_work_not_on_refusing_to_answer() {
+    let note = guest_persona_note("desk_");
+    assert!(
+        note.contains("own it"),
+        "the trigger is ownership, which is what the seat knows about itself: {note}"
+    );
+    assert!(
+        !note.contains("rather than hand back an answer"),
+        "and not the shape of the reply, which excluded the very case it is for: {note}"
+    );
+}
+
+/// And it closes the route the guest actually took instead.
+///
+/// Asked to own the campaign, the guest replied "Tell the operator I've got
+/// it" -- delegating the announcement to the teammate that asked it, who
+/// cannot make it: that teammate is finishing its own conversation, and the
+/// operator never hears a word. A note that names the verb without closing
+/// that door leaves the seat a plausible wrong move.
+#[test]
+fn the_note_says_no_one_else_can_tell_the_operator() {
+    let note = guest_persona_note("desk_");
+    assert!(
+        note.contains("only way to reach the operator"),
+        "the verb is the sole route, said plainly: {note}"
+    );
+    assert!(
+        note.contains("pass it on"),
+        "and relaying through the asker is named and refused: {note}"
+    );
+}
+
+/// A claim is staged, so the work carries on in the claimer's own line.
+///
+/// Announcing alone left the handover a dead end: a live run watched a guest
+/// say "I'm owning the pricing launch campaign end to end" and then stop --
+/// no episode, no room, a line the operator had to prod to restart. The claim
+/// is what the dispatcher opens that line from once the asker's episode ends.
+///
+/// Staged rather than opened here because the claimer is still a seat inside
+/// that episode: opening its own line mid-turn would run one teammate twice.
+#[tokio::test]
+async fn a_claim_is_staged_for_the_claimers_own_line() {
+    let (tool, log, _seen, queue) =
+        wrapped_with_queue(|| ToolResult::success("recorded: your assignment is complete"));
+
+    let result = tool.execute(args()).await.expect("the call runs");
+    assert!(!result.is_error, "{}", text(&result));
+
+    let staged = queue.drain(EPISODE);
+    assert_eq!(staged.len(), 1, "one claim, for one takeover: {staged:?}");
+    assert_eq!(staged[0].seat, "engineer", "the teammate that took it on");
+    assert_eq!(
+        staged[0].chat, "dm:engineer",
+        "and its own line with the operator, which is where the work carries on"
+    );
+    assert!(
+        staged[0].saying.contains("webauthn"),
+        "carrying what it said, so the line opens on the claim: {staged:?}"
+    );
+    assert!(
+        log.replies("dm:engineer").len() == 1,
+        "the announcement still lands; staging is in addition to it, not instead"
+    );
+}
+
+/// A refused conclusion stages nothing, for the same reason it announces
+/// nothing: the room never transferred the work.
+#[tokio::test]
+async fn a_refused_conclusion_stages_no_claim() {
+    let (tool, _log, _seen, queue) = wrapped_with_queue(|| {
+        let mut refused = ToolResult::success("name exactly those");
+        refused.is_error = true;
+        refused
+    });
+
+    let refused = tool.execute(args()).await.expect("the call runs");
+
+    assert!(refused.is_error);
+    assert!(
+        queue.drain(EPISODE).is_empty(),
+        "nothing was claimed, so no line is opened"
+    );
+}
+
+/// One episode's ending takes its own claims and leaves everyone else's.
+///
+/// The queue is reached through `HarnessDeps`, built once per company runtime
+/// and shared by `Arc` through every clone a message makes, so every episode
+/// in the company stages into the same `Vec`. An unkeyed drain handed the
+/// first episode to finish the claims of episodes still running -- opening a
+/// claimer's line while that teammate was still a live seat in the episode it
+/// claimed in, which is the one thing staging exists to prevent.
+#[test]
+fn a_drain_takes_only_the_claims_of_the_episode_that_ended() {
+    let queue = crate::hive::takeover::TakeoverQueue::default();
+    let claim = |episode: &str, seat: &str| crate::hive::takeover::TakeoverClaim {
+        episode: episode.into(),
+        seat: seat.into(),
+        chat: format!("dm:{seat}"),
+        at: 7,
+        saying: "I have this.".into(),
+    };
+    queue.stage(claim("ep-a", "engineer"));
+    queue.stage(claim("ep-b", "designer"));
+    queue.stage(claim("ep-a", "writer"));
+
+    let ended = queue.drain("ep-a");
+    assert_eq!(
+        ended.iter().map(|c| c.seat.as_str()).collect::<Vec<_>>(),
+        ["engineer", "writer"],
+        "both of this episode's claims, in the order they were staged: {ended:?}"
+    );
+
+    let other = queue.drain("ep-b");
+    assert_eq!(
+        other.iter().map(|c| c.seat.as_str()).collect::<Vec<_>>(),
+        ["designer"],
+        "and the episode still running kept its own, to act on when it ends: {other:?}"
+    );
+    assert!(
+        queue.drain("ep-a").is_empty() && queue.drain("ep-b").is_empty(),
+        "a claim is acted on once; draining twice would open the same line twice"
     );
 }

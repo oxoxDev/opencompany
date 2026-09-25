@@ -284,8 +284,14 @@ pub struct Trigger {
 }
 
 /// What one episode came to, in this host's words.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct EpisodeReport {
+    /// Which episode this is the report for.
+    ///
+    /// Carried so the caller can drain exactly this episode's staged
+    /// takeovers. The id is minted inside `run_desk_message`, so without it
+    /// `spawn_episode` had no key and drained the company's whole queue.
+    pub episode_id: String,
     /// Seat turns run.
     pub turns: u64,
     /// Waves proposed.
@@ -296,9 +302,12 @@ pub struct EpisodeReport {
     pub settled: usize,
 }
 
-impl From<Report> for EpisodeReport {
-    fn from(report: Report) -> Self {
+impl EpisodeReport {
+    /// The driver's report, named with the episode it came from.
+    #[must_use]
+    pub fn of(episode_id: impl Into<String>, report: Report) -> Self {
         Self {
+            episode_id: episode_id.into(),
             turns: report.turns,
             waves: report.waves,
             conversations: report.conversations,
@@ -377,13 +386,34 @@ impl HiveDispatcher {
     ///
     /// A desk that runs no hive, and whatever stops the episode.
     pub async fn run_desk_message(&self, desk_id: &str, trigger: Trigger) -> Result<EpisodeReport> {
+        self.run_desk_message_as(desk_id, trigger, uuid::Uuid::new_v4().simple().to_string())
+            .await
+    }
+
+    /// The same, under an id the caller minted.
+    ///
+    /// Split out because a caller that must act on the episode *after* it
+    /// ends needs its id on the failing path too, and an id minted inside is
+    /// lost with the error. `spawn_episode` drains this episode's staged
+    /// takeovers either way: a claim whose episode failed is still a claim
+    /// the operator has been told about in a durable row, and leaving it in a
+    /// queue that lives as long as the runtime strands it for good.
+    ///
+    /// # Errors
+    ///
+    /// Whatever stops the episode opening or running.
+    pub async fn run_desk_message_as(
+        &self,
+        desk_id: &str,
+        trigger: Trigger,
+        episode_id: String,
+    ) -> Result<EpisodeReport> {
         let desk = self.hive(desk_id).ok_or_else(|| {
             OpenCompanyError::InvalidRequest(format!("desk `{desk_id}` runs no hive"))
         })?;
         let thread_root = trigger.parent.unwrap_or(trigger.seq);
         let routing = desk_routing(&self.record, desk_id);
         let (starters, plan_dto) = self.opening(&desk, &routing, &trigger, thread_root).await?;
-        let episode_id = uuid::Uuid::new_v4().simple().to_string();
         self.events
             .append(
                 &self.record.id,
@@ -424,7 +454,7 @@ impl HiveDispatcher {
         })
         .await?;
         self.complete(&desk.desk_id, &episode_id, &report).await?;
-        Ok(report.into())
+        Ok(EpisodeReport::of(episode_id, report))
     }
 
     /// Carry on a parked episode from its last checkpoint, once an operator
@@ -485,7 +515,7 @@ impl HiveDispatcher {
         )
         .await?;
         self.complete(&desk.desk_id, episode_id, &report).await?;
-        Ok(Some(report.into()))
+        Ok(Some(EpisodeReport::of(episode_id, report)))
     }
 
     /// Journals an episode's closing row.

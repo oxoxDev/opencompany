@@ -30,6 +30,7 @@ async fn roster_builds_with_skill_surface_wired() {
     .unwrap();
 
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,

@@ -291,6 +291,7 @@ pub(super) fn fixture() -> Fixture {
     let meter = Arc::new(RecordingMeter::default());
     Fixture {
         deps: HarnessDeps {
+            takeovers: Default::default(),
             emergency_gate: None,
             notifications: None,
             ledgers: None,

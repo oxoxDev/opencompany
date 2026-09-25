@@ -226,15 +226,171 @@ pub fn spawn_episode(
 ) -> tokio::task::JoinHandle<Option<EpisodeReport>> {
     let task: std::pin::Pin<Box<dyn std::future::Future<Output = Option<EpisodeReport>> + Send>> =
         Box::pin(async move {
-            match dispatcher.run_desk_message(&desk_id, trigger).await {
+            // Minted here, not inside, so the id survives a failure: a claim
+            // staged by an episode that then errored is still a claim the
+            // operator holds a durable row about, and a queue that lives as
+            // long as the runtime would strand it.
+            let episode_id = uuid::Uuid::new_v4().simple().to_string();
+            let outcome = match dispatcher
+                .run_desk_message_as(&desk_id, trigger, episode_id.clone())
+                .await
+            {
                 Ok(report) => Some(report),
                 Err(error) => {
                     tracing::warn!(desk = %desk_id, %error, "[hive] the episode failed");
                     None
                 }
-            }
+            };
+            // **A claimed handover carries on in the claimer's own line.**
+            //
+            // Drained here, after the episode this claim came out of has
+            // ended, and deliberately not before: the claimer was a seat
+            // *inside* that episode, so opening its line any earlier would run
+            // the same teammate in two turns at once. `take_over` already
+            // concluded the asker's conversation -- that episode finishing is
+            // the handover's first half, and this is its second.
+            //
+            // Failures are logged and dropped rather than failing the episode
+            // that just succeeded: the conversation really did transfer and
+            // the operator really was told, so the recoverable state is a line
+            // that needs one more message, not a run to unwind.
+            carry_on_takeovers(&dispatcher, &episode_id).await;
+            outcome
         });
     tokio::spawn(task)
+}
+
+/// The job a takeover's claimer is set, in the words it used to claim it.
+///
+/// Its own function so the call site's wording is reachable from a test. The
+/// claim is quoted rather than referred to: the brief window is the seat's
+/// unread rows, not a slice this code controls, so "the words above" is a
+/// pointer at something that may not be there.
+#[must_use]
+pub fn carry_on_job(saying: &str) -> String {
+    format!(
+        "You have taken this work on. In your own words: \"{}\"\n\nIt is yours now, and this \
+         is your line with the operator. Carry it out, and tell them where it stands when you \
+         have something worth reading.",
+        saying.trim()
+    )
+}
+
+/// How a carried-on episode is opened: **at** the job, **rooted on** the claim.
+///
+/// Extracted because the pairing is the thing that regressed, and asserting
+/// `trigger_for` echoes its arguments does not pin it -- the defect was this
+/// call site passing `None` for `parent`, which `trigger_for` accepted
+/// happily. `run_desk_message` then took the root from `seq`, every utterance
+/// hung off a `SYSTEM_AUTHOR` row, and the console draws one as a pill with
+/// no "N replies": the claimer's whole report to the operator was journaled
+/// and unreachable.
+///
+/// `seq` is what the seat is briefed from and what its assignment is;
+/// `parent` is where a reader finds the conversation. The job is the first,
+/// the claim is the second.
+#[must_use]
+fn carry_on_trigger(claim: &crate::hive::takeover::TakeoverClaim, opened_at: EventSeq) -> Trigger {
+    trigger_for(
+        Some(opened_at),
+        &carry_on_job(&claim.saying),
+        Some(EventSeq::new(claim.at)),
+        &[],
+    )
+}
+
+/// Opens the claimer's own line for every takeover staged inside `episode`.
+///
+/// One episode ends and another begins, which is what a handover is: the
+/// asker's conversation was concluded by the verb itself, and the work now
+/// belongs to a teammate the operator talks to directly.
+async fn carry_on_takeovers(dispatcher: &Arc<HiveDispatcher>, episode: &str) {
+    for claim in dispatcher.deps.takeovers.drain(episode) {
+        let desk_id = format!("{}{}", crate::runtime::assignee::DM_PREFIX, claim.seat);
+        if !dispatcher.hives.contains_key(&desk_id) {
+            // DM episodes are off, or this teammate has no hive. The operator
+            // still has the announcement; what they do not get is a room.
+            tracing::warn!(
+                seat = %claim.seat,
+                chat = %claim.chat,
+                "[hive] a takeover was announced but its line runs no episodes, so nothing \
+                 carries it on"
+            );
+            continue;
+        }
+        // **The opening has to be a row, because a row is all the seat reads.**
+        //
+        // Seeding the episode at the claim's own sequence left the seat
+        // answering itself: it opened its line, saw its own sentence and the
+        // word "concluded", and was told by the brief that *that* was its
+        // assignment. A live run closed in two turns having asked nobody --
+        // it had not been given anything to do.
+        //
+        // Handing the instruction to `trigger_for` does not fix it. A
+        // trigger's text only picks who speaks first (`opening`), and in a DM
+        // `dm_opening` pins the owner and returns before even reading it, so
+        // the sentence is built and dropped. What a seat is briefed from is
+        // the journal from `trigger.seq` on -- so the job has to be written
+        // there, and the episode opened at the row that carries it.
+        //
+        // Authored by `SYSTEM_AUTHOR` and addressed to the claimer, so the
+        // brief reads it the way it reads a nudge.
+        //
+        // The address is *not* what keeps it off the operator's screen --
+        // `aside_audience` is "a coordination device between agents and never
+        // access control; an operator reads the row regardless"
+        // (`server::chat_history`). They see it, as the system pill that
+        // opens the claimer's line, which is honest about why that line
+        // suddenly has work in it. What the address does is tell the driver
+        // whose brief it belongs in, so the other seats of the episode are
+        // not handed an instruction written to somebody else.
+        let opening = carry_on_job(&claim.saying);
+        // Falls back to the claim's sequence, which is where this opened
+        // before the row existed. A journal that will not take the row is not
+        // a reason to strand work a teammate has already accepted in public;
+        // the degraded episode is the old behaviour, and the warning says so.
+        let opened_at = match brief_takeover(
+            dispatcher.events.as_ref(),
+            &dispatcher.record.id,
+            &claim.seat,
+            &opening,
+        )
+        .await
+        {
+            Ok(seq) => seq,
+            Err(error) => {
+                tracing::warn!(
+                    seat = %claim.seat,
+                    %error,
+                    "[hive] a takeover's opening could not be journaled, so its episode opens \
+                     on the claim itself and the seat is briefed with no job"
+                );
+                crate::ports::types::EventSeq::new(claim.at)
+            }
+        };
+        // **Opened at the job, rooted on the claim.**
+        //
+        // `run_desk_message` takes the thread root from `parent`, falling back
+        // to `seq` -- so opening at the job row alone made that row the root,
+        // and every utterance of the episode hung off it. The console renders
+        // a `SYSTEM_AUTHOR` row as a pill rather than a message, and a pill
+        // carries no "N replies", so the claimer's own report to the operator
+        // -- the `complete_episode` row, the point of the whole episode --
+        // was journaled and unreachable. A live run ended with the operator
+        // seeing a claim, a grey line, and "Episode complete - 3 rounds".
+        //
+        // The two answers are genuinely different questions. `seq` is what
+        // the seat is briefed from and what its assignment is; `parent` is
+        // where the conversation hangs for a reader. The job is the first and
+        // the claim is the second.
+        let trigger = carry_on_trigger(&claim, opened_at);
+        tracing::info!(
+            seat = %claim.seat,
+            chat = %claim.chat,
+            "[hive] a takeover carries on in the claimer's own line"
+        );
+        spawn_episode(Arc::clone(dispatcher), desk_id, trigger);
+    }
 }
 
 /// Carries on a parked episode from its checkpoint on its own task, as
@@ -245,16 +401,26 @@ pub fn spawn_resume(
 ) -> tokio::task::JoinHandle<Option<EpisodeReport>> {
     let task: std::pin::Pin<Box<dyn std::future::Future<Output = Option<EpisodeReport>> + Send>> =
         Box::pin(async move {
-            match dispatcher.resume_desk_message(&episode_id).await {
+            let outcome = match dispatcher.resume_desk_message(&episode_id).await {
                 Ok(report) => report,
                 Err(error) => {
                     tracing::error!(episode = %episode_id, %error, "[hive] the episode could not be resumed");
                     None
                 }
+            };
+            // A resumed episode ends like any other, and a seat can claim
+            // work on either side of the park. Without this the claims of an
+            // episode that parked once were staged and never acted on: the
+            // operator keeps a durable "I own this" row and nothing runs,
+            // which is the dead end the carry-on exists to close.
+            if let Some(report) = &outcome {
+                carry_on_takeovers(&dispatcher, &report.episode_id).await;
             }
+            outcome
         });
     tokio::spawn(task)
 }
+
 /// A teammate tells the operator it is taking something on, in its own line.
 ///
 /// # Why the askee speaks, and not the asker
@@ -262,10 +428,18 @@ pub fn spawn_resume(
 /// The obvious shape is the other way round: the teammate holding the
 /// conversation pushes the question into the other's line and steps back. It
 /// does not work, and the reason is structural rather than incidental. An
-/// episode opens when a message arrives *through the cycle* -- that is the one
+/// episode opens when a message arrives *through the cycle*, which was the one
 /// call site of `spawn_episode`. A row appended straight to the journal is the
 /// record of a message, not the delivery of one: nobody reads for it, and the
 /// teammate it was addressed to never wakes.
+///
+/// `carry_on_takeovers` has since added a second call site, which opens the
+/// claimer's line directly and hand-builds the trigger the chat path derives
+/// from a real message. That is where several defects came from, and routing
+/// it back through the cycle is the open design question -- `chat_and_emit`
+/// lives in the HTTP layer and there is no hive-level seam for it today. The
+/// reasoning below is unchanged by that: it is why the *askee* announces, and
+/// nothing about the second call site makes pushing at the asker work.
 ///
 /// Inverting it removes the problem instead of working around it. The askee is
 /// **already running** -- it was asked, so it has a turn. It does not need one
@@ -316,6 +490,66 @@ pub async fn announce_takeover(
         )
         .await?;
     Ok((chat, seq))
+}
+
+/// Writes the job into the claimer's line and says where the episode opens.
+///
+/// # Why this is a row and not a prompt
+///
+/// Because a seat is briefed from the journal, not from the trigger. A
+/// `Trigger`'s text reaches exactly one place -- [`HiveDispatcher::opening`],
+/// which uses it to route who speaks first -- and in a DM [`dm_opening`] pins
+/// the owner and returns before that read happens. Everything the seat
+/// actually sees is the rows from `trigger.seq` on. So an instruction that is
+/// not a row is an instruction nobody receives, which is what a live run
+/// found: the episode opened at the claim's sequence, and the brief told the
+/// claimer its assignment *was* the claim it had already made.
+///
+/// # Why `SYSTEM_AUTHOR`, and addressed
+///
+/// The same author the driver's own notes carry, so the brief renders this
+/// the way it renders a nudge -- as the room telling a seat something, which
+/// is what it is.
+///
+/// The audience is the claimer, and that is not a privacy claim: an
+/// `aside_audience` is a coordination device between agents, never access
+/// control, and an operator reads the row regardless (`server::chat_history`).
+/// They see it as the pill that opens the line, which is the honest account
+/// of why that line suddenly has work in it. What the address buys is that
+/// the episode's other seats are not briefed with an instruction addressed to
+/// somebody else.
+///
+/// # Errors
+///
+/// Whatever stops the journal accepting the row.
+pub async fn brief_takeover(
+    events: &dyn EventLog,
+    company: &crate::ports::types::CompanyId,
+    agent: &str,
+    job: &str,
+) -> crate::Result<EventSeq> {
+    events
+        .append(
+            company,
+            CompanyEvent::AgentReply {
+                chat_id: crate::company::blocker_sender::dm_thread(agent),
+                agent_id: crate::ports::SYSTEM_AUTHOR.to_owned(),
+                text: job.to_owned(),
+                steps: Vec::new(),
+                outputs: Vec::new(),
+                task_id: None,
+                parent: None,
+                mentions: Vec::new(),
+                mention_depth: 0,
+                audience: vec![agent.to_owned()],
+                // The row opens an episode; it is not one of its utterances.
+                // Stamping it would make the episode its own cause, and the
+                // console's band reads the first stamped row as the opening
+                // turn.
+                episode: None,
+            },
+        )
+        .await
 }
 
 /// What the teammate that handed work on tells the operator, if it says

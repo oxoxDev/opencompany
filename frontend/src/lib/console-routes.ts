@@ -48,6 +48,18 @@ export type View =
   | "team"
   | "workspace"
   /**
+   * No nav row. `#/artifacts/<artifactId>?v=<n>` — one published deliverable,
+   * on its own page.
+   *
+   * A deliverable used to be addressed as `#/tasks/<id>?artifact=…`, through
+   * the card `publish_artifact` mints for it. That card exists because an
+   * `ArtifactRecord`'s identity is `(task_id, source)` and the store will not
+   * take an artifact without a task — a storage requirement, not a piece of
+   * work. Routing through it made an operator open a board item to read the
+   * thing the chat row was already offering them.
+   */
+  | "artifacts"
+  /**
    * The company's durable memory — what it remembers, and what it forgot.
    *
    * A settings sub-page (`#/settings/brain`) until it got its own nav row.
@@ -144,6 +156,7 @@ const ROUTABLE: Record<View, true> = {
    */
   team: true,
   workspace: true,
+  artifacts: true,
   brain: true,
   /** The tabbed page the title row's bell opens. Approvals, and the feed. */
   notifications: true,

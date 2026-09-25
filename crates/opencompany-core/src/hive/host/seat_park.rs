@@ -336,16 +336,14 @@ impl DeskHost {
                 "a seat published a file but this host has no roster to file it with".to_string(),
             ));
         };
+        let (publish_chat, publish_root) = self.publish_chat(seat);
         let card = crate::harness::publish::filing::PublishFiling {
             company: &self.company,
             deps,
         }
         .record_conversation_publishes(
             seat,
-            crate::runtime::delegation::ChatTarget::in_thread(
-                Some(&self.desk_id),
-                self.thread_root,
-            ),
+            crate::runtime::delegation::ChatTarget::in_thread(Some(&publish_chat), publish_root),
             publishes,
         )
         .await?;
@@ -357,6 +355,23 @@ impl DeskHost {
             "[hive] a seat published; minted a card to carry it"
         );
         Ok(card)
+    }
+
+    /// Where one seat's publish is filed, and under which thread.
+    ///
+    /// The chat is [`DeskHost::row_chat`]'s answer -- one rule for every row
+    /// a seat produces, whether it is speech, a delivery or a publish, so the
+    /// three cannot drift into filing the same seat's work in two places.
+    /// That doc carries the reasoning; what is added here is the thread.
+    ///
+    /// A pair channel gets `None`. The episode's thread root is a position in
+    /// the desk's transcript and means nothing in the pair conversation, so
+    /// carrying it there would parent the row to an unrelated row or to
+    /// nothing at all. On the desk itself the root still applies.
+    pub(super) fn publish_chat(&self, seat: &str) -> (String, Option<EventSeq>) {
+        let chat = self.row_chat(seat);
+        let thread = (chat == self.desk_id).then_some(self.thread_root).flatten();
+        (chat, thread)
     }
 
     /// Parks what a seat's turn raised, telling the seat about anything that

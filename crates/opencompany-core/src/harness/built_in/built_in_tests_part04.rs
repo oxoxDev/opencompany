@@ -550,6 +550,7 @@ async fn a_top_level_budget_exhaustion_pauses_gracefully_and_parks_a_reissue_mar
     let mut rec = record();
     rec.id = company.clone();
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,

@@ -389,12 +389,32 @@ function inlineFirstReplies(
     // So promotion stops at the boundary it was always about: a lone answer.
     // When the runtime spoke more than once, the whole turn stays folded and
     // the chip says so.
-    const runtimeReplies = bucket.filter(
-      (r) => (r.from === "company" && !r.byPerson) || r.from === "system",
-    );
+    //
+    // **A row that only carries outputs did not speak.**
+    //
+    // A seat that writes a file and then reports on it emits two rows: an
+    // empty `post` carrying the workspace link, and the write-up. Counting
+    // the first as a second utterance folds the second — so a live run wrote
+    // a campaign brief, asked six teammates, and showed the operator a chip
+    // instead of the answer, because the turn had "spoken twice".
+    //
+    // It had not. The host already draws this line on its own side, where
+    // `a_row_that_only_carries_outputs_is_not_shown_to_seats_as_speech`
+    // keeps such a row out of what the other seats read. This is the same
+    // judgement on the render side: the link still renders under whichever
+    // row it belongs to, it just stops being evidence that the runtime said
+    // more than one thing.
+    const runtime = (r: ChatMessage): boolean =>
+      (r.from === "company" && !r.byPerson) || r.from === "system";
+    const carrier = (r: ChatMessage): boolean =>
+      runtime(r) && r.text.trim().length === 0 && (r.outputs?.length ?? 0) > 0;
+    const runtimeReplies = bucket.filter((r) => runtime(r) && !carrier(r));
     if (runtimeReplies.length > 1) continue;
     const root = position.get(rootId);
-    const first = bucket[0];
+    // Skips the carriers, never anything else -- an operator's own follow-up
+    // is not one, so the guard below still sees it first when they wrote
+    // again before the agent answered.
+    const first = bucket.find((r) => !carrier(r));
     // **Only the runtime's own answer is ever promoted** (codex on #1972).
     //
     // `bucket[0]` is merely the earliest reply, and that is the *operator's*
@@ -432,7 +452,26 @@ function inlineFirstReplies(
         break;
       }
     }
-    if (!interleaved) inline.add(first.id);
+    if (!interleaved) {
+      inline.add(first.id);
+      // **The whole turn, or none of it — and only this turn.**
+      //
+      // Promotion is only safe because it empties the chip. Lifting the
+      // write-up and leaving its file links folded would put one turn's
+      // output on two surfaces — the exact split this rule refuses for a
+      // capped turn — and hand the reader a chip holding blank rows.
+      //
+      // Bounded at the operator's next line, because every child of the root
+      // is in this bucket, not just this turn's. `[root, answer, follow-up,
+      // laterCarrier]` passes every test above — the answer is the first
+      // non-carrier and nothing interleaves it with the root — and promoting
+      // every carrier would lift a file link belonging to a later exchange
+      // into the channel, out of the thread the operator deliberately opened.
+      for (const row of bucket) {
+        if (row.from === "you") break;
+        if (carrier(row)) inline.add(row.id);
+      }
+    }
   }
   return inline;
 }

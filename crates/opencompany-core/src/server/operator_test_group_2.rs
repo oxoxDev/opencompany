@@ -231,6 +231,7 @@ async fn chat_routes_through_the_harness_brain() {
         .unwrap();
 
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,

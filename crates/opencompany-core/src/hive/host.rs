@@ -318,6 +318,39 @@ impl DeskHost {
         })
     }
 
+    /// The chat one seat's row belongs in.
+    ///
+    /// A desk takes it: a desk is a real room and a member's row belongs on
+    /// it.
+    ///
+    /// **A DM does not.** Its membership is the whole roster so that `ask` has
+    /// legal targets (`graph::dm_hives`) -- reachability, not an audience. The
+    /// same conflation `broadcast_withheld_in` closes for one verb arrives
+    /// here by two other roads: a thread-less commit, and a delivery row
+    /// flushed for a seat that published. Either way a teammate the owner
+    /// merely asked writes into the operator's private line with somebody
+    /// else -- authored by someone they never messaged, and empty, because a
+    /// delivery row carries its content in `outputs`.
+    ///
+    /// A live run put three artifacts there that way. The owner had already
+    /// reported all of it properly in its own summary, naming each
+    /// teammate's contribution and raising the blocker, so the rows added
+    /// nothing and the console folded them out of sight.
+    ///
+    /// The owner's pair, not the asker's: a non-owner is in this episode
+    /// because somebody asked it, and in an operator DM that is nearly always
+    /// the owner -- whose line this is, and who answers for it either way.
+    fn row_chat(&self, author: &str) -> String {
+        match self
+            .desk_id
+            .strip_prefix(crate::runtime::assignee::DM_PREFIX)
+            .filter(|owner| *owner != author)
+        {
+            Some(owner) => crate::hive::referral::pair_conversation(author, owner),
+            None => self.desk_id.clone(),
+        }
+    }
+
     /// The channel a committed row is filed under.
     ///
     /// Three cases, read straight off the commit:
@@ -371,7 +404,31 @@ impl DeskHost {
             return Ok(chat);
         }
         let Some(root) = commit.thread else {
-            return Ok(self.desk_id.clone());
+            // **A DM's line belongs to the teammate whose line it is.**
+            //
+            // A DM binds the whole roster so `ask` has legal targets
+            // (`graph::dm_hives`) -- membership is reachability, not an
+            // audience. The same conflation `broadcast_withheld_in` closes for
+            // one verb reaches here by another road: a seat the owner asked
+            // takes its turn in this episode, publishes through a belt tool,
+            // and its turn carries no speech act -- so it commits as a
+            // thread-less `Post` and this fallback files it on the desk. In a
+            // DM that desk is the operator's private line with somebody else,
+            // and the row lands there authored by a teammate they never
+            // messaged, with empty text, carrying the artifacts in `outputs`.
+            //
+            // It belongs to the conversation that produced it. The owner reads
+            // that in its next brief (`EpisodeBrief::conversations`) and
+            // decides what the operator hears -- which it does well: asked to
+            // own a campaign, one named every teammate's contribution and
+            // raised the blocker, while the leaked rows said nothing and the
+            // console folded them out of sight.
+            //
+            // The owner's pair, not the asker's: a non-owner is in this
+            // episode because somebody asked it, and in an operator DM that is
+            // nearly always the owner -- whose line this is, and who answers
+            // for it either way.
+            return Ok(self.row_chat(&commit.author));
         };
         self.conversations
             .lock()
@@ -503,9 +560,22 @@ impl DeskHost {
             episode: None,
             // A row of a conversation hangs off the ask that rooted it;
             // otherwise off the thread the episode itself was opened in.
+            // **A desk position means nothing in a pair channel.**
+            //
+            // `thread_root` is a sequence in the desk's own transcript, and a
+            // row redirected to `dm:<a>+<b>` by `row_chat` lands in a channel
+            // that does not contain it. History projects the parent anyway,
+            // so the console looks for a root that is not there and draws an
+            // orphaned flat row instead of a reply in the conversation.
+            //
+            // Safe to drop rather than translate: a conversation is grouped
+            // by `ConversationOpened.root` (`server::chat_history`), never by
+            // this field, so nothing downstream is reading it. A row that
+            // names its own thread still keeps it -- a conclusion does -- and
+            // a row on the desk itself is unchanged.
             parent: thread
                 .map(|root| EventSeq::new(root.0))
-                .or(self.thread_root),
+                .or_else(|| (chat == self.desk_id).then_some(self.thread_root).flatten()),
             mentions: Vec::new(),
             mention_depth: 0,
             audience,
@@ -931,6 +1001,37 @@ fn dm_persona_note(desk_id: &str, seat: &str) -> Option<&'static str> {
     })
 }
 
+/// What corrects the one line of the driver's brief a DM makes untrue.
+///
+/// Every seated turn ends with "Hand what is another seat's on with
+/// `broadcast`" -- written by `tinyhivemind-driver`, which has no hosts and
+/// so cannot know that [`crate::hive::seating::broadcast_withheld_in`] takes
+/// that verb off this belt. So the only hand-off instruction a seat in an
+/// operator's line is given names the one tool it does not have, and `ask` --
+/// the verb it does have, and the only one that actually transfers anything
+/// here -- is named nowhere in the brief at all.
+///
+/// A live run paid for exactly that: a teammate that had just claimed a
+/// campaign "end to end" opened its own line, named three teammates it would
+/// brief, and asked none of them.
+///
+/// This belongs to the host and not to the driver for the same reason
+/// [`dm_persona_note`] does: which verbs a DM withholds is this company's
+/// decision, and the crate that writes the brief has no way to ask.
+///
+/// Takes the prefix because the belt carries `desk_ask`, not `ask` -- naming
+/// a seat a tool it cannot see is the defect this exists to fix, from the
+/// other side (`takeover::guest_persona_note` records what that cost).
+#[must_use]
+fn broadcast_absent_note(prefix: &str) -> String {
+    format!(
+        "\n\nOne correction to the brief below your messages: it will tell you to hand a \
+         teammate's part on with `{prefix}broadcast`. You do not have that verb here -- there \
+         is no room in a direct line to broadcast into. `{prefix}ask` is how you reach a \
+         teammate from here, one at a time, and it is how work is actually handed to them."
+    )
+}
+
 impl EpisodeHost for DeskHost {
     fn build_seat(
         &self,
@@ -970,9 +1071,15 @@ impl EpisodeHost for DeskHost {
         // offers it only when this is `Some`.
         let takeover = crate::hive::takeover::is_guest_seat(&self.desk_id, seat).then(|| {
             crate::hive::seating::TakeoverLoan {
+                episode: self.episode_id.clone(),
                 events: Arc::clone(&self.events),
                 company: self.company.clone(),
                 agent: seat.to_owned(),
+                queue: self
+                    .roster
+                    .as_ref()
+                    .map(|(_, deps)| deps.takeovers.clone())
+                    .unwrap_or_default(),
             }
         });
         let guest = takeover.is_some();
@@ -994,6 +1101,10 @@ impl EpisodeHost for DeskHost {
         let mut persona = seat_persona(record, deps, seat).map_err(|error| refused(&error))?;
         if let Some(note) = dm_persona_note(&self.desk_id, seat) {
             persona.push_str(note);
+            // Paired with the note above on purpose: both are true of exactly
+            // the conversations `dm_persona_note` answers for, and both
+            // correct the same brief.
+            persona.push_str(&broadcast_absent_note(TOOL_PREFIX));
         }
         // A verb it is handed but never told about is one a live run shows it
         // will not reach for, so the note travels with the tool.

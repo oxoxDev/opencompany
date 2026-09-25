@@ -79,7 +79,10 @@ impl DeskHost {
                 .unwrap_or_else(PoisonError::into_inner),
         );
         for (seat, delivery) in held {
-            let mut event = self.reply(&self.desk_id.clone(), &seat, String::new(), None, None);
+            // Not necessarily the desk: in a DM, a seat that is only here to
+            // be askable does not write into the owner's operator line. See
+            // `DeskHost::row_chat`.
+            let mut event = self.reply(&self.row_chat(&seat), &seat, String::new(), None, None);
             if let CompanyEvent::AgentReply {
                 outputs,
                 task_id,

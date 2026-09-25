@@ -347,6 +347,36 @@ fn a_dm_seat_learns_whether_the_line_is_its_own() {
     );
 }
 
+/// A DM seat is told that the brief's one hand-off verb is not on its belt,
+/// and which verb is.
+///
+/// The brief `tinyhivemind-driver` writes ends "Hand what is another seat's
+/// on with `broadcast`" -- and `broadcast_withheld_in` takes that verb off
+/// every DM belt. Left alone, the only hand-off instruction a seat in an
+/// operator's line receives names the one tool it does not have, while `ask`
+/// is named nowhere in the brief at all. A live run had a teammate claim a
+/// campaign "end to end", name three teammates it would brief, and ask none
+/// of them.
+#[test]
+fn a_dm_seat_is_told_the_briefs_broadcast_is_not_on_its_belt() {
+    let note = super::broadcast_absent_note(super::TOOL_PREFIX);
+
+    assert!(
+        note.contains("desk_broadcast"),
+        "it has to name the verb the brief names, prefixed the way the belt would carry it, \
+         or the seat cannot tell which sentence is being corrected: {note}"
+    );
+    assert!(
+        note.contains("desk_ask"),
+        "and the verb it does have -- naming a tool a seat cannot see is the defect this \
+         exists to fix, from the other side: {note}"
+    );
+    assert!(
+        !note.contains("with `ask`"),
+        "never the bare name: the belt carries `desk_ask`: {note}"
+    );
+}
+
 #[test]
 fn a_seat_is_named_by_its_roster_name_then_its_role() {
     let mut record = crate::hive::test_support::record(
@@ -383,4 +413,156 @@ role = "Copywriter"
         "stranger"
     );
     assert_eq!(super::seat_display_name(None, "copywriter"), "copywriter");
+}
+
+/// **A teammate's work does not land in somebody else's operator line.**
+///
+/// A DM binds the whole roster so `ask` has legal targets
+/// (`graph::dm_hives`) -- membership is reachability, not an audience. A seat
+/// the owner asks takes its turn in the owner's episode, and a turn that
+/// publishes through a belt tool carries no speech act: it commits as a
+/// thread-less `Post`, which `channel_for`'s fallback filed on the desk. In a
+/// DM that desk is the operator's private line with somebody else.
+///
+/// A live run put three artifacts there that way -- rows authored by
+/// `copywriter` and `landing_page_builder` in the operator's line with the
+/// Creative Director, each with empty text because a publish carries its
+/// content in `outputs`, and each folded out of sight by the console.
+///
+/// The owner reads the exchange in its next brief and reports it; that run's
+/// owner named every teammate's contribution and raised the blocker. So the
+/// row belongs to the conversation, and the summary is what the operator
+/// reads.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_non_owners_deskless_row_stays_out_of_the_operators_dm() {
+    let log = Arc::new(MemoryLog::default());
+    let host = DeskHost::new(
+        CompanyId::new("acme"),
+        "dm:grace".to_owned(),
+        "Grace".to_owned(),
+        Arc::clone(&log) as Arc<dyn EventLog>,
+        Vec::new(),
+    );
+
+    host.commit(&commit(serde_json::json!({
+        "author": "ada",
+        "utterance": { "kind": "post", "message": "" },
+        "thread": null,
+        "only_for": null,
+        "conversation": null,
+        "purpose": { "kind": "desk" },
+    })))
+    .expect("the journal takes the row");
+
+    assert!(
+        log.replies("dm:grace").is_empty(),
+        "a teammate that is only in this DM to be askable writes nothing into it: {:?}",
+        log.replies("dm:grace")
+    );
+    let pair = crate::hive::referral::pair_conversation("ada", "grace");
+    assert_eq!(
+        log.replies(&pair).len(),
+        1,
+        "it belongs to its conversation with the owner, where the owner reads it"
+    );
+}
+
+/// The owner's own row still lands on its line -- that is its line.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dm_owners_own_row_still_lands_on_its_line() {
+    let log = Arc::new(MemoryLog::default());
+    let host = DeskHost::new(
+        CompanyId::new("acme"),
+        "dm:grace".to_owned(),
+        "Grace".to_owned(),
+        Arc::clone(&log) as Arc<dyn EventLog>,
+        Vec::new(),
+    );
+
+    host.commit(&commit(serde_json::json!({
+        "author": "grace",
+        "utterance": { "kind": "post", "message": "here is where it stands" },
+        "thread": null,
+        "only_for": null,
+        "conversation": null,
+        "purpose": { "kind": "desk" },
+    })))
+    .expect("the journal takes the row");
+
+    assert_eq!(
+        log.replies("dm:grace").len(),
+        1,
+        "the teammate whose DM it is answers in it, as it always did"
+    );
+}
+
+/// And a desk is untouched: a desk IS the room, and everyone there sees it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_desk_row_is_unchanged_whoever_wrote_it() {
+    let log = Arc::new(MemoryLog::default());
+    let host = host(Arc::clone(&log) as Arc<dyn EventLog>);
+
+    host.commit(&commit(serde_json::json!({
+        "author": "ada",
+        "utterance": { "kind": "post", "message": "shipping the freeze note" },
+        "thread": null,
+        "only_for": null,
+        "conversation": null,
+        "purpose": { "kind": "desk" },
+    })))
+    .expect("the journal takes the row");
+
+    assert_eq!(
+        log.replies("engineering").len(),
+        1,
+        "a desk is a real room and a member's row belongs on it"
+    );
+}
+
+/// A publish is filed by the same rule as a row, and only a desk carries the
+/// episode's thread.
+///
+/// `publish_chat` defers to `row_chat` so speech, deliveries and publishes
+/// cannot drift into filing one seat's work in two places — this asserts the
+/// deferral and the one thing it adds. The thread root is a position in the
+/// desk's transcript; carrying it into a pair channel would parent the row to
+/// an unrelated row or to nothing.
+#[test]
+fn a_publish_is_filed_where_its_rows_are_and_only_a_desk_keeps_the_thread() {
+    let log = Arc::new(MemoryLog::default());
+    let host = DeskHost::new(
+        CompanyId::new("acme"),
+        "dm:grace".to_owned(),
+        "Grace".to_owned(),
+        Arc::clone(&log) as Arc<dyn EventLog>,
+        Vec::new(),
+    )
+    .in_thread(Some(crate::ports::types::EventSeq::new(11)));
+
+    let (guest_chat, guest_thread) = host.publish_chat("ada");
+    assert_eq!(
+        guest_chat,
+        host.row_chat("ada"),
+        "one rule for every row a seat produces, publish included"
+    );
+    assert_eq!(
+        guest_chat,
+        crate::hive::referral::pair_conversation("ada", "grace"),
+        "and that rule sends a non-owner's work to its conversation with the owner"
+    );
+    assert!(
+        guest_thread.is_none(),
+        "the desk's thread root means nothing in a pair channel: {guest_thread:?}"
+    );
+
+    let (owner_chat, owner_thread) = host.publish_chat("grace");
+    assert_eq!(
+        owner_chat, "dm:grace",
+        "the owner's own work stays on its line"
+    );
+    assert_eq!(
+        owner_thread,
+        Some(crate::ports::types::EventSeq::new(11)),
+        "where the episode's thread root does apply"
+    );
 }

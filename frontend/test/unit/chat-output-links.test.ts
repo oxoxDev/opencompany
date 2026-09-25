@@ -99,8 +99,10 @@ describe("chat reply output links", () => {
     expect(more?.textContent).toBe("+2 more");
     act(() => more?.click());
     expect(container.querySelectorAll("a")).toHaveLength(3);
+    // Each deliverable addresses itself — the card `publish_artifact` minted
+    // for it is a storage requirement, not a destination.
     expect(container.querySelectorAll("a")[1]?.getAttribute("href")).toBe(
-      "#/tasks/task-7?artifact=artifact-2&v=3",
+      "#/artifacts/artifact-2?v=3",
     );
   });
 

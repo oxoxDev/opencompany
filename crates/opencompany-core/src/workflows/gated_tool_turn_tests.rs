@@ -206,6 +206,7 @@ pub(crate) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
     let gate = Arc::new(crate::policy::ManifestApprovalGate::new(policy));
     let journal = Arc::new(RuntimeJournal::new(dir.join("journal.jsonl")));
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,

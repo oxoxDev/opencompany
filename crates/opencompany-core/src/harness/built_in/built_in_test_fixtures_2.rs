@@ -31,6 +31,7 @@ pub(super) fn scripted_agent(
 pub(super) fn scripted_agent_over(provider: ScriptedProvider) -> (Arc<CompanyAgent>, HarnessDeps) {
     let dir = tempfile::tempdir().expect("tempdir");
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -303,6 +304,7 @@ pub(super) fn deps_with_plan(
     plan: Option<crate::harness::capability_budget::CapabilityPlan>,
 ) -> HarnessDeps {
     HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,

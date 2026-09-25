@@ -34,12 +34,21 @@ use crate::ports::types::CompanyId;
 /// this is answers the operator directly and has nothing to announce.
 #[derive(Clone)]
 pub struct TakeoverLoan {
+    /// The episode the claiming seat is sitting in, stamped onto the claim so
+    /// only that episode's ending acts on it. See [`TakeoverClaim::episode`].
+    ///
+    /// [`TakeoverClaim::episode`]: crate::hive::takeover::TakeoverClaim::episode
+    pub episode: String,
     /// Where the announcement row is appended.
     pub events: Arc<dyn EventLog>,
     /// The company the row belongs to.
     pub company: CompanyId,
     /// The seat claiming the work — whose line the announcement lands in.
     pub agent: String,
+    /// Where a claim is staged for the episode to act on once it ends. See
+    /// [`TakeoverQueue`](crate::hive::takeover::TakeoverQueue) for why the
+    /// tool cannot open the claimer's line itself.
+    pub queue: crate::hive::takeover::TakeoverQueue,
 }
 
 impl std::fmt::Debug for TakeoverLoan {

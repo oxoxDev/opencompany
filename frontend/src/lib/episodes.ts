@@ -184,6 +184,22 @@ interface Bucket {
   episode: Episode;
   rounds: Map<number, EpisodeRound>;
   seatByRound: Map<number, Map<string, EpisodeSeat>>;
+  /**
+   * A seat said `complete_episode` — held, not applied.
+   *
+   * One seat finishing is not the episode finishing. The host writes
+   * `EpisodeCompleted` only when `run_episode` returns, which is after every
+   * seat has settled AND any parked approval is resolved; a seat that
+   * concludes while another is still answering, or while the operator holds a
+   * sign-off, leaves the episode open. Believing the first such row told the
+   * operator "Episode complete" while the host still reported `open` with the
+   * closer itself in `waiting` — the work finished, said the band, at exactly
+   * the moment it needed them.
+   *
+   * So this is the fallback, applied below only where no live frame covers
+   * the episode: history alone still renders a closed episode as closed.
+   */
+  rowCompletion?: { by: string; at: number };
 }
 
 /**
@@ -270,16 +286,29 @@ export function foldEpisodes(
       bucket.episode.participants.push(message.channel);
     }
     if (meta.kind === "complete_episode") {
-      bucket.episode.status = "completed";
-      bucket.episode.completedBy = message.channel;
-      bucket.episode.completedAt = message.at;
-      bucket.episode.reason = bucket.episode.reason ?? "complete_episode";
+      bucket.rowCompletion = { by: message.channel, at: message.at };
     }
   }
 
   // The frames: what is open, who is working, what the host decided.
   const live = frames ? (chatId ? episodesOf(frames, chatId) : allEpisodes(frames)) : [];
   for (const state of live) layerFrames(bucketFor(state.id), state);
+
+  // **The host decides whether an episode is over; a row only suggests it.**
+  //
+  // `layerFrames` has spoken for every episode the host is reporting, so a
+  // frame that says `open` stands — that is the whole point. The row-derived
+  // completion applies only to an episode no frame covers, which is what a
+  // reload off history alone looks like.
+  const framed = new Set(live.map((state) => state.id));
+  for (const [id, bucket] of buckets) {
+    const held = bucket.rowCompletion;
+    if (!held || framed.has(id) || bucket.episode.status === "completed") continue;
+    bucket.episode.status = "completed";
+    bucket.episode.completedBy = held.by;
+    bucket.episode.completedAt = held.at;
+    bucket.episode.reason = bucket.episode.reason ?? "complete_episode";
+  }
 
   const out = [...buckets.values()].map(({ episode, rounds }) => {
     episode.rounds = [...rounds.values()].sort((a, b) => a.revision - b.revision);

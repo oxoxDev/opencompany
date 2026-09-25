@@ -24,6 +24,7 @@ async fn ensure_rebuilds_when_an_overlay_agent_is_added() {
 
     let dir = tempfile::tempdir().unwrap();
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -417,6 +418,7 @@ async fn ensure_gates_shell_tools_once_the_token_budget_is_crossed() {
         total_budget: None,
     };
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,

@@ -1729,8 +1729,29 @@ pub fn agent_spec_for(
             if let Some(takeover) =
                 crate::hive::takeover::tool_for(&loan, crate::hive::host::TOOL_PREFIX)
             {
+                tracing::debug!(
+                    tool = %takeover.name(),
+                    "[hive] a guest seat was offered the takeover verb"
+                );
                 visible.insert(takeover.name().to_owned());
                 tools.push(takeover);
+            } else if loan.takeover.is_some() {
+                // **A guest that got no verb, said out loud.**
+                //
+                // `tool_for` answers `None` two ways and only one is ordinary:
+                // no takeover on the loan (a desk seat, or the teammate whose
+                // DM it is). The other is a loan that HAS one whose
+                // `complete_episode` could not be lifted off a spare belt --
+                // a renamed tool, a changed prefix, an episode that served a
+                // narrower set. That path withholds the verb silently, and the
+                // seat then does what a live run showed it do: agree in words
+                // to own the work, reach for `complete_episode`, and leave the
+                // operator's own line empty.
+                tracing::warn!(
+                    prefix = crate::hive::host::TOOL_PREFIX,
+                    "[hive] a guest seat was lent a takeover but got no verb: `complete_episode` was \
+                     not on its belt to wrap"
+                );
             }
             // **The gate is the episode's, over this company's.**
             //

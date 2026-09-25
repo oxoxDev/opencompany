@@ -40,7 +40,11 @@ const MEMBERS: TeamMember[] = [
   },
 ];
 
-const ARTIFACT_HREF = "#/tasks/card-1?artifact=art-1&v=1";
+// The artifact's own page, not the card's Artifacts tab. `publish_artifact`
+// mints a card only to satisfy the artifact store's `(task_id, source)`
+// identity; sending a chat reader through it made them open a board item to
+// read the deliverable the row was already offering.
+const ARTIFACT_HREF = "#/artifacts/art-1?v=1";
 
 function episodeRow(id: string, text: string, kind: "complete_episode" | "post"): ChatHistoryMessageDto {
   return {
@@ -119,8 +123,14 @@ describe("a desk seat's deliverable on its episode row", () => {
     const link = container.querySelector("[data-chat-output-links] a");
     expect(link?.textContent).toContain("Pilot slide outline");
     expect(link?.getAttribute("href")).toBe(ARTIFACT_HREF);
-    const card = [...container.querySelectorAll("a")].find((a) => a.textContent?.includes("Card opened"));
-    expect(card?.getAttribute("href")).toContain("card-1");
+    // And NO card chip beside it. The card exists — `publish_artifact` cannot
+    // file without one — but offering it here gave the row two doors to the
+    // same thing, the second leading to a board item whose only content is the
+    // deliverable already linked above it.
+    const card = [...container.querySelectorAll("a, button")].find((el) =>
+      el.textContent?.includes("Card opened"),
+    );
+    expect(card).toBeUndefined();
   });
 
   it("hands over on a row with no text", () => {

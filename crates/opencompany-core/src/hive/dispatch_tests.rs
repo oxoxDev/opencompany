@@ -208,3 +208,158 @@ members = ["engineering", "ceo"]
         "a declared desk with no hive is a pooled turn, never the teammate's DM: {hiveless:?}"
     );
 }
+
+/// An [`EventLog`] that keeps what it was handed, so a takeover's rows can be
+/// read back.
+#[derive(Default)]
+struct RecordingLog {
+    events: std::sync::Mutex<Vec<CompanyEvent>>,
+}
+
+#[async_trait::async_trait]
+impl EventLog for RecordingLog {
+    async fn append(
+        &self,
+        _company: &crate::ports::types::CompanyId,
+        event: CompanyEvent,
+    ) -> crate::Result<EventSeq> {
+        let mut events = self.events.lock().expect("recording log poisoned");
+        events.push(event);
+        Ok(EventSeq::new(events.len() as u64))
+    }
+
+    async fn read_from(
+        &self,
+        _company: &crate::ports::types::CompanyId,
+        _seq: EventSeq,
+        _limit: usize,
+    ) -> crate::Result<Vec<crate::ports::types::StoredEvent>> {
+        Ok(Vec::new())
+    }
+
+    fn subscribe(
+        &self,
+        _company: &crate::ports::types::CompanyId,
+    ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem> {
+        Box::pin(futures::stream::empty())
+    }
+}
+
+/// The job lands in the claimer's line as a row, addressed to it, and the
+/// sequence handed back is that row's.
+///
+/// This is the whole fix. A seat is briefed from the journal on from
+/// `trigger.seq`, so an episode opened at the *claim's* sequence briefs the
+/// claimer with its own sentence and no work -- which is what a live run did:
+/// two turns, nobody asked, closed. The row has to exist, and the episode has
+/// to open at it.
+#[tokio::test]
+async fn a_takeovers_job_is_a_row_in_the_claimers_line_and_the_episode_opens_at_it() {
+    let log = RecordingLog::default();
+    let company = crate::ports::types::CompanyId::new("acme");
+
+    let claim = announce_takeover(
+        &log,
+        &company,
+        "creative_director",
+        "I'm owning the launch.",
+    )
+    .await
+    .expect("the operator is told");
+    let at = brief_takeover(&log, &company, "creative_director", "Carry it out.")
+        .await
+        .expect("and so is the claimer");
+
+    assert!(
+        at > claim.1,
+        "the job is written after the announcement, so opening at it still replays the claim \
+         as context: job at {at:?}, claim at {:?}",
+        claim.1
+    );
+
+    let events = log.events.lock().expect("recording log poisoned");
+    let CompanyEvent::AgentReply {
+        chat_id,
+        agent_id,
+        text,
+        audience,
+        episode,
+        parent,
+        ..
+    } = &events[1]
+    else {
+        panic!("the job is journaled as a reply: {:?}", events[1]);
+    };
+    assert_eq!(
+        chat_id, &claim.0,
+        "into the same line the operator was told about"
+    );
+    assert_eq!(
+        agent_id,
+        crate::ports::SYSTEM_AUTHOR,
+        "by the author the driver's own notes carry, so the brief reads it as a note"
+    );
+    assert_eq!(text, "Carry it out.");
+    assert_eq!(
+        audience.as_slice(),
+        ["creative_director"],
+        "addressed to the claimer -- the operator already has the announcement, and a second \
+         row saying the same thing is theirs to scroll past for nothing"
+    );
+    assert!(
+        episode.is_none(),
+        "the row opens an episode; stamping it would make the episode its own cause"
+    );
+    assert!(
+        parent.is_none(),
+        "it roots the line rather than hanging off it"
+    );
+}
+
+/// The episode opens *at* the job and hangs *off* the claim.
+///
+/// Asserted on the call site's own builder, not on `trigger_for`: the defect
+/// was this pairing, and `trigger_for` accepted the wrong one happily. The
+/// root is derived here exactly as `run_desk_message` derives it, so the two
+/// cannot drift back into a root nobody can open.
+#[test]
+fn a_carried_on_episode_is_assigned_at_the_job_and_threaded_on_the_claim() {
+    let claim = crate::hive::takeover::TakeoverClaim {
+        episode: "ep-a".into(),
+        seat: "creative_director".into(),
+        chat: "dm:creative_director".into(),
+        at: 39,
+        saying: "  I'm owning the pricing launch end to end.  ".into(),
+    };
+    let job_at = EventSeq::new(54);
+
+    let trigger = carry_on_trigger(&claim, job_at);
+
+    assert_eq!(
+        trigger.seq, job_at,
+        "the assignment is the job row, so that is what the brief reads from"
+    );
+    assert_eq!(
+        trigger.parent,
+        Some(EventSeq::new(39)),
+        "and the thread roots on the claim, a message a reader can actually open"
+    );
+    assert_eq!(
+        trigger.parent.unwrap_or(trigger.seq),
+        EventSeq::new(39),
+        "the root `run_desk_message` derives is the claim, never the job row"
+    );
+    assert!(
+        trigger
+            .text
+            .contains("I'm owning the pricing launch end to end."),
+        "the claim is quoted, not pointed at: the brief window is the seat's unread rows and \
+         may not hold it: {}",
+        trigger.text
+    );
+    assert!(
+        !trigger.text.contains("  I'm owning"),
+        "trimmed, so the quote does not carry the tool call's whitespace: {}",
+        trigger.text
+    );
+}

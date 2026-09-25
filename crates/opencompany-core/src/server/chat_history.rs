@@ -1908,7 +1908,7 @@ async fn attach_agent_conversations(
                         && matches!(
                             &stored.event,
                             CompanyEvent::AgentReply { chat_id, agent_id, .. }
-                                if chat_id == desk_id && *agent_id == asker
+                                if bookkeeping_names(chat_id, desk_id, desk_name) && *agent_id == asker
                         )
                 })
                 .map(|stored| stored.seq.value())

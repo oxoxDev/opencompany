@@ -31,6 +31,87 @@ use tinytools::{Tool, ToolResult};
 
 use crate::hive::seating::TakeoverLoan;
 
+/// One guest seat's claim, staged for the episode to act on once it ends.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TakeoverClaim {
+    /// The episode this was staged inside.
+    ///
+    /// The queue is one per company runtime -- `HarnessDeps` is built once and
+    /// its `Arc` is shared by every `HarnessDeps::clone` a message makes -- so
+    /// "everything staged" is not this episode's claims, it is every open
+    /// episode's. Draining without this key let an episode finishing on one
+    /// desk carry on a claim made on another, opening the claimer's line while
+    /// that teammate was still a live seat in the episode it claimed in: the
+    /// one thing [`TakeoverQueue`] exists to prevent, reintroduced by the
+    /// drain.
+    pub episode: String,
+    /// The teammate that took the work on. Its own operator line is where the
+    /// work carries on.
+    pub seat: String,
+    /// The chat the announcement landed in -- `dm:<seat>`.
+    pub chat: String,
+    /// The announcement's sequence, which the follow-on episode opens from so
+    /// its first row is the claim the operator can already see.
+    pub at: u64,
+    /// What it said it was taking on, in its own words -- the opening the
+    /// claimer's line carries on from.
+    pub saying: String,
+}
+
+/// Claims staged by the seats of one episode.
+///
+/// # Why a queue and not the tool doing it
+///
+/// Because a seat cannot start an episode and must not start this one. The
+/// claimer is a *live seat inside the asker's episode* when it calls the verb:
+/// opening its own line there would put the same teammate in two turns at
+/// once. And the tool holds `events`, `company` and `agent` -- no hive map, no
+/// pool -- so it could not dispatch even if that were safe.
+///
+/// So the claim is staged, the asker's episode finishes (which is correct: the
+/// takeover *concluded* that conversation), and the dispatcher -- which does
+/// hold the hives and the pool -- opens the claimer's line afterwards. One
+/// conversation ends, another begins, in that order.
+#[derive(Clone, Debug, Default)]
+pub struct TakeoverQueue {
+    claims: std::sync::Arc<std::sync::Mutex<Vec<TakeoverClaim>>>,
+}
+
+impl TakeoverQueue {
+    /// Stages one claim.
+    pub fn stage(&self, claim: TakeoverClaim) {
+        self.claims
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(claim);
+    }
+
+    /// Takes what `episode` staged, leaving every other episode's claims
+    /// where they are.
+    ///
+    /// Draining rather than reading: a claim acted on twice would open the
+    /// same line twice, and this queue lives as long as the company runtime.
+    ///
+    /// Keyed because it lives that long. It is reached through `HarnessDeps`,
+    /// built once per runtime and shared by `Arc` through every clone, so
+    /// every episode in the company stages into this one `Vec`. An unkeyed
+    /// drain therefore hands one episode's ending the claims of episodes that
+    /// are still running -- and opening a claimer's line while it is still a
+    /// seat elsewhere is exactly what staging exists to avoid.
+    #[must_use]
+    pub fn drain(&self, episode: &str) -> Vec<TakeoverClaim> {
+        let mut claims = self
+            .claims
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mine, theirs) = std::mem::take(&mut *claims)
+            .into_iter()
+            .partition(|claim| claim.episode == episode);
+        *claims = theirs;
+        mine
+    }
+}
+
 /// The bare name, before the episode's tool prefix.
 pub const TAKE_OVER_TOOL: &str = "take_over";
 
@@ -83,14 +164,16 @@ impl Tool for TakeOverTool {
     }
 
     fn description(&self) -> &str {
-        "Take this work on yourself, instead of answering and handing it back. Concludes your \
-         conversation with whoever asked you — so they stop waiting and can finish — and tells \
-         the operator, in your own line with them, that you have it. Use it when the answer is \
-         'I will do this', not when the answer is the answer: a teammate that asked for an \
-         estimate wants the estimate, and `complete_episode` is how it gets one. After this, the \
-         operator discusses the work with you, not with them. Say in `message` what you are \
-         taking on, in plain words — it is read by a person, and it is the last thing the \
-         teammate that asked you hears."
+        "Take this work on yourself. Concludes your conversation with whoever asked you — so \
+         they stop waiting and can finish — and tells the operator, in your own line with them, \
+         that you have it. Use it whenever you are becoming the owner, INCLUDING when 'I will \
+         own it' is itself the answer you were asked for: this is the only way the operator \
+         hears it. Saying so in your reply does not reach them, and neither does asking the \
+         teammate who asked you to pass it on. Not for an answer you are handing back — a \
+         teammate that asked for an estimate wants the estimate, and `complete_episode` is how \
+         it gets one. After this, the operator discusses the work with you, not with them. Say \
+         in `message` what you are taking on, in plain words — it is read by a person, and it \
+         is the last thing the teammate that asked you hears."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -158,10 +241,32 @@ impl Tool for TakeOverTool {
         // the operator was not told, and saying so is now the seat's problem
         // rather than something it can fix with another call.
         Ok(match chat {
-            Ok((chat, _seq)) => ToolResult::success(format!(
-                "recorded: you have this work, and the operator has been told in `{chat}`. Your \
-                 turn is complete; say nothing else."
-            )),
+            Ok((chat, seq)) => {
+                // **And the work carries on in that line.**
+                //
+                // Announcing alone left the claim a dead end: the operator was
+                // told a teammate owned the campaign, and nothing ran. A live
+                // run watched exactly that -- "I'm owning the pricing launch
+                // campaign end to end" -- followed by silence, no episode, and
+                // a line the operator had to prod to restart.
+                //
+                // Staged rather than opened here: this seat is still mid-turn
+                // inside the asker's episode, and opening its own line now
+                // would run the same teammate twice at once. The episode acts
+                // on it once it ends.
+                self.loan.queue.stage(TakeoverClaim {
+                    episode: self.loan.episode.clone(),
+                    seat: self.loan.agent.clone(),
+                    chat: chat.clone(),
+                    at: seq.value(),
+                    saying: message.clone(),
+                });
+                ToolResult::success(format!(
+                    "recorded: you have this work, and the operator has been told in `{chat}`. \
+                     Carry on there -- this conversation is closed. Your turn is complete; say \
+                     nothing else."
+                ))
+            }
             Err(error) => ToolResult::success(format!(
                 "recorded: you have this work and whoever asked you is no longer waiting. The \
                  operator could NOT be told ({error}) — do not retry, and do not assume they \
@@ -215,10 +320,12 @@ pub fn tool_for(loan: &crate::hive::seating::SeatLoan, prefix: &str) -> Option<B
 #[must_use]
 pub fn guest_persona_note(prefix: &str) -> String {
     format!(
-        "\n\nIf the right answer is that you will do the work yourself rather than hand back an \
-         answer, say so with `{prefix}{TAKE_OVER_TOOL}`: it ends this conversation for the \
-         teammate that asked you and tells the operator, in your own line with them, that you \
-         have it."
+        "\n\nIf you are taking this work on -- if the answer is that you will own it -- say so \
+         with `{prefix}{TAKE_OVER_TOOL}`: it ends this conversation for the teammate that asked \
+         you and tells the operator, in your own line with them, that you have it.\n\nThat tool \
+         is the only way to reach the operator from here. Answering that you will own it does \
+         not tell them, and neither does asking whoever asked you to pass it on -- they are \
+         finishing their own conversation, not yours, and the operator never hears it."
     )
 }
 

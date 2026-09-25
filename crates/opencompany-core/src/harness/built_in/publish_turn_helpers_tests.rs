@@ -332,6 +332,7 @@ pub(crate) fn brain_with(
 ) -> (HarnessBrain, Arc<FsOps>) {
     let ops = Arc::new(FsOps::new(dir));
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
