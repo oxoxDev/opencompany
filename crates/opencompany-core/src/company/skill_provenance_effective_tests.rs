@@ -158,3 +158,41 @@ fn a_synthesized_disable_does_not_erase_the_pin_beneath_it() {
         "the disable erased the pin the install wrote"
     );
 }
+/// The console decides whether to enable its Update action with its own
+/// predicate. Two copies of one rule drift, and the failure is silent — the
+/// menu offers an update the route then refuses, or hides one it would accept.
+///
+/// Read out of the console's source so a divergence fails here.
+#[test]
+fn the_console_mirrors_update_allowed_rather_than_inventing_its_own_rule() {
+    const CONSOLE_LIB: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../frontend/src/lib/skills-list.ts"
+    ));
+    assert!(
+        CONSOLE_LIB.contains("!!skill.updateAvailable && !skill.modified"),
+        "frontend/src/lib/skills-list.ts no longer expresses `canUpdateSkill` as \
+         `!!updateAvailable && !modified`, which is what `SkillDrift::update_allowed` decides. \
+         Change both together."
+    );
+
+    for (update_available, modified, allowed) in [
+        (false, false, false),
+        (true, false, true),
+        (false, true, false),
+        (true, true, false),
+    ] {
+        let drifted = SkillDrift {
+            update_available: update_available.then(|| VersionChange {
+                from: Some("1.0.0".to_string()),
+                to: Some("2.0.0".to_string()),
+            }),
+            modified,
+        };
+        assert_eq!(
+            drifted.update_allowed(),
+            allowed,
+            "update_available={update_available}, modified={modified}"
+        );
+    }
+}

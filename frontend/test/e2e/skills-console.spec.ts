@@ -541,3 +541,98 @@ test("a member sees the installed list and is offered nothing that writes to it"
     await memberContext.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Install drift (#2487)
+// ---------------------------------------------------------------------------
+
+/**
+ * The half of drift the console can actually produce.
+ *
+ * `updateAvailable` needs the shared library to be republished under a running
+ * host, which no console action and no route can do — so the browser cannot
+ * reach that state and a spec that faked it would be asserting against a
+ * fixture rather than against the host. It is covered where it is reachable:
+ * `write_skills_drift_tests.rs` and `graphql/skills_drift_tests.rs` seed a moved
+ * library and read both transports, and `test/unit/skills-drift.test.ts` drives
+ * the badge, the menu and the Update/Keep review over a client that answers with
+ * it.
+ *
+ * `modified` **is** reachable, through exactly the path issue #2487 said was a
+ * branch nothing could enter: an upload over a slug that already carries an
+ * install keeps the pin and replaces the document, so the stored copy stops
+ * matching what was recorded. This asserts that end to end — the badge, the
+ * cause-specific refusal in the row menu, and the host refusing the write if it
+ * is posted anyway.
+ */
+test("editing an installed registry skill marks it modified and refuses an update", async ({
+  page,
+  request,
+}) => {
+  await removeSkill(request, REGISTRY_SLUG);
+  await openSkills(page);
+
+  // Install from the library, which records the pin.
+  await page.getByRole("tab", { name: "Registry" }).click();
+  await page.getByPlaceholder("Search the registry…").fill(REGISTRY_NAME);
+  const entry = page.getByTestId("registry-card").filter({ hasText: REGISTRY_NAME });
+  await expect(entry).toHaveCount(1, { timeout: 30_000 });
+  await entry.getByRole("button", { name: "Install" }).click();
+  await expect(entry).toContainText("Installed", { timeout: 30_000 });
+
+  await page.getByRole("tab", { name: /^Installed/ }).click();
+  const installed = installedCard(page, REGISTRY_NAME);
+  await expect(installed).toBeVisible({ timeout: 30_000 });
+  // Freshly installed: nothing has drifted.
+  await expect(installed.getByTestId("skill-modified")).toHaveCount(0);
+  await expect(installed.getByTestId("skill-update-available")).toHaveCount(0);
+
+  // Upload a document under the same slug — the frontmatter name is what the
+  // host slugs, so this replaces the install's document and keeps its pin.
+  const dialog = await upload(
+    page,
+    markdownUpload(
+      "cold-outreach.md",
+      skillDoc({
+        name: REGISTRY_NAME,
+        description: "Open a conversation with a stranger, our way.",
+        category: "Marketing",
+        body: "Check the shared account list first, then send the intro.",
+      }),
+    ),
+  );
+  await expect(dialog.getByTestId("skill-upload-row").first()).toBeVisible({ timeout: 30_000 });
+  await page.keyboard.press("Escape");
+
+  // The host says so, and the row shows it.
+  await expect
+    .poll(
+      async () => (await hostSkills(request)).find((skill) => skill.id === REGISTRY_SLUG)?.modified,
+      { timeout: 15_000 },
+    )
+    .toBe(true);
+  await page.reload();
+  await expect(page.getByTestId("skills-read-only-note")).toBeVisible({ timeout: 30_000 });
+  const card = installedCard(page, REGISTRY_NAME);
+  await expect(card.getByTestId("skill-modified")).toContainText("Modified", { timeout: 30_000 });
+  // Modified wins: one badge, and it is the one that constrains the operator.
+  await expect(card.getByTestId("skill-update-available")).toHaveCount(0);
+
+  // Update is offered and greyed, with the edit named as the cause.
+  await card.getByTestId("skill-row-menu").click();
+  await expect(page.getByTestId("skill-menu-update")).toHaveAttribute("aria-disabled", "true");
+  await expect(page.getByTestId("skill-menu-update-reason")).toContainText(
+    "changed after it was installed",
+  );
+  await page.keyboard.press("Escape");
+
+  // And the route refuses it too, so the greyed menu is not the only guard.
+  const refused = await request.post(
+    `/api/v1/company/skills/${REGISTRY_SLUG}/update`,
+    { data: { force: false } },
+  );
+  expect(refused.status()).toBe(409);
+  expect(await refused.text()).toContain("changed after it was installed");
+
+  await removeSkill(request, REGISTRY_SLUG);
+});

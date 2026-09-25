@@ -3,11 +3,15 @@ import { describe, expect, it } from "vitest";
 import {
   canEditSkill,
   canUninstallSkill,
+  canUpdateSkill,
   DEFAULT_SKILL_FILTERS,
   skillCategories,
+  skillDriftLabel,
   skillLastEditedLabel,
   skillSourceLabel,
+  skillUpdateUnavailableReason,
   visibleSkills,
+  type SkillDriftRow,
   type SkillListRow,
 } from "@/lib/skills-list";
 
@@ -207,5 +211,76 @@ describe("visibleSkills", () => {
     const held = [...skills];
     visibleSkills(held, DEFAULT_SKILL_FILTERS, "edited");
     expect(held.map((s) => s.name)).toEqual(["Alpha", "Bravo", "Charlie"]);
+  });
+});
+
+describe("skillDriftLabel", () => {
+  it("says nothing about a row whose install has not drifted", () => {
+    expect(skillDriftLabel({})).toBeNull();
+    expect(skillDriftLabel({ modified: false, updateAvailable: null })).toBeNull();
+  });
+
+  it("names an available update", () => {
+    expect(skillDriftLabel({ updateAvailable: { from: "1.0.0", to: "2.0.0" } })).toBe(
+      "Update available",
+    );
+  });
+
+  it("lets modified win when both are true", () => {
+    // An update is refused while the copy is modified, so leading with "Update
+    // available" would advertise an action the host declines.
+    expect(
+      skillDriftLabel({ modified: true, updateAvailable: { from: "1.0.0", to: "2.0.0" } }),
+    ).toBe("Modified");
+  });
+});
+
+describe("canUpdateSkill", () => {
+  it("mirrors the host's update_allowed truth table", () => {
+    expect(canUpdateSkill({})).toBe(false);
+    expect(canUpdateSkill({ updateAvailable: { from: "1", to: "2" } })).toBe(true);
+    expect(canUpdateSkill({ modified: true })).toBe(false);
+    expect(canUpdateSkill({ modified: true, updateAvailable: { from: "1", to: "2" } })).toBe(false);
+  });
+
+  it("does not throw on a row that carries neither field", () => {
+    // Rows reach this module straight from a host response, including the ones an
+    // upload folds in optimistically, and an older host omits both fields.
+    const optimistic: SkillListRow & SkillDriftRow = row({ name: "Press" });
+    expect(() => canUpdateSkill(optimistic)).not.toThrow();
+    expect(canUpdateSkill(optimistic)).toBe(false);
+    expect(skillDriftLabel(optimistic)).toBeNull();
+  });
+});
+
+describe("skillUpdateUnavailableReason", () => {
+  it("is silent when Update is offered", () => {
+    expect(
+      skillUpdateUnavailableReason({ source: "registry", updateAvailable: { from: "1", to: "2" } }),
+    ).toBeNull();
+  });
+
+  it("names the edit before anything else", () => {
+    const reason = skillUpdateUnavailableReason({
+      source: "registry",
+      modified: true,
+      updateAvailable: { from: "1", to: "2" },
+    });
+    expect(reason).toContain("changed after it was installed");
+  });
+
+  it("says a non-registry skill has nothing to update from", () => {
+    expect(skillUpdateUnavailableReason({ source: "custom" })).toContain(
+      "installed from the registry",
+    );
+    expect(skillUpdateUnavailableReason({ source: "company" })).toContain(
+      "installed from the registry",
+    );
+  });
+
+  it("says a current registry install is already current", () => {
+    expect(skillUpdateUnavailableReason({ source: "registry" })).toContain(
+      "already matches the registry",
+    );
   });
 });

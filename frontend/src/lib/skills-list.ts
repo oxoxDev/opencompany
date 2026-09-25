@@ -36,6 +36,19 @@ export const SKILL_SORT_LABELS: Record<SkillSort, string> = {
  * this file to keep the two identical. A console that invented its own wording
  * would explain the refusal one way in the menu and another way in the toast.
  */
+/**
+ * Why a modified skill's Update is greyed.
+ *
+ * The host's own sentence, verbatim: `server::ops::language::SKILL_MODIFIED_NO_UPDATE`
+ * is what the route answers when someone posts the update anyway, and a host
+ * test reads this file to keep the two identical. The same discipline as
+ * [`SKILL_BUILTIN_UNINSTALL_REASON`], and for the same reason — two wordings for
+ * one refusal means the menu explains it one way and the toast another, and only
+ * one of them gets updated when the rule changes.
+ */
+export const SKILL_MODIFIED_UPDATE_REASON =
+  "This skill's text was changed after it was installed. Updating would replace those changes, so it's left to you — uninstall it and install it again to take the registry's version.";
+
 export const SKILL_BUILTIN_UNINSTALL_REASON =
   "This is a built-in skill and can't be uninstalled — you can disable it instead.";
 
@@ -60,6 +73,60 @@ export interface SkillListRow {
   source: string;
   enabled: boolean;
   updatedAtMillis?: number | null;
+}
+
+/** Where a row's install stands, as the host reports it on every skill read. */
+export interface SkillDriftRow {
+  /** The revisions either side of a library change, when there has been one. */
+  updateAvailable?: { from?: string | null; to?: string | null } | null;
+  /** Whether the stored copy was edited after it was installed. */
+  modified?: boolean;
+}
+
+/** The badge text for a row whose install has drifted, or `null` for one that
+ * has not.
+ *
+ * **Modified wins over update-available.** Both can be true at once — a locally
+ * edited copy of a skill whose library entry also moved — and one badge has to
+ * choose. It says the thing that constrains the operator: an update is refused
+ * while the copy is modified, so leading with "Update available" would advertise
+ * an action the host declines and hide the reason.
+ */
+export function skillDriftLabel(skill: SkillDriftRow): string | null {
+  if (skill.modified) return "Modified";
+  if (skill.updateAvailable) return "Update available";
+  return null;
+}
+
+/** Whether this row's Update action should be offered as enabled.
+ *
+ * The console mirror of the host's `SkillDrift::update_allowed`: something newer
+ * exists, and applying it would not discard an edit. A host test reads this file
+ * to keep the two identical — a menu that offered an update the route then
+ * refused would teach the operator that the button is unreliable.
+ */
+export function canUpdateSkill(skill: SkillDriftRow): boolean {
+  return !!skill.updateAvailable && !skill.modified;
+}
+
+/** Why a row's Update is greyed rather than hidden, or `null` when it is
+ * enabled.
+ *
+ * Cause-specific, and in the same order [`skillDriftLabel`] resolves its two
+ * inputs, so the badge and the menu never explain one row differently. The
+ * modified case is the host's own sentence verbatim
+ * ([`SKILL_MODIFIED_UPDATE_REASON`]), because that is the refusal an operator
+ * can also reach by posting the update anyway.
+ */
+export function skillUpdateUnavailableReason(
+  skill: SkillDriftRow & Pick<SkillListRow, "source">,
+): string | null {
+  if (canUpdateSkill(skill)) return null;
+  if (skill.modified) return SKILL_MODIFIED_UPDATE_REASON;
+  if (skill.source !== "registry") {
+    return "Only a skill installed from the registry can be updated.";
+  }
+  return "This skill already matches the registry.";
 }
 
 /** What the filter controls above the list currently select. */

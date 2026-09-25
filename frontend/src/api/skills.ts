@@ -6,6 +6,17 @@
 
 import type { OpenCompanyClient } from "./client";
 
+/** The two revisions either side of a library change, as the host names them.
+ *
+ * Neither is ordered against the other: `version` is free text a publisher
+ * writes, so this says the document *changed*, never that it is *newer*. */
+export interface SkillUpdateAvailable {
+  /** The revision recorded when the install pinned its snapshot. */
+  from?: string | null;
+  /** The revision the library's current document declares. */
+  to?: string | null;
+}
+
 /** An installed skill as the host returns it. */
 export interface Skill {
   id: string;
@@ -24,6 +35,17 @@ export interface Skill {
    * touched — and for a row the host stored before it recorded timestamps. Read
    * as "never edited here", never as a date. */
   updatedAtMillis?: number | null;
+  /** Set when the library's document has moved since this install pinned its
+   * snapshot.
+   *
+   * Optional because an older host omits it, and because the dialogs fold rows
+   * in optimistically; absent means "nothing to say", never "up to date". */
+  updateAvailable?: SkillUpdateAvailable | null;
+  /** Whether the stored copy no longer matches what was recorded at install.
+   *
+   * The host always sends it, as a plain boolean. Optional here for the same two
+   * reasons `updateAvailable` is, and read as `false` when it is missing. */
+  modified?: boolean;
 }
 
 /** The author-a-custom-skill body; the host slugs the name into the id. */
@@ -113,6 +135,27 @@ export function setSkillEnabled(
   return client.put<Skill>(`${client.scopeFor(company)}/skills/${encodeURIComponent(slug)}`, {
     enabled,
   });
+}
+
+/** Move a registry install onto the library's current document.
+ *
+ * Refused with a `409` and a sentence when there is nothing to move to, and when
+ * the stored copy was edited after it was installed — the host will not
+ * overwrite an edit that exists nowhere else. `force` overrides a blocking scan
+ * verdict for this request only, the same flag install and upload take.
+ *
+ * The answer is the re-pinned skill, already carrying its post-update drift, so
+ * folding it into the list clears the badge it just fixed. */
+export function updateSkill(
+  client: OpenCompanyClient,
+  company: string | null,
+  slug: string,
+  force = false,
+): Promise<Skill> {
+  return client.post<Skill>(
+    `${client.scopeFor(company)}/skills/${encodeURIComponent(slug)}/update`,
+    { force },
+  );
 }
 
 /** Author a custom skill. */

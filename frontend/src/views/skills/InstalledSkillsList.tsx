@@ -13,7 +13,7 @@
 // the meta row wraps and the filter bar collapses to one control per line on a
 // phone.
 
-import { MoreHorizontal, Pencil, Power, Sparkles, Trash2 } from "lucide-react";
+import { ArrowUpCircle, MoreHorizontal, Pencil, Power, Sparkles, Trash2 } from "lucide-react";
 
 import type { Skill } from "@/api/skills";
 import { Badge } from "@/components/ui/badge";
@@ -40,6 +40,9 @@ import { CATEGORY_STYLES, skillReachLabel, type SkillCategory } from "@/lib/skil
 import {
   canEditSkill,
   canUninstallSkill,
+  canUpdateSkill,
+  skillDriftLabel,
+  skillUpdateUnavailableReason,
   SKILL_BUILTIN_UNINSTALL_REASON,
   SKILL_ENABLED_FILTERS,
   SKILL_SORT_LABELS,
@@ -85,6 +88,7 @@ export function InstalledSkillsList({
   now,
   onToggle,
   onUninstall,
+  onUpdate,
 }: {
   skills: Skill[];
   filters: SkillListFilters;
@@ -97,6 +101,9 @@ export function InstalledSkillsList({
   now: number;
   onToggle: (skill: Skill) => void;
   onUninstall: (skill: Skill) => void;
+  /** Opens the review the operator sees before a newer library document is
+   * applied. The list never writes — it names the row and the view decides. */
+  onUpdate: (skill: Skill) => void;
 }) {
   const categories = skillCategories(skills);
   const rows = visibleSkills(skills, filters, sort) as Skill[];
@@ -163,6 +170,7 @@ export function InstalledSkillsList({
               now={now}
               onToggle={() => onToggle(s)}
               onUninstall={() => onUninstall(s)}
+              onUpdate={() => onUpdate(s)}
             />
           ))}
         </div>
@@ -214,13 +222,16 @@ function InstalledCard({
   now,
   onToggle,
   onUninstall,
+  onUpdate,
 }: {
   skill: Skill;
   canManage: boolean;
   now: number;
   onToggle: () => void;
   onUninstall: () => void;
+  onUpdate: () => void;
 }) {
+  const drift = skillDriftLabel(skill);
   return (
     <Card data-testid="installed-card" className={cn(!skill.enabled && "opacity-70")}>
       <CardContent className="space-y-2">
@@ -238,7 +249,12 @@ function InstalledCard({
               aria-label="Enable skill"
             />
             {canManage && (
-              <SkillRowMenu skill={skill} onToggle={onToggle} onUninstall={onUninstall} />
+              <SkillRowMenu
+                skill={skill}
+                onToggle={onToggle}
+                onUninstall={onUninstall}
+                onUpdate={onUpdate}
+              />
             )}
           </div>
         </div>
@@ -256,6 +272,18 @@ function InstalledCard({
           <span data-testid="skill-source" className="text-xs text-muted-foreground">
             {skillSourceLabel(skill)}
           </span>
+          {/* After the provenance, so the row reads "Registry v1.2 · Update
+              available" — the badge is about that install, and in front of it
+              it would read as a claim about the skill in general. */}
+          {drift ? (
+            <Badge
+              variant="outline"
+              data-testid={skill.modified ? "skill-modified" : "skill-update-available"}
+              className="bg-status-blocked-soft text-status-blocked-text"
+            >
+              {drift}
+            </Badge>
+          ) : null}
           <span data-testid="skill-last-edited" className="text-xs text-muted-foreground">
             · {skillLastEditedLabel(skill.updatedAtMillis, now)}
           </span>
@@ -282,13 +310,17 @@ function SkillRowMenu({
   skill,
   onToggle,
   onUninstall,
+  onUpdate,
 }: {
   skill: Skill;
   onToggle: () => void;
   onUninstall: () => void;
+  onUpdate: () => void;
 }) {
   const removable = canUninstallSkill(skill.source);
   const editable = canEditSkill(skill.source);
+  const updatable = canUpdateSkill(skill);
+  const updateReason = skillUpdateUnavailableReason(skill);
 
   return (
     <DropdownMenu>
@@ -322,6 +354,17 @@ function SkillRowMenu({
           <Power className="mr-2 size-4" />
           {skill.enabled ? "Disable" : "Enable"}
         </DropdownMenuItem>
+        <DropdownMenuItem
+          disabled={!updatable}
+          onClick={updatable ? onUpdate : undefined}
+          data-testid="skill-menu-update"
+        >
+          <ArrowUpCircle className="mr-2 size-4" />
+          Update
+        </DropdownMenuItem>
+        {updateReason && (
+          <MenuReason testId="skill-menu-update-reason">{updateReason}</MenuReason>
+        )}
         <DropdownMenuSeparator />
         <DropdownMenuItem
           variant={removable ? "destructive" : undefined}
