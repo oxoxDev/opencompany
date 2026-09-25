@@ -13,10 +13,16 @@
 //!
 //! [`drift`] is the comparison the two make possible: pinned digest against the
 //! stored document, and pinned digest against the library's current entry.
+//! [`effective_drift`] is how the reads reach it — over one entry of
+//! [`skill_effective::resolve`](crate::company::skill_effective::resolve),
+//! which is the single derivation the harness, the REST list and
+//! `Company.skills` all share, so none of the three can report a different
+//! standing for the same install.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::company::skill_effective::{EffectiveSkill, SkillBody};
 use crate::company::skill_file::{SkillDoc, render_skill_md};
 use crate::ports::skills_state::{SkillInstall, SkillSource, SkillTier};
 
@@ -122,6 +128,35 @@ pub fn drift(install: &SkillInstall, stored_doc: &str, library: Option<&SkillDoc
     }
 }
 
+/// Where one entry of a company's effective set stands, or `None` when the
+/// question does not apply to it.
+///
+/// `None` is not "checked and clean": a company bundle, a console-authored
+/// skill and a healed registry row have no pinned snapshot at all, so there is
+/// nothing to compare and no answer to give. Returning an empty [`SkillDrift`]
+/// for them would put `{updateAvailable: null, modified: false}` on the wire,
+/// which a reader cannot tell apart from a pinned install that was checked and
+/// found current.
+///
+/// A pinned entry whose document is a bundle directory rather than an inline
+/// snapshot is likewise unanswerable — the pin measures a `SKILL.md` string,
+/// and a directory is not one.
+pub fn effective_drift(skill: &EffectiveSkill, registry: &[SkillDoc]) -> Option<SkillDrift> {
+    let install = skill.install.as_ref()?;
+    let stored = match &skill.content.as_ref()?.body {
+        SkillBody::Inline(doc) => doc,
+        SkillBody::Bundle(_) => return None,
+    };
+    Some(drift(
+        install,
+        stored,
+        registry.iter().find(|doc| doc.slug == skill.slug),
+    ))
+}
+
 #[cfg(test)]
 #[path = "skill_provenance_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "skill_provenance_effective_tests.rs"]
+mod tests_effective;
