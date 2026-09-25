@@ -48,8 +48,8 @@ pub mod mcp_server;
 /// Coordination metrics folded from the journal — concurrency, contacts,
 /// completion — behind `opencompany measure` (Phase 8).
 pub mod measure;
-/// Cross-desk referral: the journal-backed `ReferralQueue`, the crossing
-/// record, and the return address an answer comes home to (Phase 6).
+/// Cross-desk referral, read side: the reserved authors, the pair key, the
+/// attribution heads, and the return address an answer comes home to.
 pub mod referral;
 /// The `[group_chat.routing]` block, its resolved `RoutingPolicy`, and the
 /// desk-routing wire shapes (plan Phase 4).
