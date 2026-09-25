@@ -82,6 +82,43 @@ pub const SKILL_FIELDS_REQUIRED: &str = "A skill needs a name and a description.
 /// Error shown when an install names a slug the shared skill library lacks.
 pub const SKILL_NOT_IN_REGISTRY: &str = "That skill isn't in the registry.";
 
+/// Error shown when an update names a skill that records no registry install.
+///
+/// A skill written here, or one the company bundles, has no library copy to be
+/// updated *to*. The refusal says that rather than reporting "not found": the
+/// skill is right there in the list, and an operator told it does not exist
+/// will go looking for the one they can see.
+pub const SKILL_NOT_PINNED: &str = concat!(
+    "This skill wasn't installed from the registry, ",
+    "so there's no newer registry copy to move it to.",
+);
+
+/// Error shown when an update names an install whose slug has left the library.
+///
+/// Not a broken install: the skill keeps working from the copy it holds, and
+/// saying so is the difference between "nothing to do" and "something is wrong".
+pub const SKILL_LEFT_REGISTRY: &str = concat!(
+    "This skill is no longer in the registry, so there's nothing newer to move to. ",
+    "It keeps working from the copy you have.",
+);
+
+/// Error shown when an update would overwrite a copy that was edited after it
+/// was installed.
+///
+/// The one refusal the recorded digest exists for. Applying the library's
+/// document would discard the edit with nothing to recover it from, so the
+/// choice stays with a person — and the sentence says what to do instead rather
+/// than only what was declined.
+pub const SKILL_MODIFIED_NO_UPDATE: &str = concat!(
+    "This skill's text was changed after it was installed. ",
+    "Updating would replace those changes, so it's left to you — ",
+    "uninstall it and install it again to take the registry's version.",
+);
+
+/// Error shown when an update names an install that already matches the library.
+pub const SKILL_ALREADY_CURRENT: &str =
+    "This skill already matches the registry — there's nothing to update.";
+
 /// Error shown when a workflow id is not safe to use as a filename.
 pub const WORKFLOW_ID_INVALID: &str =
     "A workflow id can't be empty or contain slashes or `..` — use a plain name.";
