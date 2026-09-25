@@ -97,7 +97,8 @@ impl ScanField {
                 let key = line
                     .split_once(':')
                     .map(|(key, _)| key.trim())
-                    .unwrap_or(line);
+                    .unwrap_or("<unrecognised>");
+                let key: String = key.chars().filter(|c| !is_invisible(*c)).take(40).collect();
                 format!("the frontmatter line `{key}`")
             }
             Self::Resource(path) => format!("the bundled file `{path}`"),

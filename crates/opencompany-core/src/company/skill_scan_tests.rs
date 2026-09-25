@@ -313,6 +313,27 @@ fn a_finding_reads_as_one_line_naming_its_field() {
     assert!(messages[0].contains("U+200B"), "{messages:?}");
 }
 
+#[test]
+fn a_frontmatter_label_strips_invisible_characters_and_is_capped() {
+    let mut doc = benign();
+    let long_key = "x".repeat(80);
+    doc.extra_frontmatter = vec![format!("{long_key}\u{200b}: whatever")];
+    let messages = scan_skill(&doc, &[]).messages();
+    assert_eq!(messages.len(), 1);
+    assert!(!messages[0].contains('\u{200b}'), "{messages:?}");
+    assert!(!messages[0].contains(&long_key), "{messages:?}");
+    assert!(messages[0].contains(&"x".repeat(40)), "{messages:?}");
+}
+
+#[test]
+fn a_frontmatter_line_with_no_key_gets_a_generic_label() {
+    let mut doc = benign();
+    doc.extra_frontmatter = vec!["\u{200b}not a key-value line".to_string()];
+    let messages = scan_skill(&doc, &[]).messages();
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].contains("<unrecognised>"), "{messages:?}");
+}
+
 /// Every skill the repo ships must scan clean, or the scan refuses the
 /// baseline on the day it is turned on.
 #[test]
