@@ -1017,6 +1017,12 @@ impl ApprovalPolicy {
         self
     }
 
+    /// The MCP read set bridge calls are graded against.
+    #[cfg(test)]
+    pub(crate) fn mcp_reads(&self) -> &McpReadSet {
+        &self.mcp_reads
+    }
+
     /// Installs the company workspace for authorship-aware mutation grading.
     /// Without it, or without an agent identity, every workspace mutation keeps
     /// the conservative per-call verdict.

@@ -383,14 +383,13 @@ pub fn effective_mcp_servers(
     out
 }
 
-/// Flattens a company's effective MCP servers into the `(server, tool)`
-/// read-only set the approval gate consults (issue #1124).
+/// Flattens a company's effective MCP servers into the `(server, tool)` pairs
+/// their `read_only_tools` declarations name.
 ///
-/// Keyed by the server's `name` — the slug the `mcp_call_tool` bridge names its
-/// server under — paired with each `read_only_tools` entry. The gate looks a
-/// live call's `(server, tool)` pair up here; an undeclared pair is simply
-/// absent, which is the gated answer. A disabled server contributes nothing: it
-/// hands out no tool, so a call through it could not have been made.
+/// Test-only: it ignores the stored tool policy, so it is the differential
+/// oracle for [`mcp_allow_set`](super::mcp_policy::mcp_allow_set), which is
+/// what every gate reads. A disabled server contributes nothing.
+#[cfg(test)]
 pub fn mcp_read_set(servers: &[McpServerDecl]) -> crate::policy::McpReadSet {
     crate::policy::McpReadSet::from_pairs(servers.iter().filter(|s| s.enabled).flat_map(|server| {
         server

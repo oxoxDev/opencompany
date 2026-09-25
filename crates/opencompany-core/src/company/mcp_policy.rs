@@ -397,8 +397,8 @@ pub async fn clear_tool_policies(
 /// approval gate lets run without parking, resolved through each server's tool
 /// policy.
 ///
-/// The successor to [`mcp_read_set`](super::mcp::mcp_read_set), which reads the
-/// flat declaration directly. Both produce the same shape, so one can be diffed
+/// The successor to the test-only `mcp_read_set`, which reads the flat
+/// declaration directly. Both produce the same shape, so one can be diffed
 /// against the other over a fixture.
 ///
 /// Enumerates the union of the policy document's own entries and the tools
