@@ -381,7 +381,15 @@ fn assignment(line: &str) -> Option<(&str, String)> {
     // splits at `https:`, leaves a URL with no spaces in it as the value, and
     // blocks a document that was documenting rather than leaking. Telling an
     // operator where their own credential goes is the common case.
-    let key = line[..split].split_whitespace().next_back()?;
+    //
+    // A trailing parenthesized label — "password (production): …" — is not
+    // that last word either: it is a note on the key, not the key, and taking
+    // it verbatim would check `(production)` against `SECRET_KEY_NAMES` and
+    // miss `password` entirely.
+    let key = line[..split]
+        .split_whitespace()
+        .rev()
+        .find(|word| !word.starts_with(['(', '[', '{']))?;
     let value = line[split + 1..].trim();
     Some((
         key,

@@ -125,6 +125,10 @@ fn hard_coded_credentials_block() {
             "a webhook signing secret",
             "webhook_secret = \"notreal2webhook6val4\"".to_string(),
         ),
+        (
+            "a credential key with a trailing label",
+            "password (production): notreal8value2label".to_string(),
+        ),
     ] {
         let mut doc = benign();
         doc.body = poison;
