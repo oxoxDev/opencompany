@@ -9,7 +9,8 @@
 //!
 //! It loads the company record, composes a prompt from it, and returns text.
 //! The draft becomes a skill only if the operator takes it and saves it through
-//! `POST …/skills`, which runs the validator and the scan like any other write.
+//! `POST …/skills/upload`, which runs the validator and the scan like any
+//! other write.
 //! Two deliberate human actions stand between this response and an agent's
 //! prompt, and if either is ever removed this route has to be reconsidered with
 //! it.

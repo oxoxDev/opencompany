@@ -93,15 +93,16 @@ dialog closes. It is bounded host-side all the same (the last 16 turns, 2,000
 characters each), because a transcript the caller composes is one the caller can
 grow without limit.
 
-The answer is `{reply, text?, source, reason?, scan?}`. `reply` is what the
-copilot says. `text` is the **whole** `SKILL.md` as it now stands, never a diff,
-and is absent on a turn that asked a question instead of drafting. `source` is
-`model` or `unavailable`, and `reason` names which of the refusals it was, so
-the console can say "wire up a model" rather than showing an empty box.
+The answer is `{reply?, text?, source, reason?, scan?}`. `reply` is what the
+copilot says, absent when no model could answer at all. `text` is the **whole**
+`SKILL.md` as it now stands, never a diff, and is absent on a turn that asked a
+question instead of drafting. `source` is `model` or `unavailable`, and
+`reason` names which of the refusals it was, so the console can say "wire up a
+model" rather than showing an empty box.
 
 **This route never writes.** It composes a prompt and returns text. The draft
 becomes a skill only if the operator takes it and saves it through `POST
-…/skills`, which runs the validator and the scan like any other write.
+…/skills/upload`, which runs the validator and the scan like any other write.
 
 ### Availability
 
@@ -120,10 +121,10 @@ the operator for different things:
 
 | What happened | `reason` | What the console tells the operator |
 |---|---|---|
-| The scan blocked the document | `refused_by_scan` | Say it differently and try again — the findings are in `scan` |
+| The scan blocked the document | `refused_by_scan` | Say it differently and try again — the findings are folded into `reply` |
 | The document did not validate | `unreadable` | Say more about what the skill is for, or write it by hand |
 
-In both cases `text` is withheld and `source` is `unavailable`. Reporting a
+In both cases `text` and `scan` are withheld and `source` is `unavailable`. Reporting a
 validation failure as a scan refusal told the operator to reword a draft the
 scan had never objected to.
 
