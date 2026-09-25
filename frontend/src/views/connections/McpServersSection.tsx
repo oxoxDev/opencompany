@@ -80,7 +80,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { McpIconButton } from "@/views/mcp/McpIconButton";
-import { McpToolPermissions } from "@/views/mcp/McpToolPermissions";
 import { useHashParam } from "@/hooks/use-hash-param";
 import { McpRegistryBrowser } from "@/views/connections/McpRegistryBrowser";
 import { ProviderDetail } from "@/views/connections/ProviderDetail";
@@ -229,14 +228,13 @@ export function McpServersSection({
   // click can't spawn a second overlapping poll. Cleared on unmount so stale
   // callbacks don't fire against a gone component.
   const pollTimers = useRef<Record<string, number>>({});
-  // The row whose tool permissions are open, carried in the address so the
-  // panel is linkable (issue #2373). A name rather than the row, for the same
-  // reason `opened` is one.
+  // Opens the detail panel on the permissions section. Kept as its own key so
+  // links already written against it keep landing where they meant to.
   const [permissionsFor, setPermissionsFor] = useHashParam("permissions");
-  // The name of the server whose detail panel is open, or `null` (issue #821).
-  // A name rather than the row itself, so an open panel re-derives from
-  // `servers` after a refresh instead of showing the row as it was when clicked.
-  const [opened, setOpened] = useState<string | null>(null);
+  // The server whose detail panel is open. A name rather than the row itself,
+  // so an open panel re-derives from `servers` after a refresh.
+  const [openedName, setOpenedName] = useHashParam("server");
+  const opened = openedName ?? permissionsFor;
   /**
    * The server whose inline credential field is open, and its draft value
    * (issue #1260).
@@ -418,7 +416,11 @@ export function McpServersSection({
           server: res.server.name,
         });
       } else if (res.warning) {
-        setAddError({ message: res.warning, added: true, server: res.server.name });
+        setAddError({
+          message: res.warning,
+          added: true,
+          server: res.server.name,
+        });
       } else {
         // The success path has to agree with the banner (issue #567): a toast
         // promising pickup, fired at the moment the operator acts, undoes a
@@ -965,7 +967,7 @@ export function McpServersSection({
                               type="button"
                               data-testid="mcp-server-open"
                               className="inline-flex cursor-pointer items-center gap-0.5 rounded-sm font-medium focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none transition-opacity hover:opacity-80"
-                              onClick={() => setOpened(server.name)}
+                              onClick={() => setOpenedName(server.name)}
                               aria-label={`Open ${server.name}`}
                             >
                               {server.name}
@@ -1116,19 +1118,11 @@ export function McpServersSection({
                             />
                           )}
                           <McpIconButton
-                            label={
-                              permissionsFor === server.name
-                                ? `Hide ${server.name}'s tool permissions`
-                                : `Tool permissions for ${server.name}`
-                            }
+                            label={`Tool permissions for ${server.name}`}
                             icon={ShieldCheck}
                             testId="mcp-permissions"
                             disabled={busy !== null}
-                            onClick={() =>
-                              setPermissionsFor(
-                                permissionsFor === server.name ? null : server.name,
-                              )
-                            }
+                            onClick={() => setPermissionsFor(server.name)}
                           />
                           {controls.removal.kind !== "none" && canManage && (
                             <McpIconButton
@@ -1203,15 +1197,6 @@ export function McpServersSection({
                         >
                           {REGISTRY_OAUTH_UNSUPPORTED_NOTICE}
                         </p>
-                      )}
-                      {permissionsFor === server.name && (
-                        <McpToolPermissions
-                          client={client}
-                          company={company}
-                          server={server}
-                          canManage={canManage}
-                          reloadKey={probedAt[server.name] ?? 0}
-                        />
                       )}
                       {credentialFor === server.name && canManage && (
                         <div
@@ -1565,6 +1550,8 @@ export function McpServersSection({
             : {
                 kind: "mcp",
                 server: openedServer,
+                reloadKey: probedAt[openedServer.name] ?? 0,
+                focusPermissions: permissionsFor === openedServer.name,
                 // The live Test result when there has been one this session,
                 // else the server's own persisted probe — the same precedence
                 // the row's badge uses, so the panel and the row it opened from
@@ -1574,7 +1561,10 @@ export function McpServersSection({
         }
         canManage={canManage}
         busy={busy !== null}
-        onClose={() => setOpened(null)}
+        onClose={() => {
+          setOpenedName(null);
+          setPermissionsFor(null);
+        }}
       />
     </section>
   );
