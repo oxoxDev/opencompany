@@ -429,9 +429,11 @@ async fn list_team(
                     member_row(
                         &record,
                         &agent.id,
-                        agent.name.clone(),
-                        agent.role.clone(),
-                        agent.description.clone(),
+                        MemberIdentity {
+                            name: agent.name.clone(),
+                            role: agent.role.clone(),
+                            description: agent.description.clone(),
+                        },
                         enabled(&agent.id),
                         &spent,
                         &company_skills,
@@ -442,9 +444,11 @@ async fn list_team(
                 member_row(
                     &record,
                     &agent.id,
-                    Some(agent.name.clone()),
-                    agent.role.clone(),
-                    agent.description.clone(),
+                    MemberIdentity {
+                        name: Some(agent.name.clone()),
+                        role: agent.role.clone(),
+                        description: agent.description.clone(),
+                    },
                     enabled(&agent.id),
                     &spent,
                     &company_skills,
@@ -456,6 +460,17 @@ async fn list_team(
     Ok(Json(members))
 }
 
+/// The three fields a roster row is named by, resolved by the caller.
+///
+/// Carried together because they are resolved together — through the record, so
+/// a manifest teammate an operator has renamed from the console answers under
+/// the name it now has whichever route is asking.
+struct MemberIdentity {
+    name: Option<String>,
+    role: String,
+    description: Option<String>,
+}
+
 /// Builds one roster row, resolving the cap and its attribution through the
 /// record so the manifest arm and the overlay arm cannot drift (issue #343).
 ///
@@ -464,9 +479,7 @@ async fn list_team(
 fn member_row(
     record: &CompanyRecord,
     agent_id: &str,
-    name: Option<String>,
-    role: String,
-    description: Option<String>,
+    identity: MemberIdentity,
     inbox_enabled: bool,
     spent: &dyn Fn(&str) -> Option<f64>,
     company_enabled_skills: &[String],
@@ -475,9 +488,9 @@ fn member_row(
     let attribution = record.budget_override(agent_id);
     TeamMemberDto {
         id: agent_id.to_string(),
-        name,
-        role,
-        description,
+        name: identity.name,
+        role: identity.role,
+        description: identity.description,
         // Through `team_agent`'s helpers, never recomputed here: the
         // roster list and the detail read must not be able to disagree about
         // the same teammate (issues #264, #601, #643). A second copy of the
@@ -1112,21 +1125,21 @@ async fn updated_row(
     // touched it — a rename would show on the roster and vanish the moment a cap
     // was set.
     let overlay = record.overlay_agents.iter().find(|a| a.id == agent_id);
-    let (name, role, description) = match overlay {
-        Some(agent) => (
-            Some(agent.name.clone()),
-            agent.role.clone(),
-            agent.description.clone(),
-        ),
+    let identity = match overlay {
+        Some(agent) => MemberIdentity {
+            name: Some(agent.name.clone()),
+            role: agent.role.clone(),
+            description: agent.description.clone(),
+        },
         None => {
             let agent = record
                 .effective_agent(agent_id)
                 .expect("roster membership was checked before the write");
-            (
-                agent.name.clone(),
-                agent.role.clone(),
-                agent.description.clone(),
-            )
+            MemberIdentity {
+                name: agent.name.clone(),
+                role: agent.role.clone(),
+                description: agent.description.clone(),
+            }
         }
     };
     let company_skills = super::team_agent::company_enabled_skills(state, company)
@@ -1135,9 +1148,7 @@ async fn updated_row(
     Ok(Json(member_row(
         record,
         agent_id,
-        name,
-        role,
-        description,
+        identity,
         inbox_enabled,
         &spent,
         &company_skills,
