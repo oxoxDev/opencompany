@@ -75,6 +75,10 @@ pub mod ledger_file;
 pub mod ledgers;
 mod manifest;
 pub mod mcp;
+/// The one rule that decides whether two MCP records name the same server,
+/// shared by the console's server list and the agent prompt that tells a model
+/// which dispatch tool reaches which server.
+pub(crate) mod mcp_endpoint;
 /// The bundle's MCP declaration file: `companies/<name>/mcp.json`. A vertical
 /// ships the tool servers its work needs the way it already ships its ledgers,
 /// rather than starting with an empty tool surface somebody has to fill in by
