@@ -34,10 +34,10 @@ use crate::company::skill_scan::{Verdict, scan_skill};
 use crate::company::skill_validate::{
     MAX_SLUG_CHARS, slugify, validate_skill_md, validate_slug, validate_slug_shape,
 };
-use crate::company::{SkillDoc, parse_skill_md, render_skill_md};
+use crate::company::{SkillDoc, parse_skill_md, render_skill_md, skill_digest};
 use crate::error::OpenCompanyError;
 use crate::ports::now_millis;
-use crate::ports::skills_state::{SkillSource, SkillState};
+use crate::ports::skills_state::{SkillInstall, SkillSource, SkillState};
 use crate::ports::types::CompanyId;
 use crate::server::error::ApiError;
 use crate::server::ops::language;
@@ -439,8 +439,17 @@ async fn install(
     let lock = write_lock(company.id());
     let _guard = lock.lock().await;
     let registry = state.shared_skill_registry()?;
-    let (doc, source) = match registry.iter().find(|doc| doc.slug == slug) {
-        Some(doc) => (render_skill_md(doc), SkillSource::Registry),
+    let (doc, source, install) = match registry.iter().find(|doc| doc.slug == slug) {
+        Some(doc) => {
+            let rendered = render_skill_md(doc);
+            let pin = SkillInstall {
+                digest: skill_digest(&rendered),
+                version: doc.version.clone(),
+                installed_by: Some(company.actor()),
+                installed_at_millis: now_millis(),
+            };
+            (rendered, SkillSource::Registry, Some(pin))
+        }
         None if !registry.is_empty() => {
             return Err(ApiError(OpenCompanyError::NotFound(
                 language::SKILL_NOT_IN_REGISTRY.to_string(),
@@ -468,6 +477,7 @@ async fn install(
             (
                 skill_md(&name, &description, meta.category.as_deref(), &description),
                 SkillSource::Custom,
+                None,
             )
         }
     };
@@ -478,8 +488,8 @@ async fn install(
         enabled: true,
         source,
         custom_doc: Some(doc),
-        install: None,
         updated_at_millis: Some(now_millis()),
+        install,
     };
     company.runtime.skills().set(company.id(), &delta).await?;
     Ok(Json(InstalledSkill::from_state(&delta).with_scan(scan)))
@@ -545,8 +555,9 @@ async fn set_enabled(
     }
     let lock = write_lock(company.id());
     let _guard = lock.lock().await;
-    // Preserve an existing delta's source and custom doc; a first toggle of a
-    // built-in company skill records a Company-sourced override.
+    // A toggle writes no document, so everything an install recorded carries
+    // through unchanged; a first toggle of a built-in company skill records a
+    // Company-sourced override.
     let existing = company
         .runtime
         .skills()
@@ -554,16 +565,17 @@ async fn set_enabled(
         .await?
         .into_iter()
         .find(|s| s.slug == slug);
+    let (source, custom_doc, install) = match existing {
+        Some(row) => (row.source, row.custom_doc, row.install),
+        None => (SkillSource::Company, None, None),
+    };
     let state = SkillState {
         slug,
         enabled: body.enabled,
-        source: existing
-            .as_ref()
-            .map(|s| s.source)
-            .unwrap_or(SkillSource::Company),
-        custom_doc: existing.and_then(|s| s.custom_doc),
-        install: None,
+        source,
+        custom_doc,
         updated_at_millis: Some(now_millis()),
+        install,
     };
     company.runtime.skills().set(company.id(), &state).await?;
     Ok(Json(InstalledSkill::from_state(&state)))
