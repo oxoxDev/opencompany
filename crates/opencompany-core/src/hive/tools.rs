@@ -39,9 +39,12 @@ use serde_json::{Value, json};
 use tinyhivemind::speech::{
     self, CallArguments, ParameterKind, ToolCall, ToolSpec, Utterance, UtteranceRejection,
 };
+use tinyhivemind::{SessionAuthor, SessionLog};
+use tinyhivemind_core::aside::Viewer;
 use tinyhivemind_embed::ConversationRef;
 use tinytools::{Tool, ToolCallOptions, ToolResult, ToolRunContext, WorkspaceDescriptor};
 
+use crate::ports::events::EventLog;
 use crate::ports::types::CompanyId;
 
 /// The bare speech tool names, in the order [`speech::tool_specs`] presents
@@ -549,6 +552,71 @@ impl McpToolAdapter {
             Err(error) => ToolResult::error(format!("'{}' failed: {error}", self.tool.name())),
         }
     }
+}
+
+/// The conversation `surface` names, as `agent_id` may see it: the most
+/// recent `limit` rows, oldest first, one `[sequence] author: content` line
+/// each.
+///
+/// # Errors
+///
+/// The journal could not be read. The text is written for the model.
+pub async fn read_conversation(
+    events: Arc<dyn EventLog>,
+    company: &CompanyId,
+    agent_id: &str,
+    surface: &ConversationRef,
+    limit: usize,
+) -> Result<String, String> {
+    let log = crate::hive::session_log::EventLogSessionLog::new(
+        events,
+        company.clone(),
+        surface.id.clone(),
+        surface.id.clone(),
+        // No pair channels. This reads a desk's own history back to an agent
+        // asking for it; a private exchange between two seats is theirs, and
+        // reaching it needs the turn that is inside it, not a read of the
+        // room. Empty admits none.
+        Vec::new(),
+    );
+    let page = log
+        .read_before(None, limit)
+        .await
+        .map_err(|error| format!("this conversation could not be read: {error}"))?;
+    let viewer = Viewer::Agent {
+        id: agent_id.to_string(),
+    };
+    let mut lines: Vec<String> = page
+        .messages
+        .iter()
+        .filter(|message| {
+            let author_id = match &message.author {
+                SessionAuthor::Agent { id, .. } => Some(id.as_str()),
+                _ => None,
+            };
+            message.audience.admits(&viewer, author_id)
+        })
+        .map(|message| {
+            let author = match &message.author {
+                SessionAuthor::Operator => "operator".to_string(),
+                SessionAuthor::Person { label, .. } => label.clone(),
+                SessionAuthor::Agent { id, .. } => id.clone(),
+                SessionAuthor::System { kind, .. } => kind.clone(),
+            };
+            format!("[{}] {author}: {}", message.sequence.0, message.content)
+        })
+        .collect();
+    lines.reverse();
+    if lines.is_empty() {
+        return Ok("Nothing has been said in this conversation yet.".to_string());
+    }
+    let mut body = lines.join("\n");
+    if page.next_before.is_some() {
+        body.push_str(&format!(
+            "\n\n(Showing the most recent {limit}. Older messages are not in this reply.)"
+        ));
+    }
+    Ok(body)
 }
 
 /// Moves a built belt into shared handles, so the pool can keep one and hand
