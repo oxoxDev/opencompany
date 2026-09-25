@@ -63,12 +63,18 @@ export function UploadSkillDialog({
   }, [open]);
 
   async function send(force: boolean) {
-    if (files.length === 0) return;
+    const targets = force ? files.filter((_, index) => rows[index]?.scanBlocked === true) : files;
+    if (targets.length === 0) return;
     setBusy(true);
     setError(null);
     try {
-      const answer = await uploadSkills(client, company, files, force);
-      setRows(answer.results);
+      const answer = await uploadSkills(client, company, targets, force);
+      if (force) {
+        let next = 0;
+        setRows(rows.map((row) => (row.scanBlocked ? answer.results[next++] : row)));
+      } else {
+        setRows(answer.results);
+      }
       onUploaded(answer.results.filter((row) => row.ok));
     } catch (e) {
       setError(e instanceof Error ? e.message : "the upload could not be sent");
