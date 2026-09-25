@@ -146,10 +146,16 @@ async fn update(
     // folds into the row it is showing, and a badge that survived its own fix
     // would send the operator round again.
     let stood = row_drift(&registry, &delta);
+    let roster = super::scope::roster_scopes(&company.runtime).await?;
     Ok(Json(
         InstalledSkill::from_state(&delta)
             .with_scan(scan)
-            .with_drift(stood),
+            .with_drift(stood)
+            .with_agents(crate::company::skill_scope::agents_for_skill(
+                &delta.slug,
+                delta.enabled,
+                &roster,
+            )),
     ))
 }
 

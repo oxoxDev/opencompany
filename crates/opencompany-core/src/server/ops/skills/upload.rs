@@ -175,9 +175,12 @@ async fn upload(
     let registry = app.shared_skill_registry()?;
     let lock = write_lock(company.id());
     let _guard = lock.lock().await;
+    // One roster read for the whole batch: a scope is a property of the
+    // teammates, and no file in this upload changes one.
+    let roster = super::scope::roster_scopes(&company.runtime).await?;
     let mut results = Vec::with_capacity(parts.len());
     for part in parts {
-        match store(&company, &registry, &part, force).await {
+        match store(&company, &registry, &part, force, &roster).await {
             Ok((skill, delta)) => {
                 // Out of the per-file rows on purpose. Those exist for a file
                 // that is not a skill; a journal the host cannot append to is
@@ -211,6 +214,7 @@ async fn store(
     registry: &[crate::company::SkillDoc],
     part: &Part,
     force: bool,
+    roster: &[crate::company::skill_scope::AgentSkillScope],
 ) -> Result<(InstalledSkill, SkillState), Refusal> {
     let read = read_upload(&part.filename, &part.bytes).map_err(Refusal::plain)?;
     check_skill_doc_size(&read.doc)
@@ -253,7 +257,12 @@ async fn store(
     let stood = super::drift::row_drift(registry, &delta);
     let skill = InstalledSkill::from_state(&delta)
         .with_scan(scan)
-        .with_drift(stood);
+        .with_drift(stood)
+        .with_agents(crate::company::skill_scope::agents_for_skill(
+            &delta.slug,
+            delta.enabled,
+            roster,
+        ));
     Ok((skill, delta))
 }
 

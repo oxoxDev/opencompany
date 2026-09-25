@@ -529,7 +529,7 @@ pub(super) async fn daily_spend_samples(
 /// Every roster teammate's id — manifest agents first, then overlay teammates,
 /// minus the ones the operator has removed. The same union
 /// `CompanyRecord::is_roster_agent` accepts.
-fn roster_ids(record: &CompanyRecord) -> impl Iterator<Item = &String> {
+pub(crate) fn roster_ids(record: &CompanyRecord) -> impl Iterator<Item = &String> {
     record
         .manifest
         .agents
