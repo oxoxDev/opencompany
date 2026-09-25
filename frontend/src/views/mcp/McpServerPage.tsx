@@ -11,6 +11,7 @@ import {
   mcpStanding,
   probedOn,
 } from "@/lib/connection-detail";
+import type { McpBridgeState } from "@/lib/mcp-bridge";
 import {
   UsageSection,
   useConnectionUsage,
@@ -31,8 +32,12 @@ interface Props {
   server: McpServer;
   health: McpHealth | undefined;
   canManage: boolean;
+  /** Whether the agent-side MCP bridge is compiled into this host (issue #567). */
+  bridge: McpBridgeState;
   /** Bumped when a probe re-ran, so the permissions read is not stale. */
   reloadKey: number;
+  /** Scroll the permissions panel into view once it has something to show. */
+  focusPermissions: boolean;
   /** Absent when this row cannot be removed from the console. */
   onDisconnect: (() => void) | null;
   onBack: () => void;
@@ -48,7 +53,9 @@ export function McpServerPage({
   server,
   health,
   canManage,
+  bridge,
   reloadKey,
+  focusPermissions,
   onDisconnect,
   onBack,
 }: Props) {
@@ -130,7 +137,9 @@ export function McpServerPage({
         </div>
       </div>
 
-      {standing.live && server.reachableBy !== undefined && (
+      {bridge !== "absent" &&
+        standing.live &&
+        server.reachableBy !== undefined && (
         <div className="flex flex-wrap items-center justify-between gap-2">
           {server.reachableBy.length === 0 ? (
             <p
@@ -184,6 +193,7 @@ export function McpServerPage({
         server={server}
         canManage={canManage}
         reloadKey={reloadKey}
+        focus={focusPermissions}
       />
 
       <Separator />

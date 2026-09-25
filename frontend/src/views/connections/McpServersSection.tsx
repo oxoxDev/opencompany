@@ -880,7 +880,9 @@ export function McpServersSection({
           server={openedServer}
           health={tested[openedServer.name] ?? openedServer.health}
           canManage={canManage}
+          bridge={bridge}
           reloadKey={probedAt[openedServer.name] ?? 0}
+          focusPermissions={openedName === null && permissionsFor !== null}
           onDisconnect={
             mcpRowControls(
               openedServer,
