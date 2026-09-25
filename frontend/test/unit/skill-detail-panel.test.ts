@@ -70,7 +70,7 @@ function member(id: string, requested: string[] | null): TeamMemberDto {
 let container: HTMLDivElement;
 let root: Root;
 
-function clientWith(updateAgent = vi.fn(() => Promise.resolve({}))) {
+function clientWith(updateAgent: unknown = vi.fn(() => Promise.resolve({}))) {
   return {
     updateAgent,
   } as unknown as OpenCompanyClient;
@@ -80,7 +80,7 @@ async function open(
   subject: Skill | null,
   team: TeamMemberDto[] | null,
   canManage = true,
-  client = clientWith(),
+  client: OpenCompanyClient = clientWith(),
   handlers: { onClose?: () => void; onSaved?: () => void } = {},
 ) {
   await act(async () => {
@@ -278,7 +278,7 @@ describe("a partial failure", () => {
       ]),
       [member("ceo", null), member("writer", null), member("analyst", null)],
       true,
-      clientWith(updateAgent as unknown as () => Promise<unknown>),
+      clientWith(updateAgent),
       { onClose, onSaved },
     );
 
