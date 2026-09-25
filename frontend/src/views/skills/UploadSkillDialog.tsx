@@ -62,13 +62,30 @@ export function UploadSkillDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
+  const isBlocked = (row: SkillUploadRow) => !row.ok && row.scanBlocked === true;
+
   async function send(force: boolean) {
-    if (files.length === 0) return;
+    const indices = force
+      ? rows.flatMap((row, i) => (isBlocked(row) ? [i] : []))
+      : files.map((_, i) => i);
+    if (indices.length === 0) return;
     setBusy(true);
     setError(null);
     try {
-      const answer = await uploadSkills(client, company, files, force);
-      setRows(answer.results);
+      const answer = await uploadSkills(
+        client,
+        company,
+        indices.map((i) => files[i]),
+        force,
+      );
+      setRows((prev) => {
+        if (!force) return answer.results;
+        const next = [...prev];
+        indices.forEach((originalIndex, k) => {
+          next[originalIndex] = answer.results[k];
+        });
+        return next;
+      });
       onUploaded(answer.results.filter((row) => row.ok));
     } catch (e) {
       setError(e instanceof Error ? e.message : "the upload could not be sent");
@@ -77,7 +94,7 @@ export function UploadSkillDialog({
     }
   }
 
-  const blocked = rows.some((row) => !row.ok && row.scanBlocked === true);
+  const blocked = rows.some(isBlocked);
 
   return (
     <Dialog
