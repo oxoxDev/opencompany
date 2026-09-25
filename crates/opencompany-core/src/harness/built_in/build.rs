@@ -1782,7 +1782,14 @@ pub fn agent_spec_for(
         // agent shapes disagreed about the tool protocol for no reason. Pin the
         // pooled path to the same one.
         config.agent.tool_dispatcher = "native".into();
+        withhold_openhuman_docs(config);
     })
+}
+
+/// Turns off OpenHuman's own documentation server, which its default config
+/// seeds into every agent's MCP registry, along with the docs tools it backs.
+fn withhold_openhuman_docs(config: &mut oh::config::Config) {
+    config.gitbooks.enabled = false;
 }
 
 /// The names an agent's `ToolScopeSpec::Named` scope lists: the belt's

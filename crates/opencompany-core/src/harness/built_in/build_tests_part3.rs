@@ -263,3 +263,24 @@ fn an_agent_granted_a_company_server_is_never_scoped_to_list_servers() {
     assert!(!blueprint.system_prompt.contains("mcp.example.test"));
     assert!(!blueprint.system_prompt.contains("sk-notes-secret"));
 }
+
+#[test]
+fn a_company_agent_config_seeds_no_openhuman_docs_server() {
+    let mut config = openhuman_core::config::Config::default();
+    config.mcp_client.enabled = true;
+    let seeded = |config: &openhuman_core::config::Config| {
+        openhuman_core::mcp::host::client_config(config)
+            .servers
+            .iter()
+            .any(|server| server.name == openhuman_core::mcp::host::GITBOOKS_SERVER_NAME)
+    };
+    assert!(
+        seeded(&config),
+        "the premise: OpenHuman's default config seeds its docs server"
+    );
+
+    withhold_openhuman_docs(&mut config);
+
+    assert!(!config.gitbooks.enabled);
+    assert!(!seeded(&config));
+}
