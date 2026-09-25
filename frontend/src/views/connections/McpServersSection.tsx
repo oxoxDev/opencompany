@@ -1211,7 +1211,6 @@ export function McpServersSection({
                           server={server}
                           canManage={canManage}
                           reloadKey={probedAt[server.name] ?? 0}
-                          onClose={() => setPermissionsFor(null)}
                         />
                       )}
                       {credentialFor === server.name && canManage && (
