@@ -146,6 +146,10 @@ pub mod skill_provenance;
 /// the write plane runs it on every install in every build, and the sanitizer
 /// is the structural half of the same control.
 pub mod skill_scan;
+/// One skill's answer to "who is this scoped to" — the read-side inversion of
+/// the per-agent allowlist, shared by both transports so a skill's detail panel
+/// and a teammate's page cannot disagree about the same scope.
+pub mod skill_scope;
 /// Reading a skill an operator uploaded — a bare `SKILL.md`, or an archive
 /// carrying one — with the archive's shape refused before anything is
 /// decompressed.
