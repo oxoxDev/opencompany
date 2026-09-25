@@ -1,4 +1,5 @@
 use super::*;
+use crate::ports::TaskOrigin;
 
 /// The reported bug. A card assigned to "Shane" — nobody this company has —
 /// used to dispatch to the orchestrator anyway, keeping `assignee = "Shane"`
@@ -195,6 +196,7 @@ async fn task_dispatch_routes_to_an_overlay_teammate() {
             role: "Growth".into(),
             description: None,
             tools: None,
+            skills: None,
             model: None,
             harness: None,
         })

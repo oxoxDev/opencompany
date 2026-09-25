@@ -66,6 +66,17 @@ pub fn pair_conversation(one: &str, two: &str) -> String {
     format!("dm:{first}+{second}")
 }
 
+/// The two seats a pair channel names, or `None` for any other key.
+///
+/// The inverse of [`pair_conversation`]. A caller deciding whether a stored
+/// channel belongs to it must check *both* ids against its own roster: the
+/// key is minted from two roster ids and says nothing about where the two
+/// were talking, so its name alone is not authority to read it.
+#[must_use]
+pub fn pair_seats(chat: &str) -> Option<(&str, &str)> {
+    chat.strip_prefix("dm:")?.split_once('+')
+}
+
 /// The head of a seeded question, as [`DeskReferral::seed_text`] writes it.
 const ASKS: &str = " asks: ";
 

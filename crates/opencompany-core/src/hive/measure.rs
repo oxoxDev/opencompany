@@ -12,7 +12,8 @@
 //! The fold mirrors `scripts/lib/coordination-metrics.mjs` frame for frame:
 //! turn brackets keyed by turn id (`TurnStarted` → `TurnSettled` /
 //! `TurnFailed`), episodes from `EpisodeOpened` / `EpisodeCompleted`, rounds
-//! from `RoundStarted`, contacts from `BroadcastRouted` / `DmDelivered` /
+//! from the revisions the turn rows carry, contacts from `BroadcastRouted` /
+//! `DmDelivered` /
 //! `ReferralEnqueued`, and the utterance-kind histogram from
 //! `AgentReply.episode`. So do the thresholds ([`Thresholds`]), so a
 //! measurement passes or fails the same way on both paths.
@@ -60,8 +61,8 @@ impl Default for Thresholds {
 pub struct EpisodeMeasure {
     /// The desk.
     pub chat_id: String,
-    /// Rounds proposed (`RoundStarted`), or the count the completion
-    /// reported, whichever is larger.
+    /// Rounds run: the distinct wave revisions this episode's turn rows
+    /// carry, or the count the completion reported, whichever is larger.
     pub rounds: u32,
     /// Whether an `EpisodeCompleted` row closed it.
     pub completed: bool,
@@ -304,6 +305,20 @@ struct Fold {
     report: Report,
     open: HashMap<String, OpenTurn>,
     opened_at: HashMap<String, u64>,
+    /// The wave revisions each episode's turns ran in.
+    ///
+    /// A round is counted from the turn rows rather than from a row of its
+    /// own, because the conductor announces no round: a wave is whoever is
+    /// due, and nobody decides its membership in advance. The turn rows are
+    /// what actually happened, and they carry the revision, so the distinct
+    /// revisions *are* the rounds — with the bonus that a wave which only
+    /// turned seats inside private conversations is still counted, which a
+    /// desk-shaped round row never could.
+    ///
+    /// A `RoundStarted` row feeds the same set. Journals written before the
+    /// loop moved to the library carry them, and an episode must measure the
+    /// same however it was run.
+    revisions: HashMap<String, BTreeSet<u64>>,
 }
 
 impl Fold {
@@ -329,8 +344,20 @@ impl Fold {
         self.report.rows += 1;
         match &stored.event {
             CompanyEvent::TurnStarted {
-                turn_id, agent_id, ..
+                turn_id,
+                agent_id,
+                chat_id,
+                episode_id,
+                round_revision,
+                ..
             } => {
+                if let (Some(episode_id), Some(revision)) = (episode_id, round_revision) {
+                    self.episode(episode_id, chat_id);
+                    self.revisions
+                        .entry(episode_id.clone())
+                        .or_default()
+                        .insert(*revision);
+                }
                 if !self.open.is_empty() {
                     self.report.overlaps += 1;
                 }
@@ -366,13 +393,21 @@ impl Fold {
                 self.opened_at.insert(episode_id.clone(), stored.at_millis);
                 Self::count(&mut self.report.plan_kinds, plan_kind(plan));
             }
+            // Legacy: the hand-written round loop announced its own rounds.
+            // Feeding the same set keeps an old journal measuring the same as
+            // a new one, and keeps the two from double-counting an episode
+            // that somehow carries both.
             CompanyEvent::RoundStarted {
                 chat_id,
                 episode_id,
+                revision,
                 ..
             } => {
-                let episode = self.episode(episode_id, chat_id);
-                episode.rounds += 1;
+                self.episode(episode_id, chat_id);
+                self.revisions
+                    .entry(episode_id.clone())
+                    .or_default()
+                    .insert(*revision);
             }
             CompanyEvent::BroadcastRouted {
                 chat_id,
@@ -459,6 +494,16 @@ impl Fold {
         self.report.company = company.to_string();
         self.report.since_seq = since.value();
         self.report.open_turns = self.open.len();
+        // An episode's rounds are the distinct revisions its turns ran in,
+        // never fewer than the completion reported: a fold that starts
+        // mid-episode (`since`) sees only the revisions after its cut, and
+        // the completion's own count is the whole story.
+        for (episode_id, revisions) in &self.revisions {
+            if let Some(episode) = self.report.episodes.get_mut(episode_id) {
+                let counted = u32::try_from(revisions.len()).unwrap_or(u32::MAX);
+                episode.rounds = episode.rounds.max(counted);
+            }
+        }
         self.report
     }
 }

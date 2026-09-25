@@ -429,6 +429,10 @@ pub enum UtteranceKind {
     Dm,
     /// A message that also reports the author's assignment finished.
     CompleteEpisode,
+    /// A private question to one seat, which opens a conversation only those
+    /// two read. New with the conductor; a desk without conversations never
+    /// writes one.
+    Ask,
 }
 
 impl UtteranceKind {
@@ -441,6 +445,7 @@ impl UtteranceKind {
             Utterance::Broadcast { .. } => Self::Broadcast,
             Utterance::Dm { .. } => Self::Dm,
             Utterance::CompleteEpisode { .. } => Self::CompleteEpisode,
+            Utterance::Ask { .. } => Self::Ask,
         }
     }
 }
@@ -1797,6 +1802,78 @@ pub enum CompanyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary_seq: Option<u64>,
     },
+    /// One seat opened a private conversation with another (`ask`).
+    ///
+    /// The **reference** row: it sits on the desk, names both seats, and
+    /// points at the exchange, which lives in the pair's own channel. An
+    /// operator reading the desk sees that two teammates are talking without
+    /// their conversation threaded through the room's own timeline, and the
+    /// console has a desk-channel frame to raise the live indicator from —
+    /// it is already subscribed to that stream, and would otherwise have to
+    /// watch every pair channel to notice one had started.
+    ConversationOpened {
+        /// The desk it was opened from.
+        chat_id: String,
+        /// The episode it belongs to.
+        episode_id: String,
+        /// The channel the exchange itself is written to.
+        conversation_id: String,
+        /// The `ask` row it is rooted at — the exchange is this row and
+        /// everything rooted at it.
+        root: u64,
+        /// The seat that asked.
+        asker: String,
+        /// The seat asked.
+        askee: String,
+    },
+    /// A private conversation ended, answered or not.
+    ///
+    /// The other half of the reference: what turns the indicator off. A
+    /// conversation that runs out of turns concludes `forced`, without an
+    /// answer, and an indicator that only watched for an answer would hang
+    /// on exactly that case.
+    ConversationConcluded {
+        /// The desk it was opened from.
+        chat_id: String,
+        /// The episode it belongs to.
+        episode_id: String,
+        /// The channel the exchange was written to.
+        conversation_id: String,
+        /// The `ask` row it was rooted at.
+        root: u64,
+        /// The seat that asked.
+        asker: String,
+        /// The seat asked.
+        askee: String,
+        /// Concluded without an answer: nothing was due, or it ran out of
+        /// turns.
+        forced: bool,
+    },
+    /// An episode seat's turn parked on the operator: the episode holds the
+    /// seat until every approval it raised is decided.
+    EpisodeSeatParked {
+        /// The desk.
+        chat_id: String,
+        /// The episode.
+        episode_id: String,
+        /// The seat that is waiting.
+        seat: String,
+        /// The conversation root the seat parked in, or `None` on the desk.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread: Option<u64>,
+        /// The approvals it waits on.
+        approval_ids: Vec<ApprovalId>,
+    },
+    /// A parked episode seat was released by the operator's decisions and
+    /// takes its turn again.
+    EpisodeSeatResumed {
+        /// The desk.
+        chat_id: String,
+        /// The episode.
+        episode_id: String,
+        /// The seat that resumed.
+        seat: String,
+    },
     /// The driver's resumable state after a committed round (plan hive-desks,
     /// Phase 4): what `hive::episode_store` reads back to resume an episode
     /// the host died under.
@@ -1814,7 +1891,7 @@ pub enum CompanyEvent {
         thread_root: Option<EventSeq>,
         /// The driver revision the state is at.
         revision: u64,
-        /// `tinyhivemind_openhuman::DriverState`, as serde wrote it.
+        /// `tinyhivemind_driver::DriverState`, as serde wrote it.
         state: serde_json::Value,
         /// Per-agent `tinyhivemind::SharingState` — where each seat's
         /// transcript delivery had reached.
@@ -2621,6 +2698,10 @@ impl CompanyEvent {
             Self::BroadcastRouted { .. } => "BroadcastRouted",
             Self::DmDelivered { .. } => "DmDelivered",
             Self::EpisodeCompleted { .. } => "EpisodeCompleted",
+            Self::ConversationOpened { .. } => "ConversationOpened",
+            Self::ConversationConcluded { .. } => "ConversationConcluded",
+            Self::EpisodeSeatParked { .. } => "EpisodeSeatParked",
+            Self::EpisodeSeatResumed { .. } => "EpisodeSeatResumed",
             Self::EpisodeStateSaved { .. } => "EpisodeStateSaved",
             Self::TaskSteered { .. } => "TaskSteered",
             Self::TaskCardChanged { .. } => "TaskCardChanged",
@@ -2791,6 +2872,15 @@ impl CompanyEvent {
             | Self::BroadcastRouted { .. }
             | Self::DmDelivered { .. }
             | Self::EpisodeCompleted { .. }
+            // The desk's record that two seats talked, and where the
+            // exchange itself is. Without it the desk cannot say a private
+            // conversation happened at all.
+            | Self::ConversationOpened { .. }
+            | Self::ConversationConcluded { .. }
+            // What a seat waited on and when it came back: the only record
+            // that an episode stood still on the operator.
+            | Self::EpisodeSeatParked { .. }
+            | Self::EpisodeSeatResumed { .. }
             | Self::EpisodeStateSaved { .. }
             | Self::TaskSteered { .. }
             | Self::TaskCardChanged { .. }
@@ -3921,6 +4011,13 @@ pub struct OverlayAgent {
     /// serializing exactly as it did before (no `tools` key).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<String>>,
+    /// The per-teammate skill scope, carried the same way as
+    /// [`Agent::skills`](crate::company::types::Agent::skills) — see that
+    /// field's docs for the three states. `None` (the default, and how every
+    /// overlay record written before this field existed deserializes) inherits
+    /// every skill the company has enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
     /// A per-agent model override, carried the same way as
     /// [`Agent::model`](crate::company::types::Agent) — see that field's docs.
     /// `None` (the default, and how every record written before this field
@@ -4018,6 +4115,29 @@ pub struct AgentOverride {
         skip_serializing_if = "Option::is_none"
     )]
     pub tools: Option<Option<Vec<String>>>,
+    /// The operator's replacement skill scope, in the same double-option shape
+    /// [`tools`](Self::tools) uses, so "not overridden" stays apart from
+    /// "override it to inherit":
+    ///
+    /// | value | means |
+    /// |---|---|
+    /// | `None` | not overridden — the manifest `skills` line flows through unchanged |
+    /// | `Some(None)` | override to **inherit** every enabled skill |
+    /// | `Some(Some(vec![]))` | override to an **explicit no-skills** scope |
+    /// | `Some(Some(slugs))` | override to **narrow** to those slugs |
+    ///
+    /// The inner value is assigned verbatim onto
+    /// [`Agent::skills`](crate::company::Agent::skills) by
+    /// [`CompanyRecord::effective_manifest_agent`], so the manifest field's own
+    /// contract carries the meaning; this layer only adds "was it set at all".
+    /// Still intersected with the company's effective set at read time, so it can
+    /// only narrow a teammate within what the company already enabled.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub skills: Option<Option<Vec<String>>>,
     /// The operator's replacement persona prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
@@ -4376,15 +4496,31 @@ impl AgentOverride {
     /// persisting a row the console would render as "overridden" — the same
     /// contract [`PolicyOverride`] draws for its own absent fields.
     pub fn is_empty(&self) -> bool {
-        self.name.is_none()
-            && self.role.is_none()
-            && self.description.is_none()
-            && self.tools.is_none()
-            && self.instructions.is_none()
-            && self.avatar.is_none()
-            && self.model.is_none()
-            && self.harness.is_none()
-            && self.provider.is_none()
+        // Destructured, so a field added to the struct is a compile error here
+        // rather than one this predicate silently stops counting.
+        let Self {
+            agent_id: _,
+            name,
+            role,
+            description,
+            tools,
+            skills,
+            instructions,
+            avatar,
+            model,
+            harness,
+            provider,
+        } = self;
+        name.is_none()
+            && role.is_none()
+            && description.is_none()
+            && tools.is_none()
+            && skills.is_none()
+            && instructions.is_none()
+            && avatar.is_none()
+            && model.is_none()
+            && harness.is_none()
+            && provider.is_none()
     }
 }
 
@@ -6107,32 +6243,50 @@ impl CompanyRecord {
             .iter_mut()
             .find(|held| held.agent_id == entry.agent_id)
         {
-            if entry.name.is_some() {
-                held.name = entry.name;
+            // Destructured, so a field added to the struct is a compile error
+            // here rather than one this merge silently stops carrying.
+            let AgentOverride {
+                agent_id: _,
+                name,
+                role,
+                description,
+                tools,
+                skills,
+                instructions,
+                avatar,
+                model,
+                harness,
+                provider,
+            } = entry;
+            if name.is_some() {
+                held.name = name;
             }
-            if entry.role.is_some() {
-                held.role = entry.role;
+            if role.is_some() {
+                held.role = role;
             }
-            if entry.description.is_some() {
-                held.description = entry.description;
+            if description.is_some() {
+                held.description = description;
             }
-            if entry.tools.is_some() {
-                held.tools = entry.tools;
+            if tools.is_some() {
+                held.tools = tools;
             }
-            if entry.instructions.is_some() {
-                held.instructions = entry.instructions;
+            if skills.is_some() {
+                held.skills = skills;
             }
-            if entry.avatar.is_some() {
-                held.avatar = entry.avatar;
+            if instructions.is_some() {
+                held.instructions = instructions;
             }
-            if entry.model.is_some() {
-                held.model = entry.model;
+            if avatar.is_some() {
+                held.avatar = avatar;
             }
-            if entry.harness.is_some() {
-                held.harness = entry.harness;
+            if model.is_some() {
+                held.model = model;
             }
-            if entry.provider.is_some() {
-                held.provider = entry.provider;
+            if harness.is_some() {
+                held.harness = harness;
+            }
+            if provider.is_some() {
+                held.provider = provider;
             }
             return;
         }
@@ -6224,6 +6378,9 @@ impl CompanyRecord {
         }
         if let Some(tools) = entry.tools.as_ref() {
             merged.tools = tools.clone();
+        }
+        if let Some(skills) = entry.skills.as_ref() {
+            merged.skills = skills.clone();
         }
         if let Some(instructions) = entry.instructions.as_ref() {
             merged.prompt = Some(instructions.clone());
@@ -6420,22 +6577,7 @@ impl CompanyRecord {
     /// whose continued existence would move the harness's overlay fingerprint
     /// for no change.
     fn retain_nonempty_agent_edits(&mut self) {
-        // Every field the override can carry, not just the ones it carried
-        // when this was written. A predicate that names a subset deletes rows
-        // that are still holding the fields it forgot — here, resetting a
-        // teammate's instructions would take their harness and model with it,
-        // silently reverting both to the blueprint.
-        self.overlay_agent_edits.retain(|entry| {
-            entry.name.is_some()
-                || entry.role.is_some()
-                || entry.description.is_some()
-                || entry.tools.is_some()
-                || entry.instructions.is_some()
-                || entry.avatar.is_some()
-                || entry.model.is_some()
-                || entry.harness.is_some()
-                || entry.provider.is_some()
-        });
+        self.overlay_agent_edits.retain(|entry| !entry.is_empty());
     }
 
     /// Whether `wid` is switched on (issue #276) — the single predicate the

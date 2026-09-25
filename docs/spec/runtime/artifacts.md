@@ -231,7 +231,8 @@ The walk is capped at 5,000 entries. A truncated scan can only miss changes.
 
 Publishing needs somewhere to record the version. The chat and task paths each
 claim a destination before the turn (`PublishDestination::Conversation` /
-`::Task`); a **workflow run claims nothing**, because `publish_artifact` needs a
+`::Task`) and run the turn inside that claim (`PublishClaim::scoped`), so each
+claim stages into and drains only its own bucket; a **workflow run claims nothing**, because `publish_artifact` needs a
 card to attach a version to and a run has neither a card nor a conversation. So
 a node that calls the tool is refused in-turn, and that refusal is correct —
 `Unclaimed` is the `#[default]`, which is the fail-safe direction: a turn-running
@@ -265,6 +266,29 @@ Whether a run *should* be able to publish is a separate, open question:
 `origin_run_id` (M5 / issue #661) taught runs to open cards, which arguably makes
 the "a run has nowhere to file one" premise stale. This change does not settle
 it — it only removes the silence around the current answer.
+
+## A desk seat files a deliverable like a conversation does
+
+A hive episode seat's turn claims `PublishDestination::Episode`, naming the
+desk and the thread the episode answers into. When the seat's turn ends,
+`park_seat` files what it published through
+[`PublishFiling::record_conversation_publishes`](../../../crates/opencompany-core/src/harness/built_in/publish/filing.rs)
+— the same path a chat turn takes: a card minted for the room in `in_review`,
+whose `origin` names the desk and the episode's thread, carrying one versioned
+artifact per path. The operator edits it from that card's Artifacts tab, and the
+edit lands as the next version, so `human_edit_diff` covers episode
+deliverables too. A company with nowhere to file (no roster, no board, no
+artifact store) cannot file it; the seat is told which paths did not land, by
+name, so it can say so plainly rather than repeating a delivery that did not
+happen.
+
+The seat's outputs — the artifact links and any workspace nodes its tools wrote —
+ride the seat's next row on the desk, with the card as the row's `task_id`. A row
+the seat writes into a private conversation does not carry them. A turn that
+published and said nothing on the desk gets an outputs-only row of its own once
+its wave has committed everything it will; that row has no text, so seats'
+briefs skip it, and a delivery whose journal write fails is held and retried on
+the next flush rather than dropped.
 
 ## Storage
 

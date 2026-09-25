@@ -23,52 +23,121 @@ use crate::policy::test_support::composio_send_args;
 /// the two implementations drifted apart in the other direction.
 #[tokio::test]
 async fn both_approval_paths_agree_on_the_same_always_approve_list() {
-    use crate::policy::ManifestApprovalGate;
-    use crate::ports::approvals::ApprovalGate;
-    use crate::ports::types::PolicyDecision;
+    in_cycle(async {
+        use crate::policy::ManifestApprovalGate;
+        use crate::ports::approvals::ApprovalGate;
+        use crate::ports::types::PolicyDecision;
 
-    // A leading segment, an exact dotted kind, a bare tool name, an
-    // unrelated declared tool that must NOT be gated, and a case variant.
-    //
-    // Every name here is one both paths leave to the fence: the tier has no
-    // opinion about it under `full`, **and** it is a declared, non-priced
-    // tool, so the per-call judgement (issue #338) is silent on it too — the
-    // thing that used to make a not-gated name diverge after `full` decided
-    // to allow was that undeclared tools stop under the judgement. The
-    // near-miss the segment boundary exists to exclude (`payment` vs
-    // `payroll.export`) stopped fitting here once the judge began stopping
-    // undeclared tools; that boundary is pinned in `always_approve::test`
-    // instead. A priced name like `web_search` would drag the harness's
-    // metered-read and budget arms into a comparison that is not about
-    // `always_approve`, so it is deliberately absent here.
-    let fence = &["payment", "filing.submit", "publish_artifact"];
-    let names = [
-        "payment.send",
-        "payment",
-        "filing.submit",
-        "publish_artifact",
-        "PUBLISH_ARTIFACT",
-        "workspace_read",
-    ];
+        // A leading segment, an exact dotted kind, a bare tool name, an
+        // unrelated declared tool that must NOT be gated, and a case variant.
+        //
+        // Every name here is one both paths leave to the fence: the tier has no
+        // opinion about it under `full`, **and** it is a declared, non-priced
+        // tool, so the per-call judgement (issue #338) is silent on it too — the
+        // thing that used to make a not-gated name diverge after `full` decided
+        // to allow was that undeclared tools stop under the judgement. The
+        // near-miss the segment boundary exists to exclude (`payment` vs
+        // `payroll.export`) stopped fitting here once the judge began stopping
+        // undeclared tools; that boundary is pinned in `always_approve::test`
+        // instead. A priced name like `web_search` would drag the harness's
+        // metered-read and budget arms into a comparison that is not about
+        // `always_approve`, so it is deliberately absent here.
+        let fence = &["payment", "filing.submit", "publish_artifact"];
+        let names = [
+            "payment.send",
+            "payment",
+            "filing.submit",
+            "publish_artifact",
+            "PUBLISH_ARTIFACT",
+            "workspace_read",
+        ];
 
-    // `full` on both sides, so the tier decides nothing and any parking
-    // observed is the override's doing.
-    let harness = policy("full", fence, None);
-    let gate = ManifestApprovalGate::new(Policy {
-        mode: "full".to_string(),
-        always_approve: fence.iter().map(|s| s.to_string()).collect(),
-        auto_approve_under_usd: None,
-        approval_ttl_hours: None,
-    });
+        // `full` on both sides, so the tier decides nothing and any parking
+        // observed is the override's doing.
+        let harness = policy("full", fence, None);
+        let gate = ManifestApprovalGate::new(Policy {
+            mode: "full".to_string(),
+            always_approve: fence.iter().map(|s| s.to_string()).collect(),
+            auto_approve_under_usd: None,
+            approval_ttl_hours: None,
+        });
 
-    let mut agreed = 0;
-    for name in names {
-        let harness_parks = matches!(
-            harness.check(&request(name, serde_json::json!({}))).await,
+        let mut agreed = 0;
+        for name in names {
+            let harness_parks = matches!(
+                harness.check(&request(name, serde_json::json!({}))).await,
+                ToolPolicyDecision::RequireApproval { .. }
+            );
+            let effect = Effect {
+                kind: name.to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::Value::Null,
+                agent: None,
+                run_id: None,
+            };
+            let gate_parks = matches!(
+                gate.evaluate(&CompanyId::new("acme"), &effect)
+                    .await
+                    .unwrap(),
+                PolicyDecision::RequireApproval
+            );
+            assert_eq!(
+                harness_parks, gate_parks,
+                "`{name}` parks on one approval path and not the other — \
+             one operator list, two answers (issue #684)"
+            );
+            agreed += 1;
+        }
+        assert_eq!(agreed, names.len(), "every name must have been compared");
+
+        // Non-vacuity: the comparison above is only worth something if the
+        // fence actually separates these names. Two paths that both allowed
+        // everything would agree perfectly and prove nothing.
+        assert!(matches!(
+            harness
+                .check(&request("payment.send", serde_json::json!({})))
+                .await,
             ToolPolicyDecision::RequireApproval { .. }
+        ));
+        assert_eq!(
+            harness
+                .check(&request("workspace_read", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::Allow
         );
-        let effect = Effect {
-            kind: name.to_string(),
+
+        // The fence near-miss, pinned where the answer is stable.
+        //
+        // `payroll.export` is what the shared matcher tests call the near-miss:
+        // sharing `payment`'s first four letters is not the same capability, so
+        // the operator list names it nowhere and must not gate it. All three
+        // statements are asserted because the two paths legitimately differ on
+        // the last of them:
+        //
+        // * the *matcher* — the part both paths actually share — does not gate
+        //   it;
+        // * the gate, effect-level and mode-driven, hands `full` the Allow this
+        //   fence implies;
+        // * the harness instead parks it, because #338's per-call judgement
+        //   fail-closes an undeclared non-read call — a layer the effect gate
+        //   does not have, and the reason the near-miss cannot live inside the
+        //   agreement loop above.
+        let fence_list: Vec<String> = fence.iter().map(|s| s.to_string()).collect();
+        assert!(
+            !crate::policy::always_approve::matches(&fence_list, "payroll.export"),
+            "the operator list must not gate the leading-segment near-miss"
+        );
+        assert!(matches!(
+            harness
+                .check(&request("payroll.export", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+        let near_miss_effect = Effect {
+            kind: "payroll.export".to_string(),
             group: EffectGroup::Other,
             amount_usd: None,
             established_thread: false,
@@ -77,80 +146,14 @@ async fn both_approval_paths_agree_on_the_same_always_approve_list() {
             agent: None,
             run_id: None,
         };
-        let gate_parks = matches!(
-            gate.evaluate(&CompanyId::new("acme"), &effect)
+        assert_eq!(
+            gate.evaluate(&CompanyId::new("acme"), &near_miss_effect)
                 .await
                 .unwrap(),
-            PolicyDecision::RequireApproval
+            PolicyDecision::Allow
         );
-        assert_eq!(
-            harness_parks, gate_parks,
-            "`{name}` parks on one approval path and not the other — \
-             one operator list, two answers (issue #684)"
-        );
-        agreed += 1;
-    }
-    assert_eq!(agreed, names.len(), "every name must have been compared");
-
-    // Non-vacuity: the comparison above is only worth something if the
-    // fence actually separates these names. Two paths that both allowed
-    // everything would agree perfectly and prove nothing.
-    assert!(matches!(
-        harness
-            .check(&request("payment.send", serde_json::json!({})))
-            .await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
-    assert_eq!(
-        harness
-            .check(&request("workspace_read", serde_json::json!({})))
-            .await,
-        ToolPolicyDecision::Allow
-    );
-
-    // The fence near-miss, pinned where the answer is stable.
-    //
-    // `payroll.export` is what the shared matcher tests call the near-miss:
-    // sharing `payment`'s first four letters is not the same capability, so
-    // the operator list names it nowhere and must not gate it. All three
-    // statements are asserted because the two paths legitimately differ on
-    // the last of them:
-    //
-    // * the *matcher* — the part both paths actually share — does not gate
-    //   it;
-    // * the gate, effect-level and mode-driven, hands `full` the Allow this
-    //   fence implies;
-    // * the harness instead parks it, because #338's per-call judgement
-    //   fail-closes an undeclared non-read call — a layer the effect gate
-    //   does not have, and the reason the near-miss cannot live inside the
-    //   agreement loop above.
-    let fence_list: Vec<String> = fence.iter().map(|s| s.to_string()).collect();
-    assert!(
-        !crate::policy::always_approve::matches(&fence_list, "payroll.export"),
-        "the operator list must not gate the leading-segment near-miss"
-    );
-    assert!(matches!(
-        harness
-            .check(&request("payroll.export", serde_json::json!({})))
-            .await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
-    let near_miss_effect = Effect {
-        kind: "payroll.export".to_string(),
-        group: EffectGroup::Other,
-        amount_usd: None,
-        established_thread: false,
-        first_time_counterparty: false,
-        payload: serde_json::Value::Null,
-        agent: None,
-        run_id: None,
-    };
-    assert_eq!(
-        gate.evaluate(&CompanyId::new("acme"), &near_miss_effect)
-            .await
-            .unwrap(),
-        PolicyDecision::Allow
-    );
+    })
+    .await;
 }
 
 /// Issue #560's contract, stated as the operator reads it: the agent works
@@ -162,118 +165,121 @@ async fn both_approval_paths_agree_on_the_same_always_approve_list() {
 /// against `full` — which is precisely the mistake `auto` exists to avoid.
 #[tokio::test]
 async fn auto_runs_sandbox_writes_and_outward_reads_but_parks_anything_that_leaves() {
-    let p = policy("auto", &[], None);
+    in_cycle(async {
+        let p = policy("auto", &[], None);
 
-    // Runs unattended: the agent's own scratch space, this company's own
-    // memory, catalogue reads, and a read scoped to one connected account.
-    for (tool, args) in [
-        ("file_write", serde_json::json!({})),
-        ("edit", serde_json::json!({})),
-        ("apply_patch", serde_json::json!({})),
-        ("csv_export", serde_json::json!({})),
-        ("memory_store", serde_json::json!({})),
-        ("file_read", serde_json::json!({})),
-        ("mcp_list_tools", serde_json::json!({})),
-        ("composio_list_tools", serde_json::json!({})),
-        (
-            "composio_execute",
-            serde_json::json!({ "tool": "GITHUB_LIST_PULL_REQUESTS" }),
-        ),
-        (
-            "http_request",
-            serde_json::json!({ "method": "GET", "url": "https://api.example.com/items" }),
-        ),
-        (
-            "web_fetch",
-            serde_json::json!({ "url": "https://example.com/docs" }),
-        ),
-        // Issue #903: handing the finished work to the operator. It writes
-        // into the company's own workspace and artifact chain — no
-        // counterparty, no address — and the chain versions it, so the
-        // company can undo it alone. Parking it made every deliverable wait
-        // on a human; one 9-node pipeline run produced 15 such waits.
-        ("publish_artifact", serde_json::json!({})),
-    ] {
-        assert_eq!(
-            p.check(&request(tool, args)).await,
-            ToolPolicyDecision::Allow,
-            "{tool} should run unattended under auto — the tier is unusable if it interrupts \
+        // Runs unattended: the agent's own scratch space, this company's own
+        // memory, catalogue reads, and a read scoped to one connected account.
+        for (tool, args) in [
+            ("file_write", serde_json::json!({})),
+            ("edit", serde_json::json!({})),
+            ("apply_patch", serde_json::json!({})),
+            ("csv_export", serde_json::json!({})),
+            ("memory_store", serde_json::json!({})),
+            ("file_read", serde_json::json!({})),
+            ("mcp_list_tools", serde_json::json!({})),
+            ("composio_list_tools", serde_json::json!({})),
+            (
+                "composio_execute",
+                serde_json::json!({ "tool": "GITHUB_LIST_PULL_REQUESTS" }),
+            ),
+            (
+                "http_request",
+                serde_json::json!({ "method": "GET", "url": "https://api.example.com/items" }),
+            ),
+            (
+                "web_fetch",
+                serde_json::json!({ "url": "https://example.com/docs" }),
+            ),
+            // Issue #903: handing the finished work to the operator. It writes
+            // into the company's own workspace and artifact chain — no
+            // counterparty, no address — and the chain versions it, so the
+            // company can undo it alone. Parking it made every deliverable wait
+            // on a human; one 9-node pipeline run produced 15 such waits.
+            ("publish_artifact", serde_json::json!({})),
+        ] {
+            assert_eq!(
+                p.check(&request(tool, args)).await,
+                ToolPolicyDecision::Allow,
+                "{tool} should run unattended under auto — the tier is unusable if it interrupts \
              the agent's own work"
-        );
-    }
+            );
+        }
 
-    // Issue #903, the two ways an operator keeps a human on every hand-over.
-    // Both must survive the change above, or `auto` has quietly become the
-    // only tier and the choice is gone.
-    assert!(
-        matches!(
-            policy("supervised", &[], None)
-                .check(&request("publish_artifact", serde_json::json!({})))
-                .await,
-            ToolPolicyDecision::RequireApproval { .. }
-        ),
-        "a supervised desk must still see a publish before it lands"
-    );
-    assert!(
-        matches!(
-            policy("auto", &["publish_artifact"], None)
-                .check(&request("publish_artifact", serde_json::json!({})))
-                .await,
-            ToolPolicyDecision::RequireApproval { .. }
-        ),
-        "always_approve names it, and always_approve wins over every tier"
-    );
-
-    // Still parks: arbitrary code, arbitrary addresses, a configured remote,
-    // operator-authored guidance, third-party effects, real money on submit,
-    // and a workflow whose contents this layer cannot see.
-    for (tool, args) in [
-        ("shell", serde_json::json!({})),
-        (
-            "http_request",
-            serde_json::json!({ "method": "POST", "url": "https://api.example.com/items" }),
-        ),
-        // `curl` always streams its response to a file under the
-        // workspace `downloads/` dir (`CurlTool::execute`), unlike
-        // `web_fetch`/read-shaped `http_request` — so a readable host
-        // must not exempt it from parking.
-        (
-            "curl",
-            serde_json::json!({ "url": "https://example.com/data.json" }),
-        ),
-        ("git_operations", serde_json::json!({})),
-        ("workspace_write", serde_json::json!({})),
-        ("workspace_create", serde_json::json!({})),
-        ("workspace_delete", serde_json::json!({})),
-        ("workspace_rename", serde_json::json!({})),
-        ("media_generate_image", serde_json::json!({})),
-        ("media_generate_video", serde_json::json!({})),
-        ("mcp_call_tool", serde_json::json!({})),
-        ("mcp_registry_tool_call", serde_json::json!({})),
-        ("run_workflow", serde_json::json!({})),
-        ("composio_authorize", serde_json::json!({})),
-        (
-            "composio_execute",
-            serde_json::json!({ "tool": "GMAIL_SEND_EMAIL" }),
-        ),
-        // An action the provider catalogue does not name is a send, so the
-        // cautious verdict survives into the new tier rather than being
-        // re-decided by it.
-        (
-            "composio_execute",
-            serde_json::json!({ "tool": "GITHUB_INVENT_A_NEW_VERB" }),
-        ),
-        // A tool nobody has declared must not run unattended by omission.
-        ("some_tool_nobody_declared", serde_json::json!({})),
-    ] {
+        // Issue #903, the two ways an operator keeps a human on every hand-over.
+        // Both must survive the change above, or `auto` has quietly become the
+        // only tier and the choice is gone.
         assert!(
             matches!(
-                p.check(&request(tool, args)).await,
+                policy("supervised", &[], None)
+                    .check(&request("publish_artifact", serde_json::json!({})))
+                    .await,
                 ToolPolicyDecision::RequireApproval { .. }
             ),
-            "{tool} leaves the company or spends money and must still park under auto"
+            "a supervised desk must still see a publish before it lands"
         );
-    }
+        assert!(
+            matches!(
+                policy("auto", &["publish_artifact"], None)
+                    .check(&request("publish_artifact", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "always_approve names it, and always_approve wins over every tier"
+        );
+
+        // Still parks: arbitrary code, arbitrary addresses, a configured remote,
+        // operator-authored guidance, third-party effects, real money on submit,
+        // and a workflow whose contents this layer cannot see.
+        for (tool, args) in [
+            ("shell", serde_json::json!({})),
+            (
+                "http_request",
+                serde_json::json!({ "method": "POST", "url": "https://api.example.com/items" }),
+            ),
+            // `curl` always streams its response to a file under the
+            // workspace `downloads/` dir (`CurlTool::execute`), unlike
+            // `web_fetch`/read-shaped `http_request` — so a readable host
+            // must not exempt it from parking.
+            (
+                "curl",
+                serde_json::json!({ "url": "https://example.com/data.json" }),
+            ),
+            ("git_operations", serde_json::json!({})),
+            ("workspace_write", serde_json::json!({})),
+            ("workspace_create", serde_json::json!({})),
+            ("workspace_delete", serde_json::json!({})),
+            ("workspace_rename", serde_json::json!({})),
+            ("media_generate_image", serde_json::json!({})),
+            ("media_generate_video", serde_json::json!({})),
+            ("mcp_call_tool", serde_json::json!({})),
+            ("mcp_registry_tool_call", serde_json::json!({})),
+            ("run_workflow", serde_json::json!({})),
+            ("composio_authorize", serde_json::json!({})),
+            (
+                "composio_execute",
+                serde_json::json!({ "tool": "GMAIL_SEND_EMAIL" }),
+            ),
+            // An action the provider catalogue does not name is a send, so the
+            // cautious verdict survives into the new tier rather than being
+            // re-decided by it.
+            (
+                "composio_execute",
+                serde_json::json!({ "tool": "GITHUB_INVENT_A_NEW_VERB" }),
+            ),
+            // A tool nobody has declared must not run unattended by omission.
+            ("some_tool_nobody_declared", serde_json::json!({})),
+        ] {
+            assert!(
+                matches!(
+                    p.check(&request(tool, args)).await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "{tool} leaves the company or spends money and must still park under auto"
+            );
+        }
+    })
+    .await;
 }
 
 /// **Codex review finding on PR #2140 (`3952368155`).** `full` autonomy is
@@ -451,70 +457,71 @@ async fn auto_approve_under_usd_still_refuses_a_consequential_call_while_stopped
 /// the classifier) puts the first two `Allow`s back to `RequireApproval`.
 #[tokio::test]
 async fn auto_runs_a_server_declared_read_only_mcp_call_but_parks_the_rest() {
-    let reads = crate::policy::McpReadSet::from_pairs([
-        ("jira".to_string(), "get_issue".to_string()),
-        ("registry-42".to_string(), "list_rows".to_string()),
-    ]);
-    let p = policy("auto", &[], None).with_mcp_reads(reads);
+    in_cycle(async {
+        let reads = crate::policy::McpReadSet::from_pairs([
+            ("jira".to_string(), "get_issue".to_string()),
+            ("registry-42".to_string(), "list_rows".to_string()),
+        ]);
+        let p = policy("auto", &[], None).with_mcp_reads(reads);
 
-    // The declared read on each bridge tool runs unattended.
-    for (tool, args) in [
-        (
-            "mcp_call_tool",
-            serde_json::json!({ "server": "jira", "tool": "get_issue", "arguments": {} }),
-        ),
-        (
-            "mcp_registry_tool_call",
-            serde_json::json!({
-                "server_id": "registry-42",
-                "tool_name": "list_rows",
-                "arguments": {},
-            }),
-        ),
-    ] {
-        assert_eq!(
-            p.check(&request(tool, args)).await,
-            ToolPolicyDecision::Allow,
-            "{tool} names a server-declared read and must run unattended under auto"
-        );
-    }
+        // The declared read on each bridge tool runs unattended.
+        for (tool, args) in [
+            (
+                "mcp_call_tool",
+                serde_json::json!({ "server": "jira", "tool": "get_issue", "arguments": {} }),
+            ),
+            (
+                "mcp_registry_tool_call",
+                serde_json::json!({
+                    "server_id": "registry-42",
+                    "tool_name": "list_rows",
+                    "arguments": {},
+                }),
+            ),
+        ] {
+            assert_eq!(
+                p.check(&request(tool, args)).await,
+                ToolPolicyDecision::Allow,
+                "{tool} names a server-declared read and must run unattended under auto"
+            );
+        }
 
-    // Everything else through the same policy still parks: a write on the
-    // declared server, a read on an undeclared server, and a bridge call the
-    // gate cannot read the (server, tool) pair from.
-    for (tool, args) in [
-        (
-            "mcp_call_tool",
-            serde_json::json!({ "server": "jira", "tool": "create_issue", "arguments": {} }),
-        ),
-        (
-            "mcp_call_tool",
-            serde_json::json!({ "server": "confluence", "tool": "get_issue", "arguments": {} }),
-        ),
-        (
-            "mcp_registry_tool_call",
-            serde_json::json!({
-                "server_id": "registry-42",
-                "tool_name": "write_row",
-                "arguments": {},
-            }),
-        ),
-        ("mcp_call_tool", serde_json::json!({})),
-    ] {
+        // Everything else through the same policy still parks: a write on the
+        // declared server, a read on an undeclared server, and a bridge call the
+        // gate cannot read the (server, tool) pair from.
+        for (tool, args) in [
+            (
+                "mcp_call_tool",
+                serde_json::json!({ "server": "jira", "tool": "create_issue", "arguments": {} }),
+            ),
+            (
+                "mcp_call_tool",
+                serde_json::json!({ "server": "confluence", "tool": "get_issue", "arguments": {} }),
+            ),
+            (
+                "mcp_registry_tool_call",
+                serde_json::json!({
+                    "server_id": "registry-42",
+                    "tool_name": "write_row",
+                    "arguments": {},
+                }),
+            ),
+            ("mcp_call_tool", serde_json::json!({})),
+        ] {
+            assert!(
+                matches!(
+                    p.check(&request(tool, args)).await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "{tool} is not an affirmatively-declared read and must still park under auto"
+            );
+        }
+
+        // And with NO declaration — the default at every non-harness site — even
+        // the declared pair parks, exactly as it did before this issue.
+        let no_reads = policy("auto", &[], None);
         assert!(
             matches!(
-                p.check(&request(tool, args)).await,
-                ToolPolicyDecision::RequireApproval { .. }
-            ),
-            "{tool} is not an affirmatively-declared read and must still park under auto"
-        );
-    }
-
-    // And with NO declaration — the default at every non-harness site — even
-    // the declared pair parks, exactly as it did before this issue.
-    let no_reads = policy("auto", &[], None);
-    assert!(
-        matches!(
             no_reads
                 .check(&request(
                     "mcp_call_tool",
@@ -523,8 +530,10 @@ async fn auto_runs_a_server_declared_read_only_mcp_call_but_parks_the_rest() {
                 .await,
             ToolPolicyDecision::RequireApproval { .. }
         ),
-        "a policy with no read declaration must gate every bridge call, as before #1124"
-    );
+            "a policy with no read declaration must gate every bridge call, as before #1124"
+        );
+    })
+    .await;
 }
 
 /// `always_approve` wins over `auto` exactly as it wins over `full`, and the
@@ -536,73 +545,82 @@ async fn auto_runs_a_server_declared_read_only_mcp_call_but_parks_the_rest() {
 /// neighbouring line, not by getting its own arm wrong.
 #[tokio::test]
 async fn auto_yields_to_always_approve_and_leaves_the_lower_tiers_alone() {
-    let auto = policy("auto", &["file_write"], None);
-    assert!(
-        matches!(
-            auto.check(&request("file_write", serde_json::json!({})))
+    in_cycle(async {
+        let auto = policy("auto", &["file_write"], None);
+        assert!(
+            matches!(
+                auto.check(&request("file_write", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "a tool on the always-approve list must park even though auto would otherwise run it"
+        );
+
+        // `readonly` still denies a sandbox write outright rather than parking
+        // it, and still allows a pure read.
+        let readonly = policy("readonly", &[], None);
+        assert!(matches!(
+            readonly
+                .check(&request("file_write", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::Deny { .. }
+        ));
+        assert_eq!(
+            readonly
+                .check(&request("file_read", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::Allow
+        );
+
+        // `supervised` still parks the sandbox write `auto` now runs — the one
+        // difference between the tiers, asserted as a difference.
+        let supervised = policy("supervised", &[], None);
+        assert!(matches!(
+            supervised
+                .check(&request("file_write", serde_json::json!({})))
                 .await,
             ToolPolicyDecision::RequireApproval { .. }
-        ),
-        "a tool on the always-approve list must park even though auto would otherwise run it"
-    );
-
-    // `readonly` still denies a sandbox write outright rather than parking
-    // it, and still allows a pure read.
-    let readonly = policy("readonly", &[], None);
-    assert!(matches!(
-        readonly
-            .check(&request("file_write", serde_json::json!({})))
-            .await,
-        ToolPolicyDecision::Deny { .. }
-    ));
-    assert_eq!(
-        readonly
-            .check(&request("file_read", serde_json::json!({})))
-            .await,
-        ToolPolicyDecision::Allow
-    );
-
-    // `supervised` still parks the sandbox write `auto` now runs — the one
-    // difference between the tiers, asserted as a difference.
-    let supervised = policy("supervised", &[], None);
-    assert!(matches!(
-        supervised
-            .check(&request("file_write", serde_json::json!({})))
-            .await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
+        ));
+    })
+    .await;
 }
 
 #[tokio::test]
 async fn supervised_requires_approval_for_external_effects() {
-    let p = policy("supervised", &[], None);
-    assert!(matches!(
-        p.check(&request("send_email", serde_json::json!({}))).await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
-    assert_eq!(
-        p.check(&request("read_file", serde_json::json!({}))).await,
-        ToolPolicyDecision::Allow
-    );
+    in_cycle(async {
+        let p = policy("supervised", &[], None);
+        assert!(matches!(
+            p.check(&request("send_email", serde_json::json!({}))).await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+        assert_eq!(
+            p.check(&request("read_file", serde_json::json!({}))).await,
+            ToolPolicyDecision::Allow
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
 async fn supervised_parks_mcp_tool_calls_as_external_other_effects() {
-    let p = policy("supervised", &[], None);
-    let args = serde_json::json!({
-        "server_id": "server-1",
-        "tool_name": "echo",
-        "arguments": {"text": "hello"}
-    });
-    assert!(matches!(
-        p.check(&request("mcp_registry_tool_call", args.clone()))
-            .await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
-    assert_eq!(
-        p.effect_for("mcp_registry_tool_call", &args).group,
-        EffectGroup::Other
-    );
+    in_cycle(async {
+        let p = policy("supervised", &[], None);
+        let args = serde_json::json!({
+            "server_id": "server-1",
+            "tool_name": "echo",
+            "arguments": {"text": "hello"}
+        });
+        assert!(matches!(
+            p.check(&request("mcp_registry_tool_call", args.clone()))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+        assert_eq!(
+            p.effect_for("mcp_registry_tool_call", &args).group,
+            EffectGroup::Other
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -621,25 +639,28 @@ async fn readonly_denies_mutations_allows_reads() {
 
 #[tokio::test]
 async fn auto_approve_under_threshold_allows_small_spends() {
-    let p = policy("supervised", &[], Some(5.0));
-    // $3 spend is under the $5 threshold → allowed even though it's external.
-    assert_eq!(
-        p.check(&request(
-            "pay_invoice",
-            serde_json::json!({ "amount_usd": 3.0 })
-        ))
-        .await,
-        ToolPolicyDecision::Allow
-    );
-    // $9 spend exceeds the threshold → requires approval.
-    assert!(matches!(
-        p.check(&request(
-            "pay_invoice",
-            serde_json::json!({ "amount_usd": 9.0 })
-        ))
-        .await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
+    in_cycle(async {
+        let p = policy("supervised", &[], Some(5.0));
+        // $3 spend is under the $5 threshold → allowed even though it's external.
+        assert_eq!(
+            p.check(&request(
+                "pay_invoice",
+                serde_json::json!({ "amount_usd": 3.0 })
+            ))
+            .await,
+            ToolPolicyDecision::Allow
+        );
+        // $9 spend exceeds the threshold → requires approval.
+        assert!(matches!(
+            p.check(&request(
+                "pay_invoice",
+                serde_json::json!({ "amount_usd": 9.0 })
+            ))
+            .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+    })
+    .await;
 }
 
 /// Media generation (issue #109): the paid `media_generate_*` tools park
@@ -647,48 +668,51 @@ async fn auto_approve_under_threshold_allows_small_spends() {
 /// the read-only `media_list_models` catalog GET is always allowed.
 #[tokio::test]
 async fn media_generate_parks_supervised_and_denies_readonly_but_list_is_read_only() {
-    let supervised = policy("supervised", &[], None);
-    for tool in ["media_generate_image", "media_generate_video"] {
-        assert!(
-            matches!(
-                supervised
-                    .check(&request(tool, serde_json::json!({})))
-                    .await,
-                ToolPolicyDecision::RequireApproval { .. }
-            ),
-            "{tool} must park under supervised"
-        );
-    }
-    let explicit_staging = policy("full", &[], None).with_policy_hitl_disabled();
-    assert!(matches!(
-        explicit_staging
-            .check(&request("media_generate_image", serde_json::json!({})))
-            .await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
-    // The catalog GET is read-only — allowed even under supervised.
-    assert_eq!(
-        supervised
-            .check(&request("media_list_models", serde_json::json!({})))
-            .await,
-        ToolPolicyDecision::Allow
-    );
-
-    let readonly = policy("readonly", &[], None);
-    assert!(
-        matches!(
-            readonly
+    in_cycle(async {
+        let supervised = policy("supervised", &[], None);
+        for tool in ["media_generate_image", "media_generate_video"] {
+            assert!(
+                matches!(
+                    supervised
+                        .check(&request(tool, serde_json::json!({})))
+                        .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "{tool} must park under supervised"
+            );
+        }
+        let explicit_staging = policy("full", &[], None).with_policy_hitl_disabled();
+        assert!(matches!(
+            explicit_staging
                 .check(&request("media_generate_image", serde_json::json!({})))
                 .await,
-            ToolPolicyDecision::Deny { .. }
-        ),
-        "media_generate must be denied under readonly"
-    );
-    // Even a read-only desk can list the model catalog.
-    assert_eq!(
-        readonly
-            .check(&request("media_list_models", serde_json::json!({})))
-            .await,
-        ToolPolicyDecision::Allow
-    );
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+        // The catalog GET is read-only — allowed even under supervised.
+        assert_eq!(
+            supervised
+                .check(&request("media_list_models", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::Allow
+        );
+
+        let readonly = policy("readonly", &[], None);
+        assert!(
+            matches!(
+                readonly
+                    .check(&request("media_generate_image", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "media_generate must be denied under readonly"
+        );
+        // Even a read-only desk can list the model catalog.
+        assert_eq!(
+            readonly
+                .check(&request("media_list_models", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::Allow
+        );
+    })
+    .await;
 }

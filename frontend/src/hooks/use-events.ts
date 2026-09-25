@@ -38,6 +38,21 @@ export type CompanyStreamEvent =
       agentId: string;
       text: string;
       /**
+       * The episode this row belongs to, when it belongs to one.
+       *
+       * The episode fold drops a frame that names no episode, so without this
+       * a row in a pair channel — a line of an exchange two seats are having —
+       * never reaches it, and the indicator can only ever say that an
+       * exchange opened.
+       */
+      episodeId?: string;
+      /**
+       * What the row committed (`ask`, `complete_episode`, `dm`, ...), on an
+       * episode row. The fold skips a `dm`: it is the conductor concluding an
+       * exchange, threaded under the ask, and restates the askee's last line.
+       */
+      utteranceKind?: string;
+      /**
        * The body as the model wrote it — see {@link AgentReplyEvent.cueText}.
        * Declared here as well as on the callback payload because this arm
        * rebuilds that payload field by field: a field the host sends and this
@@ -525,6 +540,40 @@ export type CompanyStreamEvent =
       actions?: unknown[];
     }
   | {
+      /** One seat opened a private conversation with another.
+       *
+       *  A **reference**: it carries no text. The question and the answer are
+       *  in `conversationId`, and this says two seats are talking and where,
+       *  so the indicator can be raised from the desk's own stream rather
+       *  than by watching every pair channel for one to start. */
+      type: "conversation_opened";
+      seq: number;
+      atMillis: number;
+      chatId: string;
+      episodeId: string;
+      /** The channel the exchange itself is written to. */
+      conversationId: string;
+      /** The `ask` row it is rooted at. */
+      root: number;
+      asker: string;
+      askee: string;
+    }
+  | {
+      /** The conversation ended — the other half of the reference. */
+      type: "conversation_concluded";
+      seq: number;
+      atMillis: number;
+      chatId: string;
+      episodeId: string;
+      conversationId: string;
+      root: number;
+      asker: string;
+      askee: string;
+      /** Ended without an answer: nothing was due, or it ran out of turns.
+       *  An indicator that only watched for an answer would hang here. */
+      forced: boolean;
+    }
+  | {
       type: "broadcast_routed";
       seq: number;
       atMillis: number;
@@ -561,6 +610,28 @@ export type CompanyStreamEvent =
       reason: EpisodeCompletionReason | string;
       /** The reply that closed it, when `complete_episode` carried one. */
       summarySeq?: number;
+    }
+  | {
+      /** A seat parked on an approval: it asked the operator, or made a gated
+       *  call, and the episode waits for the decision. */
+      type: "episode_seat_parked";
+      seq: number;
+      atMillis: number;
+      chatId: string;
+      episodeId: string;
+      seat: string;
+      /** The conversation root the seat was in; absent on the desk itself. */
+      thread?: number;
+      approvalIds: string[];
+    }
+  | {
+      /** The parked seat was released and its turn goes on. */
+      type: "episode_seat_resumed";
+      seq: number;
+      atMillis: number;
+      chatId: string;
+      episodeId: string;
+      seat: string;
     }
   | {
       type:
@@ -760,7 +831,16 @@ export type EpisodeFrame = Extract<
       | "round_committed"
       | "broadcast_routed"
       | "dm_delivered"
+      | "conversation_opened"
+      | "conversation_concluded"
       | "episode_completed"
+      | "episode_seat_parked"
+      | "episode_seat_resumed"
+      // Not an episode frame as such -- it is the transcript's own row, and
+      // the fold ignores every one on a desk. It is here for the pair
+      // channels: an a2a exchange is written there, the desk never shows it,
+      // and this is the only way its lines reach the indicator while it runs.
+      | "agent_reply"
       | "referral";
   }
 >;
@@ -1583,7 +1663,16 @@ export function handleEvent(
     case "round_committed":
     case "broadcast_routed":
     case "dm_delivered":
+    // The a2a pair. Easy to miss because the conversation's own rows are in
+    // the pair channel and never reach this desk's stream: these two
+    // references are the ONLY thing that tells the desk an exchange happened,
+    // so without an arm here the indicator has no input at all and the fold
+    // sees an episode that never talked to itself.
+    case "conversation_opened":
+    case "conversation_concluded":
     case "episode_completed":
+    case "episode_seat_parked":
+    case "episode_seat_resumed":
       onEpisodeEvent?.(event);
       break;
     // The chat turn bracket (issue #983). Silent, and routed to its own
@@ -1625,6 +1714,10 @@ export function handleEvent(
       onWorkspaceEvent?.(event);
       break;
     case "agent_reply":
+      // Also to the episode fold: a row in a pair channel is a line of an
+      // exchange two seats are having, and nothing else on this stream
+      // carries one. The fold drops every desk row it sees.
+      onEpisodeEvent?.(event);
       onAgentReply?.({
         chatId: event.chatId,
         agentId: event.agentId,

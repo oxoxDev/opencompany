@@ -163,6 +163,39 @@ pub(crate) fn agent_effective_grants(
     dedup(grants)
 }
 
+/// One agent's effective skill scope: its own `skills` narrowed against the
+/// company's enabled set, or that whole set when the agent lists none.
+///
+/// The same three states [`agent_effective_grants`] resolves, over skill slugs:
+/// absent inherits every enabled skill, an explicit empty list is a deliberate
+/// no-skills scope, and a list narrows.
+///
+/// Compiled in **every** build for the reason [`agent_effective_grants`] gives:
+/// the harness materializes from this and the agent detail route reports from
+/// it, and two derivations would let the console advertise a skill the harness
+/// never writes.
+///
+/// Entries match **exactly**. A tool glob selects a namespace with real
+/// hierarchy; a slug is a flat identifier, so a prefix would silently reach a
+/// skill installed after the scope was written. Filtering the enabled set rather
+/// than the request is what makes this narrow-only: a slug the company has not
+/// enabled — or has disabled — cannot survive, however it was spelled.
+pub(crate) fn agent_effective_skills(
+    company_enabled: &[String],
+    agent_skills: Option<&[String]>,
+) -> Vec<String> {
+    let scoped: Vec<String> = match agent_skills {
+        None => company_enabled.to_vec(),
+        Some([]) => Vec::new(),
+        Some(slugs) => company_enabled
+            .iter()
+            .filter(|enabled| slugs.iter().any(|want| want == *enabled))
+            .cloned()
+            .collect(),
+    };
+    dedup(scoped)
+}
+
 /// One agent's effective grants under the **three-level** narrowing
 /// `[tools].allow ∩ desk.tools ∩ [[agent]].tools`.
 ///
@@ -3481,6 +3514,15 @@ impl RuntimeBuilder {
                                     crate::harness::policy::ApprovalRequestQueue::with_grants(
                                         grants.clone(),
                                     ),
+                                approval_parker: Some(
+                                    crate::runtime::approval_park::ApprovalParker::new(
+                                        gate.clone(),
+                                        journal.clone(),
+                                        grants.clone(),
+                                        continuations.clone(),
+                                        events.clone(),
+                                    ),
+                                ),
                                 secrets: Some(secrets.clone()),
                                 // Cell A: the `web` toolbelt SSRF allowlist.
                                 // Domains come straight from the manifest.
@@ -3618,6 +3660,8 @@ impl RuntimeBuilder {
                                         // for a blocked agent node so the resolve
                                         // path can find the run to re-dispatch.
                                         blocked_nodes: blocked_nodes.clone(),
+                                        grants: grants.clone(),
+                                        events: events.clone(),
                                     }),
                                     // Issue #529: the same journal the runner
                                     // writes its start/per-node trail to, so a
@@ -4863,3 +4907,6 @@ mod tests_scoped_grants;
 #[cfg(test)]
 #[path = "builder_tests_seed_cards.rs"]
 mod tests_seed_cards;
+#[cfg(test)]
+#[path = "builder_tests_skill_scope.rs"]
+mod tests_skill_scope;

@@ -299,6 +299,7 @@ fn build_brain(
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -452,6 +453,7 @@ async fn an_overlay_teammate_added_at_runtime_writes_on_its_first_turn() {
         role: "Analyst".to_string(),
         description: Some("Reads the numbers.".to_string()),
         tools: None,
+        skills: None,
         model: None,
         harness: None,
     };

@@ -156,16 +156,19 @@ async fn s2_deflection_fails_closed_when_url_is_not_a_string() {
 /// arm, since with nothing connected the arm has nothing to deny it for.
 #[tokio::test]
 async fn s2_missing_url_passes_through_with_no_connected_toolkits() {
-    for tool in ["http_request", "curl", "web_fetch"] {
-        let decision = full_with_connected(&[])
-            .check(&request(tool, serde_json::json!({ "method": "GET" })))
-            .await;
-        assert!(
-            !matches!(decision, ToolPolicyDecision::Deny { .. }),
-            "with nothing connected, a missing `url` on `{tool}` must not be denied by this \
+    in_cycle(async {
+        for tool in ["http_request", "curl", "web_fetch"] {
+            let decision = full_with_connected(&[])
+                .check(&request(tool, serde_json::json!({ "method": "GET" })))
+                .await;
+            assert!(
+                !matches!(decision, ToolPolicyDecision::Deny { .. }),
+                "with nothing connected, a missing `url` on `{tool}` must not be denied by this \
              arm: {decision:?}"
-        );
-    }
+            );
+        }
+    })
+    .await;
 }
 
 /// STATE-axis (TOOL-003): the "connected" state a company record supplies
@@ -313,29 +316,35 @@ use crate::harness::built_in::run_origin::{DispatchSource, RunOrigin, claim};
 
 #[tokio::test]
 async fn an_unlabelled_turn_decides_exactly_as_before() {
-    let p = policy("supervised", &[], None).with_agent("ops");
-    assert!(
-        matches!(
-            p.check(&request("file_write", serde_json::json!({}))).await,
-            ToolPolicyDecision::RequireApproval { .. }
-        ),
-        "no origin was scoped, so this must park exactly as it did before #2150"
-    );
+    in_cycle(async {
+        let p = policy("supervised", &[], None).with_agent("ops");
+        assert!(
+            matches!(
+                p.check(&request("file_write", serde_json::json!({}))).await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "no origin was scoped, so this must park exactly as it did before #2150"
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
 async fn an_operator_origin_decides_the_same_as_unlabelled() {
-    let p = policy("supervised", &[], None).with_agent("ops");
-    let origin = claim(RunOrigin::Operator);
-    assert!(
-        matches!(
-            origin
-                .scoped(p.check(&request("file_write", serde_json::json!({}))))
-                .await,
-            ToolPolicyDecision::RequireApproval { .. }
-        ),
-        "a live operator turn earns no trust from this arm — only `Dispatched` does"
-    );
+    in_cycle(async {
+        let p = policy("supervised", &[], None).with_agent("ops");
+        let origin = claim(RunOrigin::Operator);
+        assert!(
+            matches!(
+                origin
+                    .scoped(p.check(&request("file_write", serde_json::json!({}))))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "a live operator turn earns no trust from this arm — only `Dispatched` does"
+        );
+    })
+    .await;
 }
 
 /// The headline case: a call an operator could already have granted
@@ -383,24 +392,27 @@ async fn a_dispatched_run_admits_a_grantable_call_with_no_approval_row() {
 /// pass without exercising the admission path.
 #[tokio::test]
 async fn the_consequence_floor_outranks_a_trusted_dispatch() {
-    let queue = ApprovalRequestQueue::default();
-    let p = policy("supervised", &[], None)
-        .with_requests(queue.clone())
-        .with_agent("ops");
-    let origin = dispatched("ops");
-    let spend = serde_json::json!({ "amount_usd": 500.0 });
-    assert!(
-        matches!(
-            origin.scoped(p.check(&request("file_write", spend))).await,
-            ToolPolicyDecision::RequireApproval { .. }
-        ),
-        "a dispatched run carrying money must reach a person, whatever the tool's standing"
-    );
-    assert_eq!(
-        queue.queued(),
-        1,
-        "and it must raise exactly one approval row for them to answer"
-    );
+    in_cycle(async {
+        let queue = ApprovalRequestQueue::default();
+        let p = policy("supervised", &[], None)
+            .with_requests(queue.clone())
+            .with_agent("ops");
+        let origin = dispatched("ops");
+        let spend = serde_json::json!({ "amount_usd": 500.0 });
+        assert!(
+            matches!(
+                origin.scoped(p.check(&request("file_write", spend))).await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "a dispatched run carrying money must reach a person, whatever the tool's standing"
+        );
+        assert_eq!(
+            queue.queued(),
+            1,
+            "and it must raise exactly one approval row for them to answer"
+        );
+    })
+    .await;
 }
 
 /// The same run, calling a `Standing::PerCall` tool, still raises exactly
@@ -408,21 +420,24 @@ async fn the_consequence_floor_outranks_a_trusted_dispatch() {
 /// over ahead of time.
 #[tokio::test]
 async fn a_dispatched_run_still_parks_a_percall_send() {
-    let queue = ApprovalRequestQueue::default();
-    let p = policy("supervised", &[], None)
-        .with_requests(queue.clone())
-        .with_agent("ops");
-    let origin = dispatched("ops");
-    assert!(
-        matches!(
-            origin
-                .scoped(p.check(&request("composio_execute", composio_send_args())))
-                .await,
-            ToolPolicyDecision::RequireApproval { .. }
-        ),
-        "a send is `Standing::PerCall` — nothing here for a dispatch to have earned"
-    );
-    assert_eq!(queue.queued(), 1, "exactly one approval row for the send");
+    in_cycle(async {
+        let queue = ApprovalRequestQueue::default();
+        let p = policy("supervised", &[], None)
+            .with_requests(queue.clone())
+            .with_agent("ops");
+        let origin = dispatched("ops");
+        assert!(
+            matches!(
+                origin
+                    .scoped(p.check(&request("composio_execute", composio_send_args())))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "a send is `Standing::PerCall` — nothing here for a dispatch to have earned"
+        );
+        assert_eq!(queue.queued(), 1, "exactly one approval row for the send");
+    })
+    .await;
 }
 
 /// Delegation must not be a privilege-escalation primitive: an origin
@@ -431,17 +446,20 @@ async fn a_dispatched_run_still_parks_a_percall_send() {
 /// same-task inheritance `run_origin`'s own tests cover).
 #[tokio::test]
 async fn a_mismatched_agent_does_not_admit() {
-    let p = policy("supervised", &[], None).with_agent("marketing");
-    let origin = dispatched("ops");
-    assert!(
-        matches!(
-            origin
-                .scoped(p.check(&request("file_write", serde_json::json!({}))))
-                .await,
-            ToolPolicyDecision::RequireApproval { .. }
-        ),
-        "the dispatch named `ops`; a different agent's policy must not be trusted by it"
-    );
+    in_cycle(async {
+        let p = policy("supervised", &[], None).with_agent("marketing");
+        let origin = dispatched("ops");
+        assert!(
+            matches!(
+                origin
+                    .scoped(p.check(&request("file_write", serde_json::json!({}))))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "the dispatch named `ops`; a different agent's policy must not be trusted by it"
+        );
+    })
+    .await;
 }
 
 /// Issue #674's split, reasserted at the constructor: `judge` is silent on
@@ -449,19 +467,22 @@ async fn a_mismatched_agent_does_not_admit() {
 /// remove the ceiling `always_approve` still leaves on that path.
 #[tokio::test]
 async fn the_arm_never_fires_for_an_authored_workflow_node() {
-    let p = policy("supervised", &[], None)
-        .with_agent("ops")
-        .for_authored_workflow_nodes();
-    let origin = dispatched("ops");
-    assert!(
-        matches!(
-            origin
-                .scoped(p.check(&request("file_write", serde_json::json!({}))))
-                .await,
-            ToolPolicyDecision::RequireApproval { .. }
-        ),
-        "an authored node must never be admitted by this arm, whatever the origin says"
-    );
+    in_cycle(async {
+        let p = policy("supervised", &[], None)
+            .with_agent("ops")
+            .for_authored_workflow_nodes();
+        let origin = dispatched("ops");
+        assert!(
+            matches!(
+                origin
+                    .scoped(p.check(&request("file_write", serde_json::json!({}))))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "an authored node must never be admitted by this arm, whatever the origin says"
+        );
+    })
+    .await;
 }
 
 /// `shell` is `Standing::PerCall` (arbitrary code, unbounded reach) and an
@@ -469,19 +490,22 @@ async fn the_arm_never_fires_for_an_authored_workflow_node() {
 /// by omission) — both stop for a human whatever this run's origin says.
 #[tokio::test]
 async fn shell_and_an_undeclared_tool_still_park_under_a_dispatched_origin() {
-    let p = policy("supervised", &[], None).with_agent("ops");
-    for tool in ["shell", "some_tool_nobody_declared"] {
-        let origin = dispatched("ops");
-        assert!(
-            matches!(
-                origin
-                    .scoped(p.check(&request(tool, serde_json::json!({}))))
-                    .await,
-                ToolPolicyDecision::RequireApproval { .. }
-            ),
-            "`{tool}` must still park inside a dispatched run"
-        );
-    }
+    in_cycle(async {
+        let p = policy("supervised", &[], None).with_agent("ops");
+        for tool in ["shell", "some_tool_nobody_declared"] {
+            let origin = dispatched("ops");
+            assert!(
+                matches!(
+                    origin
+                        .scoped(p.check(&request(tool, serde_json::json!({}))))
+                        .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "`{tool}` must still park inside a dispatched run"
+            );
+        }
+    })
+    .await;
 }
 
 /// The consequence floor (issue #1817's own arm) outranks a trusted
@@ -585,66 +609,69 @@ async fn an_underivable_scope_refuses_rather_than_admits() {
 /// spend cap, and a standing deny.
 #[tokio::test]
 async fn a_dispatched_origin_does_not_bypass_the_arms_above_the_mode_dispatch() {
-    // `readonly` denies an external effect before any grant or origin is
-    // consulted.
-    let p = policy("readonly", &[], None).with_agent("ops");
-    assert!(
-        matches!(
-            dispatched("ops")
-                .scoped(p.check(&request("file_write", serde_json::json!({}))))
-                .await,
-            ToolPolicyDecision::Deny { .. }
-        ),
-        "readonly must still deny, dispatched origin or not"
-    );
+    in_cycle(async {
+        // `readonly` denies an external effect before any grant or origin is
+        // consulted.
+        let p = policy("readonly", &[], None).with_agent("ops");
+        assert!(
+            matches!(
+                dispatched("ops")
+                    .scoped(p.check(&request("file_write", serde_json::json!({}))))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "readonly must still deny, dispatched origin or not"
+        );
 
-    // `always_approve` wins over every tier, `full` included.
-    let p = policy("full", &["file_write"], None).with_agent("ops");
-    assert!(
-        matches!(
-            dispatched("ops")
-                .scoped(p.check(&request("file_write", serde_json::json!({}))))
-                .await,
-            ToolPolicyDecision::RequireApproval { .. }
-        ),
-        "always_approve must still park under full, dispatched origin or not"
-    );
+        // `always_approve` wins over every tier, `full` included.
+        let p = policy("full", &["file_write"], None).with_agent("ops");
+        assert!(
+            matches!(
+                dispatched("ops")
+                    .scoped(p.check(&request("file_write", serde_json::json!({}))))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "always_approve must still park under full, dispatched origin or not"
+        );
 
-    // The per-agent daily cap parks a priced call once the agent is out of
-    // budget, above the tier dispatch entirely.
-    let meter = FixedMeter::with(vec![spend_sample("ops", 5.00, today())]);
-    let (capped, _) = capped_policy("supervised", None, 5.0, "ops", meter);
-    assert!(
-        matches!(
-            dispatched("ops")
-                .scoped(capped.check(&request(
-                    "web_search",
-                    serde_json::json!({ "query": "acme pricing" })
-                )))
-                .await,
-            ToolPolicyDecision::RequireApproval { .. }
-        ),
-        "the daily cap must still park at cap, dispatched origin or not"
-    );
+        // The per-agent daily cap parks a priced call once the agent is out of
+        // budget, above the tier dispatch entirely.
+        let meter = FixedMeter::with(vec![spend_sample("ops", 5.00, today())]);
+        let (capped, _) = capped_policy("supervised", None, 5.0, "ops", meter);
+        assert!(
+            matches!(
+                dispatched("ops")
+                    .scoped(capped.check(&request(
+                        "web_search",
+                        serde_json::json!({ "query": "acme pricing" })
+                    )))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "the daily cap must still park at cap, dispatched origin or not"
+        );
 
-    // A standing deny is a company saying "not this", which a run's own
-    // origin cannot override.
-    let (denying, grants) = granting_policy("supervised", &[], "ops");
-    grants.grant_standing(standing_verdict(
-        "ops",
-        "file_write",
-        far_future(),
-        Verdict::Deny,
-    ));
-    assert!(
-        matches!(
-            dispatched("ops")
-                .scoped(denying.check(&request("file_write", serde_json::json!({}))))
-                .await,
-            ToolPolicyDecision::Deny { .. }
-        ),
-        "a standing deny must still refuse, dispatched origin or not"
-    );
+        // A standing deny is a company saying "not this", which a run's own
+        // origin cannot override.
+        let (denying, grants) = granting_policy("supervised", &[], "ops");
+        grants.grant_standing(standing_verdict(
+            "ops",
+            "file_write",
+            far_future(),
+            Verdict::Deny,
+        ));
+        assert!(
+            matches!(
+                dispatched("ops")
+                    .scoped(denying.check(&request("file_write", serde_json::json!({}))))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "a standing deny must still refuse, dispatched origin or not"
+        );
+    })
+    .await;
 }
 
 /// Structural proof that the arm adds nothing outside `auto`/`supervised`:

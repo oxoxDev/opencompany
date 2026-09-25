@@ -197,6 +197,9 @@ pub(crate) fn completed(
         elapsed_ms: 42,
         iteration: 1,
         failure,
+        display_label: None,
+        display_detail: None,
+        structured: None,
     }
 }
 

@@ -48,7 +48,7 @@ mod gated_tool_call_tests;
 /// Issue #395: end-to-end proof that a tool call gated inside a workflow agent
 /// node reaches the Approvals page and survives the next chat cycle.
 #[cfg(test)]
-mod gated_tool_turn_tests;
+pub(crate) mod gated_tool_turn_tests;
 /// Issue #1866: one tool-less semantic sufficiency pass after deterministic checks.
 pub mod judge;
 /// Issue #978: a run that fans out to N gated nodes is cleared by approving,

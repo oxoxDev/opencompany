@@ -7,10 +7,16 @@ import { foldEpisodes } from "@/lib/episodes";
 import { buildTimeline, buildTimelineItems, type Channel } from "@/views/room/model";
 
 /**
- * `buildTimelineItems` with episodes: a round's rows collapse into one `round`
- * item at the position of the first row, a round the frames opened before any
- * row landed takes the moment it opened, a completed episode gets its marker
- * after its last round, and everything outside an episode is untouched.
+ * `buildTimelineItems` with episodes: an episode's rows collapse into ONE
+ * `round` item at the position of its first row, that band tracks the newest
+ * wave, a completed episode gets its marker after it, and everything outside
+ * an episode is untouched.
+ *
+ * It used to mint a band per wave, which stacked nine bands for an episode
+ * that ran nine and labelled them with raw revision numbers — so a desk that
+ * ran nine rounds could show one headed "Round 17", because conversation
+ * waves take revisions of their own. One band per episode is what the desk
+ * actually did.
  */
 
 const CHANNEL: Channel = { id: "engineering", name: "engineering", voice: "Engineering desk", kind: "channel", purpose: "" };
@@ -40,18 +46,17 @@ describe("round grouping", () => {
     expect(items.map((item) => item.kind)).toEqual(["message", "message"]);
   });
 
-  it("collapses each round's rows into one item, in transcript order, then the marker", () => {
+  it("collapses the whole episode into one band, in transcript order, then the marker", () => {
+    // One band holding every row, carrying the newest wave's state.
     expect(kinds(ROWS)).toEqual([
       "message:h1",
-      "round:0[h2,h3]",
-      "round:1[h4]",
-      "round:2[h5]",
+      "round:2[h2,h3,h4,h5]",
       "complete:ep-1",
       "message:h6",
     ]);
   });
 
-  it("places a live round with no rows after the previous round's replies", () => {
+  it("tracks a live round that has no rows yet", () => {
     const frames = (
       [
         { type: "episode_opened", seq: 1, atMillis: 5, chatId: "engineering", episodeId: "ep-1", openedBySeq: 1, participants: ["engineer", "ceo"], plan: { kind: "hive", primaryId: "engineer", invitedIds: ["ceo"] } },
@@ -62,11 +67,14 @@ describe("round grouping", () => {
     ).reduce(reduceEpisodeFrame, EMPTY_EPISODE_FRAMES);
     const rows = ROWS.slice(0, 3);
     const items = buildTimelineItems(buildTimeline(rows, CHANNEL, []), [], {}, foldEpisodes(rows, frames, "engineering"));
-    expect(items.map((item) => item.kind)).toEqual(["message", "round", "round"]);
-    const live = items[2];
+    // One band, tracking the wave that has opened but not yet spoken: it owns
+    // no rows of its own, so nothing else would carry its state onto the band.
+    expect(items.map((item) => item.kind)).toEqual(["message", "round"]);
+    const live = items[1];
     expect(live.kind === "round" && live.round.status).toBe("open");
-    expect(live.kind === "round" && live.items).toEqual([]);
-    expect(live.at).toBe(15);
+    expect(live.kind === "round" && live.round.revision).toBe(1);
+    // The band keeps the rows the earlier wave committed.
+    expect(live.kind === "round" && live.items.map((r) => r.key)).toEqual(["h2", "h3"]);
     // No marker: the episode is still open.
     expect(items.some((item) => item.kind === "episode_complete")).toBe(false);
   });
@@ -77,7 +85,7 @@ describe("round grouping", () => {
     ] as never[];
     const items = buildTimelineItems(buildTimeline(ROWS, CHANNEL, []), approvals, {}, foldEpisodes(ROWS));
     const kindsOut = items.map((item) => item.kind);
-    expect(kindsOut).toEqual(["message", "round", "approval", "round", "round", "episode_complete", "message"]);
+    expect(kindsOut).toEqual(["message", "round", "approval", "episode_complete", "message"]);
   });
 
   it("puts the completion marker after the last round even when the frames say when", () => {

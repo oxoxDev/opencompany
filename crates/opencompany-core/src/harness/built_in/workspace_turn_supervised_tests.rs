@@ -74,20 +74,20 @@ async fn a_supervised_turn_reads_and_writes_the_workspace_without_policy_hitl() 
     let (_pool, deps, _record, store) = harness(base, "\"workspace\"", dir.path()).await;
     let (pool, record) = supervised(&deps, "\"workspace\"").await;
 
-    pool.run(
-        &record.id,
-        "ceo",
-        "tidy the standards",
-        &deps,
-        crate::runtime::delegation::ChatTarget::default(),
-    )
-    .await
-    .expect("the turn runs");
-    // Issue #439: no boundary index — this turn ran outside any claim, so its
-    // requests are in the `Unscoped` bucket and `drain` reads exactly them.
-    let parked = deps
+    let cycle = deps
         .approval_requests
-        .drain(crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN);
+        .claim(crate::harness::policy::ApprovalScope::Cycle);
+    cycle
+        .scoped(pool.run(
+            &record.id,
+            "ceo",
+            "tidy the standards",
+            &deps,
+            crate::runtime::delegation::ChatTarget::default(),
+        ))
+        .await
+        .expect("the turn runs");
+    let parked = cycle.drain(crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN);
 
     assert!(parked.requests.is_empty(), "{parked:?}");
     assert!(
@@ -119,20 +119,20 @@ async fn a_write_to_the_agents_own_workspace_runs_without_policy_hitl() {
         harness(base, "\"files\", \"workspace\"", dir.path()).await;
     let (pool, record) = supervised(&deps, "\"files\", \"workspace\"").await;
 
-    pool.run(
-        &record.id,
-        "ceo",
-        "jot a note",
-        &deps,
-        crate::runtime::delegation::ChatTarget::default(),
-    )
-    .await
-    .expect("the turn runs");
-    // Issue #439: no boundary index — this turn ran outside any claim, so its
-    // requests are in the `Unscoped` bucket and `drain` reads exactly them.
-    let parked = deps
+    let cycle = deps
         .approval_requests
-        .drain(crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN);
+        .claim(crate::harness::policy::ApprovalScope::Cycle);
+    cycle
+        .scoped(pool.run(
+            &record.id,
+            "ceo",
+            "jot a note",
+            &deps,
+            crate::runtime::delegation::ChatTarget::default(),
+        ))
+        .await
+        .expect("the turn runs");
+    let parked = cycle.drain(crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN);
 
     assert!(parked.requests.is_empty(), "{parked:?}");
     assert!(
@@ -173,20 +173,20 @@ async fn a_supervised_turn_reads_its_own_workspace_without_asking() {
     let (_pool, deps, _record, _store) = harness(base, "\"files\"", dir.path()).await;
     let (pool, record) = supervised(&deps, "\"files\"").await;
 
-    pool.run(
-        &record.id,
-        "ceo",
-        "what do we have?",
-        &deps,
-        crate::runtime::delegation::ChatTarget::default(),
-    )
-    .await
-    .expect("the turn runs");
-    // Issue #439: no boundary index — this turn ran outside any claim, so its
-    // requests are in the `Unscoped` bucket and `drain` reads exactly them.
-    let parked = deps
+    let cycle = deps
         .approval_requests
-        .drain(crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN);
+        .claim(crate::harness::policy::ApprovalScope::Cycle);
+    cycle
+        .scoped(pool.run(
+            &record.id,
+            "ceo",
+            "what do we have?",
+            &deps,
+            crate::runtime::delegation::ChatTarget::default(),
+        ))
+        .await
+        .expect("the turn runs");
+    let parked = cycle.drain(crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN);
 
     assert!(
         parked.requests.is_empty(),

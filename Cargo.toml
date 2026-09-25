@@ -94,6 +94,19 @@ tinyinference-voice = { path = "vendor/openhuman/vendor/tinyagents/vendor/tinyin
 # crates" step is the tripwire.
 [patch."https://github.com/tinyhumansai/openhuman"]
 openhuman-embed = { path = "vendor/openhuman/crates/openhuman-embed" }
+# The adapter binds the core crate too, not just the embed runtime: its
+# hosted runner builds an `OpenHumanSessionHost` and its raw runner boots a
+# `CoreContext`. Without this entry cargo resolves a second openhuman-core
+# from git beside the path copy, and the same type from each is a different
+# type to the checker.
+openhuman = { path = "vendor/openhuman/crates/openhuman-core" }
+
+# And the tool crates underneath it, for the same reason and one level down:
+# the adapter names `tinytools::Tool` and `tinytools_agent::dialect`, and the
+# git openhuman drags its own vendored copies along.
+[patch."https://github.com/tinyhumansai/tinytools"]
+tinytools = { path = "vendor/openhuman/vendor/tinyagents/vendor/tinytools/crates/tinytools" }
+tinytools-agent = { path = "vendor/openhuman/vendor/tinyagents/vendor/tinytools/crates/tinytools-agent" }
 
 [patch.crates-io]
 # No `tinyagents` entry: the crate no longer exists as a package (the workspace

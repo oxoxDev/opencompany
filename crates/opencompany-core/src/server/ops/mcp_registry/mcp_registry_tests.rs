@@ -608,3 +608,57 @@ fn no_installs_leaves_the_declared_list_untouched() {
     merge_installs(&mut rows, Vec::new(), &[agent("ceo")]);
     assert_eq!(serde_json::to_value(&rows).expect("serializes"), before);
 }
+
+// ---------------------------------------------------------------------------
+// A directory entry becomes one of this company's own servers
+// ---------------------------------------------------------------------------
+
+/// The declaration carries what the catalogue entry already told us, and
+/// nothing invented.
+#[test]
+fn a_directory_entry_declares_the_endpoint_the_catalogue_named() {
+    let server = super::declaration_from_directory(
+        "exa/exa-mcp",
+        "https://server.example.com/mcp",
+        Some("Web search".to_string()),
+    );
+
+    assert_eq!(server.name, "exa/exa-mcp");
+    assert_eq!(server.endpoint, "https://server.example.com/mcp");
+    assert_eq!(server.description.as_deref(), Some("Web search"));
+    assert!(server.enabled);
+    assert!(
+        server.command.is_none(),
+        "only a hosted endpoint is ever declared from the directory"
+    );
+}
+
+/// An install has always meant every tool the server offers, and an empty
+/// pair is how this crate spells that. Declaring a narrowed list here would
+/// silently withhold tools the operator never restricted.
+#[test]
+fn a_directory_entry_declares_no_tool_restrictions() {
+    let server = super::declaration_from_directory("exa/exa-mcp", "https://e.example/mcp", None);
+
+    assert!(server.allowed_tools.is_empty());
+    assert!(server.disallowed_tools.is_empty());
+    assert!(server.read_only_tools.is_empty());
+}
+
+/// The same default `POST …/mcp/servers` applies when the body omits one, so
+/// a server added from either screen behaves the same way under load.
+#[test]
+fn a_directory_entry_takes_the_same_timeout_as_a_hand_added_server() {
+    let server = super::declaration_from_directory("exa/exa-mcp", "https://e.example/mcp", None);
+
+    assert_eq!(server.timeout_secs, 30);
+}
+
+/// The credential is never carried on the declaration: it is stored
+/// write-only beside it, which is what keeps a read from echoing one.
+#[test]
+fn a_directory_entry_carries_no_credential_on_the_row() {
+    let server = super::declaration_from_directory("exa/exa-mcp", "https://e.example/mcp", None);
+
+    assert!(server.auth_secret.is_none());
+}

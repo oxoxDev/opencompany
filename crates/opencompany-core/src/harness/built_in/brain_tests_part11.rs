@@ -171,44 +171,47 @@ fn a_host_authored_notice_is_not_authored_by_the_operator_channel() {
 /// into To-do indistinguishable from work nobody started.
 #[tokio::test]
 async fn a_rejected_model_id_parks_a_blocker_rather_than_settling_failed() {
-    use crate::harness::policy::ApprovalRequestQueue;
-    use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
+    crate::harness::built_in::policy::policy_test_helpers_tests::in_cycle(async {
+        use crate::harness::policy::ApprovalRequestQueue;
+        use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
 
-    let dir = tempfile::tempdir().unwrap();
-    let requests = ApprovalRequestQueue::default();
-    let brain = brain_with_approval_queue(dir.path(), requests.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let requests = ApprovalRequestQueue::default();
+        let brain = brain_with_approval_queue(dir.path(), requests.clone());
 
-    let reason = "dispatch failed: the model `gpt-nonexistent` does not exist or you do not \
+        let reason = "dispatch failed: the model `gpt-nonexistent` does not exist or you do not \
                   have access to it";
-    let end = brain.settle_as_blocker_or_failure("t-1", reason, Some("run-1"));
+        let end = brain.settle_as_blocker_or_failure("t-1", reason, Some("run-1"));
 
-    assert_eq!(end, TaskRunEnd::Blocked);
-    assert_eq!(
-        lifecycle::landing_column(end),
-        crate::ports::tasks::COLUMN_PAUSED,
-        "a card with an open question on it has not failed — it is waiting"
-    );
+        assert_eq!(end, TaskRunEnd::Blocked);
+        assert_eq!(
+            lifecycle::landing_column(end),
+            crate::ports::tasks::COLUMN_PAUSED,
+            "a card with an open question on it has not failed — it is waiting"
+        );
 
-    let drained = requests.drain(8);
-    assert_eq!(drained.requests.len(), 1, "exactly one question is asked");
-    let effect = &drained.requests[0].effect;
-    assert_eq!(effect.kind, "blocker.infrastructure");
-    assert_eq!(effect.run_id.as_deref(), Some("run-1"));
+        let drained = requests.drain(8);
+        assert_eq!(drained.requests.len(), 1, "exactly one question is asked");
+        let effect = &drained.requests[0].effect;
+        assert_eq!(effect.kind, "blocker.infrastructure");
+        assert_eq!(effect.run_id.as_deref(), Some("run-1"));
 
-    let payload: BlockerPayload =
-        serde_json::from_value(effect.payload.clone()).expect("the payload round-trips");
-    assert_eq!(payload.kind, BlockerKind::Infrastructure);
-    assert_eq!(payload.source, BlockerSource::Provider);
-    assert_eq!(
-        payload.step,
-        Some(BlockerStep::Task {
-            task_id: "t-1".to_string()
-        })
-    );
-    assert!(
-        !payload.needed.trim().is_empty(),
-        "a question that does not say what would answer it wastes the asking"
-    );
+        let payload: BlockerPayload =
+            serde_json::from_value(effect.payload.clone()).expect("the payload round-trips");
+        assert_eq!(payload.kind, BlockerKind::Infrastructure);
+        assert_eq!(payload.source, BlockerSource::Provider);
+        assert_eq!(
+            payload.step,
+            Some(BlockerStep::Task {
+                task_id: "t-1".to_string()
+            })
+        );
+        assert!(
+            !payload.needed.trim().is_empty(),
+            "a question that does not say what would answer it wastes the asking"
+        );
+    })
+    .await;
 }
 
 /// The conservative default, pinned: a failure the classifier does not
@@ -270,28 +273,59 @@ async fn a_rate_limit_settles_without_asking_anybody() {
 /// could break by adding a field.
 #[tokio::test]
 async fn a_parked_blocker_carries_nothing_an_executor_would_act_on() {
-    use crate::harness::policy::ApprovalRequestQueue;
+    crate::harness::built_in::policy::policy_test_helpers_tests::in_cycle(async {
+        use crate::harness::policy::ApprovalRequestQueue;
+
+        let dir = tempfile::tempdir().unwrap();
+        let requests = ApprovalRequestQueue::default();
+        let brain = brain_with_approval_queue(dir.path(), requests.clone());
+
+        brain.settle_as_blocker_or_failure(
+            "t-1",
+            "tool call failed: could not connect to mcp server `slack`",
+            None,
+        );
+
+        let drained = requests.drain(8);
+        let effect = &drained.requests[0].effect;
+        assert!(effect.amount_usd.is_none(), "a question costs nothing");
+        assert!(
+            effect.payload.get("channel").is_none() && effect.payload.get("text").is_none(),
+            "a `channel`+`text` payload would make approving a blocker post a message"
+        );
+        assert!(
+            effect.agent.is_none(),
+            "stamping an agent would mint a grant and re-dispatch the turn, which would \
+         call the escalation again and park a second time"
+        );
+    })
+    .await;
+}
+
+/// A caller with nothing published must not mint a card describing a
+/// deliverable that does not exist. Every known caller already filters this
+/// out before reaching `record_conversation_publishes`, so this pins the
+/// defensive guard for whichever caller does not: with both a task board and
+/// an artifact store wired, the pre-guard code would otherwise mint an
+/// orphaned in-review card.
+#[tokio::test]
+async fn record_conversation_publishes_rejects_an_empty_batch() {
+    use crate::runtime::delegation::ChatTarget;
 
     let dir = tempfile::tempdir().unwrap();
-    let requests = ApprovalRequestQueue::default();
-    let brain = brain_with_approval_queue(dir.path(), requests.clone());
+    let (brain, tasks) = brain_with_artifacts(dir.path());
 
-    brain.settle_as_blocker_or_failure(
-        "t-1",
-        "tool call failed: could not connect to mcp server `slack`",
-        None,
-    );
-
-    let drained = requests.drain(8);
-    let effect = &drained.requests[0].effect;
-    assert!(effect.amount_usd.is_none(), "a question costs nothing");
+    let error = brain
+        .record_conversation_publishes("maya", ChatTarget::in_thread(None, None), Vec::new())
+        .await
+        .expect_err("an empty batch must not mint a card");
+    assert!(error.to_string().contains("nothing published"), "{error}");
     assert!(
-        effect.payload.get("channel").is_none() && effect.payload.get("text").is_none(),
-        "a `channel`+`text` payload would make approving a blocker post a message"
-    );
-    assert!(
-        effect.agent.is_none(),
-        "stamping an agent would mint a grant and re-dispatch the turn, which would \
-         call the escalation again and park a second time"
+        tasks
+            .list(&CompanyId::new("acme"))
+            .await
+            .expect("list")
+            .is_empty(),
+        "no card must be minted for an empty batch"
     );
 }

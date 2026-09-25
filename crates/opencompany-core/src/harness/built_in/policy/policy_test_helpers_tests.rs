@@ -278,3 +278,10 @@ pub(crate) fn standing_verdict(
         scope: None,
     }
 }
+
+/// Runs `fut` under the chat cycle's approval claim, the way every production
+/// agent turn runs, so a gated call parks instead of being refused as
+/// unrecordable.
+pub(crate) async fn in_cycle<F: std::future::Future>(fut: F) -> F::Output {
+    CURRENT_SCOPE.scope(ApprovalScope::Cycle, fut).await
+}

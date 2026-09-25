@@ -21,6 +21,7 @@ fn summary(id: &str, task: Option<TaskLink>) -> ApprovalSummary {
         batch: None,
         group_key: None,
         blocker_step_kind: None,
+        episode: None,
     }
 }
 

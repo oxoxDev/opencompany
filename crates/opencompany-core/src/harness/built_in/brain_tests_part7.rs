@@ -10,90 +10,96 @@ use super::*;
 /// calls classify into).
 #[tokio::test]
 async fn approval_requests_are_parked_for_the_operator() {
-    use crate::harness::policy::{ApprovalPolicy, ApprovalRequestQueue};
-    use openhuman_core::agent::tool_policy::{
-        ToolCallContext, ToolPolicy, ToolPolicyDecision, ToolPolicyRequest,
-    };
+    crate::harness::built_in::policy::policy_test_helpers_tests::in_cycle(async {
+        use crate::harness::policy::{ApprovalPolicy, ApprovalRequestQueue};
+        use openhuman_core::agent::tool_policy::{
+            ToolCallContext, ToolPolicy, ToolPolicyDecision, ToolPolicyRequest,
+        };
 
-    let dir = tempfile::tempdir().unwrap();
-    let requests = ApprovalRequestQueue::default();
-    let brain = brain_with_approval_queue(dir.path(), requests.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let requests = ApprovalRequestQueue::default();
+        let brain = brain_with_approval_queue(dir.path(), requests.clone());
 
-    // Exactly what a supervised policy records when the agent reaches for a
-    // gated tool mid-turn.
-    let policy = ApprovalPolicy::new(
-        &crate::company::Policy {
-            mode: "supervised".to_string(),
-            always_approve: Vec::new(),
-            auto_approve_under_usd: None,
-            approval_ttl_hours: None,
-        },
-        None,
-    )
-    .with_requests(requests.clone());
-    let args = crate::policy::test_support::composio_send_args();
-    let request = ToolPolicyRequest::new(
-        "composio_execute",
-        args.clone(),
-        ToolCallContext::session("s", "chat", "ceo", "call-1", 0),
-    );
-    assert!(
-        matches!(
-            policy.check(&request).await,
-            ToolPolicyDecision::RequireApproval { .. }
-        ),
-        "the fixture must reproduce a gated call"
-    );
-    assert_eq!(requests.queued(), 1, "the decision was recorded to park");
+        // Exactly what a supervised policy records when the agent reaches for a
+        // gated tool mid-turn.
+        let policy = ApprovalPolicy::new(
+            &crate::company::Policy {
+                mode: "supervised".to_string(),
+                always_approve: Vec::new(),
+                auto_approve_under_usd: None,
+                approval_ttl_hours: None,
+            },
+            None,
+        )
+        .with_requests(requests.clone());
+        let args = crate::policy::test_support::composio_send_args();
+        let request = ToolPolicyRequest::new(
+            "composio_execute",
+            args.clone(),
+            ToolCallContext::session("s", "chat", "ceo", "call-1", 0),
+        );
+        assert!(
+            matches!(
+                policy.check(&request).await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "the fixture must reproduce a gated call"
+        );
+        assert_eq!(requests.queued(), 1, "the decision was recorded to park");
 
-    let host = ParkingHost::default();
-    brain
-        .park_approval_requests(&host)
-        .await
-        .expect("the drain parks");
+        let host = ParkingHost::default();
+        brain
+            .park_approval_requests(&host)
+            .await
+            .expect("the drain parks");
 
-    let parked = host.parked();
-    assert_eq!(parked.len(), 1, "one approval reached the operator");
-    assert_eq!(parked[0].kind, "composio_execute");
-    assert_eq!(
-        parked[0].payload, args,
-        "the call's arguments are preserved"
-    );
-    assert_eq!(requests.queued(), 0, "the queue is drained");
+        let parked = host.parked();
+        assert_eq!(parked.len(), 1, "one approval reached the operator");
+        assert_eq!(parked[0].kind, "composio_execute");
+        assert_eq!(
+            parked[0].payload, args,
+            "the call's arguments are preserved"
+        );
+        assert_eq!(requests.queued(), 0, "the queue is drained");
+    })
+    .await;
 }
 
 /// A second drain parks nothing: the queue is emptied, so a later cycle
 /// can't re-park a request the operator has already been shown.
 #[tokio::test]
 async fn draining_twice_parks_nothing_the_second_time() {
-    use crate::harness::policy::{ApprovalRequest, ApprovalRequestQueue};
-    use crate::ports::types::EffectGroup;
+    crate::harness::built_in::policy::policy_test_helpers_tests::in_cycle(async {
+        use crate::harness::policy::{ApprovalRequest, ApprovalRequestQueue};
+        use crate::ports::types::EffectGroup;
 
-    let dir = tempfile::tempdir().unwrap();
-    let requests = ApprovalRequestQueue::default();
-    let brain = brain_with_approval_queue(dir.path(), requests.clone());
-    requests.push(ApprovalRequest {
-        tool: "media_generate_image".to_string(),
-        reason: "supervised".to_string(),
-        effect: Effect {
-            kind: "media_generate_image".to_string(),
-            group: EffectGroup::Spend,
-            amount_usd: None,
-            established_thread: false,
-            first_time_counterparty: false,
-            payload: serde_json::json!({ "prompt": "a logo" }),
-            agent: None,
-            run_id: None,
-        },
-    });
+        let dir = tempfile::tempdir().unwrap();
+        let requests = ApprovalRequestQueue::default();
+        let brain = brain_with_approval_queue(dir.path(), requests.clone());
+        requests.push(ApprovalRequest {
+            tool: "media_generate_image".to_string(),
+            reason: "supervised".to_string(),
+            effect: Effect {
+                kind: "media_generate_image".to_string(),
+                group: EffectGroup::Spend,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({ "prompt": "a logo" }),
+                agent: None,
+                run_id: None,
+            },
+        });
 
-    let host = ParkingHost::default();
-    brain.park_approval_requests(&host).await.expect("drain");
-    brain
-        .park_approval_requests(&host)
-        .await
-        .expect("second drain");
-    assert_eq!(host.parked().len(), 1, "parked once, not twice");
+        let host = ParkingHost::default();
+        brain.park_approval_requests(&host).await.expect("drain");
+        brain
+            .park_approval_requests(&host)
+            .await
+            .expect("second drain");
+        assert_eq!(host.parked().len(), 1, "parked once, not twice");
+    })
+    .await;
 }
 
 /// Issue #561: a turn that gates more calls than one turn may raise tells
@@ -106,16 +112,66 @@ async fn draining_twice_parks_nothing_the_second_time() {
 /// all there was".
 #[tokio::test]
 async fn a_turn_that_overflows_the_cap_tells_the_operator_how_many_were_dropped() {
-    use crate::harness::policy::{ApprovalRequest, ApprovalRequestQueue};
-    use crate::ports::types::EffectGroup;
+    crate::harness::built_in::policy::policy_test_helpers_tests::in_cycle(async {
+        use crate::harness::policy::{ApprovalRequest, ApprovalRequestQueue};
+        use crate::ports::types::EffectGroup;
 
-    let cap = crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN;
-    let over = 5;
+        let cap = crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN;
+        let over = 5;
 
-    let dir = tempfile::tempdir().unwrap();
-    let requests = ApprovalRequestQueue::default();
-    let brain = brain_with_approval_queue(dir.path(), requests.clone());
-    for i in 0..(cap + over) {
+        let dir = tempfile::tempdir().unwrap();
+        let requests = ApprovalRequestQueue::default();
+        let brain = brain_with_approval_queue(dir.path(), requests.clone());
+        for i in 0..(cap + over) {
+            requests.push(ApprovalRequest {
+                tool: "composio_execute".to_string(),
+                reason: "supervised".to_string(),
+                effect: Effect {
+                    kind: "composio_execute".to_string(),
+                    group: EffectGroup::Send,
+                    amount_usd: None,
+                    established_thread: false,
+                    first_time_counterparty: false,
+                    // Distinct payloads, or `push` would dedupe them and the
+                    // queue would never reach the cap in the first place.
+                    payload: crate::policy::test_support::composio_unclassified_args_numbered(i),
+                    agent: None,
+                    run_id: None,
+                },
+            });
+        }
+
+        let host = ParkingHost::default();
+        let notice = brain
+            .park_approval_requests(&host)
+            .await
+            .expect("drain")
+            .expect("an overflowing turn has something to tell the operator");
+
+        assert_eq!(host.parked().len(), cap, "the cap still holds");
+        assert!(
+            notice.contains(&over.to_string()),
+            "the operator is told HOW MANY were dropped, not just that some were: {notice}"
+        );
+        assert!(
+            notice.contains(&cap.to_string()),
+            "…and what the limit was, so the number means something: {notice}"
+        );
+    })
+    .await;
+}
+
+/// The ordinary turn stays quiet. A notice on every cycle would train the
+/// operator to scroll past the one that matters.
+#[tokio::test]
+async fn a_turn_within_the_cap_raises_no_notice() {
+    crate::harness::built_in::policy::policy_test_helpers_tests::in_cycle(async {
+        use crate::harness::policy::{ApprovalRequest, ApprovalRequestQueue};
+        use crate::ports::types::EffectGroup;
+
+        let dir = tempfile::tempdir().unwrap();
+        let requests = ApprovalRequestQueue::default();
+        let brain = brain_with_approval_queue(dir.path(), requests.clone());
         requests.push(ApprovalRequest {
             tool: "composio_execute".to_string(),
             reason: "supervised".to_string(),
@@ -125,68 +181,24 @@ async fn a_turn_that_overflows_the_cap_tells_the_operator_how_many_were_dropped(
                 amount_usd: None,
                 established_thread: false,
                 first_time_counterparty: false,
-                // Distinct payloads, or `push` would dedupe them and the
-                // queue would never reach the cap in the first place.
-                payload: crate::policy::test_support::composio_unclassified_args_numbered(i),
+                payload: crate::policy::test_support::composio_send_args(),
                 agent: None,
                 run_id: None,
             },
         });
-    }
 
-    let host = ParkingHost::default();
-    let notice = brain
-        .park_approval_requests(&host)
-        .await
-        .expect("drain")
-        .expect("an overflowing turn has something to tell the operator");
-
-    assert_eq!(host.parked().len(), cap, "the cap still holds");
-    assert!(
-        notice.contains(&over.to_string()),
-        "the operator is told HOW MANY were dropped, not just that some were: {notice}"
-    );
-    assert!(
-        notice.contains(&cap.to_string()),
-        "…and what the limit was, so the number means something: {notice}"
-    );
-}
-
-/// The ordinary turn stays quiet. A notice on every cycle would train the
-/// operator to scroll past the one that matters.
-#[tokio::test]
-async fn a_turn_within_the_cap_raises_no_notice() {
-    use crate::harness::policy::{ApprovalRequest, ApprovalRequestQueue};
-    use crate::ports::types::EffectGroup;
-
-    let dir = tempfile::tempdir().unwrap();
-    let requests = ApprovalRequestQueue::default();
-    let brain = brain_with_approval_queue(dir.path(), requests.clone());
-    requests.push(ApprovalRequest {
-        tool: "composio_execute".to_string(),
-        reason: "supervised".to_string(),
-        effect: Effect {
-            kind: "composio_execute".to_string(),
-            group: EffectGroup::Send,
-            amount_usd: None,
-            established_thread: false,
-            first_time_counterparty: false,
-            payload: crate::policy::test_support::composio_send_args(),
-            agent: None,
-            run_id: None,
-        },
-    });
-
-    let host = ParkingHost::default();
-    assert!(
-        brain
-            .park_approval_requests(&host)
-            .await
-            .expect("drain")
-            .is_none(),
-        "one request, a cap of 8: nothing was dropped and nothing is said"
-    );
-    assert_eq!(host.parked().len(), 1, "and the request itself still parks");
+        let host = ParkingHost::default();
+        assert!(
+            brain
+                .park_approval_requests(&host)
+                .await
+                .expect("drain")
+                .is_none(),
+            "one request, a cap of 8: nothing was dropped and nothing is said"
+        );
+        assert_eq!(host.parked().len(), 1, "and the request itself still parks");
+    })
+    .await;
 }
 
 /// One failed park must not take the rest of the batch — or the turn's reply
@@ -196,43 +208,46 @@ async fn a_turn_within_the_cap_raises_no_notice() {
 /// disappearance this issue fixes.
 #[tokio::test]
 async fn a_failed_park_does_not_drop_the_rest_of_the_batch() {
-    use crate::harness::policy::{ApprovalRequest, ApprovalRequestQueue};
-    use crate::ports::types::EffectGroup;
+    crate::harness::built_in::policy::policy_test_helpers_tests::in_cycle(async {
+        use crate::harness::policy::{ApprovalRequest, ApprovalRequestQueue};
+        use crate::ports::types::EffectGroup;
 
-    let dir = tempfile::tempdir().unwrap();
-    let requests = ApprovalRequestQueue::default();
-    let brain = brain_with_approval_queue(dir.path(), requests.clone());
-    for tool in ["first_tool", "second_tool", "third_tool"] {
-        requests.push(ApprovalRequest {
-            tool: tool.to_string(),
-            reason: "supervised".to_string(),
-            effect: Effect {
-                kind: tool.to_string(),
-                group: EffectGroup::Other,
-                amount_usd: None,
-                established_thread: false,
-                first_time_counterparty: false,
-                payload: serde_json::json!({ "tool": tool }),
-                agent: None,
-                run_id: None,
-            },
-        });
-    }
+        let dir = tempfile::tempdir().unwrap();
+        let requests = ApprovalRequestQueue::default();
+        let brain = brain_with_approval_queue(dir.path(), requests.clone());
+        for tool in ["first_tool", "second_tool", "third_tool"] {
+            requests.push(ApprovalRequest {
+                tool: tool.to_string(),
+                reason: "supervised".to_string(),
+                effect: Effect {
+                    kind: tool.to_string(),
+                    group: EffectGroup::Other,
+                    amount_usd: None,
+                    established_thread: false,
+                    first_time_counterparty: false,
+                    payload: serde_json::json!({ "tool": tool }),
+                    agent: None,
+                    run_id: None,
+                },
+            });
+        }
 
-    let host = FlakyParkingHost::default();
-    let notice = brain
-        .park_approval_requests(&host)
-        .await
-        .expect("a park failure is surfaced without aborting the batch")
-        .expect("the operator is told a request was not saved");
+        let host = FlakyParkingHost::default();
+        let notice = brain
+            .park_approval_requests(&host)
+            .await
+            .expect("a park failure is surfaced without aborting the batch")
+            .expect("the operator is told a request was not saved");
 
-    // The first park failed; the two after it still reached the operator.
-    let parked = host.parked();
-    assert_eq!(parked.len(), 2, "the batch continued past the failure");
-    assert_eq!(parked[0].kind, "second_tool");
-    assert_eq!(parked[1].kind, "third_tool");
-    assert!(notice.contains("1 approval request could not be saved"));
-    assert!(notice.contains("Ask the agent to request approval again"));
+        // The first park failed; the two after it still reached the operator.
+        let parked = host.parked();
+        assert_eq!(parked.len(), 2, "the batch continued past the failure");
+        assert_eq!(parked[0].kind, "second_tool");
+        assert_eq!(parked[1].kind, "third_tool");
+        assert!(notice.contains("1 approval request could not be saved"));
+        assert!(notice.contains("Ask the agent to request approval again"));
+    })
+    .await;
 }
 
 /// The arm that made #243 visible: an approved grant re-dispatches its agent

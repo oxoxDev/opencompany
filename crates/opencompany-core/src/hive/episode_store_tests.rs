@@ -272,3 +272,51 @@ async fn the_checkpoint_round_trips_and_later_replies_replay() {
     assert_eq!(all.len(), 2);
     assert!(all[0].seq < all[1].seq);
 }
+
+fn seat_parked(id: &str, seat: &str) -> CompanyEvent {
+    CompanyEvent::EpisodeSeatParked {
+        chat_id: "engineering".into(),
+        episode_id: id.into(),
+        seat: seat.into(),
+        thread: None,
+        approval_ids: vec![crate::ports::types::ApprovalId::new("a-1")],
+    }
+}
+
+#[tokio::test]
+async fn a_parked_seat_is_listed_as_waiting_until_it_resumes() {
+    let log = MemoryLog::default();
+    let company = MemoryLog::company();
+    log.append(&company, opened("engineering", "ep-1", 1, None))
+        .await
+        .unwrap();
+    log.append(&company, seat_parked("ep-1", "engineer"))
+        .await
+        .unwrap();
+
+    let waiting = list_episodes(&log, &company, None, None, 10).await.unwrap();
+    assert_eq!(waiting[0].waiting, vec!["engineer".to_string()]);
+    assert_eq!(
+        serde_json::to_value(&waiting[0]).unwrap()["waiting"],
+        serde_json::json!(["engineer"])
+    );
+
+    log.append(
+        &company,
+        CompanyEvent::EpisodeSeatResumed {
+            chat_id: "engineering".into(),
+            episode_id: "ep-1".into(),
+            seat: "engineer".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let resumed = list_episodes(&log, &company, None, None, 10).await.unwrap();
+    assert!(resumed[0].waiting.is_empty());
+    assert!(
+        serde_json::to_value(&resumed[0])
+            .unwrap()
+            .get("waiting")
+            .is_none()
+    );
+}

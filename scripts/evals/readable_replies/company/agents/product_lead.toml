@@ -1,0 +1,4 @@
+role = "Product Lead"
+description = "Owns the roadmap, answers for the company, and hands work to the desks."
+tier = "orchestrator"
+tools = ["mcp:*", "workspace.read"]

@@ -31,11 +31,8 @@
 //! ([`InFlightRegistry`]) names the episode, round and conversation. A speech
 //! call folds into that turn's outbox; an OpenCompany tool call is decided by
 //! the agent's [`ApprovalPolicy`] — allow, deny, or park — and runs under an
-//! [`InFlightContext`]. A parked call pushes onto the same
-//! `ApprovalRequestQueue` the previous in-process dispatcher fed, so the chat
-//! cycle's `park_approval_requests` still journals `ApprovalParked` and the
-//! grant re-issue on `ApprovalResolved` still re-dispatches the message; the
-//! seat is told "awaiting approval" and stops.
+//! [`InFlightContext`]. A call parks only on a task that holds an approval
+//! claim; without one the policy refuses it and says nobody was asked.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -50,7 +47,7 @@ use openhuman_embed::{AgentSpec, McpAuthConfig, McpServer};
 use serde_json::Value;
 use tinytools::Tool;
 
-use super::tools::{InFlightRegistry, McpToolAdapter, SPEECH_TOOL_NAMES, speech_descriptor};
+use super::tools::{InFlightRegistry, McpToolAdapter, speech_descriptor, speech_tool_names};
 use crate::harness::policy::ApprovalPolicy;
 use crate::ports::events::EventLog;
 use crate::ports::types::CompanyId;
@@ -115,7 +112,10 @@ impl McpAgent {
             agent_id: agent_id.into(),
             runtime_agent_id: runtime_agent_id.into(),
             bearer: bearer.into(),
-            speech_tools: SPEECH_TOOL_NAMES.iter().map(|s| (*s).to_string()).collect(),
+            speech_tools: speech_tool_names()
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
             tools: Vec::new(),
             policy: None,
             workspace: None,

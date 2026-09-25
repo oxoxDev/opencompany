@@ -22,7 +22,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::Result;
-use crate::company::artifact_mirror;
 use crate::company::steer::{InflightEntry, InflightKind, SteerAction, SteerControl, cap_redirect};
 use crate::harness::build::agent_workspace;
 use crate::harness::confine;
@@ -228,7 +227,6 @@ pub(crate) fn budget_pause_notice_no_resend(pause: &crate::harness::BudgetPause)
 }
 
 use crate::harness::run_trace::RunTraceSink;
-use crate::ports::artifacts::{ArtifactAuthor, ArtifactRecord};
 use crate::ports::blockers::{BlockerPayload, BlockerStep};
 use crate::ports::brain::{Brain, CycleHost};
 use crate::ports::runs::{RunOutcome, RunStatus};
@@ -237,7 +235,7 @@ use crate::ports::types::{
     CompanyEvent, CompanyRecord, CompressedTrace, CycleRequest, CycleResult, Effect, EffectGroup,
     OutboundMessage, TokenUsage, TurnStep, TurnStepKind, TurnStepStatus, Verdict,
 };
-use crate::ports::{Cognition, TaskOrigin, TaskRecord, UsageMetering, generate_id, now_millis};
+use crate::ports::{Cognition, TaskRecord, UsageMetering, now_millis};
 
 /// A [`Brain`] that answers with a live openhuman agent turn.
 pub struct HarnessBrain {
@@ -817,37 +815,38 @@ impl HarnessBrain {
         // chat path. It is a conversation continuation (it answers into the
         // thread the approval was raised in), so it files the same way a chat
         // turn does.
-        let publish_claim =
-            (self.deps.tasks.is_some() && self.deps.artifacts.is_some()).then(|| {
-                self.deps
-                    .pending_publishes
-                    .claim(publish::PublishDestination::Conversation)
-            });
+        let publish_claim = self
+            .deps
+            .pending_publishes
+            .claim(self.conversation_destination());
         let output_claim = self.deps.pending_publishes.output_collector().claim();
         // Un-streamed, like a dispatched card: this turn is answered by the
         // bubble returned below, and its transient frames would otherwise
         // misattribute onto whichever chat thread the console is watching.
         let outcome = output_claim
-            .scoped(run_turn.run_steered_background(
-                &self.record().id,
-                &grant.agent,
-                &instruction,
-                &control,
-                // Issue #1890 I. Un-streamed, but **not** unaddressed: this
-                // call was raised in a conversation, and the grant has recorded
-                // which one — channel and thread — since #435. Without it the
-                // re-issued call bound to nothing, so it ran against whatever
-                // history the agent happened to be holding and then published
-                // its answer into the origin thread regardless. The same pair
-                // the delegation drain below is bound to.
-                ChatTarget::in_thread(grant.origin_thread.as_deref(), grant.origin_parent),
-                None,
-            ))
+            .scoped(Box::pin(publish_claim.scoped(Box::pin(
+                run_turn.run_steered_background(
+                    &self.record().id,
+                    &grant.agent,
+                    &instruction,
+                    &control,
+                    // Issue #1890 I. Un-streamed, but **not** unaddressed: this
+                    // call was raised in a conversation, and the grant has
+                    // recorded which one — channel and thread — since #435.
+                    // Without it the re-issued call bound to nothing, so it ran
+                    // against whatever history the agent happened to be holding
+                    // and then published its answer into the origin thread
+                    // regardless. The same pair the delegation drain below is
+                    // bound to.
+                    ChatTarget::in_thread(grant.origin_thread.as_deref(), grant.origin_parent),
+                    None,
+                ),
+            ))))
             .await;
         drop(guard);
-        let published = self.deps.pending_publishes.drain();
+        let published = publish_claim.drain();
         if !published.is_empty()
-            && publish_claim.is_some()
+            && publish_claim.is_claimed()
             && let Err(err) = output_claim
                 .scoped(self.record_conversation_publishes(
                     &grant.agent,
@@ -1110,11 +1109,14 @@ impl HarnessBrain {
         // turns that into an in-turn refusal the agent can actually report.
         // `build_agent` already declines to wire the tool at all in that case;
         // this makes the invariant local rather than borrowed from the builder.
-        let _publish_claim = self.deps.artifacts.as_ref().map(|_| {
-            self.deps
-                .pending_publishes
-                .claim(publish::PublishDestination::Task)
-        });
+        let publish_claim = self
+            .deps
+            .pending_publishes
+            .claim(if self.deps.artifacts.is_some() {
+                publish::PublishDestination::Task
+            } else {
+                publish::PublishDestination::Unclaimed
+            });
         // Issue #453: and the delegation queue, for the same span. A dispatched
         // card's responder is the orchestrator, which carries the delegation
         // tools, and `handle_task_delegations` below is the drain — so this path
@@ -1198,34 +1200,36 @@ impl HarnessBrain {
             // it. This is inside the loop deliberately; the nudge below is not
             // part of the loop and never clears, so a nudge cannot discard what
             // the turn it is asking about published.
-            self.deps.pending_publishes.clear();
+            publish_claim.clear();
             // Issue #339: an abandoned redirect's workflow run is abandoned with
             // it, for the same reason — the card's link must name what the turn
             // that actually settled produced, not what a discarded one did.
             self.deps.workflow_refs.clear();
-            let outcome = dispatch_origin
+            let outcome = publish_claim
                 .scoped(Box::pin(
-                    run_turn
-                        // A dispatched task card carries no chat bubble (its steps
-                        // are discarded into the note), so its live turn frames
-                        // must not leak onto the console timeline — run it
-                        // un-streamed (#125 review).
-                        .run_steered_background(
-                            &self.record().id,
-                            &responder,
-                            &instruction,
-                            &control,
-                            // No conversation to bind to: a dispatched card's turn
-                            // answers the board, not a thread (#1890 I). Unchanged
-                            // behaviour — including that it does not clear
-                            // history, since one task can span several turns.
-                            ChatTarget::default(),
-                            // Issue #242: un-streamed does not mean unrecorded. The
-                            // trace this turn produces is written to the attempt
-                            // row as it happens, which is what a redirect re-run
-                            // appends to rather than restarting.
-                            sink.clone(),
-                        ),
+                    dispatch_origin.scoped(Box::pin(
+                        run_turn
+                            // A dispatched task card carries no chat bubble (its steps
+                            // are discarded into the note), so its live turn frames
+                            // must not leak onto the console timeline — run it
+                            // un-streamed (#125 review).
+                            .run_steered_background(
+                                &self.record().id,
+                                &responder,
+                                &instruction,
+                                &control,
+                                // No conversation to bind to: a dispatched card's turn
+                                // answers the board, not a thread (#1890 I). Unchanged
+                                // behaviour — including that it does not clear
+                                // history, since one task can span several turns.
+                                ChatTarget::default(),
+                                // Issue #242: un-streamed does not mean unrecorded. The
+                                // trace this turn produces is written to the attempt
+                                // row as it happens, which is what a redirect re-run
+                                // appends to rather than restarting.
+                                sink.clone(),
+                            ),
+                    )),
                 ))
                 .await;
             // One-shot read of what (if anything) the operator asked for. `None`
@@ -1292,22 +1296,24 @@ impl HarnessBrain {
                             // The card keeps the delegate as its assignee on the
                             // way to `todo` — the hand-off did happen, and a
                             // re-dispatch should start from who it was given to.
-                            let handoff = match self
-                                .delegation_runner(run_turn.as_ref(), &record)
-                                .for_task(&card.id)
-                                // The delegate's turn is part of THIS attempt —
-                                // its steps and its spend belong to the card's
-                                // run, not to nothing (#242).
-                                .for_run(sink.clone())
-                                // Issue #1846 review (Codex #3864988176): the
-                                // card's own (possibly redirect-augmented)
-                                // instruction — the closest thing a dispatched
-                                // task has to "the operator's own words" — so a
-                                // delegate's budget-pause marker re-parks with
-                                // the brief this attempt is actually running,
-                                // not the hand-off instruction the model wrote.
-                                .reissue_message(instruction.clone())
-                                .handle_task_delegations(&mut card, &responder)
+                            let handoff = match publish_claim
+                                .scoped(Box::pin(
+                                    self.delegation_runner(run_turn.as_ref(), &record)
+                                        .for_task(&card.id)
+                                        // The delegate's turn is part of THIS attempt —
+                                        // its steps and its spend belong to the card's
+                                        // run, not to nothing (#242).
+                                        .for_run(sink.clone())
+                                        // Issue #1846 review (Codex #3864988176): the
+                                        // card's own (possibly redirect-augmented)
+                                        // instruction — the closest thing a dispatched
+                                        // task has to "the operator's own words" — so a
+                                        // delegate's budget-pause marker re-parks with
+                                        // the brief this attempt is actually running,
+                                        // not the hand-off instruction the model wrote.
+                                        .reissue_message(instruction.clone())
+                                        .handle_task_delegations(&mut card, &responder),
+                                ))
                                 .await
                             {
                                 Ok(handoff) => handoff,
@@ -1517,7 +1523,7 @@ impl HarnessBrain {
                 let changed = workspace_at_dispatch.changed_since(&workspace);
                 scan_partial = changed.partial;
                 unpublished_before_nudge =
-                    publish::unpublished(&changed.files, &self.deps.pending_publishes.sources());
+                    publish::unpublished(&changed.files, &publish_claim.sources());
             } else {
                 // A hand-off reassigned the card, so the snapshot above is of
                 // the delegator's workspace and the work happened in the
@@ -1537,8 +1543,8 @@ impl HarnessBrain {
         // a local — not a loop, not a counter, not inside the redirect loop. A
         // second nudge is not merely absent, there is nowhere to write one.
         if !unpublished_before_nudge.is_empty() {
-            declined = self
-                .nudge_for_unpublished(
+            declined = publish_claim
+                .scoped(Box::pin(self.nudge_for_unpublished(
                     run_turn.as_ref(),
                     &responder,
                     &base_instruction,
@@ -1554,7 +1560,7 @@ impl HarnessBrain {
                             scope: None,
                         },
                     ),
-                )
+                )))
                 .await;
         }
 
@@ -1562,10 +1568,8 @@ impl HarnessBrain {
         // staged now. Deliberately not a fresh scan: a scratch file the agent
         // wrote *while answering the nudge* is an artifact of being asked, and
         // naming it in the warning would make the nudge generate its own noise.
-        let still_unpublished = publish::unpublished(
-            &unpublished_before_nudge,
-            &self.deps.pending_publishes.sources(),
-        );
+        let still_unpublished =
+            publish::unpublished(&unpublished_before_nudge, &publish_claim.sources());
         if !still_unpublished.is_empty() {
             // A decline is a clean outcome, not an error: the reason goes on the
             // card where it is addressable, the warning names the files for
@@ -1652,7 +1656,7 @@ impl HarnessBrain {
         // outcome than a missing deliverable record. So the failure is now
         // logged at `error` (loudly: an operator whose published file did not
         // store needs to know) and the settle continues.
-        let published = self.deps.pending_publishes.drain();
+        let published = publish_claim.drain();
         let staged_workflows = self.deps.workflow_refs.drain();
         let succeeded = lifecycle::run_status_for(run_end) == RunStatus::Succeeded;
         let recorded: Vec<TaskOutputArtifact> = if succeeded {
@@ -2278,73 +2282,10 @@ impl HarnessBrain {
         }
     }
 
-    /// Records everything the run published as versioned artifacts, returning
-    /// one reference per artifact **pinned at the version this run wrote**
-    /// (issues #244, #339).
+    /// Records published files as artifacts on `card`.
     ///
-    /// # Why the version comes back
-    ///
-    /// The caller stamps these onto the card, and a card link that named only
-    /// the artifact would re-point at whatever a human last edited — silently
-    /// turning "what this task produced" into "what the artifact says now".
-    /// `push_version` already computes the number; before #339 it was
-    /// discarded.
-    ///
-    /// # Extend by identity, never by recency
-    ///
-    /// The record to extend is the one on this card whose `source` equals the
-    /// published path. That is the correction at the heart of this issue.
-    ///
-    /// The old rule was `max_by_key(updated_at_millis)` — extend whichever
-    /// artifact on the card was touched most recently. An **operator edit**
-    /// bumps `updated_at_millis`, so editing the invoice made the invoice the
-    /// target for the next agent write to the spec: the spec's v3 landed as the
-    /// invoice's v4, and `human_edit_diff` then reported an operator rewriting
-    /// a document they had never seen. Since that diff is the entire purpose of
-    /// the artifact port, recency did not merely mis-file records — it
-    /// fabricated the one number the product exists to measure.
-    ///
-    /// A path that has never been published opens a new record; a rename starts
-    /// a new lineage, which is a limitation named on
-    /// [`ArtifactRecord::source`](crate::ports::artifacts::ArtifactRecord::source)
-    /// rather than papered over with a guess.
-    ///
-    /// # Errors propagate — to the caller, which now contains them
-    ///
-    /// Deliberately, and this was a change in #244. The pre-#244 path returned
-    /// a silent `Ok(())` when the store was missing and swallowed nothing else,
-    /// which meant a failed write to a deliverable an agent had explicitly
-    /// published was indistinguishable from success. An explicit publish that
-    /// could not be stored is a real failure of the run and the operator needs
-    /// to see it, so this still surfaces one.
-    ///
-    /// What changed in #339 is where that failure stops. This now runs
-    /// **before** the card's single write, so `run_task` logs the error at
-    /// `error` and settles the card anyway rather than propagating — a
-    /// bookkeeping fault must not strand a finished card in `in_progress`. The
-    /// error is still raised here; it is simply no longer fatal there.
-    ///
-    /// A **missing store** is different: `publish_artifact` is not wired at all
-    /// without one (see `build.rs`), so a non-empty queue here means something
-    /// upstream is misconfigured. It warns loudly rather than failing the cycle,
-    /// because the turn's actual work is already done and persisted.
-    ///
-    /// `run_id` stamps the revision this call writes (#242) so a run row can
-    /// point at what it actually produced. An earlier attempt's version keeps
-    /// the attempt that wrote *it*.
-    ///
-    /// # Authorship is per file, not per call (issue #463)
-    ///
-    /// Each revision records the agent that published **that file**, read from
-    /// [`PendingPublish::agent`]. `responder` is only the fallback, for a value
-    /// built by hand rather than by the tool.
-    ///
-    /// One drain can hold publishes from more than one agent — the desk lead's
-    /// turn and the orchestrator's own turn both run with the full toolbelt
-    /// under a single `Conversation` claim — so a single author applied to the
-    /// batch stamps one agent's name on another's file. The card above still
-    /// takes one owner, because a card has one; a revision is a different
-    /// question with a different answer.
+    /// Delegates to [`PublishFiling`](publish::filing::PublishFiling); see its
+    /// module docs for why the body no longer lives here.
     async fn record_published_artifacts(
         &self,
         card: &TaskRecord,
@@ -2352,259 +2293,22 @@ impl HarnessBrain {
         published: Vec<publish::PendingPublish>,
         run_id: Option<&str>,
     ) -> Result<Vec<TaskOutputArtifact>> {
-        if published.is_empty() {
-            // The honest, common case: this run produced no file. There is no
-            // artifact, and the run trace is the addressable record of what
-            // happened.
-            return Ok(Vec::new());
+        publish::filing::PublishFiling {
+            company: &self.record().id,
+            deps: &self.deps,
         }
-        let Some(artifacts) = self.deps.artifacts.as_ref() else {
-            tracing::warn!(
-                task_id = %card.id,
-                staged = published.len(),
-                "[publish] files were published but no artifact store is configured; the tool \
-                 should not have been wired — nothing was recorded"
-            );
-            return Ok(Vec::new());
-        };
+        .record_published_artifacts(card, responder, published, run_id)
+        .await
+    }
 
-        let mut on_card = artifacts.list(&self.record().id, Some(&card.id)).await?;
-        let mut written = Vec::with_capacity(published.len());
-        for pending in published {
-            let at = now_millis();
-            // Issue #463: whoever published THIS file. `responder` is the
-            // fallback for a `PendingPublish` not built by the tool — the tool
-            // always stamps its own agent.
-            let author = match pending.agent.trim() {
-                "" => responder,
-                agent => agent,
-            };
-            // Identity, not recency: the record whose `source` is this exact
-            // path, or a new one.
-            let existing = on_card
-                .iter()
-                .position(|a| a.source.as_deref() == Some(pending.source.as_str()));
-            // The revision THIS run wrote (#339). A fresh record is always its
-            // own v1; an extended one takes whatever `push_version` numbered.
-            let mut version = 1;
-            // The node the PREVIOUS version was mirrored into, read before the
-            // push below appends a version whose own node is not chosen yet.
-            let mut prior_node = None;
-            let mut record = match existing {
-                Some(index) => {
-                    let mut found = on_card.remove(index);
-                    prior_node = found.workspace_node_id().map(str::to_string);
-                    version = found.push_version(
-                        pending.payload.artifact_body(),
-                        ArtifactAuthor::Agent,
-                        author,
-                        at,
-                        pending.note.clone(),
-                    );
-                    // A republished file may have changed shape — a markdown
-                    // draft exported as a PDF, a small file grown past the
-                    // inline cap. The record follows what was actually
-                    // captured, or the console renders the new version with the
-                    // old version's renderer.
-                    found.kind = pending.kind;
-                    found
-                }
-                None => {
-                    let mut fresh = ArtifactRecord::new(
-                        generate_id(),
-                        &card.id,
-                        &pending.title,
-                        pending.kind,
-                        pending.payload.artifact_body(),
-                        author,
-                        at,
-                    )
-                    .with_source(pending.source.clone());
-                    if let Some(note) = pending.note.clone()
-                        && let Some(first) = fresh.versions.first_mut()
-                    {
-                        first.note = Some(note);
-                    }
-                    fresh
-                }
-            };
-            if let Some(run_id) = run_id {
-                record.stamp_run(run_id);
-            }
-            // Issue #552: the deliverable also goes into the shared workspace
-            // tree, which is the one surface the operator browses and every
-            // other agent can read. The artifact chain here stays the
-            // authoritative version history; the node holds the current body.
-            //
-            // # Chain first, without exception
-            //
-            // A re-publish inherits the node the previous version named, so the
-            // version can be written *before* the tree is touched. That
-            // ordering is the load-bearing half of keeping the chain
-            // authoritative, not a preference: a node one version ahead of the
-            // chain is the tree showing content the version history has no
-            // record of, which makes `human_edit_diff` quietly wrong rather
-            // than loudly broken — the same #187 rot arriving by a different
-            // door. Requiring the store to half-fail bounds how *often* that
-            // happens and not at all how bad it is, and on a data path a silent
-            // wrong answer outlives the incident that caused it.
-            //
-            // A *fresh* publish has no node id to inherit, so its v1 is stored
-            // unlinked and the link is stamped by the second upsert below. Note
-            // what that buys beyond ordering: because the record is written
-            // first, a node is only ever created for a deliverable that is
-            // already recorded, so this path can no longer leave a node in the
-            // tree with no artifact behind it at all.
-            if let Some(node_id) = prior_node.as_deref() {
-                // Inherit before storing, so a failure anywhere below leaves
-                // the version pointing at the node that currently holds it.
-                record.stamp_workspace_node(node_id);
-            }
-            artifacts.upsert(&self.record().id, &record).await?;
-
-            // **A failed mirror does not lose the deliverable.** An explicit
-            // publish that could not be filed into the tree is still recorded
-            // as an artifact — dropping a produced file over tree bookkeeping
-            // would be far worse than a deliverable the operator has to reach
-            // through the Artifacts tab. So this logs at `error` (loudly: the
-            // tree is where people look) and leaves the version unlinked, which
-            // is exactly what a pre-#552 record carries. The next publish of
-            // the same source retries and heals it.
-            if let Some(workspace) = self.deps.workspace.as_ref() {
-                let target = artifact_mirror::PublishTarget {
-                    agent_id: author,
-                    task_id: &card.id,
-                    // Issue #1687: the folder the deliverable lands in is
-                    // named for the work, not only keyed by it. The card is
-                    // right here and its title is the one string that says
-                    // what an operator is looking at.
-                    task_title: Some(card.title.as_str()),
-                    source: &pending.source,
-                    payload: match &pending.payload {
-                        crate::harness::publish::PublishPayload::Text(text) => {
-                            artifact_mirror::MirrorPayload::Text(text)
-                        }
-                        crate::harness::publish::PublishPayload::Bytes { bytes, mime } => {
-                            artifact_mirror::MirrorPayload::Bytes { bytes, mime }
-                        }
-                    },
-                    existing_node_id: prior_node.as_deref(),
-                };
-                match artifact_mirror::materialize(workspace.as_ref(), &self.record().id, target)
-                    .await
-                {
-                    Ok(mirrored) => {
-                        let node_id = mirrored.node_id;
-                        // Issue #663/#668: the version body was composed before
-                        // the store was asked, so it describes an outcome that
-                        // had not happened. Now it has — say what it was, and
-                        // record the digest the STORE computed so two versions
-                        // of one binary can be told apart.
-                        //
-                        // Always re-composed, never conditional on the link
-                        // having changed: an ordinary re-publish reuses its node
-                        // and would otherwise keep the previous version's
-                        // digest, which is precisely the "identical string"
-                        // failure #668 describes.
-                        let stored = pending.payload.artifact_body_for(
-                            crate::harness::publish::PayloadStorage::Stored {
-                                sha256: mirrored.sha256.as_deref(),
-                            },
-                        );
-                        // Only when it actually says something new. Prose is its
-                        // own body, so a text re-publish composes the identical
-                        // string and still stores once — the contract
-                        // `an_ordinary_republish_writes_the_artifact_once`
-                        // pins. A binary's body gains the store's digest, so it
-                        // differs and is worth the second write: without it the
-                        // version would keep the PREVIOUS digest, which is the
-                        // indistinguishable-versions defect (#668) with an extra
-                        // step.
-                        let body_changed =
-                            record.latest().is_some_and(|latest| latest.body != stored);
-                        if body_changed {
-                            record.amend_latest_body(stored);
-                        }
-                        let relinked = record.workspace_node_id() != Some(node_id.as_str());
-                        if relinked {
-                            record.stamp_workspace_node(&node_id);
-                        }
-                        // A second write only when the record actually changed:
-                        // a fresh publish, a re-publish whose node the operator
-                        // deleted, or a body that now carries an outcome it did
-                        // not before. Warn rather than `?` for the unchanged
-                        // reason — BOTH surfaces already hold this body and only
-                        // the record's copy is stale, so failing the batch would
-                        // discard the remaining publishes' records to report
-                        // something the next publish repairs.
-                        if (body_changed || relinked)
-                            && let Err(err) = artifacts.upsert(&self.record().id, &record).await
-                        {
-                            tracing::warn!(
-                                task_id = %card.id,
-                                source = %pending.source,
-                                node = %node_id,
-                                error = %err,
-                                "[publish] the deliverable and its note are both stored but the \
-                                 record could not be updated; the next publish of this source \
-                                 re-adopts the note and repairs it"
-                            );
-                        }
-                    }
-                    Err(err) => {
-                        // Issue #663. The record already claimed this file was
-                        // filed into the workspace. It was not, so the claim is
-                        // withdrawn rather than left standing — an operator who
-                        // opens the artifact and reads "open it there" and finds
-                        // nothing is the dangling-record failure #553 set out to
-                        // remove, arriving through the error path.
-                        //
-                        // The store's error is logged and NOT written to the
-                        // record: a version body is permanent and a backend
-                        // error can name host paths.
-                        tracing::error!(
-                            task_id = %card.id,
-                            agent = %author,
-                            source = %pending.source,
-                            error = %err,
-                            "[publish] could not put the published file into the company \
-                             workspace; the artifact record says so rather than promising a \
-                             file that is not there"
-                        );
-                        record.amend_latest_body(
-                            pending.payload.artifact_body_for(
-                                crate::harness::publish::PayloadStorage::Refused,
-                            ),
-                        );
-                        if let Err(err) = artifacts.upsert(&self.record().id, &record).await {
-                            tracing::error!(
-                                task_id = %card.id,
-                                source = %pending.source,
-                                error = %err,
-                                "[publish] the workspace refused the file AND the record could \
-                                 not be corrected; it still claims the file is stored"
-                            );
-                        }
-                    }
-                }
-            }
-            written.push(TaskOutputArtifact {
-                artifact_id: record.id.clone(),
-                version,
-                title: record.title.clone(),
-                kind: record.kind,
-            });
-            self.deps.pending_publishes.output_collector().artifact(
-                record.id.clone(),
-                card.id.clone(),
-                version,
-                &record.title,
-            );
-            // Keep the working set current so two publishes of the same path in
-            // one run extend one record rather than opening two.
-            on_card.push(record);
+    /// Where a conversation turn's publishes go: a fresh card when both stores
+    /// the drain needs are wired, else nowhere, so the tool refuses in-turn.
+    fn conversation_destination(&self) -> publish::PublishDestination {
+        if self.deps.tasks.is_some() && self.deps.artifacts.is_some() {
+            publish::PublishDestination::Conversation
+        } else {
+            publish::PublishDestination::Unclaimed
         }
-        Ok(written)
     }
 
     /// Files one drained batch of conversation publishes onto the right card —
@@ -2613,7 +2317,7 @@ impl HarnessBrain {
     /// operator's own reply (issue #445) — and returns the card it landed on.
     ///
     /// `claimed` mirrors the belt-and-suspenders guard every call site already
-    /// used inline (`!published.is_empty() && publish_claim.is_some()`): an
+    /// used inline (`!published.is_empty() && publish_claim.is_claimed()`): an
     /// unclaimed queue can only ever drain empty, so this is defensive rather
     /// than load-bearing, but it keeps both conditions visible together instead
     /// of only at the call site.
@@ -2778,110 +2482,23 @@ impl HarnessBrain {
         Ok(card.id)
     }
 
-    /// Records what a **conversation** turn published, minting the card that
-    /// carries it (issue #445). Returns that card's id.
+    /// Files a conversation's publishes, on a card minted to carry them.
     ///
-    /// # Why a card, rather than a company-level artifact
-    ///
-    /// The issue allows either: a chat deliverable becomes an artifact attached
-    /// to no card, or the act of publishing mints the card. This path takes the
-    /// second, and the deciding argument is *reachability* — which is, after
-    /// all, the entire bug.
-    ///
-    /// An [`ArtifactRecord`] carries a non-optional `task_id`, `(task_id,
-    /// source)` **is** its identity, the only route that lists artifacts is
-    /// `GET /tasks/{task_id}/artifacts`, and the only console surface that
-    /// renders one is the per-task Artifacts tab. A card-less artifact would
-    /// therefore need an optional `task_id` (breaking the identity contract), a
-    /// new company-scoped route, and a new console view — and until that last
-    /// piece shipped, the artifact would be recorded and still unreachable,
-    /// which is precisely the failure being fixed, merely moved one layer down.
-    /// Minting the card reuses a path the operator can already open today.
-    ///
-    /// It is also honest about what happened rather than a workaround: an agent
-    /// that produced a deliverable did a unit of work, and a board that shows it
-    /// is more accurate than one that does not. The card lands in
-    /// [`COLUMN_IN_REVIEW`] because that is where the lifecycle already puts
-    /// finished agent work awaiting a person — `COLUMN_DONE` is reached only by
-    /// a human accepting it, and this fix does not get to decide that on their
-    /// behalf.
-    ///
-    /// # What it deliberately does not do
-    ///
-    /// No `output` stamp. That field pins a `run_id` and an attempt ordinal, and
-    /// a chat turn has neither — inventing one would put a fabricated attempt on
-    /// a card to make a field look populated. The artifacts are reachable
-    /// through the tab regardless; an invented run id would not be true.
+    /// Delegates to [`PublishFiling`](publish::filing::PublishFiling), which a
+    /// hive episode's seat also uses; see its module docs for why the body no
+    /// longer lives here.
     async fn record_conversation_publishes(
         &self,
         responder: &str,
         chat: ChatTarget<'_>,
         published: Vec<publish::PendingPublish>,
     ) -> Result<String> {
-        let Some(tasks) = self.deps.tasks.as_ref() else {
-            // Unreachable while the claim is only taken with both stores wired,
-            // and an error rather than a silent `Ok` so it stays unreachable:
-            // the caller surfaces this to the operator instead of dropping the
-            // deliverable the way #445 did.
-            return Err(crate::OpenCompanyError::Harness(
-                "a conversation published a file but no task board is wired".to_string(),
-            ));
-        };
-
-        let card = TaskRecord {
-            id: generate_id(),
-            title: crate::ports::tasks::TaskTitle::system(&publish::conversation_card_title(
-                &published,
-            )),
-            note: Some(publish::conversation_card_note(responder, &published)),
-            // Finished agent work a person has not accepted yet — the same
-            // landing `column_for_settled_run(Succeeded)` gives a dispatched run.
-            column: COLUMN_IN_REVIEW.to_string(),
-            priority: "medium".to_string(),
-            assignee: responder.to_string(),
-            updated_at_millis: now_millis(),
-            // The conversation this came out of, so the card points back at the
-            // thread that produced it (#151 §3.2's field, same meaning).
-            // Issue #1890 B: and the thread inside it, so a file published
-            // inside a thread leaves its card pointing at that thread rather
-            // than at the channel around it. `None` for the thread is the
-            // channel-level conversation, which is where every publish landed
-            // before threads were part of the key.
-            origin: TaskOrigin::new(chat.chat_id.map(str::to_string), chat.thread_root),
-            // A chat turn has no card in scope, so this is a lineage root —
-            // the same `None` a `spawn_task` from an ordinary chat turn writes.
-            parent_task_id: None,
-            output: None,
-            plan: None,
-            planning_attempts: Vec::new(),
-            deliverable: crate::ports::tasks::TaskDeliverable::Once,
-            workflow_proposal: None,
-            origin_run_id: None,
-            origin_workflow_id: None,
-            origin_message_seq: None,
-            bounced: None,
-        };
-        // The card is written **first**: an artifact's `task_id` must name a
-        // card that exists. If the artifact writes then fail, the failure
-        // direction is a visible card whose note explains what it was for —
-        // recoverable, and the operator is told below. The reverse order would
-        // leave artifacts pointing at a card that was never created, which is
-        // unreachable by every route and indistinguishable from the original
-        // bug.
-        tasks.upsert(&self.record().id, &card).await?;
-
-        // No run id: there is no attempt row behind a chat turn, and
-        // `stamp_run` is skipped rather than given something invented.
-        let recorded = self
-            .record_published_artifacts(&card, responder, published, None)
-            .await?;
-        tracing::info!(
-            task_id = %card.id,
-            agent = %responder,
-            artifacts = recorded.len(),
-            "[publish] a conversation published files; minted a card to carry them"
-        );
-        Ok(card.id)
+        publish::filing::PublishFiling {
+            company: &self.record().id,
+            deps: &self.deps,
+        }
+        .record_conversation_publishes(responder, chat, published)
+        .await
     }
 
     /// Resolves which agent answers an operator message.
@@ -2987,6 +2604,50 @@ impl HarnessBrain {
             }
         }
         crate::hive::dispatch::hives_for(record, &|id| agents.get(id).cloned())
+    }
+
+    /// The episode seat that parked `approval_id`, if a seat did.
+    fn episode_seat_of(
+        &self,
+        approval_id: &crate::ports::types::ApprovalId,
+    ) -> Option<crate::runtime::episode_resume::EpisodeSeat> {
+        self.deps
+            .approval_parker
+            .as_ref()?
+            .turn_of(approval_id)
+            .as_deref()
+            .and_then(crate::runtime::episode_resume::parse)
+    }
+
+    /// Carries on a desk episode from its last checkpoint, on its own task.
+    async fn resume_desk_episode(&self, episode_id: &str) -> bool {
+        let Some(events) = self.deps.events.clone() else {
+            return false;
+        };
+        let warmed = match self.refresh_record().await {
+            Ok(()) => self.run_turn().ensure(&self.record()).await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = warmed {
+            tracing::error!(
+                episode = %episode_id,
+                %error,
+                "[hive] the roster a parked episode resumes with could not be built"
+            );
+            return false;
+        }
+        let record = self.record();
+        let hives = self.desk_hives(&record).await;
+        let dispatcher = crate::hive::dispatch::dispatcher(
+            record,
+            events,
+            hives,
+            Arc::new(HarnessDeps::clone(&self.deps)),
+            Arc::clone(&self.pool),
+            self.mentions.clone(),
+        );
+        crate::hive::dispatch::spawn_resume(dispatcher, episode_id.to_owned());
+        true
     }
 
     /// The first active teammate the message named, in reading order —
@@ -3234,13 +2895,23 @@ impl HarnessBrain {
             agent: None,
             run_id: run_id.map(str::to_string),
         };
-        self.deps
-            .approval_requests
-            .push(crate::harness::built_in::policy::ApprovalRequest {
-                tool: payload.kind.effect_kind(),
-                reason: reason.to_string(),
-                effect,
-            });
+        let pushed =
+            self.deps
+                .approval_requests
+                .push(crate::harness::built_in::policy::ApprovalRequest {
+                    tool: payload.kind.effect_kind(),
+                    reason: reason.to_string(),
+                    effect,
+                });
+        if !pushed.is_queued() {
+            tracing::error!(
+                kind = %payload.kind.effect_kind(),
+                outcome = ?pushed,
+                "[harness::brain] a blocker could not be queued for the operator; settling the \
+                 run as failed rather than blocked on a question nobody was asked"
+            );
+            return TaskRunEnd::Failed;
+        }
         TaskRunEnd::Blocked
     }
 
@@ -3566,6 +3237,10 @@ impl Brain for HarnessBrain {
         Some(self.title_pass(&self.record().id))
     }
 
+    async fn resume_episode(&self, episode_id: &str) -> bool {
+        self.resume_desk_episode(episode_id).await
+    }
+
     async fn run_cycle(&self, req: CycleRequest, host: &dyn CycleHost) -> Result<CycleResult> {
         // Issue #707: re-read the record before anything routes on it, so a desk
         // reorder / new desk / added desk member saved through the console
@@ -3790,10 +3465,8 @@ impl HarnessBrain {
                                 record,
                                 events,
                                 hives,
-                                Arc::new(crate::hive::seats::HarnessSeatRunner {
-                                    run_turn: self.run_turn(),
-                                }),
-                                self.deps.workflow_runs.clone(),
+                                Arc::new(HarnessDeps::clone(&self.deps)),
+                                Arc::clone(&self.pool),
                                 self.mentions.clone(),
                             );
                             let trigger = crate::hive::dispatch::trigger_for(
@@ -3893,12 +3566,10 @@ impl HarnessBrain {
                     // a promise to record, and one that cannot be kept must not
                     // be made, or the tool goes back to issuing receipts nothing
                     // honours.
-                    let publish_claim =
-                        (self.deps.tasks.is_some() && self.deps.artifacts.is_some()).then(|| {
-                            self.deps
-                                .pending_publishes
-                                .claim(publish::PublishDestination::Conversation)
-                        });
+                    let publish_claim = self
+                        .deps
+                        .pending_publishes
+                        .claim(self.conversation_destination());
                     // Drive the brain-agnostic delegation seam (issue #176): the
                     // orchestrator turn, its queued delegations, and the CEO-relay
                     // hand-back all run behind the `RunTurn` impl. `HarnessDeps` is
@@ -3908,37 +3579,39 @@ impl HarnessBrain {
                     let record = self.record();
                     let output_claim = self.deps.pending_publishes.output_collector().claim();
                     let turn = output_claim
-                        .scoped(
-                            self.delegation_runner(run_turn.as_ref(), &record)
-                                // Issues #1035 / #1152: the operator's own statement of
-                                // what this message is for. The REST handler already
-                                // acts on it; until #1035 the runtime never saw it, so
-                                // it could not tell a message the handler had carded
-                                // from one it had not — and since #1152 it also carries
-                                // "this is not work", which the runtime has to honour or
-                                // the console's promise holds on one surface only.
-                                .requested(*deliverable)
-                                // Who else this message named (issue: mentions). Context
-                                // for the turn, never a second dispatch.
-                                .also_mentioned(also_mentioned)
-                                // The thread this message belongs to (#1890). Its own
-                                // `parent` IS the root — a reply is parented to its
-                                // question's parent, never to the question — so an
-                                // unparented message carries `None` and lands on the
-                                // channel-level conversation.
-                                .in_thread(*parent)
-                                // This message's own line in the journal, so the chat
-                                // seed can tell it apart from a concurrently accepted
-                                // sibling by identity instead of by text.
-                                .answering(event_seq)
-                                .maybe_for_task(thread_card.as_deref())
-                                // Issue #1846 review (Codex #3864988176): the operator's
-                                // own words, so a delegate's budget-pause marker re-parks
-                                // with what the operator actually asked for rather than
-                                // the hand-off instruction the model wrote.
-                                .reissue_message(composed.clone())
-                                .handle_operator_message(&responder, &composed, chat_id),
-                        )
+                        .scoped(Box::pin(
+                            publish_claim.scoped(Box::pin(
+                                self.delegation_runner(run_turn.as_ref(), &record)
+                                    // Issues #1035 / #1152: the operator's own statement of
+                                    // what this message is for. The REST handler already
+                                    // acts on it; until #1035 the runtime never saw it, so
+                                    // it could not tell a message the handler had carded
+                                    // from one it had not — and since #1152 it also carries
+                                    // "this is not work", which the runtime has to honour or
+                                    // the console's promise holds on one surface only.
+                                    .requested(*deliverable)
+                                    // Who else this message named (issue: mentions). Context
+                                    // for the turn, never a second dispatch.
+                                    .also_mentioned(also_mentioned)
+                                    // The thread this message belongs to (#1890). Its own
+                                    // `parent` IS the root — a reply is parented to its
+                                    // question's parent, never to the question — so an
+                                    // unparented message carries `None` and lands on the
+                                    // channel-level conversation.
+                                    .in_thread(*parent)
+                                    // This message's own line in the journal, so the chat
+                                    // seed can tell it apart from a concurrently accepted
+                                    // sibling by identity instead of by text.
+                                    .answering(event_seq)
+                                    .maybe_for_task(thread_card.as_deref())
+                                    // Issue #1846 review (Codex #3864988176): the operator's
+                                    // own words, so a delegate's budget-pause marker re-parks
+                                    // with what the operator actually asked for rather than
+                                    // the hand-off instruction the model wrote.
+                                    .reissue_message(composed.clone())
+                                    .handle_operator_message(&responder, &composed, chat_id),
+                            )),
+                        ))
                         .await?;
                     let mut operator_steps = turn.steps;
                     let mut operator_reply = turn.reply;
@@ -3972,7 +3645,7 @@ impl HarnessBrain {
                     // so nothing survives into the next turn, and only *recorded*
                     // when the claim was actually taken — an unclaimed queue can
                     // only be empty here, because the tool refuses without one.
-                    let published = self.deps.pending_publishes.drain();
+                    let published = publish_claim.drain();
                     // Issue #989: the paths this turn actually offered, captured
                     // before `file_conversation_batch` below moves `published` —
                     // the cap-pause scan's "staged" side of `publish::unpublished`
@@ -3987,7 +3660,7 @@ impl HarnessBrain {
                             // Issue #1890 B: the same conversation this turn
                             // answers in, thread and all — `parent` IS the root.
                             ChatTarget::in_thread(chat_id, *parent),
-                            publish_claim.is_some(),
+                            publish_claim.is_claimed(),
                             published,
                             &mut operator_reply,
                         ))
@@ -4026,25 +3699,27 @@ impl HarnessBrain {
                         if !unpublished.is_empty() {
                             let nudge_control = SteerControl::new();
                             let declined = output_claim
-                                .scoped(self.nudge_for_unpublished(
-                                    run_turn.as_ref(),
-                                    &responder,
-                                    text,
-                                    &operator_reply,
-                                    &unpublished,
-                                    changed.partial,
-                                    &nudge_control,
-                                    None,
-                                    None,
-                                ))
+                                .scoped(Box::pin(publish_claim.scoped(Box::pin(
+                                    self.nudge_for_unpublished(
+                                        run_turn.as_ref(),
+                                        &responder,
+                                        text,
+                                        &operator_reply,
+                                        &unpublished,
+                                        changed.partial,
+                                        &nudge_control,
+                                        None,
+                                        None,
+                                    ),
+                                ))))
                                 .await;
-                            let nudge_published = self.deps.pending_publishes.drain();
+                            let nudge_published = publish_claim.drain();
                             if let Some(card_id) = output_claim
                                 .scoped(self.file_conversation_batch(
                                     &responder,
                                     turn.spawned_task.as_deref(),
                                     ChatTarget::in_thread(chat_id, *parent),
-                                    publish_claim.is_some(),
+                                    publish_claim.is_claimed(),
                                     nudge_published,
                                     &mut operator_reply,
                                 ))
@@ -4059,10 +3734,8 @@ impl HarnessBrain {
                             // answering the nudge* is an artifact of being
                             // asked, and naming it here would make the nudge
                             // generate its own noise.
-                            let still_unpublished = publish::unpublished(
-                                &unpublished,
-                                &self.deps.pending_publishes.sources(),
-                            );
+                            let still_unpublished =
+                                publish::unpublished(&unpublished, &publish_claim.sources());
                             if !still_unpublished.is_empty() {
                                 // A plain chat turn has no card to note a
                                 // decline on unless one happened to be opened
@@ -4265,7 +3938,16 @@ impl HarnessBrain {
                     verdict,
                     ..
                 } => {
-                    if let Some(message) =
+                    if let Some(seat) = self.episode_seat_of(approval_id) {
+                        tracing::warn!(
+                            %approval_id,
+                            episode = %seat.episode_id,
+                            seat = %seat.seat,
+                            "[hive] an episode seat's decision reached a chat cycle; handing it to \
+                             its episode instead of re-running the call here"
+                        );
+                        self.resume_episode(&seat.episode_id).await;
+                    } else if let Some(message) =
                         self.redispatch_granted_call(approval_id, *verdict).await?
                     {
                         channel_responses.push(message);
@@ -4292,12 +3974,10 @@ impl HarnessBrain {
                     // the claim is a promise to record, and one that cannot be
                     // kept must not be made, or the tool goes back to issuing
                     // receipts nothing honours.
-                    let publish_claim =
-                        (self.deps.tasks.is_some() && self.deps.artifacts.is_some()).then(|| {
-                            self.deps
-                                .pending_publishes
-                                .claim(publish::PublishDestination::Conversation)
-                        });
+                    let publish_claim = self
+                        .deps
+                        .pending_publishes
+                        .claim(self.conversation_destination());
                     // Drive the same routed turn an operator message gets, so a
                     // responder bound to a named harness runs there and an
                     // unavailable default fails loudly instead of silently
@@ -4306,10 +3986,12 @@ impl HarnessBrain {
                     let record = self.record();
                     let output_claim = self.deps.pending_publishes.output_collector().claim();
                     let turn = output_claim
-                        .scoped(
-                            self.delegation_runner(run_turn.as_ref(), &record)
-                                .handle_operator_message(&responder, prompt, None),
-                        )
+                        .scoped(Box::pin(
+                            publish_claim.scoped(Box::pin(
+                                self.delegation_runner(run_turn.as_ref(), &record)
+                                    .handle_operator_message(&responder, prompt, None),
+                            )),
+                        ))
                         .await?;
                     let mut responses = vec![OutboundMessage {
                         message_id: None,
@@ -4391,7 +4073,7 @@ impl HarnessBrain {
                     // onto the card the turn opened — or a freshly minted one —
                     // exactly as an operator turn's publish is filed.
                     let spawned_task = responses[0].task_id.clone();
-                    let published = self.deps.pending_publishes.drain();
+                    let published = publish_claim.drain();
                     let published_sources: Vec<String> = published
                         .iter()
                         .map(|publish| publish.source.clone())
@@ -4404,7 +4086,7 @@ impl HarnessBrain {
                             // the General desk's channel-level conversation,
                             // which is what the bare id meant before #1890 B.
                             ChatTarget::channel(Some(crate::server::ops::language::DEFAULT_DESK)),
-                            publish_claim.is_some(),
+                            publish_claim.is_claimed(),
                             published,
                             &mut responses[0].text,
                         ))
@@ -4422,19 +4104,21 @@ impl HarnessBrain {
                         if !unpublished.is_empty() {
                             let nudge_control = SteerControl::new();
                             let _declined = output_claim
-                                .scoped(self.nudge_for_unpublished(
-                                    run_turn.as_ref(),
-                                    &responder,
-                                    prompt,
-                                    &responses[0].text,
-                                    &unpublished,
-                                    changed.partial,
-                                    &nudge_control,
-                                    None,
-                                    None,
-                                ))
+                                .scoped(Box::pin(publish_claim.scoped(Box::pin(
+                                    self.nudge_for_unpublished(
+                                        run_turn.as_ref(),
+                                        &responder,
+                                        prompt,
+                                        &responses[0].text,
+                                        &unpublished,
+                                        changed.partial,
+                                        &nudge_control,
+                                        None,
+                                        None,
+                                    ),
+                                ))))
                                 .await;
-                            let nudge_published = self.deps.pending_publishes.drain();
+                            let nudge_published = publish_claim.drain();
                             if let Some(card_id) = output_claim
                                 .scoped(self.file_conversation_batch(
                                     &responder,
@@ -4442,7 +4126,7 @@ impl HarnessBrain {
                                     ChatTarget::channel(Some(
                                         crate::server::ops::language::DEFAULT_DESK,
                                     )),
-                                    publish_claim.is_some(),
+                                    publish_claim.is_claimed(),
                                     nudge_published,
                                     &mut responses[0].text,
                                 ))

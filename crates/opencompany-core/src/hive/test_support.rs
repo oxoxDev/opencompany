@@ -37,6 +37,7 @@ impl MemoryLog {
     /// Only `driver_tests.rs` (feature `openhuman`) calls this; without that
     /// feature it would be dead code under a plain `cargo clippy --all-targets`.
     #[cfg(feature = "openhuman")]
+    #[allow(dead_code)]
     pub(crate) fn replies(&self, chat: &str) -> Vec<(String, String)> {
         self.rows()
             .into_iter()
@@ -56,6 +57,7 @@ impl MemoryLog {
     ///
     /// Only `driver_tests.rs` (feature `openhuman`) calls this; see `replies`.
     #[cfg(feature = "openhuman")]
+    #[allow(dead_code)]
     pub(crate) fn kinds(&self) -> Vec<&'static str> {
         self.rows()
             .iter()

@@ -438,6 +438,8 @@ export interface EpisodeDto {
   completedAtMillis?: number;
   completedBy?: string;
   reason?: EpisodeCompletionReason;
+  /** Seats parked waiting on the operator, by agent id. Absent or empty when none. */
+  waiting?: string[];
 }
 
 /** Why an episode closed. Widened by the console to a string on read, so a
@@ -519,6 +521,38 @@ export interface ReferralLineDto {
  * a question crossed and never what was said either way. `lines.length` is the
  * count the collapsed label shows.
  */
+/**
+ * One agent-to-agent exchange on this desk, folded onto the `ask` row that
+ * opened it.
+ *
+ * The same shape and the same `ReferralLineDto` rows as
+ * {@link ReferralConversationDto}: to a reader both are an exchange somebody
+ * on this desk had that the desk's own transcript cannot show. The difference
+ * is where the rows are — a crossing's are dropped host-side, these live in
+ * the pair channel the two seats wrote to.
+ */
+export interface AgentConversationDto {
+  /**
+   * The `ask` row it is rooted at: its identity.
+   *
+   * Two seats can hold several exchanges inside one episode and they share a
+   * channel — `pair_conversation` is deterministic, so each is `dm:<a>+<b>`.
+   * Without this they are indistinguishable: same asker, same askee, same
+   * channel, and a reader sees the same line twice with nothing to tell them
+   * apart. It is also the only safe React key for the same reason.
+   */
+  root: number;
+  askerId: string;
+  askeeId: string;
+  /** The channel the exchange is written to (`dm:{a}+{b}`). */
+  conversationId: string;
+  /** Whether it has ended. A live exchange is worded in the present tense. */
+  concluded: boolean;
+  /** Whether it ended by running out of turns rather than by concluding. */
+  forced: boolean;
+  lines: ReferralLineDto[];
+}
+
 export interface ReferralConversationDto {
   askerId: string;
   otherId: string;
@@ -649,6 +683,7 @@ export interface ChatHistoryMessageDto {
   cueText?: string;
   referredFrom?: ReferredFromDto;
   referralConversation?: ReferralConversationDto;
+  agentConversations?: AgentConversationDto[];
   /**
    * What this reply was inside the episode that produced it — its round, its
    * speech act, and for a `dm` who it went to. Absent for every reply outside
@@ -1144,6 +1179,12 @@ export interface ApprovalSummary {
    * should fall back to wording that is true regardless.
    */
   blocker_step_kind?: BlockerStepKind;
+  /**
+   * The hive episode seat that raised this approval — `id` is the episode,
+   * `seat` the roster agent id. Such an approval's {@link thread} is the desk.
+   * Absent for an approval no episode seat raised, and on an older host.
+   */
+  episode?: { id: string; seat: string } | null;
 }
 
 /**
@@ -1693,6 +1734,7 @@ export interface AgentDetailDto {
    */
   isOrchestrator: boolean;
   tools: AgentToolsDto;
+  skills: AgentSkillsDto;
   desks: AgentDeskDto[];
   inboxEnabled: boolean;
   /**
@@ -1738,6 +1780,27 @@ export interface AgentToolsDto {
    */
   deskCeilingActive: boolean;
   effective: string[];
+}
+
+/**
+ * An agent's skill scope against the company's enabled set.
+ *
+ * `requested` is three-state exactly like {@link AgentToolsDto.requested}:
+ * `null` **inherits** every enabled skill, `[]` is a deliberate **no-skills**
+ * scope, and a non-empty array **narrows**. A surface that treats `null` and
+ * `[]` alike reports the opposite of the truth for exactly those agents.
+ *
+ * A slug in `requested` but missing from `effective` was asked for and not
+ * granted, because the company does not have it enabled — the same
+ * asked-for-but-dropped shape the tool grant has.
+ */
+export interface AgentSkillsDto {
+  requested: string[] | null;
+  /** The company's enabled set — the ceiling, and what the picker offers. */
+  companyAvailable: string[];
+  effective: string[];
+  /** Whether an operator override sets this scope rather than the manifest. */
+  overridden: boolean;
 }
 
 /** A desk this agent sits on, and whether it leads it. */
@@ -1808,6 +1871,13 @@ export interface EditAgentInput {
    * re-scope a grant the operator did not touch.
    */
   tools?: string[] | null;
+  /**
+   * The teammate's own skill scope, the same four-state wire shape as `tools`:
+   * `undefined` leaves it alone, `null` resets it to every enabled skill, `[]`
+   * is a deliberate no-skills scope, and a non-empty array narrows. Entries are
+   * exact slugs — the host refuses a wildcard.
+   */
+  skills?: string[] | null;
 }
 
 /** One declared or detected harness. */

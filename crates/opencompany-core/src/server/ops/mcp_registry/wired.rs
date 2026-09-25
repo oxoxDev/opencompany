@@ -32,7 +32,9 @@ use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::now_millis;
 use crate::server::error::ApiError;
-use crate::server::ops::mcp::{McpServerDto, NEXT_TURN_NOTE, merged_rows};
+use crate::server::ops::mcp::{
+    AuthKind, McpServerDto, NEXT_TURN_NOTE, auth_material_from, declare_runtime_server, merged_rows,
+};
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, not_wired};
 
 use super::RegistryInstall;
@@ -68,8 +70,25 @@ pub(super) struct EntryQuery {
 #[serde(rename_all = "camelCase")]
 pub(super) struct InstallBody {
     qualified_name: String,
+    /// The outbound credential value, stored write-only. Omit to declare the
+    /// server without one and set it later with `PUT …/mcp/servers/{name}`.
+    ///
+    /// The directory reports an entry's `requiredEnvKeys`, but those name a
+    /// launcher's environment and a hosted HTTPS endpoint has no launcher.
+    /// How a credential reaches such a server — bearer, named header, query
+    /// parameter — is the same question `POST …/mcp/servers` asks, and is
+    /// answered here the same way rather than guessed from a key's spelling.
     #[serde(default)]
-    env: HashMap<String, String>,
+    token: Option<String>,
+    /// The auth scheme; defaults to `bearer`.
+    #[serde(default)]
+    auth_kind: AuthKind,
+    /// The header name, when `authKind == header`.
+    #[serde(default)]
+    header_name: Option<String>,
+    /// The query-parameter name, when `authKind == query_param`.
+    #[serde(default)]
+    param_name: Option<String>,
 }
 
 /// `PUT …/mcp/registry/{server_id}/env` body — a credential rotation.
@@ -215,17 +234,28 @@ pub(super) async fn entry(company: ScopedCompany, Query(query): Query<EntryQuery
     }
 }
 
-/// `POST …/mcp/registry/install` — install a directory entry and connect it.
+/// `POST …/mcp/registry/install` — declare a directory entry as one of this
+/// company's own servers.
 ///
 /// Refuses a stdio-only entry before writing anything: the tenant image has no
 /// Node, Python or package manager to launch one with. The search filter keeps
 /// such entries off the operator's screen; this check is what makes the refusal
 /// true for a caller that POSTs a qualified name search never offered.
 ///
-/// The connect that follows is **not** a gate. A server that installs and then
-/// asks for a credential is at a valid resting state — the same rule
+/// **This writes the same runtime index `POST …/mcp/servers` writes**, so a
+/// server found in the directory is an ordinary `runtime`-sourced row and the
+/// whole surface — conflicts, override rules, probes, credential rotation,
+/// delete — behaves for it exactly as for a server an admin typed in by hand.
+/// It used to write OpenHuman's separate install store instead, through an RPC
+/// upstream has since removed: the registry there is browse-only now, and a
+/// server found in it is declared by the reader. Declaring it here rather than
+/// making the operator retype an endpoint they just looked at is what this
+/// route is for.
+///
+/// The probe that follows is **not** a gate. A server that is declared and
+/// then asks for a credential is at a valid resting state — the same rule
 /// `POST …/mcp/servers` follows when its probe comes back `needs_config` — so
-/// the install stands and the connection state rides back in `test`.
+/// the declaration stands and the connection state rides back in `test`.
 pub(super) async fn install(
     company: AdminScopedCompany,
     Json(body): Json<InstallBody>,
@@ -256,13 +286,29 @@ pub(super) async fn install(
         return ApiError(OpenCompanyError::InvalidRequest(refusal)).into_response();
     }
 
-    let server = match mcp.install_from_directory(qualified_name, body.env).await {
-        Ok(server) => server,
-        Err(error) => return ApiError(error).into_response(),
+    // Everything the declaration needs is already in the catalogue entry this
+    // route just fetched: the hosted endpoint an install would have dialled,
+    // and the blurb the directory shows beside it.
+    let Some(endpoint) = detail.endpoint else {
+        return ApiError(OpenCompanyError::InvalidRequest(stdio_install_refusal(
+            &qualified_name,
+        )))
+        .into_response();
     };
-    // A connect failure is recorded as connection state, not raised: see above.
-    let _ = mcp.connect(&server.server_id).await;
-    mutation_response(runtime, &server.server_id).await
+    let server = super::declaration_from_directory(&qualified_name, &endpoint, detail.description);
+    let auth = match auth_material_from(
+        body.token.as_deref(),
+        body.auth_kind,
+        body.header_name.as_deref(),
+        body.param_name.as_deref(),
+    ) {
+        Ok(auth) => auth,
+        Err(error) => return error.into_response(),
+    };
+    match declare_runtime_server(runtime, server, auth).await {
+        Ok(response) => response.into_response(),
+        Err(error) => error.into_response(),
+    }
 }
 
 /// `POST …/mcp/registry/{server_id}/connect` — dial an installed server.

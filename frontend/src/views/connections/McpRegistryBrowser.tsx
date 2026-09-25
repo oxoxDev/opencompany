@@ -11,9 +11,9 @@ import {
   type McpCatalogueEntry,
 } from "@/api/mcp-registry";
 import { ApiError } from "@/api/types";
+import type { McpAuthKind } from "@/api/mcp";
 import {
   directoryEmptyNotice,
-  missingEnvKeys,
   REGISTRY_UNWIRED_NOTICE,
   registryOutage,
   type McpRegistryOutage,
@@ -80,7 +80,12 @@ export function McpRegistryBrowser({ client, company, onInstalled }: Props) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Results>({ kind: "idle" });
   const [picked, setPicked] = useState<Picked | null>(null);
-  const [env, setEnv] = useState<Record<string, string>>({});
+  // The credential, in the shape the add-server form uses. Not the entry's
+  // `requiredEnvKeys` map: those name a launcher's environment, and only a
+  // hosted endpoint is ever declared here. The keys are shown as guidance.
+  const [token, setToken] = useState("");
+  const [authKind, setAuthKind] = useState<McpAuthKind>("bearer");
+  const [authFieldName, setAuthFieldName] = useState("");
   const [installing, setInstalling] = useState(false);
   const [installError, setInstallError] = useState<string | null>(null);
   // Only the newest search may write its answer. Two searches issued quickly —
@@ -97,7 +102,7 @@ export function McpRegistryBrowser({ client, company, onInstalled }: Props) {
     generation.current += 1;
     setResults({ kind: "idle" });
     setPicked(null);
-    setEnv({});
+    resetCredential();
     setInstallError(null);
   }, [client, company]);
 
@@ -130,7 +135,7 @@ export function McpRegistryBrowser({ client, company, onInstalled }: Props) {
 
   async function pick(entry: McpCatalogueEntry) {
     setInstallError(null);
-    setEnv({});
+    resetCredential();
     setPicked({ kind: "loading", qualifiedName: entry.qualifiedName });
     try {
       const detail = await getMcpRegistryEntry(client, company, entry.qualifiedName);
@@ -144,12 +149,22 @@ export function McpRegistryBrowser({ client, company, onInstalled }: Props) {
     }
   }
 
+  function resetCredential() {
+    setToken("");
+    setAuthKind("bearer");
+    setAuthFieldName("");
+  }
+
   async function install(detail: McpCatalogueDetail) {
     if (installing) return;
-    const missing = missingEnvKeys(detail.requiredEnvKeys, env);
-    if (missing.length > 0) {
+    // A credential is optional — a server can be declared now and given one
+    // later — but a non-bearer one is meaningless without the field it travels
+    // in, which is the same rule the add-server form applies.
+    if (authKind !== "bearer" && token.trim() && !authFieldName.trim()) {
       setInstallError(
-        `This server needs a value for ${missing.join(", ")} before it can be installed.`,
+        authKind === "header"
+          ? "A custom-header credential needs a header name."
+          : "A query-parameter credential needs a parameter name.",
       );
       return;
     }
@@ -158,7 +173,14 @@ export function McpRegistryBrowser({ client, company, onInstalled }: Props) {
     try {
       const res = await installMcpRegistryEntry(client, company, {
         qualifiedName: detail.qualifiedName,
-        env,
+        token: token.trim() || undefined,
+        authKind,
+        headerName:
+          authKind === "header" ? authFieldName.trim() || undefined : undefined,
+        paramName:
+          authKind === "query_param"
+            ? authFieldName.trim() || undefined
+            : undefined,
       });
       // An install that lands "needs a credential" is NOT a rollback — the host
       // says so explicitly — so it is reported where the operator can act on it
@@ -169,7 +191,7 @@ export function McpRegistryBrowser({ client, company, onInstalled }: Props) {
         toast.success(`Installed ${detail.displayName}. ${res.note}`);
         setPicked(null);
       }
-      setEnv({});
+      resetCredential();
       onInstalled();
     } catch (err) {
       setInstallError(
@@ -262,8 +284,12 @@ export function McpRegistryBrowser({ client, company, onInstalled }: Props) {
                   {isPicked(picked, entry.qualifiedName) && (
                     <InstallForm
                       picked={picked}
-                      env={env}
-                      setEnv={setEnv}
+                      token={token}
+                      setToken={setToken}
+                      authKind={authKind}
+                      setAuthKind={setAuthKind}
+                      authFieldName={authFieldName}
+                      setAuthFieldName={setAuthFieldName}
                       installing={installing}
                       error={installError}
                       onCancel={() => setPicked(null)}
@@ -349,16 +375,24 @@ function OutageNotice({ outage }: { outage: McpRegistryOutage }) {
  */
 function InstallForm({
   picked,
-  env,
-  setEnv,
+  token,
+  setToken,
+  authKind,
+  setAuthKind,
+  authFieldName,
+  setAuthFieldName,
   installing,
   error,
   onCancel,
   onInstall,
 }: {
   picked: Picked;
-  env: Record<string, string>;
-  setEnv: (next: Record<string, string>) => void;
+  token: string;
+  setToken: (next: string) => void;
+  authKind: McpAuthKind;
+  setAuthKind: (next: McpAuthKind) => void;
+  authFieldName: string;
+  setAuthFieldName: (next: string) => void;
   installing: boolean;
   error: string | null;
   onCancel: () => void;
@@ -397,26 +431,60 @@ function InstallForm({
       )}
       {detail.requiredEnvKeys.length === 0 ? (
         <p className="text-xs text-muted-foreground">
-          This server asks for no credentials — installing connects it straight away.
+          This server asks for no credentials — adding it connects it straight away.
         </p>
       ) : (
-        detail.requiredEnvKeys.map((key) => (
-          <div key={key} className="space-y-1">
-            <Label htmlFor={`mcp-env-${key}`} className="font-mono text-xs">
-              {key}
+        <p className="text-xs text-muted-foreground">
+          The directory says this server needs{" "}
+          <span className="font-mono">{detail.requiredEnvKeys.join(", ")}</span>. Add
+          the value below and choose how it reaches the server.
+        </p>
+      )}
+      <div className="space-y-1">
+        <Label htmlFor="mcp-registry-token" className="text-xs">
+          Credential (optional)
+        </Label>
+        <Input
+          id="mcp-registry-token"
+          data-testid="mcp-registry-token"
+          type="password"
+          autoComplete="new-password"
+          placeholder="write-only"
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+        />
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2 sm:items-end">
+        <div className="space-y-1">
+          <Label htmlFor="mcp-registry-auth-kind" className="text-xs">
+            Auth
+          </Label>
+          <select
+            id="mcp-registry-auth-kind"
+            data-testid="mcp-registry-auth-kind"
+            value={authKind}
+            onChange={(e) => setAuthKind(e.target.value as McpAuthKind)}
+            className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs"
+          >
+            <option value="bearer">Bearer token</option>
+            <option value="header">Custom header</option>
+            <option value="query_param">Query parameter</option>
+          </select>
+        </div>
+        {authKind !== "bearer" && (
+          <div className="space-y-1">
+            <Label htmlFor="mcp-registry-auth-field" className="text-xs">
+              {authKind === "header" ? "Header name" : "Parameter name"}
             </Label>
             <Input
-              id={`mcp-env-${key}`}
-              data-testid="mcp-registry-env-field"
-              type="password"
-              autoComplete="new-password"
-              placeholder="write-only"
-              value={env[key] ?? ""}
-              onChange={(e) => setEnv({ ...env, [key]: e.target.value })}
+              id="mcp-registry-auth-field"
+              data-testid="mcp-registry-auth-field"
+              value={authFieldName}
+              onChange={(e) => setAuthFieldName(e.target.value)}
             />
           </div>
-        ))
-      )}
+        )}
+      </div>
       {error && (
         <p className="text-xs text-destructive" data-testid="mcp-registry-install-error">
           {error}

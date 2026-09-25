@@ -2,9 +2,13 @@
 //! the driver checkpoint a resume reads back, and the "is one already open
 //! here?" lookup a desk message needs before it opens another.
 //!
-//! There is no second store. An episode is the `EpisodeOpened` /
-//! `RoundStarted` / `RoundCommitted` / `EpisodeCompleted` rows it wrote plus
-//! the `AgentReply` rows they bracket, and the driver's own resumable state is
+//! There is no second store. An episode is its `EpisodeOpened` and
+//! `EpisodeCompleted` rows, the `TurnStarted` rows between them -- which
+//! carry the wave each turn ran in, and are what an open episode's progress
+//! is read from -- and the `AgentReply` rows they bracket. (A journal
+//! written before the loop moved to the library carries `RoundStarted` /
+//! `RoundCommitted` rows instead, and folds the same.) The driver's own
+//! resumable state is
 //! one more row (`EpisodeStateSaved`) rather than a file beside the journal —
 //! so a host that died after committing a round finds, on the next boot, both
 //! the state it had reached and the rows it committed since, and can replay
@@ -72,6 +76,8 @@ pub struct EpisodeSummary {
     pub reason: Option<EpisodeReason>,
     /// The referral hop it runs at.
     pub hop: u32,
+    /// The seats parked on the operator right now, in the order they parked.
+    pub waiting: Vec<String>,
 }
 
 /// `GET {scope}/episodes` row. Mirrors `EpisodeDto` in
@@ -107,6 +113,9 @@ pub struct EpisodeDto {
     /// Why it closed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<EpisodeReason>,
+    /// The seats parked on the operator right now.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub waiting: Vec<String>,
 }
 
 impl From<EpisodeSummary> for EpisodeDto {
@@ -124,6 +133,7 @@ impl From<EpisodeSummary> for EpisodeDto {
             completed_at_millis: summary.completed_at_millis,
             completed_by: summary.completed_by,
             reason: summary.reason,
+            waiting: summary.waiting,
         }
     }
 }
@@ -163,8 +173,25 @@ pub fn fold_episodes(events: &[StoredEvent]) -> Vec<EpisodeSummary> {
                     completed_by: None,
                     reason: None,
                     hop: *hop,
+                    waiting: Vec::new(),
                 });
             }
+            // An episode in flight reports the wave its turns are running
+            // in. The conductor announces no round -- a wave is whoever is
+            // due, decided as it goes -- so the turn rows are what say how
+            // far an open episode has got, and an operator watching one
+            // would otherwise see it sit at round zero until it closed.
+            CompanyEvent::TurnStarted {
+                episode_id: Some(episode_id),
+                round_revision: Some(revision),
+                ..
+            } => {
+                if let Some(summary) = index.get(episode_id).map(|at| &mut episodes[*at]) {
+                    summary.revision = summary.revision.max(*revision);
+                }
+            }
+            // Legacy: the hand-written round loop committed a round at a
+            // time. An old journal still folds to the same revision.
             CompanyEvent::RoundCommitted {
                 episode_id,
                 revision,
@@ -188,6 +215,24 @@ pub fn fold_episodes(events: &[StoredEvent]) -> Vec<EpisodeSummary> {
                     summary.completed_at_millis = Some(stored.at_millis);
                     summary.completed_by = completed_by.clone();
                     summary.reason = Some(*reason);
+                    summary.waiting.clear();
+                }
+            }
+            CompanyEvent::EpisodeSeatParked {
+                episode_id, seat, ..
+            } => {
+                if let Some(summary) = index.get(episode_id).map(|at| &mut episodes[*at])
+                    && summary.status == EpisodeStatus::Open
+                    && !summary.waiting.contains(seat)
+                {
+                    summary.waiting.push(seat.clone());
+                }
+            }
+            CompanyEvent::EpisodeSeatResumed {
+                episode_id, seat, ..
+            } => {
+                if let Some(summary) = index.get(episode_id).map(|at| &mut episodes[*at]) {
+                    summary.waiting.retain(|waiting| waiting != seat);
                 }
             }
             _ => {}
@@ -265,9 +310,18 @@ pub struct PersistedEpisode {
     pub thread_root: Option<EventSeq>,
     /// The driver revision.
     pub revision: u64,
-    /// `tinyhivemind_openhuman::DriverState`, as serde wrote it.
+    /// The conductor's resumable snapshot
+    /// (`tinyhivemind_driver::ConductorState`), as serde wrote it: the
+    /// episode and every conversation open under it, each seat's watermark,
+    /// the ledger of outstanding asks, who is parked, and the wave in
+    /// progress. What is deliberately **not** here is the driver, the
+    /// routing and the policy -- the host supplies those again on resume,
+    /// because a router is a live object and a policy the operator changed
+    /// between restarts should be the new one.
     pub state: serde_json::Value,
-    /// Per-seat transcript delivery progress.
+    /// Per-seat transcript delivery progress, from before the conductor
+    /// kept its own watermarks. A conducted episode writes none: `state`
+    /// carries them, and two records of the same thing would disagree.
     pub sharing: BTreeMap<String, SharingState>,
     /// The referral hop.
     pub hop: u32,
@@ -312,7 +366,8 @@ impl PersistedEpisode {
         })
     }
 
-    fn to_event(&self) -> CompanyEvent {
+    /// This checkpoint as the row the journal stores.
+    pub(crate) fn to_event(&self) -> CompanyEvent {
         CompanyEvent::EpisodeStateSaved {
             episode_id: self.episode_id.clone(),
             desk: self.desk.clone(),
@@ -412,6 +467,22 @@ pub async fn replies_after(
             _ => None,
         })
         .collect())
+}
+
+/// Every row since `episode_id` opened, oldest first: what a resumed
+/// episode's host reads its open conversations and parked seats back from.
+pub async fn episode_rows(
+    events: &dyn EventLog,
+    company: &CompanyId,
+    episode_id: &str,
+) -> Result<Vec<StoredEvent>> {
+    tail(events, company, |stored| {
+        matches!(
+            &stored.event,
+            CompanyEvent::EpisodeOpened { episode_id: id, .. } if id == episode_id
+        )
+    })
+    .await
 }
 
 /// An episode still running on a desk thread.

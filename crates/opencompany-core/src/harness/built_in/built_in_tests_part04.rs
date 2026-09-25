@@ -603,6 +603,7 @@ async fn a_top_level_budget_exhaustion_pauses_gracefully_and_parks_a_reissue_mar
         deep_trace: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,

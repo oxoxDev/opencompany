@@ -34,6 +34,12 @@ describe("episode frames", () => {
     { type: "round_committed", ...BASE, revision: 0, utterances: [] },
     { type: "broadcast_routed", ...BASE, revision: 0, agentId: "engineer", messageSeq: 2, plan: { kind: "one", primaryId: "ceo" }, router: "fallback" },
     { type: "dm_delivered", ...BASE, from: "engineer", to: ["ceo"], messageSeq: 3 },
+    // The a2a pair. These are the only frames that tell this desk an exchange
+    // happened at all — the conversation's rows live in the pair channel and
+    // never reach the desk's stream — so a missing arm costs the whole
+    // indicator with nothing on screen to hint at it.
+    { type: "conversation_opened", ...BASE, conversationId: "dm:ceo+engineer", root: 33, asker: "engineer", askee: "ceo" },
+    { type: "conversation_concluded", ...BASE, conversationId: "dm:ceo+engineer", root: 33, asker: "engineer", askee: "ceo", forced: false },
     { type: "episode_completed", ...BASE, revision: 1, rounds: 1, reason: "complete_episode" },
   ] as CompanyStreamEvent[])("routes $type to onEpisodeEvent and nowhere else", (event) => {
     const subs = subscribers();

@@ -31,6 +31,7 @@
 import type { OpenCompanyClient } from "./client";
 import { ApiError } from "./types";
 import type { McpHealth, McpServer } from "./types";
+import type { McpAuthKind } from "./mcp";
 
 /** One directory listing, as `GET …/mcp/registry/search` returns it. */
 export interface McpCatalogueEntry {
@@ -152,16 +153,27 @@ export function getMcpRegistryEntry(
 }
 
 /**
- * Install a directory entry and connect it.
+ * Declare a directory entry as one of this company's own servers.
  *
- * `env` carries the values for the entry's declared keys and is write-only — the
- * host persists them into OpenHuman's env table and no route here reads one
- * back.
+ * The host writes the same runtime index `POST …/mcp/servers` writes, so the
+ * result is an ordinary `runtime`-sourced row.
+ *
+ * The credential is supplied the way the add-server form supplies one — a
+ * `token` read by `authKind` — and is write-only: no route here reads one
+ * back. It is deliberately not the entry's `requiredEnvKeys` map: those name a
+ * launcher's environment, and a hosted endpoint has no launcher, so how the
+ * secret travels is chosen rather than guessed. Show the keys as guidance.
  */
 export function installMcpRegistryEntry(
   client: OpenCompanyClient,
   company: string | null,
-  body: { qualifiedName: string; env: Record<string, string> },
+  body: {
+    qualifiedName: string;
+    token?: string;
+    authKind?: McpAuthKind;
+    headerName?: string;
+    paramName?: string;
+  },
 ): Promise<McpRegistryMutation> {
   return client.post<McpRegistryMutation>(
     `${client.scopeFor(company)}/mcp/registry/install`,

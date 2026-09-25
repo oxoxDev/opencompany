@@ -13,8 +13,9 @@
 //! its situation; the situation was wrong.
 //!
 //! So the roster is rendered into every agent's prompt, statically, beside the
-//! tools that act on it. It is a listing of ids, roles and mandates — what a
-//! new hire is told on day one — not a live status board; what a teammate is
+//! tools that act on it. It is a listing of names, roles and mandates — what a
+//! new hire is told on day one — with the id each tool call takes kept beside
+//! the name rather than in front of it. It is not a live status board; what a teammate is
 //! doing right now is a question for the board tools, not for this section.
 //!
 //! # Where it sits
@@ -54,6 +55,24 @@ pub const TEAM_HEADING: &str = "## Your team";
 /// manifest entry that says nothing — the line says so in one clause rather
 /// than repeating the roster.
 pub fn team_section(record: &CompanyRecord, agent_id: &str) -> String {
+    render(record, agent_id, Audience::Roster)
+}
+
+/// [`team_section`] for a hive episode seat.
+///
+/// A seat's belt has no hand-off tools, so this variant describes who does
+/// what and how to name them, and says nothing about handing work on.
+pub fn seat_team_section(record: &CompanyRecord, agent_id: &str) -> String {
+    render(record, agent_id, Audience::Seat)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Audience {
+    Roster,
+    Seat,
+}
+
+fn render(record: &CompanyRecord, agent_id: &str, audience: Audience) -> String {
     let manifest_roster = record.effective_agents();
     // The manifest roster, then the operator-added teammates — the same order
     // `roster_agent_ids` (and every refusal message) uses, so the listing and
@@ -110,33 +129,45 @@ pub fn team_section(record: &CompanyRecord, agent_id: &str) -> String {
         "\n\nYou are one of {} teammates at {company}, and you are not working alone. ",
         roster.len(),
     ));
-    out.push_str(match narrowed {
-        false => {
-            "Every teammate below is a real agent you can hand work to: they run it and hand \
-             their answer back to you in this same turn. Never tell anyone a teammate is out of \
-             reach or that you cannot contact them — you can, with "
+    match audience {
+        Audience::Seat => out.push_str(
+            "Every teammate below is a real agent at this company. Call them by name when you \
+             write; an id is for a tool call.\n\nTeammates (name, role: mandate):\n",
+        ),
+        Audience::Roster if orchestrator.as_deref() == Some(agent_id) => {
+            out.push_str(match narrowed {
+                false => {
+                    "Every teammate below is a real agent you can hand work to: they run it and \
+                     hand their answer back to you in this same turn. Never tell anyone a \
+                     teammate is out of reach or that you cannot contact them — you can, with "
+                }
+                true => {
+                    "Every teammate below is a real agent; the ones you may hand work to are \
+                     named at the end of this section, and they hand their answer back to you \
+                     in this same turn. The tool for that is "
+                }
+            });
+            out.push_str(&format!(
+                "`{DELEGATE_TO_TEAMMATE_TOOL}`.\n\nTeammates (name, role: mandate). Hand work \
+                 to one with `{DELEGATE_TO_TEAMMATE_TOOL}`: pass the id in the tool call; call \
+                 them by name when you write.\n"
+            ));
         }
-        true => {
-            "Every teammate below is a real agent; the ones you may hand work to are named at \
-             the end of this section, and they hand their answer back to you in this same turn. \
-             The tool for that is "
-        }
-    });
-    out.push_str(&format!(
-        "`{DELEGATE_TO_TEAMMATE_TOOL}`.\n\nTeammates (roster id — role: mandate). Hand work to \
-         one with `{DELEGATE_TO_TEAMMATE_TOOL}`, naming the id exactly as written:\n"
-    ));
+        Audience::Roster => out.push_str(
+            "Every teammate below is a real agent. When you are in a room with one — a desk, or \
+             a conversation somebody opened with you — you can ask them directly and their \
+             answer reaches you there. Otherwise the way to put work on a teammate is to open a \
+             card for it with `spawn_task`, naming them; never say a teammate is out of \
+             reach. Call them by name when you write; an id is for a tool call.\n\nTeammates \
+             (name, role: mandate):\n",
+        ),
+    }
     for agent in &others {
-        out.push_str("- `");
-        out.push_str(agent.id);
-        out.push_str("` — ");
-        match agent.name.map(str::trim).filter(|n| !n.is_empty()) {
-            Some(name) if !name.eq_ignore_ascii_case(agent.role.trim()) => {
-                out.push_str(name);
-                out.push_str(", ");
-                out.push_str(agent.role.trim());
-            }
-            _ => out.push_str(agent.role.trim()),
+        out.push_str("- ");
+        out.push_str(agent.label());
+        if !agent.label().eq_ignore_ascii_case(agent.role.trim()) {
+            out.push_str(", ");
+            out.push_str(agent.role.trim());
         }
         if orchestrator.as_deref() == Some(agent.id) {
             out.push_str(
@@ -150,7 +181,7 @@ pub fn team_section(record: &CompanyRecord, agent_id: &str) -> String {
             out.push_str(": ");
             out.push_str(description);
         }
-        out.push('\n');
+        out.push_str(&format!(" (id `{}` for tool calls)\n", agent.id));
     }
 
     // **The desks this agent sits on, not every desk the company has.**
@@ -170,21 +201,25 @@ pub fn team_section(record: &CompanyRecord, agent_id: &str) -> String {
     // could not contact a colleague sitting on the same desk".
     let desks = desks_of_member(record, agent_id);
     if !desks.is_empty() {
-        out.push_str("\nYou sit on (desk id — name: members):\n");
+        out.push_str("\nYou sit on (desk: members):\n");
         for desk in &desks {
             let lead = desk_lead(record, desk);
             let members: Vec<String> = record
                 .effective_desk_members(desk)
                 .into_iter()
                 .filter(|member| record.is_roster_agent(member))
-                .map(|member| match lead.as_deref() == Some(member.as_str()) {
-                    true => format!("{member} (lead)"),
-                    false => member,
+                .map(|member| {
+                    let name = roster
+                        .iter()
+                        .find(|agent| agent.id == member)
+                        .map_or(member.as_str(), Teammate::label);
+                    match lead.as_deref() == Some(member.as_str()) {
+                        true => format!("{name} (lead)"),
+                        false => name.to_string(),
+                    }
                 })
                 .collect();
-            out.push_str("- `");
-            out.push_str(desk);
-            out.push_str("` — ");
+            out.push_str("- ");
             out.push_str(&desk_label(record, desk));
             out.push_str(": ");
             out.push_str(match members.is_empty() {
@@ -192,13 +227,13 @@ pub fn team_section(record: &CompanyRecord, agent_id: &str) -> String {
                 false => "",
             });
             out.push_str(&members.join(", "));
-            out.push('\n');
+            out.push_str(&format!(" (id `{desk}` for tool calls)\n"));
         }
     }
 
     // The reach, rendered from the rule the tool enforces. Only worth a line
     // when it is narrower than "everyone above", which the opening already says.
-    if narrowed {
+    if narrowed && audience == Audience::Roster {
         out.push_str(&match reachable.is_empty() {
             true => "\nYour manifest entry does not let you hand work to anyone listed above. \
                      They are listed so you know who does what: answer what you can yourself, \
@@ -209,7 +244,13 @@ pub fn team_section(record: &CompanyRecord, agent_id: &str) -> String {
                  say who should be brought in rather than handing to them.\n",
                 reachable
                     .iter()
-                    .map(|id| format!("`{id}`"))
+                    .map(|id| {
+                        let name = roster
+                            .iter()
+                            .find(|agent| agent.id == id.as_str())
+                            .map_or(id.as_str(), Teammate::label);
+                        format!("{name} (`{id}`)")
+                    })
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -227,8 +268,18 @@ struct Teammate<'a> {
     description: Option<&'a str>,
 }
 
+impl Teammate<'_> {
+    /// What a person calls them: their display name, else their role.
+    fn label(&self) -> &str {
+        self.name
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(self.role.trim())
+    }
+}
+
 /// A desk's operator-facing name, or its id when it has none to show.
-fn desk_label(record: &CompanyRecord, desk_id: &str) -> String {
+pub(crate) fn desk_label(record: &CompanyRecord, desk_id: &str) -> String {
     record
         .manifest
         .group_chats

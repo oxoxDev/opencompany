@@ -145,6 +145,7 @@ async fn main() -> anyhow::Result<()> {
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: opencompany::harness::policy::ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: opencompany::harness::toolbelt::CapabilityFilter::AllowAll,

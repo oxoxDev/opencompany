@@ -26,10 +26,8 @@ pub(crate) async fn run(tool: &PublishArtifactTool, args: serde_json::Value) -> 
 
 /// A queue claimed for `destination`, with the live claim (issue #445).
 ///
-/// Both halves must be bound by the caller: the claim releases on drop, so
-/// `let (queue, _) = claimed(..)` would un-claim it immediately and every
-/// publish would then be refused. That is the guard doing its job, but it makes
-/// for a confusing test failure, hence the name `_claim` at each call site.
+/// Run the tool inside [`PublishClaim::scoped`]: outside it, and once the
+/// claim drops, every publish is refused.
 pub(crate) fn claimed(destination: PublishDestination) -> (PendingPublishQueue, PublishClaim) {
     let queue = PendingPublishQueue::default();
     let claim = queue.claim(destination);

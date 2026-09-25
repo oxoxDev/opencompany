@@ -4,70 +4,151 @@ use serde_json::json;
 
 // ── Queue semantics ───────────────────────────────────────────────────────
 
-#[test]
-fn the_queue_drains_fifo_and_empties() {
-    let queue = PendingPublishQueue::default();
-    let publish = |source: &str| PendingPublish {
+fn staged(source: &str) -> PendingPublish {
+    PendingPublish {
         agent: "maya".to_string(),
         source: source.to_string(),
         title: source.to_string(),
         kind: ArtifactKind::Text,
         note: None,
         payload: PublishPayload::Text("b".to_string()),
-    };
-    queue.push(publish("a.md"));
-    queue.push(publish("b.md"));
-    assert_eq!(queue.sources(), ["a.md", "b.md"]);
-    assert_eq!(queue.queued(), 2);
+    }
+}
 
-    let drained = queue.drain();
+#[tokio::test]
+async fn the_queue_drains_fifo_and_empties() {
+    let queue = PendingPublishQueue::default();
+    let claim = queue.claim(PublishDestination::Task);
+    claim
+        .scoped(async {
+            assert!(queue.push(staged("a.md")));
+            assert!(queue.push(staged("b.md")));
+            assert_eq!(queue.sources(), ["a.md", "b.md"]);
+            assert_eq!(queue.queued(), 2);
+
+            let drained = queue.drain();
+            assert_eq!(
+                drained
+                    .iter()
+                    .map(|p| p.source.as_str())
+                    .collect::<Vec<_>>(),
+                ["a.md", "b.md"]
+            );
+            assert_eq!(queue.queued(), 0, "drain empties");
+            assert!(queue.drain().is_empty(), "a second drain yields nothing");
+        })
+        .await;
+}
+
+/// `clear` is what stops an abandoned redirect re-run from having its staged
+/// file attributed to this card.
+#[tokio::test]
+async fn clear_drops_what_a_prior_turn_staged() {
+    let queue = PendingPublishQueue::default();
+    let claim = queue.claim(PublishDestination::Task);
+    claim
+        .scoped(async {
+            assert!(queue.push(staged("leftover.md")));
+            queue.clear();
+            assert_eq!(queue.queued(), 0);
+            assert!(queue.sources().is_empty());
+        })
+        .await;
+}
+
+/// A publish outside every claim stages nothing, and a claim with nowhere to
+/// file refuses too.
+#[tokio::test]
+async fn an_unscoped_or_unclaimed_publish_stages_nothing() {
+    let queue = PendingPublishQueue::default();
+    assert!(!queue.push(staged("orphan.md")));
+    assert_eq!(queue.destination(), PublishDestination::Unclaimed);
+
+    let claim = queue.claim(PublishDestination::Task);
+    assert!(
+        !queue.push(staged("outside.md")),
+        "holding a claim is not enough; the push must run inside its scope"
+    );
+    assert!(claim.drain().is_empty());
+
+    let nowhere = queue.claim(PublishDestination::Unclaimed);
+    nowhere
+        .scoped(async { assert!(!queue.push(staged("nowhere.md"))) })
+        .await;
+    assert!(nowhere.drain().is_empty());
+}
+
+/// Two turns running at once each drain only what they staged, into their own
+/// destination.
+#[tokio::test]
+async fn concurrent_claims_drain_only_their_own_publishes() {
+    let queue = PendingPublishQueue::default();
+    let task_claim = queue.claim(PublishDestination::Task);
+    let chat_claim = queue.claim(PublishDestination::Conversation);
+    let (task_gate, task_wait) = tokio::sync::oneshot::channel::<()>();
+    let (chat_gate, chat_wait) = tokio::sync::oneshot::channel::<()>();
+
+    let task_turn = {
+        let queue = queue.clone();
+        async move {
+            assert_eq!(queue.destination(), PublishDestination::Task);
+            assert!(queue.push(staged("task.md")));
+            task_gate.send(()).expect("the other turn is listening");
+            chat_wait.await.expect("the other turn staged");
+        }
+    };
+    let chat_turn = {
+        let queue = queue.clone();
+        async move {
+            task_wait.await.expect("the other turn staged");
+            assert_eq!(queue.destination(), PublishDestination::Conversation);
+            assert!(queue.push(staged("chat.md")));
+            chat_gate.send(()).expect("the other turn is listening");
+        }
+    };
+    let task = tokio::spawn(async move {
+        task_claim.scoped(task_turn).await;
+        task_claim.drain()
+    });
+    let chat = tokio::spawn(async move {
+        chat_claim.scoped(chat_turn).await;
+        chat_claim.drain()
+    });
+
+    let task_drained = task.await.expect("task turn");
+    let chat_drained = chat.await.expect("chat turn");
     assert_eq!(
-        drained
+        task_drained
             .iter()
             .map(|p| p.source.as_str())
             .collect::<Vec<_>>(),
-        ["a.md", "b.md"]
+        ["task.md"]
     );
-    assert_eq!(queue.queued(), 0, "drain empties");
-    assert!(queue.drain().is_empty(), "a second drain yields nothing");
-}
-
-/// `clear` is what stops an operator chat turn earlier in the same cycle — or
-/// an abandoned redirect re-run — from having its staged file attributed to
-/// this card.
-#[test]
-fn clear_drops_what_a_prior_turn_staged() {
-    let queue = PendingPublishQueue::default();
-    queue.push(PendingPublish {
-        agent: "maya".to_string(),
-        source: "leftover.md".to_string(),
-        title: "leftover".to_string(),
-        kind: ArtifactKind::Text,
-        note: None,
-        payload: PublishPayload::Text("b".to_string()),
-    });
-    queue.clear();
-    assert_eq!(queue.queued(), 0);
-    assert!(queue.sources().is_empty());
+    assert_eq!(
+        chat_drained
+            .iter()
+            .map(|p| p.source.as_str())
+            .collect::<Vec<_>>(),
+        ["chat.md"]
+    );
 }
 
 /// The queue handle is shared, not copied — the tool built into the agent and
-/// the brain that drains it must see one queue.
-///
-/// Since #445 that sharing has a second half: the **destination** travels with
-/// the clone too. `build_agent` hands the tool one clone and nothing else, so a
-/// destination that did not survive cloning would leave every built tool
-/// permanently unclaimed and unable to publish at all.
+/// the claim that drains it must see one queue.
 #[tokio::test]
 async fn a_cloned_handle_sees_the_same_queue() {
     let dir = workspace(&[("spec.md", b"# Spec")]);
     let queue = PendingPublishQueue::default();
     let tool = PublishArtifactTool::new(dir.path(), "maya", queue.clone());
 
-    let _claim = queue.claim(PublishDestination::Task);
-    run(&tool, json!({ "path": "spec.md" })).await;
+    let claim = queue.claim(PublishDestination::Task);
+    claim.scoped(run(&tool, json!({ "path": "spec.md" }))).await;
 
-    assert_eq!(queue.queued(), 1, "the brain's handle sees the tool's push");
+    assert_eq!(
+        claim.sources(),
+        ["spec.md"],
+        "the claim sees the tool's push"
+    );
 }
 
 // ── The scan ──────────────────────────────────────────────────────────────

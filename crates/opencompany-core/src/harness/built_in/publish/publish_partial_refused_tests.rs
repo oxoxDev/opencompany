@@ -137,12 +137,16 @@ async fn a_claimed_destination_records_no_refusal() {
     let dir = workspace(&[("spec.md", b"# Spec")]);
 
     for destination in [PublishDestination::Task, PublishDestination::Conversation] {
-        let (queue, _claim) = claimed(destination);
+        let (queue, claim) = claimed(destination.clone());
         let tool = PublishArtifactTool::new(dir.path(), "maya", queue.clone());
-        let result = run(&tool, json!({ "path": "spec.md" })).await;
+        let result = claim.scoped(run(&tool, json!({ "path": "spec.md" }))).await;
 
         assert!(!result.is_error, "{destination:?}: the publish succeeds");
-        assert_eq!(queue.queued(), 1, "{destination:?}: and it is staged");
+        assert_eq!(
+            claim.sources().len(),
+            1,
+            "{destination:?}: and it is staged"
+        );
         assert!(
             queue.drain_refusals().is_empty(),
             "{destination:?}: a claimed destination must never record a refusal"
@@ -156,25 +160,30 @@ async fn a_claimed_destination_records_no_refusal() {
 /// Otherwise a redirect re-runs from the original brief and the operator is told
 /// about a refusal provoked by a turn that was thrown away — attributed to the
 /// turn that replaced it, which never asked to publish anything.
-#[test]
-fn clearing_the_queue_empties_both_buckets() {
+#[tokio::test]
+async fn clearing_the_queue_empties_both_buckets() {
     let queue = PendingPublishQueue::default();
-    queue.push(PendingPublish {
-        agent: "maya".to_string(),
-        source: "staged.md".to_string(),
-        title: "staged".to_string(),
-        kind: ArtifactKind::Text,
-        note: None,
-        payload: PublishPayload::Text("body".to_string()),
-    });
-    queue.push_refusal("refused.md".to_string());
-    assert_eq!(queue.queued(), 1);
+    let claim = queue.claim(PublishDestination::Task);
+    claim
+        .scoped(async {
+            assert!(queue.push(PendingPublish {
+                agent: "maya".to_string(),
+                source: "staged.md".to_string(),
+                title: "staged".to_string(),
+                kind: ArtifactKind::Text,
+                note: None,
+                payload: PublishPayload::Text("body".to_string()),
+            }));
+            queue.push_refusal("refused.md".to_string());
+            assert_eq!(queue.queued(), 1);
 
-    queue.clear();
+            queue.clear();
 
-    assert_eq!(queue.queued(), 0, "the staged bucket is emptied, as before");
-    assert!(
-        queue.drain_refusals().is_empty(),
-        "an abandoned turn's refusal must not survive into the turn that replaces it"
-    );
+            assert_eq!(queue.queued(), 0, "the staged bucket is emptied, as before");
+            assert!(
+                queue.drain_refusals().is_empty(),
+                "an abandoned turn's refusal must not survive into the turn that replaces it"
+            );
+        })
+        .await;
 }

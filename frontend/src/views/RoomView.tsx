@@ -82,6 +82,7 @@ import { ThreadPanel } from "./room/ThreadPanel";
 import { useLocalScope } from "@/connections/ConnectionContext";
 import * as room from "@/room/store";
 import { useEpisodes } from "@/hooks/use-episodes";
+import { withLiveExchanges } from "@/lib/episodes";
 import type { EpisodeFrames } from "@/lib/episode-frames";
 import {
   buildChannels,
@@ -1345,7 +1346,7 @@ export function RoomView({
     return members.filter((m) => !inside.has(m.id));
   }, [inChannel, members]);
 
-  const messages = useMemo(
+  const transcript = useMemo(
     () => (channel ? (transcripts[channel.id] ?? EMPTY_MESSAGES) : EMPTY_MESSAGES),
     [transcripts, channel?.id],
   );
@@ -1361,6 +1362,17 @@ export function RoomView({
   const historyPending = channel
     ? loadingTeam || !historyReady(hydration, channel.id)
     : false;
+  // Folded from the raw transcript, and then folded back onto it: an
+  // exchange two seats are having is written to their pair channel, so the
+  // rows never reach this desk and only the episode fold has seen them.
+  // Attaching them here means every surface below -- the timeline, the thread
+  // panel -- renders one enriched transcript rather than each learning about
+  // conversations separately.
+  const episodes = useEpisodes(transcript, episodeFrames, channel?.id);
+  const messages = useMemo(
+    () => withLiveExchanges(transcript, episodes),
+    [transcript, episodes],
+  );
   const entries = useMemo(
     () => (channel ? buildTimeline(messages, channel, members, youAvatar) : []),
     [messages, channel, members, youAvatar],
@@ -1449,15 +1461,6 @@ export function RoomView({
    * consults the channel's kind, which is what keeps the surface unchanged
    * for every conversation that is not a room.
    */
-  const episodes = useEpisodes(
-    // The complete transcript, not `entries` — `buildTimeline` folds thread
-    // replies out of the main timeline, but a seat's utterance can itself be
-    // a reply to the operator message that opened the episode, and `entries`
-    // would then miss those rows and render an incomplete round.
-    messages,
-    episodeFrames,
-    channel?.id,
-  );
 
   const items = useMemo(
     () =>

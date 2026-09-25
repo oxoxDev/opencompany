@@ -12,23 +12,26 @@ use crate::policy::test_support::composio_send_args;
 /// runs, instead of parking a second time.
 #[tokio::test]
 async fn a_granted_call_is_allowed_once_and_then_parks_again() {
-    let (p, grants) = granting_policy("supervised", &[], "finance");
-    let args = composio_send_args();
-    grants.grant(granted("finance", "composio_execute", args.clone()));
+    in_cycle(async {
+        let (p, grants) = granting_policy("supervised", &[], "finance");
+        let args = composio_send_args();
+        grants.grant(granted("finance", "composio_execute", args.clone()));
 
-    assert_eq!(
-        p.check(&request("composio_execute", args.clone())).await,
-        ToolPolicyDecision::Allow,
-        "the operator approved this exact call; it must run"
-    );
-    // Single-use: the next identical call has no grant left and parks.
-    assert!(
-        matches!(
-            p.check(&request("composio_execute", args)).await,
-            ToolPolicyDecision::RequireApproval { .. }
-        ),
-        "one approval buys one call, not standing permission"
-    );
+        assert_eq!(
+            p.check(&request("composio_execute", args.clone())).await,
+            ToolPolicyDecision::Allow,
+            "the operator approved this exact call; it must run"
+        );
+        // Single-use: the next identical call has no grant left and parks.
+        assert!(
+            matches!(
+                p.check(&request("composio_execute", args)).await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "one approval buys one call, not standing permission"
+        );
+    })
+    .await;
 }
 
 /// A grant is consumed **above** `always_approve`.
@@ -41,25 +44,28 @@ async fn a_granted_call_is_allowed_once_and_then_parks_again() {
 /// exact-args + agent-scope is what keeps the widened path narrow.
 #[tokio::test]
 async fn a_grant_beats_always_approve_but_only_for_that_one_call() {
-    let (p, grants) = granting_policy("full", &["payment"], "finance");
-    let args = serde_json::json!({ "amount_usd": 40.0 });
+    in_cycle(async {
+        let (p, grants) = granting_policy("full", &["payment"], "finance");
+        let args = serde_json::json!({ "amount_usd": 40.0 });
 
-    // Without a grant, `always_approve` parks it even under full autonomy.
-    assert!(matches!(
-        p.check(&request("payment.send", args.clone())).await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
+        // Without a grant, `always_approve` parks it even under full autonomy.
+        assert!(matches!(
+            p.check(&request("payment.send", args.clone())).await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
 
-    grants.grant(granted("finance", "payment.send", args.clone()));
-    assert_eq!(
-        p.check(&request("payment.send", args.clone())).await,
-        ToolPolicyDecision::Allow
-    );
-    // And the list reasserts itself immediately afterwards.
-    assert!(matches!(
-        p.check(&request("payment.send", args)).await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
+        grants.grant(granted("finance", "payment.send", args.clone()));
+        assert_eq!(
+            p.check(&request("payment.send", args.clone())).await,
+            ToolPolicyDecision::Allow
+        );
+        // And the list reasserts itself immediately afterwards.
+        assert!(matches!(
+            p.check(&request("payment.send", args)).await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+    })
+    .await;
 }
 
 /// A grant minted for one agent does not admit another agent's identical
@@ -67,22 +73,25 @@ async fn a_grant_beats_always_approve_but_only_for_that_one_call() {
 /// the abstract.
 #[tokio::test]
 async fn a_grant_does_not_travel_to_another_agent() {
-    let (marketing, grants) = granting_policy("supervised", &[], "marketing");
-    let args = composio_send_args();
-    // The grant belongs to `finance`.
-    grants.grant(granted("finance", "composio_execute", args.clone()));
+    in_cycle(async {
+        let (marketing, grants) = granting_policy("supervised", &[], "marketing");
+        let args = composio_send_args();
+        // The grant belongs to `finance`.
+        grants.grant(granted("finance", "composio_execute", args.clone()));
 
-    assert!(
-        matches!(
-            marketing
-                .check(&request("composio_execute", args.clone()))
-                .await,
-            ToolPolicyDecision::RequireApproval { .. }
-        ),
-        "another agent's grant must not admit this call"
-    );
-    // ...and the near-miss did not burn finance's grant.
-    assert_eq!(grants.live_count(), 1);
+        assert!(
+            matches!(
+                marketing
+                    .check(&request("composio_execute", args.clone()))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "another agent's grant must not admit this call"
+        );
+        // ...and the near-miss did not burn finance's grant.
+        assert_eq!(grants.live_count(), 1);
+    })
+    .await;
 }
 
 /// Re-issuing with different arguments re-parks rather than riding the
@@ -95,37 +104,40 @@ async fn a_grant_does_not_travel_to_another_agent() {
 /// payment and funded a $4,000 one.
 #[tokio::test]
 async fn drifted_arguments_re_park_instead_of_riding_the_grant() {
-    let (p, grants) = granting_policy("supervised", &[], "finance");
-    grants.grant(granted(
-        "finance",
-        "pay_invoice",
-        serde_json::json!({ "amount_usd": 40.0, "to": "acme" }),
-    ));
-
-    for drifted in [
-        serde_json::json!({ "amount_usd": 4000.0, "to": "acme" }),
-        serde_json::json!({ "amount_usd": 40.0, "to": "someone-else" }),
-        serde_json::json!({ "amount_usd": 40.0 }),
-        serde_json::json!({ "amount_usd": 40.0, "to": "acme", "memo": "extra" }),
-    ] {
-        assert!(
-            matches!(
-                p.check(&request("pay_invoice", drifted.clone())).await,
-                ToolPolicyDecision::RequireApproval { .. }
-            ),
-            "arguments the operator never saw must re-park: {drifted}"
-        );
-    }
-    // Every near-miss left the grant intact for the genuine call.
-    assert_eq!(grants.live_count(), 1);
-    assert_eq!(
-        p.check(&request(
+    in_cycle(async {
+        let (p, grants) = granting_policy("supervised", &[], "finance");
+        grants.grant(granted(
+            "finance",
             "pay_invoice",
-            serde_json::json!({ "amount_usd": 40.0, "to": "acme" })
-        ))
-        .await,
-        ToolPolicyDecision::Allow
-    );
+            serde_json::json!({ "amount_usd": 40.0, "to": "acme" }),
+        ));
+
+        for drifted in [
+            serde_json::json!({ "amount_usd": 4000.0, "to": "acme" }),
+            serde_json::json!({ "amount_usd": 40.0, "to": "someone-else" }),
+            serde_json::json!({ "amount_usd": 40.0 }),
+            serde_json::json!({ "amount_usd": 40.0, "to": "acme", "memo": "extra" }),
+        ] {
+            assert!(
+                matches!(
+                    p.check(&request("pay_invoice", drifted.clone())).await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "arguments the operator never saw must re-park: {drifted}"
+            );
+        }
+        // Every near-miss left the grant intact for the genuine call.
+        assert_eq!(grants.live_count(), 1);
+        assert_eq!(
+            p.check(&request(
+                "pay_invoice",
+                serde_json::json!({ "amount_usd": 40.0, "to": "acme" })
+            ))
+            .await,
+            ToolPolicyDecision::Allow
+        );
+    })
+    .await;
 }
 
 /// A grant cannot rescue a tool the tier denies outright.
@@ -174,18 +186,21 @@ async fn a_grant_does_not_override_a_readonly_desk() {
 /// never consults the grant set at all.
 #[tokio::test]
 async fn an_unbound_policy_ignores_grants_entirely() {
-    let queue = ApprovalRequestQueue::default();
-    let grants = queue.grants();
-    let p = policy("supervised", &[], None).with_requests(queue);
-    let args = serde_json::json!({ "to": "a@b.test" });
-    // A grant naming *some* agent exists, but this policy is bound to none.
-    grants.grant(granted("finance", "send_email", args.clone()));
+    in_cycle(async {
+        let queue = ApprovalRequestQueue::default();
+        let grants = queue.grants();
+        let p = policy("supervised", &[], None).with_requests(queue);
+        let args = serde_json::json!({ "to": "a@b.test" });
+        // A grant naming *some* agent exists, but this policy is bound to none.
+        grants.grant(granted("finance", "send_email", args.clone()));
 
-    assert!(matches!(
-        p.check(&request("send_email", args)).await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
-    assert_eq!(grants.live_count(), 1, "the grant was never touched");
+        assert!(matches!(
+            p.check(&request("send_email", args)).await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+        assert_eq!(grants.live_count(), 1, "the grant was never touched");
+    })
+    .await;
 }
 
 /// Issue #243, and the single most fragile thing about riding the grant set
@@ -237,6 +252,10 @@ fn grants_survive_a_queue_clear() {
 /// triggered.
 #[test]
 fn stamping_a_run_claims_only_the_requests_that_came_after_the_boundary() {
+    CURRENT_SCOPE.sync_scope(ApprovalScope::Cycle, stamp_after_the_boundary);
+}
+
+fn stamp_after_the_boundary() {
     let queue = ApprovalRequestQueue::default();
     let queued = |kind: &str| ApprovalRequest {
         tool: kind.to_string(),

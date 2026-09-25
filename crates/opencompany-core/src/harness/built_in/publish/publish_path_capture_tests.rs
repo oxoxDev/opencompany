@@ -383,13 +383,15 @@ fn a_prose_version_is_its_content_whatever_the_store_did() {
 #[tokio::test]
 async fn publishing_stages_the_file_and_reports_what_was_captured() {
     let dir = workspace(&[("specs/launch.md", b"# Spec\nShip it.")]);
-    let (queue, _claim) = claimed(PublishDestination::Task);
+    let (queue, claim) = claimed(PublishDestination::Task);
     let tool = PublishArtifactTool::new(dir.path(), "maya", queue.clone());
 
-    let result = run(&tool, json!({ "path": "specs/launch.md" })).await;
+    let result = claim
+        .scoped(run(&tool, json!({ "path": "specs/launch.md" })))
+        .await;
     assert!(!result.is_error, "{}", text_of(&result));
 
-    let staged = queue.drain();
+    let staged = claim.drain();
     assert_eq!(staged.len(), 1);
     assert_eq!(staged[0].source, "specs/launch.md");
     assert_eq!(staged[0].kind, ArtifactKind::Markdown);
@@ -412,33 +414,34 @@ async fn publishing_stages_the_file_and_reports_what_was_captured() {
 #[tokio::test]
 async fn a_staged_publish_names_the_agent_that_called_the_tool() {
     let dir = workspace(&[("memo.md", b"# Memo")]);
-    let (queue, _claim) = claimed(PublishDestination::Conversation);
+    let (queue, claim) = claimed(PublishDestination::Conversation);
     let tool = PublishArtifactTool::new(dir.path(), "writer", queue.clone());
 
-    run(&tool, json!({ "path": "memo.md" })).await;
+    claim.scoped(run(&tool, json!({ "path": "memo.md" }))).await;
 
-    let staged = queue.drain();
+    let staged = claim.drain();
     assert_eq!(staged[0].agent, "writer");
 }
 
 #[tokio::test]
 async fn an_explicit_title_kind_and_note_are_carried_through() {
     let dir = workspace(&[("out.dat", b"plain text really")]);
-    let (queue, _claim) = claimed(PublishDestination::Task);
+    let (queue, claim) = claimed(PublishDestination::Task);
     let tool = PublishArtifactTool::new(dir.path(), "maya", queue.clone());
 
-    run(
-        &tool,
-        json!({
-            "path": "out.dat",
-            "title": "Q3 export",
-            "kind": "text",
-            "note": "rewrote the pricing section"
-        }),
-    )
-    .await;
+    claim
+        .scoped(run(
+            &tool,
+            json!({
+                "path": "out.dat",
+                "title": "Q3 export",
+                "kind": "text",
+                "note": "rewrote the pricing section"
+            }),
+        ))
+        .await;
 
-    let staged = queue.drain();
+    let staged = claim.drain();
     assert_eq!(staged[0].title, "Q3 export");
     assert_eq!(
         staged[0].kind,
@@ -456,14 +459,14 @@ async fn an_explicit_title_kind_and_note_are_carried_through() {
 #[tokio::test]
 async fn the_body_is_captured_at_publish_time_not_at_drain_time() {
     let dir = workspace(&[("spec.md", b"# The version I published")]);
-    let (queue, _claim) = claimed(PublishDestination::Task);
+    let (queue, claim) = claimed(PublishDestination::Task);
     let tool = PublishArtifactTool::new(dir.path(), "maya", queue.clone());
 
-    run(&tool, json!({ "path": "spec.md" })).await;
+    claim.scoped(run(&tool, json!({ "path": "spec.md" }))).await;
     // The agent's next step scribbles over the file.
     std::fs::write(dir.path().join("spec.md"), b"# clobbered afterwards").unwrap();
 
-    let staged = queue.drain();
+    let staged = claim.drain();
     assert_eq!(
         staged[0].payload,
         PublishPayload::Text("# The version I published".to_string())
@@ -473,27 +476,35 @@ async fn the_body_is_captured_at_publish_time_not_at_drain_time() {
 #[tokio::test]
 async fn a_bad_path_is_a_truthful_tool_error_and_stages_nothing() {
     let dir = workspace(&[("spec.md", b"# Spec")]);
-    let (queue, _claim) = claimed(PublishDestination::Task);
+    let (queue, claim) = claimed(PublishDestination::Task);
     let tool = PublishArtifactTool::new(dir.path(), "maya", queue.clone());
 
     for path in ["../escape.md", "/etc/hosts", "nope.md", ""] {
-        let result = run(&tool, json!({ "path": path })).await;
+        let result = claim.scoped(run(&tool, json!({ "path": path }))).await;
         assert!(result.is_error, "`{path}` was accepted");
     }
     // A missing `path` argument entirely.
-    assert!(run(&tool, json!({})).await.is_error);
-    assert_eq!(queue.queued(), 0, "a refused publish must stage nothing");
+    assert!(claim.scoped(run(&tool, json!({}))).await.is_error);
+    assert!(
+        claim.sources().is_empty(),
+        "a refused publish must stage nothing"
+    );
 }
 
 #[tokio::test]
 async fn an_unknown_kind_is_refused_by_name() {
     let dir = workspace(&[("spec.md", b"# Spec")]);
-    let (queue, _claim) = claimed(PublishDestination::Task);
+    let (queue, claim) = claimed(PublishDestination::Task);
     let tool = PublishArtifactTool::new(dir.path(), "maya", queue.clone());
 
-    let result = run(&tool, json!({ "path": "spec.md", "kind": "spreadsheet" })).await;
+    let result = claim
+        .scoped(run(
+            &tool,
+            json!({ "path": "spec.md", "kind": "spreadsheet" }),
+        ))
+        .await;
     assert!(result.is_error);
     let message = text_of(&result);
     assert!(message.contains("markdown"), "{message}");
-    assert_eq!(queue.queued(), 0);
+    assert!(claim.sources().is_empty());
 }

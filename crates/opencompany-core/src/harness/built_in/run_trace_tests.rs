@@ -33,6 +33,9 @@ fn completed(call_id: &str, tool: &str) -> AgentProgress {
         elapsed_ms: 42,
         iteration: 1,
         failure: None,
+        display_label: None,
+        display_detail: None,
+        structured: None,
     }
 }
 

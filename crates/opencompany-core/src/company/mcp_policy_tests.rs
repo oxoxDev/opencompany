@@ -696,3 +696,57 @@ fn the_tier_wire_string_matches_its_serde_form() {
         assert_eq!(serialized, format!("\"{}\"", tier.as_str()), "{tier:?}");
     }
 }
+
+#[test]
+fn a_stored_bulk_default_reaches_a_merely_suggested_tier() {
+    let mut policies = McpToolPolicies::default();
+    policies
+        .tier_defaults
+        .insert(ToolTier::ReadOnly, ApprovalMode::AlwaysAllow);
+
+    let resolved = resolve_policy(&policies, "read_wiki_contents", Some(ToolTier::ReadOnly));
+    assert!(policies.overrides.is_empty());
+    assert_eq!(
+        resolved.mode,
+        ApprovalMode::AlwaysAllow,
+        "a stored bulk default is the operator's deliberate allow, and it applies \
+         to the tools the suggestion grouped under that tier"
+    );
+    assert!(
+        !resolved.is_override,
+        "nothing was decided about this tool itself"
+    );
+}
+
+#[test]
+fn without_a_bulk_default_a_suggested_tier_still_asks() {
+    let policies = McpToolPolicies::default();
+    assert_eq!(
+        resolve_policy(&policies, "read_wiki_contents", Some(ToolTier::ReadOnly)).mode,
+        ApprovalMode::NeedsApproval,
+        "a name heuristic alone must never skip the approval gate"
+    );
+}
+
+#[test]
+fn a_tool_that_only_reads_is_still_suggested_read_only() {
+    for name in [
+        "get_page",
+        "list_items",
+        "read_wiki_contents",
+        "search_pages",
+    ] {
+        assert_eq!(suggest_tool_tier(name, None), ToolTier::ReadOnly, "{name}");
+    }
+}
+
+#[test]
+fn an_unrecognised_verb_stays_in_the_conservative_middle() {
+    for name in ["ask_wiki_question", "fleet_status", "catalogue"] {
+        assert_eq!(
+            suggest_tool_tier(name, None),
+            ToolTier::Interactive,
+            "{name}"
+        );
+    }
+}

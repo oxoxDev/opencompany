@@ -44,6 +44,21 @@ const MODE_LABELS: Record<ApprovalMode, string> = {
   blocked: "Blocked",
 };
 
+/**
+ * The value the tier control carries when nothing is stored for that tier.
+ *
+ * A sentinel rather than an absent value: the control has to be able to say
+ * "nothing is set here" and to be set back to it, and a `Select` with no value
+ * can do neither.
+ */
+const UNSET = "unset";
+
+/** The tier control's own vocabulary: the three modes, plus "nothing set". */
+const TIER_DEFAULT_LABELS: Record<string, string> = {
+  [UNSET]: "Not set",
+  ...MODE_LABELS,
+};
+
 /** The tiers, in the order they escalate. */
 const TIERS: readonly ToolTier[] = ["read_only", "interactive", "write_delete"];
 
@@ -53,12 +68,50 @@ const TIER_LABELS: Record<ToolTier, string> = {
   write_delete: "Write & delete",
 };
 
+/**
+ * Why a tool the panel lists is unreachable regardless of what its row says.
+ *
+ * `allowedTools` / `disallowedTools` are a separate gate, enforced where the
+ * server is attached to an agent rather than at the approval ladder — so a row
+ * can read "Asks" while the transport refuses the call outright. Rendering the
+ * row without saying so invites an operator to set a mode that will never be
+ * consulted.
+ */
+function exclusion(server: McpServer, tool: string): string | null {
+  if (server.disallowedTools.includes(tool)) return "Not sent — on the deny list";
+  if (server.allowedTools.length > 0 && !server.allowedTools.includes(tool)) {
+    return "Not sent — off the allow list";
+  }
+  return null;
+}
+
+/**
+ * The patch a choice in the tier control means on the wire.
+ *
+ * The sentinel and the absence it stands for are two vocabularies, and the
+ * translation between them is the whole of issue #2373's tier half: a tier
+ * cleared back to unset has to arrive as `null`, because the host reads a
+ * missing key as "leave it alone" and would keep the bulk allow standing.
+ */
+export function tierPatch(tier: ToolTier, value: string): ToolPolicyPatch {
+  return { tierDefaults: { [tier]: value === UNSET ? null : (value as ApprovalMode) } };
+}
+
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
   server: McpServer;
   /** Writes are an admin's. The host answers 403 whatever this says. */
   canManage: boolean;
+  /**
+   * Bumped by the page when a probe re-ran against this server.
+   *
+   * A probe rewrites the stored inventory, and the inventory is what a tier
+   * default resolves against — so a panel that re-checked a server while open
+   * goes on rendering the tool list from before the probe, empty state and all,
+   * until it is closed and reopened.
+   */
+  reloadKey?: number;
   onClose: () => void;
 }
 
@@ -73,7 +126,14 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function McpToolPermissions({ client, company, server, canManage, onClose }: Props) {
+export function McpToolPermissions({
+  client,
+  company,
+  server,
+  canManage,
+  reloadKey = 0,
+  onClose,
+}: Props) {
   const [state, setState] = useState<State>({ kind: "loading" });
   const [busy, setBusy] = useState(false);
   const [writeError, setWriteError] = useState<string | null>(null);
@@ -114,7 +174,7 @@ export function McpToolPermissions({ client, company, server, canManage, onClose
     // `target` is rebuilt every render from the row; `targetKey` is the value
     // this effect actually depends on.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, company, targetKey]);
+  }, [client, company, targetKey, reloadKey]);
 
   const apply = useCallback(
     async (patch: ToolPolicyPatch) => {
@@ -213,17 +273,20 @@ export function McpToolPermissions({ client, company, server, canManage, onClose
                     {TIER_LABELS[tier]}
                   </Label>
                   <Select
-                    value={state.doc.tierDefaults[tier]}
-                    onValueChange={(v) =>
-                      v && void apply({ tierDefaults: { [tier]: v as ApprovalMode } })
+                    value={
+                      state.doc.tierDefaults[tier].stored
+                        ? state.doc.tierDefaults[tier].mode
+                        : UNSET
                     }
-                    items={MODE_LABELS}
+                    onValueChange={(v) => v && void apply(tierPatch(tier, v))}
+                    items={TIER_DEFAULT_LABELS}
                     disabled={!canManage || busy}
                   >
                     <SelectTrigger id={`tier-${tier}`} className="w-36">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
+                      <SelectItem value={UNSET}>Not set</SelectItem>
                       {(Object.keys(MODE_LABELS) as ApprovalMode[]).map((mode) => (
                         <SelectItem key={mode} value={mode}>
                           {MODE_LABELS[mode]}
@@ -250,6 +313,11 @@ export function McpToolPermissions({ client, company, server, canManage, onClose
                   data-testid="mcp-permission-row"
                 >
                   <span className="min-w-40 flex-1 font-mono text-xs">{row.tool}</span>
+                  {exclusion(server, row.tool) && (
+                    <Badge variant="outline" className="text-3xs text-muted-foreground">
+                      {exclusion(server, row.tool)}
+                    </Badge>
+                  )}
                   {row.suggestedTier && row.suggestedTier !== row.effectiveTier && (
                     <Badge variant="outline" className="text-3xs">
                       discovery said {TIER_LABELS[row.suggestedTier]}

@@ -221,6 +221,75 @@ async fn skipping_an_agent_question_settles_the_card_its_approval_is_linked_to()
     );
 }
 
+/// An agent's own question names its asker on the card even though the
+/// parked effect behind it carries no `agent` — the grant/re-dispatch
+/// machinery a blocked tool call's card relies on stays untouched by this
+/// path (see `blockers::asked_by`).
+#[cfg(feature = "openhuman")]
+#[tokio::test]
+async fn an_agent_question_names_its_asker_on_the_card() {
+    use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource};
+    use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home, "running").await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+
+    let payload = BlockerPayload {
+        kind: BlockerKind::Information,
+        source: BlockerSource::AgentQuestion,
+        step: None,
+        reason: "which of the two briefs is current?".to_string(),
+        needed: "an answer from you".to_string(),
+        group_key: None,
+    };
+    let mut payload_json = serde_json::to_value(&payload).expect("payload serializes");
+    payload_json
+        .as_object_mut()
+        .expect("payload is an object")
+        .insert("asked_by".to_string(), serde_json::json!("eng"));
+    let approval = ApprovalId::new("question-asker");
+    let effect = crate::ports::types::Effect {
+        kind: payload.effect_kind(),
+        group: crate::ports::types::EffectGroup::Other,
+        amount_usd: None,
+        established_thread: false,
+        first_time_counterparty: false,
+        payload: payload_json,
+        agent: None,
+        run_id: None,
+    };
+    let at = crate::ports::now_millis();
+    runtime
+        .approval_gate
+        .rehydrate(approval.clone(), effect.clone(), at);
+    runtime
+        .journal
+        .record_parked(
+            &approval,
+            &effect,
+            at,
+            TaskLink::from_task_id(None),
+            ApprovalConversation {
+                thread: Some("dm:eng".to_string()),
+                parent: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+    let pending = runtime.pending_approvals();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        pending[0].agent.as_deref(),
+        Some("eng"),
+        "the console renders \"Asked by\" from this field"
+    );
+}
+
 /// The link is followed only to a card the board still holds.
 ///
 /// A stepless question's approval carries a task link because a card was in

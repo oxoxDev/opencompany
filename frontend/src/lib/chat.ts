@@ -237,6 +237,8 @@ export interface ChatMessage {
   referredFrom?: import("@/api/types").ReferredFromDto;
   /** The crossing this report brought home, rendered as one collapsed line. */
   referralConversation?: import("@/api/types").ReferralConversationDto;
+  /** The agent-to-agent exchanges this row reported, oldest first. */
+  agentConversations?: import("@/api/types").AgentConversationDto[];
   /**
    * What this line was inside the episode that produced it — its round, its
    * speech act (`post` / `broadcast` / `dm` / `complete_episode`) and a `dm`'s
@@ -705,6 +707,9 @@ export function fromHistory(entries: ChatHistoryMessageDto[]): ChatMessage[] {
       // caused this line, and nothing here may infer it.
       referredFrom: entry.referredFrom,
       referralConversation: entry.referralConversation,
+      // And the a2a exchange, on the same terms: the rows are in the pair
+      // channel, so only the host can say this row reported one.
+      agentConversations: entry.agentConversations,
       // The round and speech act behind a reply, and who may read it. Same
       // rule again: only the host knows which round committed a line.
       episode: entry.episode,

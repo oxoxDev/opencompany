@@ -1,5 +1,6 @@
 use super::*;
 use crate::ports::TaskStore;
+use crate::ports::artifacts::ArtifactRecord;
 
 // -- issue #552: the write ordering, proven by failure injection ---------
 
@@ -287,6 +288,7 @@ pub(super) fn brain_over(
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -423,6 +425,7 @@ pub(super) fn brain_with_approval_queue(
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: requests,
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,

@@ -17,24 +17,27 @@ use crate::policy::test_support::{
 /// effect the operator will see, so the runtime can park it.
 #[tokio::test]
 async fn require_approval_records_the_request_to_park() {
-    let (p, queue) = queued_policy("supervised", &[]);
-    let args = composio_send_args();
-    assert!(matches!(
-        p.check(&request("composio_execute", args.clone())).await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
+    in_cycle(async {
+        let (p, queue) = queued_policy("supervised", &[]);
+        let args = composio_send_args();
+        assert!(matches!(
+            p.check(&request("composio_execute", args.clone())).await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
 
-    let queued = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN).requests;
-    assert_eq!(queued.len(), 1, "the gated call was recorded");
-    assert_eq!(queued[0].tool, "composio_execute");
-    assert_eq!(queued[0].effect.kind, "composio_execute");
-    assert_eq!(queued[0].effect.group, EffectGroup::Send);
-    assert_eq!(queued[0].effect.payload, args);
-    assert!(
-        queued[0].reason.contains("supervised"),
-        "the operator-facing reason rides along: {}",
-        queued[0].reason
-    );
+        let queued = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN).requests;
+        assert_eq!(queued.len(), 1, "the gated call was recorded");
+        assert_eq!(queued[0].tool, "composio_execute");
+        assert_eq!(queued[0].effect.kind, "composio_execute");
+        assert_eq!(queued[0].effect.group, EffectGroup::Send);
+        assert_eq!(queued[0].effect.payload, args);
+        assert!(
+            queued[0].reason.contains("supervised"),
+            "the operator-facing reason rides along: {}",
+            queued[0].reason
+        );
+    })
+    .await;
 }
 
 /// Issue #470, at the layer that projects a blocked call onto the effect
@@ -50,50 +53,53 @@ async fn require_approval_records_the_request_to_park() {
 /// not what it is.
 #[tokio::test]
 async fn a_composio_read_and_a_composio_send_are_classified_differently() {
-    let read = composio_read_args();
-    let send = composio_send_args();
+    in_cycle(async {
+        let read = composio_read_args();
+        let send = composio_send_args();
 
-    assert_eq!(
-        classify_group("composio_execute", &read),
-        EffectGroup::Other,
-        "`{COMPOSIO_READ_SLUG}` is tagged `Read` in the vendored catalogue; \
+        assert_eq!(
+            classify_group("composio_execute", &read),
+            EffectGroup::Other,
+            "`{COMPOSIO_READ_SLUG}` is tagged `Read` in the vendored catalogue; \
          if this fails the lookup is not being reached"
-    );
-    assert!(
-        grantable("composio_execute", &read),
-        "a read scoped to one connected account is what a standing grant \
+        );
+        assert!(
+            grantable("composio_execute", &read),
+            "a read scoped to one connected account is what a standing grant \
          can honestly describe"
-    );
+        );
 
-    assert_eq!(
-        classify_group("composio_execute", &send),
-        EffectGroup::Send,
-        "`{COMPOSIO_SEND_SLUG}` is tagged `Write`"
-    );
-    assert!(!grantable("composio_execute", &send));
+        assert_eq!(
+            classify_group("composio_execute", &send),
+            EffectGroup::Send,
+            "`{COMPOSIO_SEND_SLUG}` is tagged `Write`"
+        );
+        assert!(!grantable("composio_execute", &send));
 
-    // The cautious fallback still has its own coverage, and still says
-    // send — but now because the catalogue was asked and had no answer,
-    // not because the classifier never saw an action at all.
-    let unknown = composio_unclassified_args();
-    assert_eq!(
-        classify_group("composio_execute", &unknown),
-        EffectGroup::Send
-    );
-    assert!(!grantable("composio_execute", &unknown));
+        // The cautious fallback still has its own coverage, and still says
+        // send — but now because the catalogue was asked and had no answer,
+        // not because the classifier never saw an action at all.
+        let unknown = composio_unclassified_args();
+        assert_eq!(
+            classify_group("composio_execute", &unknown),
+            EffectGroup::Send
+        );
+        assert!(!grantable("composio_execute", &unknown));
 
-    // And the split survives the round trip through the park queue: the
-    // group asserted above is the one the operator's card is built from.
-    let (p, queue) = queued_policy("supervised", &[]);
-    let _ = p.check(&request("composio_execute", send.clone())).await;
-    let queued = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN).requests;
-    assert_eq!(queued.len(), 1);
-    assert_eq!(queued[0].effect.group, EffectGroup::Send);
-    assert_eq!(
-        queued[0].effect.payload, send,
-        "the card shows the arguments the agent actually sent, action key \
+        // And the split survives the round trip through the park queue: the
+        // group asserted above is the one the operator's card is built from.
+        let (p, queue) = queued_policy("supervised", &[]);
+        let _ = p.check(&request("composio_execute", send.clone())).await;
+        let queued = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN).requests;
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].effect.group, EffectGroup::Send);
+        assert_eq!(
+            queued[0].effect.payload, send,
+            "the card shows the arguments the agent actually sent, action key \
          included"
-    );
+        );
+    })
+    .await;
 }
 
 /// Issue #559, at the gate an agent actually hits: a Composio read runs
@@ -106,36 +112,39 @@ async fn a_composio_read_and_a_composio_send_are_classified_differently() {
 /// operator notices when every page of a mailbox raises a card.
 #[tokio::test]
 async fn a_composio_read_runs_under_supervision_without_parking() {
-    let (p, queue) = queued_policy("supervised", &[]);
+    in_cycle(async {
+        let (p, queue) = queued_policy("supervised", &[]);
 
-    assert_eq!(
-        p.check(&request("composio_execute", composio_read_args()))
-            .await,
-        ToolPolicyDecision::Allow,
-        "reading a connected account changes nothing and costs nothing"
-    );
-    assert_eq!(
-        queue.queued(),
-        0,
-        "no card was raised, so no human was interrupted"
-    );
+        assert_eq!(
+            p.check(&request("composio_execute", composio_read_args()))
+                .await,
+            ToolPolicyDecision::Allow,
+            "reading a connected account changes nothing and costs nothing"
+        );
+        assert_eq!(
+            queue.queued(),
+            0,
+            "no card was raised, so no human was interrupted"
+        );
 
-    // Paging the same list is not a second decision, because there was
-    // never a first one. This is the symptom the issue opens with.
-    for _ in 0..5 {
-        let _ = p
-            .check(&request("composio_execute", composio_read_args()))
-            .await;
-    }
-    assert_eq!(queue.queued(), 0);
+        // Paging the same list is not a second decision, because there was
+        // never a first one. This is the symptom the issue opens with.
+        for _ in 0..5 {
+            let _ = p
+                .check(&request("composio_execute", composio_read_args()))
+                .await;
+        }
+        assert_eq!(queue.queued(), 0);
 
-    // The send half is untouched: same tool, same desk, still parks.
-    assert!(matches!(
-        p.check(&request("composio_execute", composio_send_args()))
-            .await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
-    assert_eq!(queue.queued(), 1);
+        // The send half is untouched: same tool, same desk, still parks.
+        assert!(matches!(
+            p.check(&request("composio_execute", composio_send_args()))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+        assert_eq!(queue.queued(), 1);
+    })
+    .await;
 }
 
 /// A `readonly` desk still denies the read. That tier's contract is that
@@ -160,19 +169,22 @@ async fn a_readonly_desk_still_denies_a_composio_read() {
 /// that arm has to record its request too.
 #[tokio::test]
 async fn always_approve_records_the_request_even_under_full_autonomy() {
-    let (p, queue) = queued_policy("full", &["payment"]);
-    assert!(matches!(
-        p.check(&request(
-            "payment.send",
-            serde_json::json!({ "amount_usd": 40.0 })
-        ))
-        .await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
-    let queued = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN).requests;
-    assert_eq!(queued.len(), 1);
-    assert_eq!(queued[0].effect.kind, "payment.send");
-    assert_eq!(queued[0].effect.amount_usd, Some(40.0));
+    in_cycle(async {
+        let (p, queue) = queued_policy("full", &["payment"]);
+        assert!(matches!(
+            p.check(&request(
+                "payment.send",
+                serde_json::json!({ "amount_usd": 40.0 })
+            ))
+            .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+        let queued = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN).requests;
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].effect.kind, "payment.send");
+        assert_eq!(queued[0].effect.amount_usd, Some(40.0));
+    })
+    .await;
 }
 
 /// Allowed and denied calls leave the queue alone: only a call actually
@@ -206,23 +218,26 @@ async fn allow_and_deny_record_nothing() {
 /// keeps re-trying the same tool must not stack up duplicate approvals.
 #[tokio::test]
 async fn a_retried_call_is_recorded_once() {
-    let (p, queue) = queued_policy("supervised", &[]);
-    let args = composio_send_args();
-    for _ in 0..3 {
-        let _ = p.check(&request("composio_execute", args.clone())).await;
-    }
-    assert_eq!(queue.queued(), 1, "the same call parks once");
+    in_cycle(async {
+        let (p, queue) = queued_policy("supervised", &[]);
+        let args = composio_send_args();
+        for _ in 0..3 {
+            let _ = p.check(&request("composio_execute", args.clone())).await;
+        }
+        assert_eq!(queue.queued(), 1, "the same call parks once");
 
-    // A different call to the same tool is a distinct request. Another
-    // catalogued send, so the second call is classified rather than merely
-    // unrecognised.
-    let _ = p
-        .check(&request(
-            "composio_execute",
-            composio_args(COMPOSIO_OTHER_SEND_SLUG),
-        ))
-        .await;
-    assert_eq!(queue.queued(), 2);
+        // A different call to the same tool is a distinct request. Another
+        // catalogued send, so the second call is classified rather than merely
+        // unrecognised.
+        let _ = p
+            .check(&request(
+                "composio_execute",
+                composio_args(COMPOSIO_OTHER_SEND_SLUG),
+            ))
+            .await;
+        assert_eq!(queue.queued(), 2);
+    })
+    .await;
 }
 
 /// The drain is capped, so a runaway turn can't flood the operator's queue.
@@ -235,37 +250,40 @@ async fn a_retried_call_is_recorded_once() {
 /// it — the honest fallback, rather than a call carrying no action at all.
 #[tokio::test]
 async fn the_drain_is_capped_and_empties_the_queue() {
-    let (p, queue) = queued_policy("supervised", &[]);
-    for i in 0..(MAX_APPROVAL_REQUESTS_PER_TURN + 4) {
-        let _ = p
-            .check(&request(
-                "composio_execute",
-                composio_unclassified_args_numbered(i),
-            ))
-            .await;
-    }
-    let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
-    assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
-    assert_eq!(queue.queued(), 0, "the overflow is discarded, not carried");
+    in_cycle(async {
+        let (p, queue) = queued_policy("supervised", &[]);
+        for i in 0..(MAX_APPROVAL_REQUESTS_PER_TURN + 4) {
+            let _ = p
+                .check(&request(
+                    "composio_execute",
+                    composio_unclassified_args_numbered(i),
+                ))
+                .await;
+        }
+        let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(queue.queued(), 0, "the overflow is discarded, not carried");
 
-    // Issue #561: and the drain says how many it threw away, rather than
-    // handing back a `Vec` indistinguishable from a complete one.
-    assert_eq!(
-        drained.discarded, 4,
-        "12 gated calls, a cap of 8, so 4 were dropped"
-    );
-    let notice = drained
-        .overflow_notice()
-        .expect("an overflowing drain has something to tell the operator");
-    assert!(
-        notice.contains('4'),
-        "the count is in the sentence: {notice}"
-    );
-    assert!(
-        notice.contains("not** run") || notice.contains("not run"),
-        "the operator must not read this as 'the calls happened, the records \
+        // Issue #561: and the drain says how many it threw away, rather than
+        // handing back a `Vec` indistinguishable from a complete one.
+        assert_eq!(
+            drained.discarded, 4,
+            "12 gated calls, a cap of 8, so 4 were dropped"
+        );
+        let notice = drained
+            .overflow_notice()
+            .expect("an overflowing drain has something to tell the operator");
+        assert!(
+            notice.contains('4'),
+            "the count is in the sentence: {notice}"
+        );
+        assert!(
+            notice.contains("not** run") || notice.contains("not run"),
+            "the operator must not read this as 'the calls happened, the records \
          were lost': {notice}"
-    );
+        );
+    })
+    .await;
 }
 
 /// CONC-axis (TOOL-021): the cap in `the_drain_is_capped_and_empties_the_queue`
@@ -294,7 +312,7 @@ async fn concurrent_pushes_past_the_cap_are_never_lost_or_double_counted() {
             let gate = gate.clone();
             handles.push(tokio::task::spawn_blocking(move || {
                 gate.wait();
-                queue.push(ApprovalRequest {
+                let request = ApprovalRequest {
                     tool: "composio_execute".to_string(),
                     reason: format!("racer {i}"),
                     effect: Effect {
@@ -307,14 +325,15 @@ async fn concurrent_pushes_past_the_cap_are_never_lost_or_double_counted() {
                         agent: None,
                         run_id: None,
                     },
-                });
+                };
+                CURRENT_SCOPE.sync_scope(ApprovalScope::Cycle, || queue.push(request));
             }));
         }
         for handle in handles {
             handle.await.expect("racer joins");
         }
 
-        let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        let drained = queue.drain_scope(&ApprovalScope::Cycle, MAX_APPROVAL_REQUESTS_PER_TURN);
         assert_eq!(
             drained.requests.len(),
             MAX_APPROVAL_REQUESTS_PER_TURN,
@@ -340,38 +359,44 @@ async fn concurrent_pushes_past_the_cap_are_never_lost_or_double_counted() {
 /// operator to ignore the one that matters.
 #[tokio::test]
 async fn a_drain_under_the_cap_reports_no_overflow() {
-    let (p, queue) = queued_policy("supervised", &[]);
-    for i in 0..(MAX_APPROVAL_REQUESTS_PER_TURN - 1) {
-        let _ = p
-            .check(&request(
-                "composio_execute",
-                composio_unclassified_args_numbered(i),
-            ))
-            .await;
-    }
-    let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
-    assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN - 1);
-    assert_eq!(drained.discarded, 0);
-    assert!(drained.overflow_notice().is_none());
+    in_cycle(async {
+        let (p, queue) = queued_policy("supervised", &[]);
+        for i in 0..(MAX_APPROVAL_REQUESTS_PER_TURN - 1) {
+            let _ = p
+                .check(&request(
+                    "composio_execute",
+                    composio_unclassified_args_numbered(i),
+                ))
+                .await;
+        }
+        let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN - 1);
+        assert_eq!(drained.discarded, 0);
+        assert!(drained.overflow_notice().is_none());
+    })
+    .await;
 }
 
 /// Exactly at the cap is not an overflow. An off-by-one here would cry wolf
 /// on the commonest boundary case.
 #[tokio::test]
 async fn a_drain_exactly_at_the_cap_reports_no_overflow() {
-    let (p, queue) = queued_policy("supervised", &[]);
-    for i in 0..MAX_APPROVAL_REQUESTS_PER_TURN {
-        let _ = p
-            .check(&request(
-                "composio_execute",
-                composio_unclassified_args_numbered(i),
-            ))
-            .await;
-    }
-    let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
-    assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
-    assert_eq!(drained.discarded, 0);
-    assert!(drained.overflow_notice().is_none());
+    in_cycle(async {
+        let (p, queue) = queued_policy("supervised", &[]);
+        for i in 0..MAX_APPROVAL_REQUESTS_PER_TURN {
+            let _ = p
+                .check(&request(
+                    "composio_execute",
+                    composio_unclassified_args_numbered(i),
+                ))
+                .await;
+        }
+        let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(drained.discarded, 0);
+        assert!(drained.overflow_notice().is_none());
+    })
+    .await;
 }
 
 /// One dropped request reads as one, not as "1 calls".
@@ -421,25 +446,28 @@ fn the_overflow_notice_stays_plural_for_several_dropped_requests() {
 /// unrepresentable, and this pins that the stored value is the one used.
 #[tokio::test]
 async fn the_notice_quotes_the_cap_the_drain_was_taken_against() {
-    let (p, queue) = queued_policy("supervised", &[]);
-    for i in 0..5 {
-        let _ = p
-            .check(&request(
-                "composio_execute",
-                composio_unclassified_args_numbered(i),
-            ))
-            .await;
-    }
-    let drained = queue.drain(3);
-    assert_eq!(drained.cap(), 3);
-    assert_eq!(drained.discarded, 2);
-    let notice = drained.overflow_notice().expect("2 were dropped");
-    assert!(
-        notice.contains("at most 3"),
-        "the sentence must quote the cap that did the discarding: {notice}"
-    );
-    assert!(
-        !notice.contains(&MAX_APPROVAL_REQUESTS_PER_TURN.to_string()),
-        "and not the constant the call site happened to have in scope: {notice}"
-    );
+    in_cycle(async {
+        let (p, queue) = queued_policy("supervised", &[]);
+        for i in 0..5 {
+            let _ = p
+                .check(&request(
+                    "composio_execute",
+                    composio_unclassified_args_numbered(i),
+                ))
+                .await;
+        }
+        let drained = queue.drain(3);
+        assert_eq!(drained.cap(), 3);
+        assert_eq!(drained.discarded, 2);
+        let notice = drained.overflow_notice().expect("2 were dropped");
+        assert!(
+            notice.contains("at most 3"),
+            "the sentence must quote the cap that did the discarding: {notice}"
+        );
+        assert!(
+            !notice.contains(&MAX_APPROVAL_REQUESTS_PER_TURN.to_string()),
+            "and not the constant the call site happened to have in scope: {notice}"
+        );
+    })
+    .await;
 }

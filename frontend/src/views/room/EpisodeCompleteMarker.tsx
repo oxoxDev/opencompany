@@ -11,7 +11,7 @@
 
 import { CheckCircle2, AlertTriangle } from "lucide-react";
 
-import type { Episode } from "@/lib/episodes";
+import { deskRounds, type Episode } from "@/lib/episodes";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -41,7 +41,7 @@ export function describeReason(reason: string | undefined): string | null {
 export function EpisodeCompleteMarker({ episode, agentNames }: Props) {
   const cut = describeReason(episode.reason);
   const by = episode.completedBy ? agentNames?.[episode.completedBy] ?? episode.completedBy : null;
-  const rounds = episode.roundCount || episode.rounds.length;
+  const rounds = deskRounds(episode);
   return (
     <div
       className="my-2 flex justify-center"

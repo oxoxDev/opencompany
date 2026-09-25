@@ -165,7 +165,7 @@ pub(super) struct RosterAgentDto {
 /// endpoint advisory.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct MutationResponse {
+pub(in crate::server::ops) struct MutationResponse {
     server: McpServerDto,
     note: String,
     /// The result of probing the server right after the mutation. `None` when
@@ -183,7 +183,7 @@ struct MutationResponse {
 /// `query_param` uses `paramName` + `token` (the BrowserBase style).
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum AuthKind {
+pub(in crate::server::ops) enum AuthKind {
     #[default]
     Bearer,
     Header,
@@ -260,7 +260,7 @@ struct UpdateServer {
 /// Builds the [`AuthMaterial`] a write-only intake describes, or `None` when no
 /// credential value was supplied (leave auth unchanged). Returns a 400 when a
 /// scheme is missing its companion field.
-fn auth_material_from(
+pub(in crate::server::ops) fn auth_material_from(
     token: Option<&str>,
     kind: AuthKind,
     header_name: Option<&str>,
@@ -530,6 +530,40 @@ async fn add_server(
         enabled: true,
         auth_secret: None,
     };
+    // The credential is read here, where the request body is, and the rest of
+    // the add is the step the directory install shares.
+    let auth = auth_material_from(
+        body.token.as_deref(),
+        body.auth_kind,
+        body.header_name.as_deref(),
+        body.param_name.as_deref(),
+    )?;
+    declare_runtime_server(runtime, server, auth).await
+}
+
+/// Declare `server` as this company's own runtime MCP server, credential and
+/// all, and answer with the row a later `GET` will serve.
+///
+/// The body of [`add_server`] as a callable step, because adding a server
+/// found in the upstream directory is the same act reached from a different
+/// screen (`POST …/mcp/registry/install`). Both write the same runtime index
+/// under the same admin guard, so a directory server is an ordinary
+/// `runtime`-sourced row: one store, one set of conflict rules, one delete
+/// path. Before issue #1270's follow-up the directory route wrote to
+/// OpenHuman's *separate* install store instead, which is the store upstream
+/// has since closed to catalogue actions.
+///
+/// # Errors
+///
+/// [`OpenCompanyError::Conflict`] when the bundle already declares the name or
+/// a runtime entry already holds it, whatever the index read or write fails
+/// with, and an invalid server record.
+pub(in crate::server::ops) async fn declare_runtime_server(
+    runtime: &CompanyRuntime,
+    server: McpServer,
+    auth: Option<AuthMaterial>,
+) -> Result<Json<MutationResponse>, ApiError> {
+    let name = server.name.trim().to_string();
     reject_invalid(&format!("mcp server `{name}`"), &server)?;
 
     // A manifest-declared name is not a runtime add — update it to override.
@@ -553,13 +587,7 @@ async fn add_server(
         .await
         .map_err(ApiError)?;
 
-    // Persist the credential write-only, if supplied (bearer / header / query).
-    if let Some(material) = auth_material_from(
-        body.token.as_deref(),
-        body.auth_kind,
-        body.header_name.as_deref(),
-        body.param_name.as_deref(),
-    )? {
+    if let Some(material) = auth {
         store_auth(runtime.id(), &name, &material, runtime.secrets().as_ref())
             .await
             .map_err(ApiError)?;

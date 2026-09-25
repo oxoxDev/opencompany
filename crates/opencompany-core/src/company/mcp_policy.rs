@@ -397,8 +397,8 @@ pub async fn clear_tool_policies(
 /// approval gate lets run without parking, resolved through each server's tool
 /// policy.
 ///
-/// The successor to [`mcp_read_set`](super::mcp::mcp_read_set), which reads the
-/// flat declaration directly. Both produce the same shape, so one can be diffed
+/// The successor to the test-only `mcp_read_set`, which reads the flat
+/// declaration directly. Both produce the same shape, so one can be diffed
 /// against the other over a fixture.
 ///
 /// Enumerates the union of the policy document's own entries and the tools
@@ -408,10 +408,13 @@ pub async fn clear_tool_policies(
 /// definition. A disabled server contributes nothing: it hands out no tool, so
 /// a call through it could not have been made.
 ///
-/// Never consults [`suggest_tool_tier`] directly. The suggestion reaches the
-/// resolution only through the stored inventory, and only as a tier — a
-/// suggestion alone still cannot grant [`ApprovalMode::AlwaysAllow`], which is
-/// what keeps a name heuristic out of the decision to skip the approval gate.
+/// Never consults [`suggest_tool_tier`] directly: a suggestion reaches the
+/// resolution only through the stored inventory, and only as a tier. It can
+/// still reach [`ApprovalMode::AlwaysAllow`] from there, through a stored
+/// `tier_defaults` entry — see [`resolve_policy`], where that is the deliberate
+/// bulk-allow an operator writes. What a suggestion cannot do is reach it on
+/// its own: with no bulk default stored, a merely-suggested tier resolves to
+/// [`ApprovalMode::NeedsApproval`].
 pub fn mcp_allow_set(servers: &[McpServerDecl]) -> crate::policy::McpReadSet {
     crate::policy::McpReadSet::from_pairs(servers.iter().filter(|s| s.enabled).flat_map(|server| {
         policy_tool_names(&server.tool_policies, &server.tool_inventory)

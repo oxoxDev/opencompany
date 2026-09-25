@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::company::Policy;
-use crate::harness::policy::ApprovalRequestQueue;
+use crate::harness::policy::{ApprovalRequestQueue, ApprovalScope};
 use crate::hive::tools::{HiveTurn, InFlight, InFlightContext};
 use crate::ports::events::EventStreamItem;
 use crate::ports::types::{CompanyEvent, EventSeq, StoredEvent};
@@ -215,6 +215,10 @@ async fn initialize_and_list_tools_serve_speech_and_custom_tools() {
             "post",
             "broadcast",
             "dm",
+            // `ask` opens a conversation with one seat; it arrived with the
+            // conductor and is served because the vocabulary is derived from
+            // the library rather than mirrored here.
+            "ask",
             "complete_episode",
             "read",
             "who_am_i"
@@ -447,21 +451,28 @@ async fn the_policy_parks_or_denies_a_custom_tool_call() {
     )
     .with_requests(queue.clone())
     .with_agent(AGENT);
-    let (host, _agent, client) = boot(plain_agent().policy(Arc::new(policy))).await;
+    let (host, agent, client) = boot(plain_agent().policy(Arc::new(policy))).await;
     let _ticket = host.in_flight().begin(desk_turn()).unwrap();
 
-    let parked = client.call_tool("who_am_i", json!({})).await.unwrap();
-    assert!(parked.rendered.is_error);
+    let unrecorded = client.call_tool("who_am_i", json!({})).await.unwrap();
+    assert!(unrecorded.rendered.is_error);
     assert!(
-        parked.rendered.output().starts_with("awaiting approval"),
-        "{}",
-        parked.rendered.output()
+        unrecorded.rendered.output().contains("nobody was asked"),
+        "a call no claim can park is refused, not reported as parked: {}",
+        unrecorded.rendered.output()
     );
-    let drained = queue.drain(8);
+
+    let cycle = queue.claim(ApprovalScope::Cycle);
+    let parked = cycle
+        .scoped(agent.serve_call("who_am_i", json!({}), None))
+        .await;
+    assert_eq!(parked["isError"], json!(true), "{parked}");
+    assert!(parked.to_string().contains("awaiting approval"), "{parked}");
+    let drained = cycle.drain(8);
     assert_eq!(
         drained.requests.len(),
         1,
-        "the park reached the cycle's queue"
+        "the park reached the claim's queue"
     );
     assert_eq!(drained.requests[0].tool, "who_am_i");
 
@@ -535,7 +546,7 @@ async fn mount_serves_the_same_route_on_a_caller_router() {
     })
     .build()
     .unwrap();
-    assert_eq!(client.list_tools().await.unwrap().len(), 6);
+    assert_eq!(client.list_tools().await.unwrap().len(), 7);
 }
 
 #[test]

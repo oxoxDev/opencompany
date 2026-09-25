@@ -633,3 +633,112 @@ fn the_registry_inventory_key_is_addressed_by_install_id() {
         "mcp_registry/0b8f4b0e/tool_inventory"
     );
 }
+
+/// Clearing a bulk default has to reach the gate, not just the document.
+///
+/// The console had no way to express this at all before — the wire took a mode
+/// per tier and nothing else, so a tier an operator set could be changed but
+/// never unset. A clear that stored cleanly but left the allow set alone would
+/// be the same bug wearing a fix.
+#[tokio::test]
+async fn clearing_a_tier_default_returns_its_tools_to_the_gate() {
+    use crate::server::ops::mcp_tool_policy::{PutToolPolicy, apply_tool_policy_patch};
+
+    let company = CompanyId::new("acme");
+    let secrets = MemSecrets::default();
+    let manifest = vec![read_only_server(
+        "notion",
+        "https://notion.example/mcp",
+        &[],
+    )];
+    seed_inventory(&company, &secrets, "notion", &["search_pages"]).await;
+
+    let mut stored = McpToolPolicies::default();
+    stored
+        .tier_defaults
+        .insert(ToolTier::ReadOnly, ApprovalMode::AlwaysAllow);
+    save_tool_policies(&company, &secrets, &tool_policies_key("notion"), &stored)
+        .await
+        .unwrap();
+
+    let decls = resolve_effective(&company, &[], &manifest, &secrets)
+        .await
+        .unwrap();
+    assert!(
+        crate::company::mcp_policy::mcp_allow_set(&decls).contains("notion", "search_pages"),
+        "the allow has to be in force before clearing it can mean anything"
+    );
+
+    let mut defaults = std::collections::HashMap::new();
+    defaults.insert("read_only".to_string(), None);
+    let cleared = apply_tool_policy_patch(
+        stored,
+        PutToolPolicy {
+            tier_defaults: Some(defaults),
+            tools: None,
+        },
+    )
+    .unwrap();
+    save_tool_policies(&company, &secrets, &tool_policies_key("notion"), &cleared)
+        .await
+        .unwrap();
+
+    let decls = resolve_effective(&company, &[], &manifest, &secrets)
+        .await
+        .unwrap();
+    assert!(
+        !crate::company::mcp_policy::mcp_allow_set(&decls).contains("notion", "search_pages"),
+        "with nothing stored the suggestion is back on its own, and a suggestion asks"
+    );
+}
+
+/// A per-tool decision is not a bulk one: clearing the tier leaves it standing.
+#[tokio::test]
+async fn clearing_a_tier_default_leaves_a_per_tool_decision_alone() {
+    use crate::server::ops::mcp_tool_policy::{PutToolPolicy, apply_tool_policy_patch};
+
+    let company = CompanyId::new("acme");
+    let secrets = MemSecrets::default();
+    let manifest = vec![read_only_server(
+        "notion",
+        "https://notion.example/mcp",
+        &[],
+    )];
+    seed_inventory(&company, &secrets, "notion", &["search_pages", "move_page"]).await;
+
+    let mut stored = McpToolPolicies::default();
+    stored
+        .tier_defaults
+        .insert(ToolTier::ReadOnly, ApprovalMode::AlwaysAllow);
+    stored.overrides.insert(
+        "move_page".into(),
+        ToolPolicy {
+            tier: None,
+            mode: Some(ApprovalMode::AlwaysAllow),
+        },
+    );
+
+    let mut defaults = std::collections::HashMap::new();
+    defaults.insert("read_only".to_string(), None);
+    let cleared = apply_tool_policy_patch(
+        stored,
+        PutToolPolicy {
+            tier_defaults: Some(defaults),
+            tools: None,
+        },
+    )
+    .unwrap();
+    save_tool_policies(&company, &secrets, &tool_policies_key("notion"), &cleared)
+        .await
+        .unwrap();
+
+    let decls = resolve_effective(&company, &[], &manifest, &secrets)
+        .await
+        .unwrap();
+    let allow = crate::company::mcp_policy::mcp_allow_set(&decls);
+    assert!(
+        allow.contains("notion", "move_page"),
+        "the operator decided this row itself, and the tier is not what carried it"
+    );
+    assert!(!allow.contains("notion", "search_pages"));
+}

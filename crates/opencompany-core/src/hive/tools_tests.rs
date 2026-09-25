@@ -223,7 +223,15 @@ fn speech_specs_render_to_mcp_descriptors_with_the_contract_argument_names() {
         .iter()
         .map(|d| d["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, SPEECH_TOOL_NAMES);
+    assert_eq!(
+        names,
+        speech_tool_names(),
+        "the descriptors and the names come from the same specs"
+    );
+    assert!(
+        names.contains(&"ask"),
+        "the vocabulary the library defines includes `ask`: {names:?}"
+    );
     let dm = descriptors.iter().find(|d| d["name"] == "dm").unwrap();
     assert_eq!(dm["inputSchema"]["properties"]["to"]["type"], "array");
     assert_eq!(
@@ -308,18 +316,35 @@ async fn the_adapter_runs_a_tool_under_the_in_flight_context() {
     );
 }
 
+/// A speech tool goes over the server; everything else is a bare name.
+///
+/// The split moved. It used to be "OpenHuman's own tools are native, this
+/// crate's go over MCP", and this test asserted `publish_artifact` — a
+/// company tool — arriving wrapped. Now this crate's tools ride the agent's
+/// belt directly (`AgentSpec::tools`), so the only thing still wrapped is
+/// speech: a seat in an episode answers with one, and nothing else does.
 #[test]
-fn a_company_tool_is_reached_through_mcp_call_tool_and_a_native_one_directly() {
-    let (name, args) = via_opencompany_mcp("publish_artifact", json!({ "path": "memo.md" }));
-    assert_eq!(name, "mcp_call_tool");
+fn only_a_speech_tool_is_reached_through_mcp_call_tool() {
+    let (name, args) =
+        via_opencompany_mcp("ask", json!({ "to": "engineer", "message": "how long?" }));
+    assert_eq!(name, "mcp_call_tool", "speech is the server's");
     assert_eq!(
         args,
         json!({
             "server": "opencompany",
-            "tool": "publish_artifact",
-            "arguments": { "path": "memo.md" }
+            "tool": "ask",
+            "arguments": { "to": "engineer", "message": "how long?" }
         })
     );
+
+    // A company tool. Native since its belt became the agent's own, so the
+    // model calls it by name against its own schema rather than guessing at
+    // an inner `arguments` object no provider can validate.
+    let (name, args) = via_opencompany_mcp("publish_artifact", json!({ "path": "memo.md" }));
+    assert_eq!(name, "publish_artifact");
+    assert_eq!(args, json!({ "path": "memo.md" }));
+
+    // And an OpenHuman tool, native as it always was.
     let (name, args) = via_opencompany_mcp("file_read", json!({ "path": "memo.md" }));
     assert_eq!(name, "file_read");
     assert_eq!(args, json!({ "path": "memo.md" }));
