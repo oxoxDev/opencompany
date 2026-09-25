@@ -34,7 +34,10 @@ use crate::company::skill_scan::{Verdict, scan_skill};
 use crate::company::skill_validate::{
     MAX_SLUG_CHARS, slugify, validate_skill_md, validate_slug, validate_slug_shape,
 };
-use crate::company::{SkillDoc, parse_skill_md, render_skill_md, skill_digest};
+use crate::company::{
+    SkillDoc, SkillDrift, VersionChange, effective_drift, parse_skill_md, render_skill_md,
+    skill_digest,
+};
 use crate::error::OpenCompanyError;
 use crate::ports::now_millis;
 use crate::ports::skills_state::{SkillInstall, SkillSource, SkillState};
@@ -187,6 +190,7 @@ fn write_lock(company: &CompanyId) -> Arc<tokio::sync::Mutex<()>> {
 }
 
 mod draft;
+mod drift;
 mod upload;
 
 /// Builds the skills route fragment.
@@ -225,6 +229,21 @@ struct InstalledSkill {
     /// re-deriving one on every list would report a verdict nobody acted on.
     #[serde(skip_serializing_if = "Option::is_none")]
     scan: Option<ScanSummary>,
+    /// The revisions either side of a library change, when the library's
+    /// document has moved since this install pinned its snapshot.
+    ///
+    /// Absent when it has not moved, and on every row that pinned nothing —
+    /// a bundled skill has no library copy to be a revision *of*.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update_available: Option<VersionChange>,
+    /// Whether the stored document no longer matches the digest recorded at
+    /// install.
+    ///
+    /// A plain boolean, always on the wire, `false` on a row that pinned
+    /// nothing. An absent boolean reads as "unknown", and the console would
+    /// then have to decide whether to warn about a skill nothing can be said
+    /// about.
+    modified: bool,
 }
 
 impl InstalledSkill {
@@ -264,6 +283,8 @@ impl InstalledSkill {
             version,
             updated_at_millis: state.updated_at_millis,
             scan: None,
+            update_available: None,
+            modified: false,
         }
     }
 
@@ -276,7 +297,11 @@ impl InstalledSkill {
     /// Projects one entry of the company's effective set
     /// ([`skill_effective::resolve`]) to the console shape. An entry no layer
     /// supplied a document for is rendered from its slug alone.
-    fn from_effective(skill: &EffectiveSkill) -> Self {
+    ///
+    /// `registry` is the host's shared library, which a pinned install is
+    /// measured against — the list is where an operator learns that one has
+    /// moved on without them.
+    fn from_effective(skill: &EffectiveSkill, registry: &[SkillDoc]) -> Self {
         let doc = skill.doc();
         Self {
             id: skill.slug.clone(),
@@ -292,7 +317,10 @@ impl InstalledSkill {
             version: doc.and_then(|doc| doc.version.clone()),
             updated_at_millis: skill.updated_at_millis,
             scan: None,
+            update_available: None,
+            modified: false,
         }
+        .with_drift(effective_drift(skill, registry))
     }
 }
 
@@ -394,7 +422,7 @@ async fn list_skills(
     Ok(Json(
         effective
             .iter()
-            .map(InstalledSkill::from_effective)
+            .map(|skill| InstalledSkill::from_effective(skill, &registry))
             .collect(),
     ))
 }
@@ -492,7 +520,15 @@ async fn install(
         install,
     };
     company.runtime.skills().set(company.id(), &delta).await?;
-    Ok(Json(InstalledSkill::from_state(&delta).with_scan(scan)))
+    // A pin minted from the library's current document, over a document stored
+    // from the same render: current and unmodified by construction, so this
+    // needs no second comparison to say so.
+    let stood = delta.install.as_ref().map(|_| SkillDrift::default());
+    Ok(Json(
+        InstalledSkill::from_state(&delta)
+            .with_scan(scan)
+            .with_drift(stood),
+    ))
 }
 
 /// `GET …/skills/registry` — the shared skill library the console's registry tab
@@ -546,6 +582,7 @@ async fn uninstall(
 }
 
 async fn set_enabled(
+    State(app): State<AppState>,
     company: AdminScopedCompany,
     Path(SlugPath { slug }): Path<SlugPath>,
     Json(body): Json<SetEnabled>,
@@ -578,7 +615,11 @@ async fn set_enabled(
         install,
     };
     company.runtime.skills().set(company.id(), &state).await?;
-    Ok(Json(InstalledSkill::from_state(&state)))
+    // The toggle moved nothing a pin measures, so the row stands where it stood
+    // — which the answer has to say, because the console folds this row into the
+    // list it is already showing.
+    let stood = drift::row_drift(&app.shared_skill_registry()?, &state);
+    Ok(Json(InstalledSkill::from_state(&state).with_drift(stood)))
 }
 
 async fn create_custom(
