@@ -619,6 +619,100 @@ pub async fn read_conversation(
     Ok(body)
 }
 
+/// The name [`ConversationReadTool`] is called by.
+pub const READ_TOOL: &str = "read";
+
+/// `read` on a pooled agent's own belt: the conversation its in-flight turn
+/// answers in, read through [`read_conversation`].
+///
+/// Built before the runtime settles the agent's id, so the id is bound
+/// afterwards through the shared cell handed to [`new`](Self::new).
+pub struct ConversationReadTool {
+    in_flight: Arc<InFlightRegistry>,
+    runtime_agent_id: Arc<std::sync::OnceLock<String>>,
+    events: Arc<dyn EventLog>,
+    schema: Value,
+}
+
+impl fmt::Debug for ConversationReadTool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConversationReadTool")
+            .field("runtime_agent_id", &self.runtime_agent_id.get())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ConversationReadTool {
+    /// A `read` over `in_flight`, for the agent whose runtime id lands in
+    /// `runtime_agent_id`, served from `events`.
+    #[must_use]
+    pub fn new(
+        in_flight: Arc<InFlightRegistry>,
+        runtime_agent_id: Arc<std::sync::OnceLock<String>>,
+        events: Arc<dyn EventLog>,
+    ) -> Self {
+        let schema = speech::tool_specs()
+            .iter()
+            .find(|spec| spec.name == READ_TOOL)
+            .map(|spec| speech_descriptor(spec)["inputSchema"].clone())
+            .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
+        Self {
+            in_flight,
+            runtime_agent_id,
+            events,
+            schema,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for ConversationReadTool {
+    fn name(&self) -> &str {
+        READ_TOOL
+    }
+
+    fn description(&self) -> &str {
+        "Read the recent messages of the conversation this turn answers in, oldest first. \
+         Call it when you need more of the conversation than you were given."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        self.schema.clone()
+    }
+
+    async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
+        let limit = speech::read_limit(args.get("limit").and_then(Value::as_u64));
+        let turn = self
+            .runtime_agent_id
+            .get()
+            .and_then(|id| self.in_flight.snapshot(id));
+        let Some(turn) = turn else {
+            tracing::debug!("[hive::tools] `read` called with no turn in flight");
+            return Ok(ToolResult::error(
+                "refused: no turn is in flight for this agent",
+            ));
+        };
+        tracing::debug!(
+            agent = %turn.runtime_agent_id,
+            conversation = %turn.surface.id,
+            limit,
+            "[hive::tools] native `read`"
+        );
+        let read = read_conversation(
+            Arc::clone(&self.events),
+            &turn.company,
+            &turn.agent_id,
+            &turn.surface,
+            limit,
+        )
+        .await;
+        Ok(match read {
+            Ok(body) => ToolResult::success(body),
+            Err(text) => ToolResult::error(text),
+        })
+    }
+}
+
 /// Moves a built belt into shared handles, so the pool can keep one and hand
 /// the MCP host another.
 #[must_use]
