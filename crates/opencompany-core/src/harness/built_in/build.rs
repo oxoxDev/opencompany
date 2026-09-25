@@ -387,12 +387,6 @@ pub fn build_agent_with_model(
             deps.approval_requests.clone(),
         ),
     ));
-    // Speaking — `post`, `broadcast`, `dm`, `complete_episode`, `read` — and
-    // reading another thread are served to every agent by the `opencompany`
-    // MCP server (plan hive-desks, Phases 3-4), not by tools on this belt:
-    // `openhuman_embed::Agent` has no seam for an in-process host tool, and
-    // a seat's one utterance per turn is attributed to its round by the
-    // in-flight registry the server reads, which a belt tool cannot reach.
     // Installed-MCP-registry surface (`mcp_registry_list_tools` /
     // `mcp_registry_tool_call`) — distinct from the per-server `mcp:<name>`
     // bridge below: both tools address an install at call time by a `server_id`
