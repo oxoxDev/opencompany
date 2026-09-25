@@ -27,6 +27,7 @@ import {
 import { getInferenceStatus } from "@/api/inference";
 import { DraftSkillDialog } from "@/views/skills/DraftSkillDialog";
 import { InstalledSkillsList } from "@/views/skills/InstalledSkillsList";
+import { UpdateSkillDialog } from "@/views/skills/UpdateSkillDialog";
 import { UploadSkillDialog } from "@/views/skills/UploadSkillDialog";
 import type { OpenCompanyClient } from "@/api/client";
 import { PageHeader } from "@/components/page-header";
@@ -117,6 +118,10 @@ export function SkillsView({ client, company }: Props) {
   const [addOpen, setAddOpen] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [draftOpen, setDraftOpen] = useState(false);
+  // The row under update review, or `null` for closed. The row rather than a
+  // boolean, because the dialog compares this install against the registry and
+  // a flag would leave it guessing which one the menu meant.
+  const [updating, setUpdating] = useState<Skill | null>(null);
   // Whether this host can draft at all. `undefined` is "it did not say" — an
   // older host omits the field — and is read as unknown rather than as `false`,
   // exactly as the Add-teammate dialog reads it. Only an explicit `false` hides
@@ -154,6 +159,7 @@ export function SkillsView({ client, company }: Props) {
     setAddOpen(false);
     setUploadOpen(false);
     setDraftOpen(false);
+    setUpdating(null);
     setCanDraft(undefined);
     setScopeGen((g) => g + 1);
     setFilters(DEFAULT_SKILL_FILTERS);
@@ -406,6 +412,7 @@ export function SkillsView({ client, company }: Props) {
                 now={now}
                 onToggle={(s) => void toggle(s)}
                 onUninstall={(s) => void uninstall(s)}
+                onUpdate={setUpdating}
               />
             )}
         </PageTabPanel>
@@ -478,6 +485,22 @@ export function SkillsView({ client, company }: Props) {
         open={draftOpen}
         onOpenChange={setDraftOpen}
         onSaved={takeUploaded}
+      />
+      <UpdateSkillDialog
+        client={client}
+        company={company}
+        skill={updating}
+        registry={registry}
+        onOpenChange={(open) => {
+          if (!open) setUpdating(null);
+        }}
+        onUpdated={(saved) => {
+          // The host answers with the re-pinned row and its post-update drift,
+          // so this is the row — a refetch would only be a second chance to
+          // disagree with what it just said.
+          setSkills((all) => all.map((s) => (s.id === saved.id ? saved : s)));
+          toast.success(`Updated ${saved.name}.`);
+        }}
       />
     </div>
   );

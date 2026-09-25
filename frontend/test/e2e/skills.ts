@@ -23,6 +23,11 @@ export interface HostSkill {
   enabled: boolean;
   version?: string | null;
   updatedAtMillis?: number | null;
+  /** The revisions either side of a library change, when the library has moved
+   * since this install pinned its snapshot. */
+  updateAvailable?: { from?: string | null; to?: string | null } | null;
+  /** Whether the stored copy no longer matches what was recorded at install. */
+  modified?: boolean;
 }
 
 /**
