@@ -423,9 +423,14 @@ pub fn build_agent_with_model(
     // mutating ones, and OpenHuman's own tool description frames the two as a
     // single discover-then-call workflow.
     #[cfg(feature = "mcp")]
+    let mut mcp_registry_wired = false;
+    #[cfg(feature = "mcp")]
+    let mut mcp_declared_wired = false;
+    #[cfg(feature = "mcp")]
     if crate::company::grants_mcp_registry_explicit(grants) {
         match deps.mcp_home.clone() {
             Some(mcp_home) => {
+                mcp_registry_wired = true;
                 let config = std::sync::Arc::new(crate::harness::mcp::McpRuntime::config_for(
                     mcp_home.clone(),
                 ));
@@ -1161,10 +1166,14 @@ pub fn build_agent_with_model(
             },
             mcp_policies,
         )));
-        // Stale-memory mitigation: direct the agent to answer capability
-        // questions from a live `mcp_list_servers` call, never from memory.
-        persona.push_str(&capability_brief());
+        mcp_declared_wired = true;
     }
+
+    // Stale-memory mitigation, once for whichever families were wired: an agent
+    // holding only a directory install enumerates through different tools and
+    // used to be told nothing at all, because this sat inside the declared arm.
+    #[cfg(feature = "mcp")]
+    persona.push_str(&capability_brief(mcp_declared_wired, mcp_registry_wired));
 
     // Composed from the same inputs the two dispatch tools were wired from, so
     // the brief is exactly as accurate as the belt it describes. The installs
