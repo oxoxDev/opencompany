@@ -176,7 +176,7 @@ export function DraftSkillDialog({
           />
         </div>
 
-        {draft && (
+        {draft !== null && (
           <div className="grid gap-2">
             <Label htmlFor="skill-draft-doc">The draft</Label>
             <Textarea
