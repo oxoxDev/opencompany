@@ -17,6 +17,28 @@ export interface SkillUpdateAvailable {
   to?: string | null;
 }
 
+/** Where one roster agent stands on one skill, as the host reports it.
+ *
+ * The read-side inversion of the per-agent allowlist. `state` is what the agent
+ * record **stores**; `holds` is what the agent actually gets once the company's
+ * switch is applied. The two answer different questions and a surface that used
+ * one for the other would be wrong in both directions — `included` with
+ * `holds: false` is "asked for and not granted", and `inherited` with
+ * `holds: false` is "would get it the moment the skill is enabled". */
+export interface SkillAgentScope {
+  id: string;
+  /** `inherited` = the agent lists no skills of its own; `included` = its list
+   * names this one; `excluded` = it has a list and this is not on it (whether
+   * the list is empty or merely narrower).
+   *
+   * `inherited` and `excluded` must never be collapsed: both hold nothing while
+   * the skill is disabled, and only the first holds it again when the switch
+   * returns. */
+  state: "inherited" | "included" | "excluded";
+  /** Whether the agent gets this skill right now. */
+  holds: boolean;
+}
+
 /** An installed skill as the host returns it. */
 export interface Skill {
   id: string;
@@ -46,6 +68,15 @@ export interface Skill {
    * The host always sends it, as a plain boolean. Optional here for the same two
    * reasons `updateAvailable` is, and read as `false` when it is missing. */
   modified?: boolean;
+  /** Where every roster agent stands on this skill.
+   *
+   * **Optional on the type, not on the wire** — the repo's rule for `tools` and
+   * `desks`: `undefined` means "this answer does not report the roster" (a host
+   * predating the field, or one of the write routes), and `[]` means the company
+   * has no teammates. The detail panel renders those two differently, so they
+   * must not be collapsed: an empty picker is a fact about the company, and no
+   * picker at all is a fact about the host. */
+  agents?: SkillAgentScope[];
 }
 
 /** The author-a-custom-skill body; the host slugs the name into the id. */
