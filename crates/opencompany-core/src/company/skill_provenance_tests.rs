@@ -66,6 +66,7 @@ fn library_doc(version: &str, body: &str) -> SkillDoc {
         category: Some("research".to_string()),
         version: Some(version.to_string()),
         body: body.to_string(),
+        extra_frontmatter: Vec::new(),
     }
 }
 

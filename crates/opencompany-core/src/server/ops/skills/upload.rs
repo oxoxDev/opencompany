@@ -203,6 +203,7 @@ async fn store(
         source: SkillSource::Custom,
         custom_doc: Some(read.doc),
         updated_at_millis: Some(crate::ports::now_millis()),
+        install: None,
     };
     company
         .runtime

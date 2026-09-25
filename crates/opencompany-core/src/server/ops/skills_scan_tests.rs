@@ -320,6 +320,7 @@ async fn a_skill_stored_under_an_over_cap_slug_can_still_be_toggled() {
                         .to_string(),
                 ),
                 updated_at_millis: None,
+                install: None,
             },
         )
         .await
