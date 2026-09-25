@@ -629,6 +629,3 @@ impl HiveDispatcher {
         Ok((starters, dto))
     }
 }
-
-/// The journal as the episode store, for a follow-up that joins an open one.
-pub use episode_store::open_episode_for;
