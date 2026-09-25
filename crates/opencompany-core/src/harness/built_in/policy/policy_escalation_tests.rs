@@ -15,6 +15,7 @@ async fn escalate_to_human_sets_the_turn_boundary_and_explicitly_refuses_overflo
         let tool = crate::harness::built_in::blockers::EscalateToHumanTool::new(
             queue.clone(),
             "engineer".to_string(),
+            "engineer".to_string(),
         );
 
         queue
@@ -86,6 +87,7 @@ async fn a_flood_of_escalations_can_push_a_paid_media_card_off_the_shared_cap() 
         let blockers = crate::harness::built_in::blockers::EscalateToHumanTool::new(
             queue.clone(),
             "engineer".to_string(),
+            "engineer".to_string(),
         );
 
         for i in 0..MAX_APPROVAL_REQUESTS_PER_TURN {
@@ -145,6 +147,7 @@ async fn escalate_to_human_respects_the_cycle_claims_drain_cap() {
         let tool = crate::harness::built_in::blockers::EscalateToHumanTool::new(
             queue.clone(),
             "engineer".to_string(),
+            "engineer".to_string(),
         );
         for i in 0..MAX_APPROVAL_REQUESTS_PER_TURN - 1 {
             let args = serde_json::json!({ "question": format!("question {i}") });
@@ -198,6 +201,7 @@ async fn accepted_blockers_survive_later_ordinary_approvals() {
             let cycle = queue.claim(ApprovalScope::Cycle);
             let tool = super::super::blockers::EscalateToHumanTool::new(
                 queue.clone(),
+                "engineer".to_string(),
                 "engineer".to_string(),
             );
             for i in 0..preceding {
@@ -259,10 +263,14 @@ async fn a_blocker_duplicate_outside_the_drain_budget_is_refused() {
 
         let fixture = ApprovalRequestQueue::default();
         let args = serde_json::json!({ "question": "outside the budget" });
-        super::super::blockers::EscalateToHumanTool::new(fixture.clone(), "engineer".to_string())
-            .execute(args.clone())
-            .await
-            .expect("the fixture tool runs");
+        super::super::blockers::EscalateToHumanTool::new(
+            fixture.clone(),
+            "engineer".to_string(),
+            "engineer".to_string(),
+        )
+        .execute(args.clone())
+        .await
+        .expect("the fixture tool runs");
         let existing = fixture
             .drain(MAX_APPROVAL_REQUESTS_PER_TURN)
             .requests
@@ -283,6 +291,7 @@ async fn a_blocker_duplicate_outside_the_drain_budget_is_refused() {
             }
             let tool = super::super::blockers::EscalateToHumanTool::new(
                 queue.clone(),
+                "engineer".to_string(),
                 "engineer".to_string(),
             );
             let asked = if existing_in_cycle {
@@ -365,6 +374,7 @@ async fn escalate_to_human_refuses_a_sibling_gated_call_in_the_same_turn() {
     let tool = crate::harness::built_in::blockers::EscalateToHumanTool::new(
         queue.clone(),
         "engineer".to_string(),
+        "engineer".to_string(),
     );
     let later_call = claim
         .scoped(queue.turn_scoped(async {
@@ -406,6 +416,7 @@ async fn a_repeated_identical_escalation_collapses_but_a_distinct_one_survives()
         let queue = ApprovalRequestQueue::default();
         let tool = crate::harness::built_in::blockers::EscalateToHumanTool::new(
             queue.clone(),
+            "engineer".to_string(),
             "engineer".to_string(),
         );
 

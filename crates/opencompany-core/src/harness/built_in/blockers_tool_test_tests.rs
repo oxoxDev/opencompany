@@ -5,7 +5,11 @@ use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource};
 use tinytools::Tool;
 
 fn tool(queue: &ApprovalRequestQueue) -> EscalateToHumanTool {
-    EscalateToHumanTool::new(queue.clone(), "engineer".to_string())
+    EscalateToHumanTool::new(
+        queue.clone(),
+        "engineer".to_string(),
+        "engineer".to_string(),
+    )
 }
 
 #[tokio::test]
@@ -98,6 +102,74 @@ async fn an_escalation_mints_no_grant() {
     .await;
 }
 
+/// The card a person reads names the teammate by the label they know, not
+/// the roster id — and still carries the id separately so the console can
+/// resolve "Asked by" for itself.
+#[tokio::test]
+async fn the_reason_names_the_display_label_never_the_roster_id() {
+    in_cycle(async {
+        let queue = ApprovalRequestQueue::default();
+        let tool = EscalateToHumanTool::new(
+            queue.clone(),
+            "backend_engineer_7f3a".to_string(),
+            "Alex".to_string(),
+        );
+        tool.execute(serde_json::json!({
+            "question": "which environment?",
+            "context": "staging is already deployed"
+        }))
+        .await
+        .expect("runs");
+
+        let effect = queue.drain(8).requests[0].effect.clone();
+        let payload: BlockerPayload =
+            serde_json::from_value(effect.payload.clone()).expect("payload round-trips");
+        assert!(
+            payload.reason.contains("Alex"),
+            "the operator reads the teammate's name: {}",
+            payload.reason
+        );
+        assert!(
+            !payload.reason.contains("backend_engineer_7f3a"),
+            "the raw roster id must not leak into operator-visible text: {}",
+            payload.reason
+        );
+        assert_eq!(
+            crate::ports::blockers::asked_by(&effect).as_deref(),
+            Some("backend_engineer_7f3a"),
+            "the card still carries the asking agent so the console can render \"Asked by\""
+        );
+    })
+    .await;
+}
+
+/// An agent with no display name still gets a readable card: a blank label
+/// falls back to a generic word rather than ever printing the id.
+#[tokio::test]
+async fn a_blank_display_label_falls_back_to_a_teammate() {
+    in_cycle(async {
+        let queue = ApprovalRequestQueue::default();
+        let tool = EscalateToHumanTool::new(
+            queue.clone(),
+            "backend_engineer_7f3a".to_string(),
+            String::new(),
+        );
+        tool.execute(serde_json::json!({
+            "question": "which environment?",
+            "context": "staging is already deployed"
+        }))
+        .await
+        .expect("runs");
+
+        let effect = queue.drain(8).requests[0].effect.clone();
+        let payload: BlockerPayload =
+            serde_json::from_value(effect.payload.clone()).expect("payload round-trips");
+        assert!(payload.reason.contains("a teammate"), "{}", payload.reason);
+        assert!(!payload.reason.contains("backend_engineer_7f3a"));
+    })
+    .await;
+}
+
 /// Two agents asking distinct questions in the same turn race through
 /// `execute` concurrently — nothing upstream of this tool serialises the
 /// calls — so both must still land their own card rather than one
@@ -121,8 +193,13 @@ async fn concurrent_questions_from_different_agents_both_park() {
 
         for round in 0..20 {
             let queue = ApprovalRequestQueue::default();
-            let finance = EscalateToHumanTool::new(queue.clone(), "finance".to_string());
-            let legal = EscalateToHumanTool::new(queue.clone(), "legal".to_string());
+            let finance = EscalateToHumanTool::new(
+                queue.clone(),
+                "finance".to_string(),
+                "finance".to_string(),
+            );
+            let legal =
+                EscalateToHumanTool::new(queue.clone(), "legal".to_string(), "legal".to_string());
             let gate = Arc::new(Barrier::new(2));
 
             let ask = |tool: EscalateToHumanTool, question: &'static str, gate: Arc<Barrier>| {
@@ -305,7 +382,8 @@ async fn concurrent_questions_compete_for_the_final_slot_without_silent_loss() {
 
             let barrier = Arc::new(Barrier::new(2));
             let ask = |agent: &str, question: &'static str| {
-                let tool = EscalateToHumanTool::new(queue.clone(), agent.to_string());
+                let tool =
+                    EscalateToHumanTool::new(queue.clone(), agent.to_string(), agent.to_string());
                 let barrier = barrier.clone();
                 tokio::task::spawn_blocking(move || {
                     barrier.wait();

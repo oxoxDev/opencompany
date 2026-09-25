@@ -227,10 +227,20 @@ pub fn model_for_tier(tier: Option<&str>) -> String {
 /// them, and pointing an agent at a tool it was not granted is the "a tool
 /// granted, unmentioned" problem pointed the other way. The agents that do
 /// have them are told in [`orchestrator::orchestrator_brief`].
-const MENTION_BRIEF: &str = " Naming a teammate: write their name or id as ordinary text when you are \
-referring to them — \"qa_engineer has the failing case\". An `@` in your reply renders a chip and \
+const MENTION_BRIEF: &str = " Naming a teammate: write their name as ordinary text when you are \
+referring to them: \"Quinn has the failing case\". An `@` in your reply renders a chip and \
 nothing more: it notifies nobody and starts no work, so it cannot hand anything over. Reaching for \
 `@` to make somebody pick something up does not make them pick it up. ";
+
+/// Who reads what an agent writes, and what belongs in a tool call instead.
+///
+/// Every agent, pooled or seated: a reply, a desk post and a relayed answer
+/// all land in front of a person. States the audience and the ordering, not a
+/// length budget; OpenHuman's own style rules own tone.
+pub(crate) const READER_BRIEF: &str = " A person reads what you post. Lead with the answer in \
+plain words, usually a few short sentences; offer detail rather than dump it. Refer to teammates, \
+desks and work by name. Ids, tool names, card, run and sequence numbers, and JSON belong in tool \
+calls, never in what you write. ";
 
 /// The persona system prompt for a company agent.
 ///
@@ -505,10 +515,18 @@ pub fn build_agent_with_model(
     // node through `park_gated_calls`. There is no belt on which the question
     // would stage into a queue nothing empties — the `media` failure mode the
     // publish gate below guards against.
+    let agent_label = manifest_agent
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(manifest_agent.role.trim())
+        .to_string();
     tools.push(Box::new(
         crate::harness::built_in::blockers::EscalateToHumanTool::new(
             deps.approval_requests.clone(),
             manifest_agent.id.clone(),
+            agent_label,
         ),
     ));
 
@@ -943,6 +961,7 @@ pub fn build_agent_with_model(
     // Every agent, granted tools or not: an `@` is something any of them can
     // write, and what it does is not guessable from the fact that it renders.
     persona.push_str(MENTION_BRIEF);
+    persona.push_str(READER_BRIEF);
 
     // How this company talks, when it talks by calling a tool.
     //
@@ -1803,6 +1822,53 @@ fn opencompany_mcp_brief(tools: &[String]) -> String {
     brief.push_str(&tools.join(", "));
     brief.push('\n');
     brief
+}
+
+/// `blueprint.system_prompt` rendered the way OpenHuman renders an agent's standing
+/// prompt: the body, then the shared grounding contract and the writing-style
+/// block read from `blueprint.workspace`.
+///
+/// A seat's every turn is seeded, and a seeded session is never cold, so the
+/// runtime composes no prompt of its own for it. The text returned here is
+/// the only system prompt such a turn carries.
+///
+/// # Errors
+///
+/// A prompt section failing to render.
+#[cfg(feature = "openhuman")]
+pub fn rendered_seat_persona(blueprint: &AgentBlueprint) -> crate::Result<String> {
+    let tools = Vec::new();
+    let visible = std::collections::HashSet::new();
+    let context = oh::agent::prompts::PromptContext {
+        workspace_dir: &blueprint.workspace,
+        model_name: &blueprint.model,
+        agent_id: &blueprint.definition_name,
+        tools: &tools,
+        workflows: &[],
+        dispatcher_instructions: "",
+        learned: oh::agent::prompts::LearnedContextData::default(),
+        visible_tool_names: &visible,
+        tool_call_format: oh::agent::prompts::ToolCallFormat::Native,
+        connected_integrations: &[],
+        connected_identities_md: String::new(),
+        include_profile: false,
+        include_memory_md: false,
+        curated_snapshot: None,
+        user_identity: None,
+        personality_roster: Vec::new(),
+        agents_md_global: None,
+        agents_md_local: None,
+    };
+    let rendered =
+        oh::agent::prompts::SystemPromptBuilder::from_final_body(blueprint.system_prompt.clone())
+            .build(&context)
+            .map_err(|error| crate::error::OpenCompanyError::Harness(error.to_string()))?;
+    tracing::debug!(
+        agent = %blueprint.definition_name,
+        bytes = rendered.len(),
+        "[harness] rendered seat persona"
+    );
+    Ok(rendered)
 }
 
 /// The catalogue brief again, on a turn's text, for a session whose pinned

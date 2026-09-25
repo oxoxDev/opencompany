@@ -1,0 +1,38 @@
+# The fixture company the readable-replies eval talks to.
+#
+# Every id carries a separator, so the leak check can count an id that reaches
+# a reply without mistaking an ordinary English word for one. Two desks of two
+# seats each, so a desk message opens an episode and a follow-up on the same
+# desk reaches a seat on a seeded turn.
+
+[company]
+name = "Readable Replies Co"
+output = "Short answers from a small product team"
+human_role = "Asking the team questions"
+
+[users]
+admins = ["harness-e2e@tinyhumans.ai"]
+
+[policy]
+mode = "full"
+
+[tools]
+allow = ["mcp:*", "workspace", "workspace.*"]
+
+[[group_chat]]
+id = "build_desk"
+name = "Build"
+description = "How the product is built and tested."
+members = ["backend_dev", "qa_engineer"]
+
+[group_chat.routing]
+round_width = 2
+
+[[group_chat]]
+id = "launch_desk"
+name = "Launch"
+description = "Release notes and launch timing."
+members = ["copy_writer", "product_lead"]
+
+[group_chat.routing]
+round_width = 2

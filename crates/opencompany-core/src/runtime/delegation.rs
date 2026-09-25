@@ -349,13 +349,13 @@ struct HandOff {
 }
 
 /// The prompt for the CEO-relay hand-back turn: the operator's original message
-/// plus each teammate's reply, framed so the orchestrator relays the answer back
-/// as its own single, coherent response and does not delegate again.
+/// plus each teammate's reply, framed so the orchestrator passes the answer
+/// along briefly and does not delegate again.
 pub(crate) fn build_relay_prompt(original: &str, desk_replies: &[(String, String)]) -> String {
     let mut prompt = format!(
         "The operator asked:\n{original}\n\nYou delegated this to your team and their reply is \
-below. Relay their answer back to the operator now as your own single, coherent response — \
-summarize it or pass it along. Do not delegate again; just relay what came back."
+below. Pass their answer along to the operator now, by name, in a sentence or two. Do not \
+delegate again; just relay what came back."
     );
     for (member, reply) in desk_replies {
         prompt.push_str(&format!("\n\n{member} replied:\n{reply}"));

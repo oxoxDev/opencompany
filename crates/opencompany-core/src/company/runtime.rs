@@ -6234,7 +6234,12 @@ impl CompanyRuntime {
                 // internal effect.
                 group: p.effect.group,
                 task: p.task,
-                agent: p.effect.agent.clone(),
+                // An agent's own question names its asker on the payload, not
+                // on `Effect::agent` — see `blockers::asked_by` — so the card
+                // still gets its "Asked by" without picking up that field's
+                // grant/re-dispatch meaning.
+                agent: crate::ports::blockers::asked_by(&p.effect)
+                    .or_else(|| p.effect.agent.clone()),
                 payload: crate::runtime::approval_display::display_payload(&p.effect),
                 thread: p.thread,
                 // Issues #374, #444. Both halves matter: a native effect has no

@@ -21,6 +21,7 @@ use crate::ports::types::{
     CompanyRecord, EventSeq, Mention, MentionTarget, StoredEvent, TurnStep, UtteranceKind,
 };
 use crate::server::ops::language::DEFAULT_DESK;
+use crate::server::readable::{DisplayNames, project_history};
 
 // Conversation identity now lives in `tinyhivemind_core::chat`, and these are
 // re-exported so every existing caller keeps its path (issue #65, #435).
@@ -698,7 +699,8 @@ pub struct MessageView {
     /// The message text.
     pub text: String,
     /// **What the agent was actually handed for this row** — the text before
-    /// [`readable_moves`] rewrote it into operator-facing prose.
+    /// [`readable_moves`](crate::server::readable::readable_moves) projected it
+    /// for a person.
     ///
     /// Same reasoning as [`Self::cue_author`], applied to the other half of
     /// the cue line: `render_cues` in `agent_session.rs` prepends
@@ -707,7 +709,7 @@ pub struct MessageView {
     /// a surface that claims to show what the model saw — the raw-turns view
     /// — must not feed it [`Self::text`], which has already had `!support
     /// #topic ^3` turned into prose. Equal to [`Self::text`] on every row
-    /// `readable_moves` does not touch.
+    /// the display projection does not touch.
     pub cue_text: String,
     /// When it was journaled, epoch millis.
     pub at_millis: f64,
@@ -1047,10 +1049,11 @@ impl MessageView {
                     // `body_of`'s `AgentReply` arm names the agent, so this does.
                     cue_author: agent_id.clone(),
                     author: agent_id,
-                    // `body_of`'s `AgentReply` arm hands the agent `text.clone()`
-                    // untouched — clone before `readable_moves` consumes it below.
+                    // `body_of`'s `AgentReply` arm hands the agent this body
+                    // untouched; `text` is projected for a person at the end of
+                    // `history_for_desk`.
                     cue_text: text.clone(),
-                    text: readable_moves(text),
+                    text,
                     at_millis,
                     mine: false,
                     // The runtime wrote this, whichever brain produced it.
@@ -1571,6 +1574,7 @@ pub async fn history_for_desk(
 
     // One roster read per history, not one per message.
     let authors = author_labels(runtime).await?;
+    let names = DisplayNames::load(runtime).await;
     let mut cursor = before_seq.map(EventSeq::new);
     let mut messages = Vec::with_capacity(first);
     while messages.len() < first {
@@ -1671,6 +1675,7 @@ pub async fn history_for_desk(
     drop_dead_outputs(runtime, &mut messages).await?;
     attach_referral_origins(runtime, desk_id, &mut messages).await?;
     attach_agent_conversations(runtime, desk_id, &mut messages).await?;
+    project_history(&mut messages, &names);
     Ok(messages)
 }
 
@@ -2028,9 +2033,7 @@ async fn attach_referral_origins(
                     } else {
                         target.clone()
                     },
-                    // The ask is a committed MOVE — the grammar is addressed to
-                    // the fold, never to a person reading a transcript.
-                    text: readable_moves(words),
+                    text: words,
                     outbound: agent_id == asker,
                 });
             }
@@ -2338,7 +2341,7 @@ async fn attach_referral_origins(
                     lines.push(ReferralLine {
                         author_id: target.clone(),
                         author_label: String::new(),
-                        text: readable_moves(crate::hive::referral::asked_message(&text)),
+                        text: crate::hive::referral::asked_message(&text),
                         outbound: true,
                     });
                 }
@@ -2407,7 +2410,7 @@ async fn attach_referral_origins(
                             Some(ReferralLine {
                                 author_id: agent_id.clone(),
                                 author_label: agent_id.clone(),
-                                text: readable_moves(text.clone()),
+                                text: text.clone(),
                                 outbound: false,
                             })
                         }
@@ -2424,11 +2427,11 @@ async fn attach_referral_origins(
                                 // The room's attribution removed — this line is
                                 // already attributed by the fold that carries
                                 // it. See `referral::unattributed`.
-                                text: readable_moves(crate::hive::referral::unattributed(
+                                text: crate::hive::referral::unattributed(
                                     asker,
                                     from_desk_name,
                                     &text,
-                                )),
+                                ),
                                 outbound: false,
                             });
                         }
@@ -2511,9 +2514,7 @@ async fn attach_referral_origins(
                             lines: vec![ReferralLine {
                                 author_id: asker.clone(),
                                 author_label: asker_label.clone(),
-                                // A room's question is a committed MOVE, and the
-                                // grammar is addressed to the fold.
-                                text: readable_moves(text),
+                                text,
                                 outbound: false,
                             }],
                         });
@@ -2560,16 +2561,6 @@ fn strip_relay_note(event: &CompanyEvent) -> Option<String> {
         .map_or(text.as_str(), |(answer, _)| answer)
         .trim();
     (!words.is_empty()).then(|| words.to_string())
-}
-
-/// The operator-facing body of a reply.
-///
-/// An identity since plan hive-desks, Phase 4: a seat speaks through a tool
-/// call, so nothing a person reads carries a move grammar to rewrite. Kept as
-/// a function because every projection calls it at the display edge, and the
-/// seam is where a future rewrite would go.
-pub(crate) fn readable_moves(text: String) -> String {
-    text
 }
 
 /// Blanks `task_id` on any row naming a card the board no longer has

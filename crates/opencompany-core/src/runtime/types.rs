@@ -174,12 +174,15 @@ pub struct ApprovalSummary {
     /// pre-#333 approval serializes as it always did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<TaskLink>,
-    /// The roster teammate whose blocked tool call this approval was parked for
-    /// (issue #372), mirroring [`Effect::agent`](crate::ports::types::Effect::agent).
+    /// The roster teammate to name as this card's asker: whose blocked tool
+    /// call it was parked for, mirroring
+    /// [`Effect::agent`](crate::ports::types::Effect::agent), or — for an
+    /// agent's own question — whoever asked it, read off the blocker payload
+    /// instead (see `blockers::asked_by`).
     ///
-    /// `Some(id)` is exactly "projected from a harness tool call" — the console
-    /// renders "Asked by <name>". `None` is a *native* effect the runtime
-    /// performs itself, or a park journaled before #243 stamped the field, and
+    /// `Some(id)` is what the console reads as "Asked by <name>". `None` is a
+    /// *native* effect the runtime performs itself, a blocker with no
+    /// particular asker, or a park journaled before this field existed, and
     /// the card names no asker rather than inventing one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,

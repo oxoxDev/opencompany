@@ -63,6 +63,27 @@ pub fn is_blocker_effect(effect: &crate::ports::types::Effect) -> bool {
         .starts_with(&format!("{BLOCKER_EFFECT_PREFIX}."))
 }
 
+/// The roster agent id that asked a blocker's question, when the effect
+/// carries one.
+///
+/// Read straight off the JSON payload rather than through
+/// [`BlockerPayload`]'s typed fields: an agent's own question is the one
+/// blocker shape with an unambiguous asker (every other shape parks with no
+/// teammate behind it), so the id lives as an additive key on the same
+/// payload instead of a struct field every other blocker construction site
+/// would have to grow. `None` for a non-blocker effect, a blocker with no
+/// asker, or a payload that does not parse as JSON.
+pub fn asked_by(effect: &crate::ports::types::Effect) -> Option<String> {
+    if !is_blocker_effect(effect) {
+        return None;
+    }
+    effect
+        .payload
+        .get("asked_by")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
 /// **What is missing.** The primary axis: it decides whether the work parks at
 /// all, and which recovery is worth trying before a person is asked.
 ///
