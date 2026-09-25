@@ -192,7 +192,7 @@ mod draft;
 mod drift;
 mod journal;
 mod registry;
-mod scope;
+pub(crate) mod scope;
 mod update;
 mod upload;
 

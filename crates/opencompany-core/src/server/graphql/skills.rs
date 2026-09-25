@@ -13,6 +13,9 @@ use async_graphql::{Context, ID, SimpleObject};
 use crate::AppState;
 use crate::company::runtime::CompanyRuntime;
 use crate::company::skill_effective::{self, EffectiveSkill};
+use crate::company::skill_scope::{
+    AgentSkillScope, SkillAgentScope, SkillScopeState, agents_for_skill,
+};
 use crate::company::{SkillDoc, VersionChange, effective_drift};
 use crate::ports::skills_state::SkillSource;
 
@@ -42,6 +45,51 @@ pub struct SkillGql {
     /// install. `false` on a row that pinned nothing, so a reader never has to
     /// tell "clean" apart from "absent".
     pub modified: bool,
+    /// Where every roster agent stands on this skill — the read-side inversion
+    /// of the per-agent allowlist, the same projection `GET …/skills` reports.
+    ///
+    /// A list, never null: this resolver loads the company record, so it can
+    /// always say. An empty list means the company has no teammates.
+    pub agents: Vec<SkillAgentScopeGql>,
+}
+
+/// One roster agent's standing on one skill.
+///
+/// A GraphQL type of its own rather than an `async_graphql` derive on
+/// [`SkillAgentScope`]: that type is `company`'s vocabulary, shared with the
+/// REST projection, and a transport's schema attributes have no business on it.
+#[derive(SimpleObject)]
+#[graphql(name = "SkillAgentScope")]
+pub struct SkillAgentScopeGql {
+    /// The roster agent's id.
+    pub id: ID,
+    /// Which of the three stored states this agent is in for this skill:
+    /// `inherited` | `included` | `excluded`.
+    ///
+    /// `inherited` and `excluded` are not interchangeable. An agent that has
+    /// never been scoped and one given an explicit empty list both hold nothing
+    /// while the skill is disabled, and only the first holds it again when the
+    /// switch goes back on.
+    pub state: String,
+    /// Whether the agent actually gets this skill right now — the scope resolved
+    /// against the company's switch, not the scope alone.
+    pub holds: bool,
+}
+
+impl SkillAgentScopeGql {
+    /// Projects `company`'s [`SkillAgentScope`] onto this transport's shape.
+    fn of(scope: &SkillAgentScope) -> Self {
+        Self {
+            id: ID(scope.id.clone()),
+            state: match scope.state {
+                SkillScopeState::Inherited => "inherited",
+                SkillScopeState::Included => "included",
+                SkillScopeState::Excluded => "excluded",
+            }
+            .to_string(),
+            holds: scope.holds,
+        }
+    }
 }
 
 /// The two revisions either side of a library change.
@@ -151,6 +199,7 @@ pub(crate) async fn resolve_company(
     Ok(project(
         &skill_effective::resolve(runtime.source_dir(), &registry, &deltas)?,
         &registry,
+        &crate::server::ops::skills::scope::roster_scopes(runtime).await?,
     ))
 }
 
@@ -159,16 +208,24 @@ pub(crate) async fn resolve_company(
 /// `registry` is the host's shared library, which a pinned install's drift is
 /// measured against — the same input the REST list projects from, so the two
 /// transports cannot report a different standing for one install.
-pub(crate) fn project(effective: &[EffectiveSkill], registry: &[SkillDoc]) -> Vec<SkillGql> {
+pub(crate) fn project(
+    effective: &[EffectiveSkill],
+    registry: &[SkillDoc],
+    roster: &[AgentSkillScope],
+) -> Vec<SkillGql> {
     effective
         .iter()
-        .map(|skill| from_effective(skill, registry))
+        .map(|skill| from_effective(skill, registry, roster))
         .collect()
 }
 
 /// Projects one effective entry into a `Skill`. An entry no layer supplied a
 /// document for is rendered from its slug alone.
-fn from_effective(skill: &EffectiveSkill, registry: &[SkillDoc]) -> SkillGql {
+fn from_effective(
+    skill: &EffectiveSkill,
+    registry: &[SkillDoc],
+    roster: &[AgentSkillScope],
+) -> SkillGql {
     let drifted = effective_drift(skill, registry);
     let doc = skill.doc();
     SkillGql {
@@ -188,6 +245,10 @@ fn from_effective(skill: &EffectiveSkill, registry: &[SkillDoc]) -> SkillGql {
             .and_then(|drifted| drifted.update_available.clone())
             .map(SkillUpdateGql::of),
         modified: drifted.is_some_and(|drifted| drifted.modified),
+        agents: agents_for_skill(&skill.slug, skill.enabled, roster)
+            .iter()
+            .map(SkillAgentScopeGql::of)
+            .collect(),
     }
 }
 
