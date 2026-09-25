@@ -25,8 +25,10 @@ import {
   type SkillUploadRow,
 } from "@/api/skills";
 import { getInferenceStatus } from "@/api/inference";
+import type { TeamMemberDto } from "@/api/types";
 import { DraftSkillDialog } from "@/views/skills/DraftSkillDialog";
 import { InstalledSkillsList } from "@/views/skills/InstalledSkillsList";
+import { SkillDetailPanel } from "@/views/skills/SkillDetailPanel";
 import { UpdateSkillDialog } from "@/views/skills/UpdateSkillDialog";
 import { UploadSkillDialog } from "@/views/skills/UploadSkillDialog";
 import type { OpenCompanyClient } from "@/api/client";
@@ -122,6 +124,15 @@ export function SkillsView({ client, company }: Props) {
   // boolean, because the dialog compares this install against the registry and
   // a flag would leave it guessing which one the menu meant.
   const [updating, setUpdating] = useState<Skill | null>(null);
+  // The skill whose detail panel is open, or `null` for closed. One piece of
+  // state for both ways in — a card click and the row menu's `Scope…` — so the
+  // two cannot open different things.
+  const [opened, setOpened] = useState<Skill | null>(null);
+  // The roster, for the panel's write. Each row carries that teammate's stored
+  // skill list, and the panel computes the next one from it; `null` means the
+  // read has not landed or failed, which is what stops the panel offering a
+  // change it could not make safely.
+  const [team, setTeam] = useState<TeamMemberDto[] | null>(null);
   // Whether this host can draft at all. `undefined` is "it did not say" — an
   // older host omits the field — and is read as unknown rather than as `false`,
   // exactly as the Add-teammate dialog reads it. Only an explicit `false` hides
@@ -160,6 +171,8 @@ export function SkillsView({ client, company }: Props) {
     setUploadOpen(false);
     setDraftOpen(false);
     setUpdating(null);
+    setOpened(null);
+    setTeam(null);
     setCanDraft(undefined);
     setScopeGen((g) => g + 1);
     setFilters(DEFAULT_SKILL_FILTERS);
@@ -228,11 +241,17 @@ export function SkillsView({ client, company }: Props) {
     const mine = ++gen.current;
     // Independent requests: a failing registry must not blank the installed
     // list (or the reverse), so each settles on its own.
-    const [installed, shared] = await Promise.allSettled([
+    const [installed, shared, roster] = await Promise.allSettled([
       listSkills(client, company),
       listRegistrySkills(client, company),
+      client.listTeam(company),
     ]);
     if (mine !== gen.current) return;
+
+    // A failed roster read leaves `null` rather than an empty array: "nobody is
+    // on this company" and "this read did not answer" are different, and the
+    // panel must not offer to rewrite a skill list it could not read.
+    setTeam(roster.status === "fulfilled" ? roster.value : null);
 
     if (installed.status === "fulfilled") {
       setSkills(installed.value);
@@ -258,6 +277,7 @@ export function SkillsView({ client, company }: Props) {
     setRegistryLoading(true);
     setSkills([]); // drop the previous scope's skills while the new set loads
     setRegistry([]);
+    setTeam(null);
     void refresh();
     // Invalidate any in-flight request on scope change / unmount.
     return () => {
@@ -266,6 +286,10 @@ export function SkillsView({ client, company }: Props) {
   }, [refresh]);
 
   const installedIds = useMemo(() => new Set(skills.map((s) => s.id)), [skills]);
+  // The panel reads the row out of the list rather than holding its own copy, so
+  // a refetch behind an open panel shows what is stored instead of the snapshot
+  // the click captured. A row that has gone (uninstalled elsewhere) closes it.
+  const openedRow = opened === null ? null : (skills.find((s) => s.id === opened.id) ?? null);
   // One instant for the whole list, so no two rows date themselves against
   // different "now"s within a single render.
   const now = Date.now();
@@ -413,6 +437,7 @@ export function SkillsView({ client, company }: Props) {
                 onToggle={(s) => void toggle(s)}
                 onUninstall={(s) => void uninstall(s)}
                 onUpdate={setUpdating}
+                onOpen={setOpened}
               />
             )}
         </PageTabPanel>
@@ -485,6 +510,15 @@ export function SkillsView({ client, company }: Props) {
         open={draftOpen}
         onOpenChange={setDraftOpen}
         onSaved={takeUploaded}
+      />
+      <SkillDetailPanel
+        client={client}
+        company={company}
+        skill={openedRow}
+        team={team}
+        canManage={canManage}
+        onClose={() => setOpened(null)}
+        onSaved={() => void refresh()}
       />
       <UpdateSkillDialog
         client={client}

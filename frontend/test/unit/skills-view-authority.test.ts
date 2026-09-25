@@ -71,6 +71,7 @@ function clientWith(
 ): OpenCompanyClient {
   return {
     scopeFor: () => "/api/v1/companies/acme",
+    listTeam: () => Promise.resolve([]),
     carriesPlatformBearer,
     get: (path: string) => {
       if (path.endsWith("/auth/me")) {
