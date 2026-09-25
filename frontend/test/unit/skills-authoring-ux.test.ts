@@ -195,6 +195,8 @@ describe("skill upload dialog", () => {
     expect(rows[0].textContent).toContain("press-outreach");
     expect(rows[1].textContent).toContain("no `name` in its frontmatter");
     expect(posted[0].path).toContain("/skills/upload");
+    const sent = posted[0].form.getAll("file").map((f) => (f as File).name);
+    expect(sent).toEqual(["good.md", "broken.md"]);
   });
 });
 
