@@ -197,13 +197,29 @@ async fn store(
         .map_err(problem_text)
         .map_err(Refusal::plain)?;
     let scan: ScanSummary = vet_skill(&read.slug, &read.doc, force).map_err(Refusal::from)?;
+    // An upload replaces the document, not the install. A row that already
+    // pins one keeps its pin and its provenance, so the stored copy reads as
+    // modified against what was installed rather than as never having been
+    // installed at all.
+    let pinned = company
+        .runtime
+        .skills()
+        .list(company.id())
+        .await
+        .map_err(|error| Refusal::plain(error.to_string()))?
+        .into_iter()
+        .find(|row| row.slug == read.slug && row.install.is_some());
+    let (source, install) = match pinned {
+        Some(row) => (row.source, row.install),
+        None => (SkillSource::Custom, None),
+    };
     let delta = SkillState {
         slug: read.slug,
         enabled: true,
-        source: SkillSource::Custom,
+        source,
         custom_doc: Some(read.doc),
         updated_at_millis: Some(crate::ports::now_millis()),
-        install: None,
+        install,
     };
     company
         .runtime
