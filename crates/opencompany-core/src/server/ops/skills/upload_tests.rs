@@ -643,3 +643,45 @@ async fn each_stored_file_journals_its_own_installed_row() {
         assert!(row["by"].is_object(), "{row}");
     }
 }
+
+/// The row an upload answers with says the copy is now modified.
+///
+/// The console folds a stored row straight into the list it is showing, without
+/// a re-read, so an answer that reported the defaults would show the operator a
+/// clean row for the document they just replaced — and the badge would appear
+/// only if they happened to reload.
+#[tokio::test]
+async fn an_upload_over_a_pinned_skill_answers_that_it_is_now_modified() {
+    let home_dir = home();
+    let state = state_with_registry(home_dir.path()).await;
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/skills/competitor-scan/install",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["modified"],
+        serde_json::json!(false),
+        "the install's own answer: nothing has drifted yet"
+    );
+
+    let (status, body) = upload(
+        &state,
+        &[("competitor-scan.md", doc("Competitor Scan").as_bytes())],
+        false,
+        &fixed_cookie("acme"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let stored = &body["results"][0]["skill"];
+    assert_eq!(
+        stored["modified"],
+        serde_json::json!(true),
+        "the answer has to carry the badge the write just earned: {body}"
+    );
+}
