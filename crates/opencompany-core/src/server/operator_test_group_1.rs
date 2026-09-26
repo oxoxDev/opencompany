@@ -296,6 +296,36 @@ async fn an_unaddressed_chat_lands_in_the_default_agents_dm() {
     assert_eq!(asked.as_deref(), Some("dm:product_manager"));
 }
 
+/// A transient roster-read failure while resolving the default agent's DM
+/// must not fail the send: it falls back to `DEFAULT_DESK`, exactly as an
+/// unaddressed message did before that DM resolution existed.
+#[tokio::test]
+async fn an_unaddressed_chat_still_sends_when_the_roster_read_fails() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let (state, store) = state_with_roster_and_failing_store(&home).await;
+    let id = CompanyId::new("acme");
+    let runtime = state.registry().get(&id).unwrap();
+    let app = router(state);
+
+    store.fail_next_loads(1);
+
+    let r = app.oneshot(workflow_chat_to(CROSSED, None)).await.unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::OK,
+        "a roster read failure must not fail the whole chat send"
+    );
+
+    let tasks = runtime.tasks().list(&id).await.unwrap();
+    assert_eq!(tasks.len(), 1, "one card: {tasks:?}");
+    assert_eq!(
+        tasks[0].origin_chat_id(),
+        Some(crate::server::ops::language::DEFAULT_DESK),
+        "falls back to the default desk when the roster cannot be read"
+    );
+}
+
 /// A thread key that names nothing on the roster is not an error: the card
 /// is opened, unassigned, exactly as it was before this route resolved
 /// anything. A chat must never 400 — and must never lose its card — over who

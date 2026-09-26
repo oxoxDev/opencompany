@@ -3760,9 +3760,8 @@ async fn chat_and_emit(
     let desk = match message.chat.clone() {
         Some(chat) => chat,
         None => {
-            let desk = runtime
-                .default_agent_dm()
-                .await?
+            let desk = addressed_or_default_dm(&runtime, None)
+                .await
                 .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string());
             tracing::warn!(
                 company = %id,
