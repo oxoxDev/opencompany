@@ -201,6 +201,52 @@ fn a_bulk_install_is_capped_and_says_how_many_it_left_out() {
         "{brief}"
     );
     assert!(brief.contains("…and 4 more"), "{brief}");
+    assert!(
+        brief.contains("`mcp_registry_installed_list`"),
+        "the overflow must name an enumeration tool this agent holds: {brief}"
+    );
+    assert!(
+        !brief.contains("`mcp_list_servers`"),
+        "`mcp_list_servers` does not list directory installs and a registry-only agent is not \
+         wired it: {brief}"
+    );
+}
+
+/// The mirror of the case above: an agent over the cap on declared servers alone
+/// must be sent to the declared enumeration tool, not the registry one.
+#[test]
+fn a_declared_overflow_points_at_the_declared_enumeration_tool() {
+    let decls: Vec<McpServerDecl> = (0..CAP + 2)
+        .map(|n| decl(&format!("server-{n}"), &format!("https://n{n}.example/mcp")))
+        .collect();
+    let brief = server_family_brief(&decls, &[], &grants(&["mcp:*"]));
+    assert!(brief.contains("…and 2 more"), "{brief}");
+    assert!(brief.contains("`mcp_list_servers`"), "{brief}");
+    assert!(
+        !brief.contains("`mcp_registry_installed_list`"),
+        "an agent with no install reachable must not be sent to the registry listing: {brief}"
+    );
+}
+
+/// An agent over the cap on both families needs both tools named, since neither
+/// one alone enumerates the servers it is missing.
+#[test]
+fn an_overflow_across_both_families_names_both_enumeration_tools() {
+    let decls: Vec<McpServerDecl> = (0..CAP)
+        .map(|n| decl(&format!("server-{n}"), &format!("https://d{n}.example/mcp")))
+        .collect();
+    let installs: Vec<RegistryServerRow> = (0..3)
+        .map(|n| {
+            install(
+                &format!("id-{n}"),
+                &format!("Server {n}"),
+                Some(&format!("https://r{n}.example/mcp")),
+            )
+        })
+        .collect();
+    let brief = server_family_brief(&decls, &installs, &grants(&["mcp:*", "mcp_registry"]));
+    assert!(brief.contains("`mcp_list_servers`"), "{brief}");
+    assert!(brief.contains("`mcp_registry_installed_list`"), "{brief}");
 }
 
 /// A name carrying a newline would end the list item and let whatever follows

@@ -161,8 +161,13 @@ pub(crate) fn server_family_brief(
     );
     brief.push_str(&lines.join("\n"));
     if hidden > 0 {
+        let enumerate = match (!reachable_decls.is_empty(), !reachable_installs.is_empty()) {
+            (true, true) => "`mcp_list_servers` and `mcp_registry_installed_list`",
+            (false, true) => "`mcp_registry_installed_list`",
+            _ => "`mcp_list_servers`",
+        };
         brief.push_str(&format!(
-            "\n- …and {hidden} more. Call `mcp_list_servers` for the rest."
+            "\n- …and {hidden} more. Call {enumerate} for the rest."
         ));
     }
     brief.push('\n');
