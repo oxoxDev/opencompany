@@ -50,6 +50,23 @@ pub(crate) struct RegistryServerRow {
     pub(crate) enabled: bool,
 }
 
+/// Whether `value` can appear in the brief exactly as an agent must pass it back.
+///
+/// Each value is rendered inside a code span *and* quoted as the key the model
+/// sends, so it has to be both safe to render and exact. A control character
+/// breaks the line out of its list item and a backtick closes the span early;
+/// either way the appended text stops reading as a list of servers. A declared
+/// name is only checked for emptiness, and an install's `server_id` and
+/// `display_name` arrive from the directory unchanged, so none can be assumed
+/// clean.
+///
+/// A value that fails this cannot be named faithfully — mangling it would print a
+/// key that gets refused — so its server joins the overflow count and is left to
+/// live enumeration.
+fn renderable(value: &str) -> bool {
+    !value.is_empty() && !value.contains('`') && !value.chars().any(char::is_control)
+}
+
 /// The brief naming each server this agent can reach and the tool that reaches
 /// it, or an empty string when it can reach none.
 ///
@@ -62,14 +79,27 @@ pub(crate) fn server_family_brief(
     installs: &[RegistryServerRow],
     grants: &[String],
 ) -> String {
-    let declared: Vec<&McpServerDecl> = decls
+    let reachable_decls: Vec<&McpServerDecl> = decls
         .iter()
         .filter(|decl| decl.enabled && grants_cover_server(grants, &decl.name))
         .collect();
-    let installed: Vec<&RegistryServerRow> = installs
+    let reachable_installs: Vec<&RegistryServerRow> = installs
         .iter()
         .filter(|row| row.enabled && grants_cover_registry_server(grants, &row.server_id))
         .collect();
+
+    let declared: Vec<&McpServerDecl> = reachable_decls
+        .iter()
+        .copied()
+        .filter(|decl| renderable(&decl.name))
+        .collect();
+    let installed: Vec<&RegistryServerRow> = reachable_installs
+        .iter()
+        .copied()
+        .filter(|row| renderable(&row.server_id) && renderable(&row.display_name))
+        .collect();
+    let unnameable =
+        (reachable_decls.len() - declared.len()) + (reachable_installs.len() - installed.len());
 
     if declared.is_empty() && installed.is_empty() {
         return String::new();
@@ -120,7 +150,7 @@ pub(crate) fn server_family_brief(
         ));
     }
 
-    let hidden = lines.len().saturating_sub(CAP);
+    let hidden = lines.len().saturating_sub(CAP) + unnameable;
     lines.truncate(CAP);
 
     let mut brief = String::from(HEADING);
