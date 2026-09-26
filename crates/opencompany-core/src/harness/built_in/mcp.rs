@@ -544,7 +544,7 @@ impl Tool for OcMcpCallTool {
             "properties": {
                 "server": {
                     "type": "string",
-                    "description": "Registered MCP server name from `mcp_list_servers`."
+                    "description": "Registered MCP server name, from the granted servers named in your persona brief."
                 },
                 "tool": {
                     "type": "string",
