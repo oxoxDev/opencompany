@@ -147,8 +147,7 @@ use crate::company::WorkflowFile;
 use crate::company::runtime::CompanyMail;
 use crate::company::{WorkflowDestinationDef, WorkflowNodeKind};
 use crate::ports::types::{
-    Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, CompanyRecord, Effect, EffectGroup,
-    OutboundMessage, Verdict,
+    ApprovalId, CompanyEvent, CompanyId, CompanyRecord, Effect, EffectGroup, OutboundMessage,
 };
 use crate::ports::{
     ApprovalGate, ChannelAdapter, DeliveryReason, DeliveryReport, DeliveryStatus, EmailRecord,
@@ -281,6 +280,12 @@ pub struct DeliveryParking {
     /// no trigger input), and released by the runtime's `continue_turn`. The same
     /// handle both sides share, for [`gates`](Self::gates)' reason.
     pub blocked_nodes: crate::runtime::blocked_nodes::BlockedNodeQueue,
+    /// The company's live grants, so a park marks its work unit's checkout as
+    /// held until the approval resolves.
+    pub grants: crate::runtime::grants::GrantSet,
+    /// The company's event journal, for the `ApprovalParked` nudge every
+    /// console listens for.
+    pub events: Arc<dyn EventLog>,
 }
 
 impl std::fmt::Debug for WorkflowDeliveryDeps {
@@ -997,67 +1002,27 @@ async fn park_cold_recipient(
 }
 
 impl DeliveryParking {
-    /// Parks `effect` on the gate and journals it — **both halves or neither**.
+    /// The shared park transaction over this bundle's handles.
+    fn parker(&self) -> crate::runtime::approval_park::ApprovalParker {
+        crate::runtime::approval_park::ApprovalParker::new(
+            self.approvals.clone(),
+            self.journal.clone(),
+            self.grants.clone(),
+            self.continuations.clone(),
+            self.events.clone(),
+        )
+    }
+
+    /// Parks `effect` on the gate and journals it — **both halves or neither**
+    /// — through the shared [`ApprovalParker`](crate::runtime::approval_park::ApprovalParker),
+    /// then arms the workflow gate queue for `turn`.
     ///
-    /// The gate is in-memory; the journal is the durable record `/approvals`
-    /// reads and boot replay rehydrates. A gate entry the journal never recorded
-    /// is the worst of the three possible outcomes: it shows up in the
-    /// operator's queue now, vanishes on the next restart, and backs a `pending`
-    /// row that promises a card which no longer exists.
+    /// The parker counts `turn`'s continuation slot before the approval is
+    /// visible, retracts the gate entry if the journal write fails, marks the
+    /// work unit pending on the company's grants, and emits `ApprovalParked`.
     ///
-    /// Bundling the two handles in [`DeliveryParking`] makes the *mis-wiring* of
-    /// that state unrepresentable, but it does nothing about a **partial failure
-    /// at runtime** — `park` succeeding and `record_parked` erroring (a full
-    /// disk, a read-only volume, a serialization fault). So the journal write is
-    /// treated as the commit point: if it fails, the gate entry is retracted
-    /// before returning the error, and the caller degrades to whatever it does
-    /// when parking is unavailable.
-    ///
-    /// Retraction has to undo **two** things, because a failed `record_parked`
-    /// has already mutated the journal's in-memory queue (it inserts before it
-    /// appends, so the entry is live even though nothing reached disk):
-    ///
-    /// 1. [`ApprovalGate::resolve`] with [`Verdict::Deny`] — the trait's only
-    ///    removal verb, and the honest one: this effect must never execute. It
-    ///    is attributed to
-    ///    [`ActorKind::System`](crate::ports::types::ActorKind::System) (the
-    ///    runtime itself, as boot replay and the TTL sweep are) rather than to
-    ///    an operator who made no such decision.
-    /// 2. [`RuntimeJournal::record_resolved`] — which also removes before it
-    ///    appends, so it clears the in-memory queue entry that would otherwise
-    ///    show the operator a card `/approvals` lists but the gate can no longer
-    ///    execute. Its own append will usually fail for the same reason the
-    ///    first one did; that is fine and expected, since there is no
-    ///    `ApprovalParked` line on disk for it to pair with anyway.
-    ///
-    /// The ordering cannot simply be inverted to dodge this: `record_parked`
-    /// needs the [`ApprovalId`](crate::ports::types::ApprovalId) that `park`
-    /// mints, so the gate write must come first.
-    ///
-    /// Both rollback steps deliberately ignore their own errors and the
-    /// **original** journal error propagates — the effect is unparked either
-    /// way, and losing the real cause behind a cleanup error would make the
-    /// failure harder to diagnose, not easier.
-    ///
-    /// # Why this is `pub(crate)` rather than a private free function (#395)
-    ///
-    /// It was private to this module while cold-recipient delivery was the only
-    /// caller. Issue #395 found two more places that must park an effect from
-    /// *outside* a cycle — a workflow agent node's gated tool call, and a
-    /// `requires_approval` node the engine paused on — and neither has a
-    /// [`CycleHost`](crate::ports::brain::CycleHost) to reach
-    /// [`park_effect`](crate::ports::brain::CycleHost::park_effect) through.
-    ///
-    /// Widening `CycleHost` for them would have been the wrong seam: that trait
-    /// is the *cycle's* whole effect surface, and a workflow run is not a cycle.
-    /// What all three callers actually share is this transaction. So it becomes
-    /// a method on the bundle that already carries both handles — and which is
-    /// already threaded down the workflow path as
-    /// [`HarnessDeps::delivery`](crate::harness::HarnessDeps)`.parking`.
-    ///
-    /// `task_link` and `thread` are parameters rather than the hardcoded
-    /// `Unlinked` / `None` delivery used, because they are the two facts only
-    /// the caller knows: which board card owns the request, and which
+    /// `task_link` and `thread` are parameters because they are the two facts
+    /// only the caller knows: which board card owns the request, and which
     /// conversation to raise it in.
     pub(crate) async fn park_and_journal(
         &self,
@@ -1067,115 +1032,23 @@ impl DeliveryParking {
         thread: Option<String>,
         turn: Option<String>,
     ) -> Result<ApprovalId, crate::error::OpenCompanyError> {
-        // Issue #1825 (P1, fifth follow-up — found by chatgpt-codex-connector):
-        // arm this card's continuation slot BEFORE anything below can make the
-        // approval visible to a concurrent resolver. `record_parked`'s
-        // synchronous in-memory insert — the write `approval_cycle` reads to
-        // route a resolution through the continuation batch — lands as soon as
-        // that call's synchronous portion runs, strictly before its own async
-        // durable append (below) returns; a resolve racing in on another tokio
-        // worker thread during that window used to see a turn whose only armed
-        // slot was `park_gated_calls`'s pre-loop synthetic hold — this card's
-        // own arm had not run yet, still gated behind the journal write below —
-        // consumed it, and released the batch before this card (or the rest of
-        // the node's batch) had finished parking. This card's own arm then
-        // still ran once the journal write returned, into a queue entry the
-        // premature decision had already removed: a fresh, orphaned slot no
-        // further decision would ever redeem, doubling the eventual dispatch.
-        // Arming here, before the approval gate has even minted an id, closes
-        // the window by construction — nothing below can make this card
-        // resolvable before its slot is already counted.
-        if let Some(turn) = turn.as_deref() {
-            self.continuations.arm(turn);
-        }
-        let approval_id = match self.approvals.park(company, effect.clone()).await {
-            Ok(id) => id,
-            Err(err) => {
-                // Nothing was ever parked, so no decision will ever come along
-                // to release the slot armed above — release it now instead of
-                // leaving the turn blocked on a card that will never exist.
-                if let Some(turn) = turn.as_deref() {
-                    self.continuations.decide(turn, None);
-                }
-                return Err(err);
-            }
-        };
-        if let Err(err) = self
-            .journal
-            .record_parked(
-                &approval_id,
-                &effect,
-                now_millis(),
-                task_link,
-                // A channel but no thread root (issue #435), for a reason one
-                // step upstream of #469's: a workflow node's request is not
-                // raised by a chat message, so there is no message for a
-                // continuation to hang under. The channel is the whole of the
-                // conversation identity here, exactly as before.
-                ApprovalConversation {
-                    thread,
-                    parent: None,
-                },
-                // The turn this park belongs to, when it belongs to one
-                // (issues #469, #978).
-                //
-                // `None` for a cold-recipient delivery and for an agent node's
-                // gated tool call: neither is raised by anything that holds a
-                // continuation, so each resolves and continues on its own,
-                // exactly as it always has.
-                //
-                // `Some` for a `requires_approval` gate, where issue #978 found
-                // the opposite: the N gates one run pauses on ARE a batch, and
-                // recording no key for them is what let every branch of a
-                // fan-out believe it was the last decision and re-dispatch the
-                // whole run. A run is a turn in precisely the sense #469 means —
-                // one unit of work, blocked on several decisions, owed exactly
-                // one continuation when the last of them lands.
-                turn.clone(),
-            )
-            .await
-        {
-            // Roll back to "never parked". Both steps deliberately swallow their
-            // own errors — `err` below is the one worth surfacing.
-            if let Err(rollback) = self
-                .approvals
-                .resolve(
-                    &approval_id,
-                    Verdict::Deny,
-                    Actor {
-                        kind: ActorKind::System,
-                        id: "workflow-delivery".to_string(),
+        let approval_id = self
+            .parker()
+            .park(
+                company,
+                effect.clone(),
+                crate::runtime::approval_park::ParkSite {
+                    task: task_link,
+                    // A workflow request is not raised by a chat message, so
+                    // there is no thread root to hang a continuation under.
+                    conversation: ApprovalConversation {
+                        thread,
+                        parent: None,
                     },
-                )
-                .await
-            {
-                tracing::error!(
-                    company = %company,
-                    error = %rollback,
-                    "workflow: a parked effect could not be journaled AND could not be \
-                     retracted from the approval gate; it may linger in the queue until restart"
-                );
-            }
-            // Clears the in-memory queue entry `record_parked` inserted before
-            // it failed to write. Its append will usually fail too — expected,
-            // and ignored: there is no `ApprovalParked` line on disk to pair
-            // with.
-            let _ = self.journal.record_resolved(&approval_id).await;
-            // Same as the park failure above: the card this slot was armed for
-            // was just retracted, so release it rather than leave the turn
-            // blocked forever on a decision that can never arrive.
-            if let Some(turn) = turn.as_deref() {
-                self.continuations.decide(turn, None);
-            }
-            return Err(err);
-        }
-        // Issue #978: arm the gate queue once the park is durable. `gates` is
-        // looked up by `approval_id` (minted above) rather than by turn alone,
-        // so — unlike `continuations`, moved ahead of this function's first
-        // await for the reason at the top — it has no visibility-before-count
-        // window of its own to close: nothing can look this approval's gate up
-        // before `approval_id` exists, which is true either way. `park_pending_gates`'
-        // dedupe skip never reaches here at all.
+                    turn: turn.clone(),
+                },
+            )
+            .await?;
         if let Some(turn) = turn {
             self.gates.arm(&turn, &approval_id, &effect);
         }

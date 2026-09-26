@@ -131,7 +131,7 @@ fn a_blank_tool_name_is_refused() {
 #[test]
 fn an_unknown_tier_name_is_refused() {
     let mut defaults = std::collections::HashMap::new();
-    defaults.insert("read-only".to_string(), ApprovalMode::AlwaysAllow);
+    defaults.insert("read-only".to_string(), Some(ApprovalMode::AlwaysAllow));
     let err = apply_tool_policy_patch(
         McpToolPolicies::default(),
         PutToolPolicy {
@@ -146,7 +146,7 @@ fn an_unknown_tier_name_is_refused() {
 #[test]
 fn tier_defaults_are_stored_under_the_wire_spelling() {
     let mut defaults = std::collections::HashMap::new();
-    defaults.insert("read_only".to_string(), ApprovalMode::AlwaysAllow);
+    defaults.insert("read_only".to_string(), Some(ApprovalMode::AlwaysAllow));
     let merged = apply_tool_policy_patch(
         McpToolPolicies::default(),
         PutToolPolicy {
@@ -173,13 +173,58 @@ fn tier_defaults_are_total_on_the_wire() {
         &McpToolInventory::default(),
     );
     assert_eq!(dto.tier_defaults.len(), ToolTier::ALL.len());
-    assert_eq!(
-        dto.tier_defaults.get("read_only"),
-        Some(&ApprovalMode::AlwaysAllow)
+    let read_only = dto.tier_defaults.get("read_only").expect("present");
+    assert_eq!(read_only.mode, ApprovalMode::AlwaysAllow);
+    assert!(
+        !read_only.stored,
+        "nothing was written, so the nominal mode must not read as a live decision"
     );
-    assert_eq!(
-        dto.tier_defaults.get("write_delete"),
-        Some(&ApprovalMode::NeedsApproval)
+    let write_delete = dto.tier_defaults.get("write_delete").expect("present");
+    assert_eq!(write_delete.mode, ApprovalMode::NeedsApproval);
+    assert!(!write_delete.stored);
+}
+
+/// The one a console needs to tell apart: a tier an operator actually set
+/// carries the same mode a nominal one can, and only `stored` separates them.
+#[test]
+fn a_written_tier_default_reads_as_stored() {
+    let mut policies = McpToolPolicies::default();
+    policies
+        .tier_defaults
+        .insert(ToolTier::ReadOnly, ApprovalMode::AlwaysAllow);
+    let dto = tool_policy_dto("notion", &policies, &McpToolInventory::default());
+    let read_only = dto.tier_defaults.get("read_only").expect("present");
+    assert_eq!(read_only.mode, ApprovalMode::AlwaysAllow);
+    assert!(read_only.stored);
+}
+
+/// Naming a tier as `null` undoes it, the way naming a tool with neither field
+/// undoes that row. Without this there is no way back to unset at all.
+#[test]
+fn a_tier_default_named_as_nothing_is_cleared() {
+    let mut policies = McpToolPolicies::default();
+    policies
+        .tier_defaults
+        .insert(ToolTier::ReadOnly, ApprovalMode::AlwaysAllow);
+
+    let mut defaults = std::collections::HashMap::new();
+    defaults.insert("read_only".to_string(), None);
+    let merged = apply_tool_policy_patch(
+        policies,
+        PutToolPolicy {
+            tier_defaults: Some(defaults),
+            tools: None,
+        },
+    )
+    .unwrap();
+
+    assert!(!merged.tier_defaults.contains_key(&ToolTier::ReadOnly));
+    assert!(
+        !tool_policy_dto("notion", &merged, &McpToolInventory::default())
+            .tier_defaults
+            .get("read_only")
+            .expect("present")
+            .stored
     );
 }
 

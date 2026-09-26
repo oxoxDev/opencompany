@@ -12,19 +12,30 @@
 //! surface, which the server does not need, and gating on it would leave the
 //! harness lane's turns without their tools.)
 
+/// The company journal read as a tinyhivemind `SessionLog`, one desk at a
+/// time (ex `hivemind/log.rs`).
+/// This company as the host of one completion episode: the journal
+/// `tinyhivemind` commits through, and how a teammate is built as a seat.
+/// One completion episode on `tinyhivemind`'s own loop.
+#[cfg(feature = "openhuman")]
+pub mod conducted;
 /// The chat body of the brain's cycle: which surface a message is on, and
 /// the episode it opens on a desk with a room (Phase 5).
 #[cfg(feature = "openhuman")]
 pub mod dispatch;
-/// The episode host: routing, the round loop, checkpoints, referral (Phase 4).
-#[cfg(feature = "openhuman")]
-pub mod driver;
+/// An operator DM driven end to end: the hive, the surface, the dispatcher,
+/// the seats. Needs the harness it drives, so it is gated with it.
+#[cfg(all(test, feature = "openhuman"))]
+#[path = "dm_episode_tests.rs"]
+mod dm_episode_tests;
 /// The journal as the episode store: the `GET {scope}/episodes` fold, the
 /// driver checkpoint a resume reads, and the open-episode lookup (Phase 4).
 pub mod episode_store;
 /// One `OpenHumanHive` per desk over the company's live agents (Phase 4).
 #[cfg(feature = "openhuman")]
 pub mod graph;
+#[cfg(feature = "openhuman")]
+pub mod host;
 /// Jev routing over the TinyHumans System One proxy: the host-owned
 /// `SystemOneTransport` and the `jev_router` constructor (plan Phase 7).
 /// Gated with the harness whose credential seam it reads.
@@ -43,23 +54,21 @@ pub mod prompt;
 /// Cross-desk referral: the journal-backed `ReferralQueue`, the crossing
 /// record, and the return address an answer comes home to (Phase 6).
 pub mod referral;
-/// One round of seat turns, run at once and folded to one utterance each
-/// (Phase 4).
-#[cfg(feature = "openhuman")]
-pub mod round;
 /// The `[group_chat.routing]` block, its resolved `RoutingPolicy`, and the
 /// desk-routing wire shapes (plan Phase 4).
 pub mod routing;
-/// The production `SeatRunner`: one seat turn over the harness pool
-/// (Phase 4).
 #[cfg(feature = "openhuman")]
-pub mod seats;
-/// The company journal read as a tinyhivemind `SessionLog`, one desk at a
-/// time (ex `hivemind/log.rs`).
+pub mod seating;
 pub mod session_log;
-#[cfg(test)]
-pub(crate) mod test_support;
 /// The in-flight turn registry, the speech fold and the tool adapter the
 /// server dispatches through (plan Phase 3).
+#[cfg(feature = "openhuman")]
+pub mod shared_tool;
+/// `take_over`: a guest seat claims work, concluding the conversation that
+/// asked it and telling the operator in its own line.
+#[cfg(feature = "openhuman")]
+pub mod takeover;
+#[cfg(test)]
+pub(crate) mod test_support;
 #[cfg(feature = "openhuman")]
 pub mod tools;

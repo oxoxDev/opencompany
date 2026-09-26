@@ -284,6 +284,10 @@ tinymcp = { path = "../../vendor/openhuman/vendor/tinymcp/crates/tinymcp", optio
 # checkout, the exact path `openhuman-core` declares, so cargo resolves ONE
 # package and a tool built here still satisfies OpenHuman's registry.
 tinytools = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinytools/crates/tinytools", optional = true }
+# The tool *dialect*: how a seat's model asks for a tool and reads its
+# result. An episode seat is built with a native belt, so it asks the
+# structured way; the spec path leaves this to the runtime.
+tinytools-agent = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinytools/crates/tinytools-agent", optional = true }
 # The openhuman `Provider`/`Memory` traits return `anyhow::Result` and log via
 # the `log` facade; both only link under the `openhuman` feature.
 anyhow = { version = "1", optional = true }
@@ -560,6 +564,13 @@ tinyhivemind-typesafe = { path = "../../vendor/tinyhivemind/crates/tinyhivemind-
 # bound to an already-built `openhuman_embed::Agent`, and the
 # `CompletionDriver` that proposes concurrent rounds. Optional because it
 # links `openhuman-embed`; it comes in with the `openhuman` feature.
+# The completion driver and the episode's tool record, both pure: the
+# conductor, the wire forms, and the record every tool call lands in. Split
+# out of `tinyhivemind-openhuman` upstream, which now holds only the crates
+# that link a harness.
+tinyhivemind-driver = { path = "../../vendor/tinyhivemind/crates/tinyhivemind-driver" }
+tinyhivemind-tools = { path = "../../vendor/tinyhivemind/crates/tinyhivemind-tools" }
+
 tinyhivemind-openhuman = { path = "../../vendor/tinyhivemind/crates/tinyhivemind-openhuman", optional = true }
 
 [features]
@@ -615,7 +626,7 @@ tiny = ["tinyagents-harness", "tinyinference"]
 # Enables `tiny` so the `tinyagents` crate is in scope: the harness's inference
 # models implement its `ChatModel<()>` trait (openhuman's old `Provider` trait
 # was deleted upstream); it is the same vendored crate `openhuman_core` uses.
-openhuman = ["tiny", "dep:openhuman_core", "dep:openhuman-embed", "dep:openhuman-tinyhumans", "dep:tinyhivemind-openhuman", "dep:tinymcp", "dep:tinytools", "dep:tinyinference-core", "dep:reqwest", "dep:anyhow", "dep:log", "dep:tinyflows", "dep:regex", "dep:uuid", "dep:swc_core"]
+openhuman = ["tiny", "dep:openhuman_core", "dep:openhuman-embed", "dep:openhuman-tinyhumans", "dep:tinyhivemind-openhuman", "dep:tinymcp", "dep:tinytools", "dep:tinytools-agent", "dep:tinyinference-core", "dep:reqwest", "dep:anyhow", "dep:log", "dep:tinyflows", "dep:regex", "dep:uuid", "dep:swc_core"]
 # MCP server management and agent tools share OpenHuman's in-process registry.
 # Enabling it necessarily enables the embedded harness and OpenHuman MCP
 # domain, while the default build remains unchanged.

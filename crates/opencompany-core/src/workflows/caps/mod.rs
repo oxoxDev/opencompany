@@ -2682,8 +2682,7 @@ impl HarnessAgentRunner {
             // real — dropping the claim without parking would discard it, which is
             // the exact disappearance this issue is about.
             //
-            // Inside the scope, so the drain reads this run's bucket rather than
-            // whatever `Unscoped` happens to hold.
+            // Inside the scope, so the drain reads this run's bucket.
             //
             // Issue #880: the receipts it files therefore survive a failed turn
             // too. Only the #881 *block* below is gated on the turn having

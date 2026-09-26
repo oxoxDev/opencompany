@@ -499,6 +499,13 @@ pub struct HarnessDeps {
     /// cheap-shared-handle pattern as [`Self::delegations`]; the default is an
     /// empty queue, which simply means nothing is ever parked.
     pub approval_requests: ApprovalRequestQueue,
+    /// Where a guest seat stages a takeover, and the dispatcher drains it once
+    /// the episode that produced it has ended. Same cheap-shared-handle shape
+    /// as the queues above; an empty default simply means nothing is claimed.
+    pub takeovers: crate::hive::takeover::TakeoverQueue,
+    /// The runtime's shared park transaction, for a turn that parks outside a
+    /// cycle. `None` where no runtime is wired (tests, examples).
+    pub approval_parker: Option<crate::runtime::approval_park::ApprovalParker>,
     /// The company's [`SecretStore`], so [`HarnessPool::ensure`] can **re-resolve**
     /// the effective MCP server set on each call and rebuild the roster when a
     /// console add/remove/enable-toggle changes it — the MCP-freshness fix (a
@@ -702,6 +709,9 @@ pub struct CompanyAgent {
     /// The runtime agent. Shared, not locked: see the type docs.
     agent: openhuman_embed::Agent,
     /// Serialises this agent's turns.
+    /// Belts episodes have lent this teammate, by conversation. The same map
+    /// the belt factory reads, so what a host lends here reaches the turn.
+    seating: crate::hive::seating::EpisodeBelts,
     turn_lock: Arc<Mutex<()>>,
     /// The loopback route this agent's model is served on, and the usage tap
     /// its attempts are metered from. See [`model_bridge`](crate::harness::model_bridge).
@@ -1229,19 +1239,34 @@ impl CompanyAgent {
         )?;
         let mcp = crate::hive::mcp_server::global();
         let mcp_bearer = crate::hive::mcp_server::McpAgent::mint_bearer();
-        // The served catalogue: the belt minus what OpenHuman runs itself.
-        let served_names: Vec<String> = blueprint
-            .tools
-            .iter()
-            .map(|tool| tool.name().to_string())
-            .filter(|name| !build::OPENHUMAN_NATIVE_TOOLS.contains(&name.as_str()))
-            .collect();
-        let mut allow_tools: Vec<String> = crate::hive::tools::SPEECH_TOOL_NAMES
+        // The speech tools stay on the MCP server; this crate's own tools do
+        // not, so they leave the served catalogue with them.
+        let allow_tools: Vec<String> = crate::hive::tools::served_speech_tool_names()
             .iter()
             .map(|name| (*name).to_string())
             .collect();
-        allow_tools.extend(served_names.iter().cloned());
         let served_catalogue = allow_tools.clone();
+        // Shared once, here, and handed to the spec as a factory that mints
+        // owned handles per turn. OpenHuman's own tools are filtered out: it
+        // runs those itself, and handing them back would register each twice.
+        let mut blueprint = blueprint;
+        let step_labels = steps::StepLabels::from_tools(&blueprint.tools);
+        let belt_names: Vec<String> = blueprint
+            .tools
+            .iter()
+            .map(|tool| tool.name().to_string())
+            .collect();
+        let gate = Arc::clone(&blueprint.policy);
+        let native_belt: Arc<Vec<Arc<dyn tinytools::Tool>>> =
+            Arc::new(crate::hive::tools::share_belt(
+                std::mem::take(&mut blueprint.tools)
+                    .into_iter()
+                    .filter(|tool| !build::OPENHUMAN_NATIVE_TOOLS.contains(&tool.name()))
+                    .collect(),
+            ));
+        // Created before the agent, because the belt factory closes over it at
+        // registration and an episode writes to it long afterwards.
+        let seating = crate::hive::seating::EpisodeBelts::default();
         let base_id = crate::session_key::runtime_agent_id(company, agent_id);
         let mut runtime_id = base_id.clone();
         let mut attempt = 0u32;
@@ -1253,8 +1278,15 @@ impl CompanyAgent {
                     allow_tools: allow_tools.clone(),
                 }
             });
-            let spec =
-                build::agent_spec_for(&blueprint, &runtime_id, bridge.provider(), attach.as_ref());
+            let spec = build::agent_spec_for(
+                &blueprint,
+                &runtime_id,
+                bridge.provider(),
+                attach.as_ref(),
+                Some(&native_belt),
+                Some(&gate),
+                Some(&seating),
+            );
             match runtime.agent(spec) {
                 Ok(agent) => break agent,
                 Err(openhuman_embed::AgentError::DuplicateId(_)) if attempt < 64 => {
@@ -1281,33 +1313,21 @@ impl CompanyAgent {
                 "[harness] runtime id was taken; registered under a numbered suffix"
             );
         }
-        let step_labels = steps::StepLabels::from_tools(&blueprint.tools);
-        let belt_names: Vec<String> = blueprint
-            .tools
-            .iter()
-            .map(|tool| tool.name().to_string())
-            .collect();
         let build::AgentBlueprint {
-            tools,
-            policy,
             workspace,
             chat_model,
             ..
         } = blueprint;
-        let served: Vec<Arc<dyn tinytools::Tool>> = crate::hive::tools::share_belt(
-            tools
-                .into_iter()
-                .filter(|tool| !build::OPENHUMAN_NATIVE_TOOLS.contains(&tool.name()))
-                .collect(),
-        );
+        // No `.tools(..)`: the belt is the agent's own now. The server still
+        // serves the speech tools, and still holds the policy and workspace
+        // those calls are admitted and sandboxed against.
         let mut entry = crate::hive::mcp_server::McpAgent::new(
             company.clone(),
             agent_id,
             runtime_id.clone(),
             mcp_bearer.clone(),
         )
-        .tools(served.clone())
-        .policy(Arc::new(policy))
+        .policy(Arc::clone(&gate))
         .workspace(workspace.clone());
         if let Some(events) = events {
             entry = entry.events(events);
@@ -1322,10 +1342,11 @@ impl CompanyAgent {
             mcp_bearer,
             company: company.clone(),
             agent,
+            seating,
             turn_lock: Arc::new(Mutex::new(())),
             bridge,
             step_labels,
-            tools: Arc::new(served),
+            tools: native_belt,
             belt_names,
             mcp,
             workspace,
@@ -1396,6 +1417,12 @@ impl CompanyAgent {
     /// this agent is bound into, so two desks cannot run it at once.
     pub fn turn_lock(&self) -> Arc<Mutex<()>> {
         self.turn_lock.clone()
+    }
+
+    /// Where an episode lends this teammate its belt.
+    #[must_use]
+    pub fn seating(&self) -> &crate::hive::seating::EpisodeBelts {
+        &self.seating
     }
 
     /// The names of every tool this agent's belt wires, in belt order — the
@@ -1588,12 +1615,9 @@ impl CompanyAgent {
         // back through the scope when the turn returns.
         let seat = crate::runtime::delegation::seat_turn();
         let _turn = self.turn_lock.lock().await;
-        // The bracket opens under the lock and closes before it is released
-        // (`drop(_turn)` below), so one agent's brackets never overlap on the
-        // journal — the invariant `opencompany measure` checks (Phase 8).
-        if let Some(bracket) = seat.as_ref().and_then(|seat| seat.bracket.as_ref()) {
-            bracket.started().await;
-        }
+        // An episode seat brackets its own turn, inside this same lock, from
+        // `hive::host`: the session it runs is the episode's, not this
+        // pool's, so the pool no longer has a bracket handed down to it.
         let deadline = seat
             .as_ref()
             .map(|seat| tokio::time::Instant::now() + seat.timeout);
@@ -1751,12 +1775,10 @@ impl CompanyAgent {
             self.catalogue_brief_stale
                 .store(false, std::sync::atomic::Ordering::Release);
         }
-        let mut spoke = false;
         match _in_flight {
-            // What the seat said, back to the driver, before the lock goes.
+            // What the seat said, back to the caller, before the lock goes.
             Some(ticket) => {
                 let finished = ticket.finish();
-                spoke = !finished.outbox.is_empty();
                 if let Some(seat) = seat.as_ref()
                     && let Ok(mut outbox) = seat.outbox.lock()
                 {
@@ -1766,23 +1788,6 @@ impl CompanyAgent {
             None => {
                 in_flight.with(&self.runtime_id, |turn| turn.executor = None);
             }
-        }
-        if let Some(seat) = seat.as_ref()
-            && let Some(bracket) = seat.bracket.as_ref()
-        {
-            let (outcome, error) = match &reply {
-                Ok(_) if spoke => (crate::ports::types::TurnOutcome::Committed, None),
-                Ok(_) => (crate::ports::types::TurnOutcome::NoUtterance, None),
-                Err(_) if seat.timed_out() => (
-                    crate::ports::types::TurnOutcome::TimedOut,
-                    Some("the seat turn ran past its timeout".to_string()),
-                ),
-                Err(error) => (
-                    crate::ports::types::TurnOutcome::Failed,
-                    Some(error.to_string()),
-                ),
-            };
-            bracket.settled(outcome, error).await;
         }
         drop(_turn);
 
@@ -1799,8 +1804,31 @@ impl CompanyAgent {
             .any(|usage| usage.is_zero() || usage.cost_usd == 0.0)
         {
             let segments = progress_pump::attempt_event_segments(&events, usages.len());
+            // **The price when nothing marks where an attempt began.**
+            //
+            // `attempt_event_segments` splits on `AgentProgress::TurnStarted`,
+            // which is declared and never emitted -- a real stream opens
+            // `IterationStarted`. So every segment comes back empty and the
+            // `else { continue }` below skipped silently: a provider that
+            // reported tokens but no price (every scripted double, and a BYOK
+            // route per the note above) kept `cost_usd` at zero, and the spend
+            // a halt announced was zero with it.
+            //
+            // `TurnCostUpdated` is a cumulative rollup, so the stream's last
+            // one prices the turn. It supplies the **price only**, and only to
+            // an attempt that burned something: a turn that burned nothing must
+            // not inherit a total, which is what `zero_usage_turn_writes_nothing`
+            // and its two neighbours exist to hold.
+            let rollup = progress_pump::last_observed_turn_cost(&events);
             for (usage, segment) in usages.iter_mut().zip(segments) {
                 let Some(observed) = progress_pump::last_observed_turn_cost(segment) else {
+                    if !usage.is_zero()
+                        && usage.cost_usd == 0.0
+                        && let Some(rollup) = rollup.as_ref()
+                        && rollup.cost_usd > 0.0
+                    {
+                        usage.cost_usd = rollup.cost_usd;
+                    }
                     continue;
                 };
                 if usage.is_zero() {
@@ -2176,7 +2204,7 @@ impl HarnessModel for DefaultFirstModel {
 /// they unwrap the turn's own result — see
 /// [`turn_result_after_metering`] for why that ordering is the fix and not an
 /// accident of layout.
-async fn meter_turn_costs(
+pub(crate) async fn meter_turn_costs(
     turn_costs: &[TurnUsage],
     agent_id: &str,
     company: &CompanyId,
@@ -4831,9 +4859,9 @@ impl HarnessPool {
         // (`delegation::seat_turn`), never through the reply text: on a hive
         // seat turn the reply is the seat's own thinking, and on every other
         // turn there is no speech tool to call.
-        let (outcome, turn_costs) = crate::runtime::delegation::with_task_hint(
-            crate::runtime::delegation::operator_words(message).to_string(),
-            deps.approval_requests.turn_scoped(agent.run_with_steer(
+        let (outcome, turn_costs) = deps
+            .approval_requests
+            .turn_scoped(agent.run_with_steer(
                 &augmented,
                 steer,
                 stream_ctx,
@@ -4841,9 +4869,8 @@ impl HarnessPool {
                 // The caller's own, not read off `live` (#1890 I). A turn can
                 // have a conversation and stream nothing.
                 chat,
-            )),
-        )
-        .await;
+            ))
+            .await;
         // Issue B-120: bank what the turn spent BEFORE its result is unwrapped.
         //
         // Both consumers of `turn_costs` used to sit below a `?` on this very
@@ -5705,6 +5732,241 @@ fn serves(deps: &HarnessDeps, agent_id: &str) -> bool {
     }
 }
 
+/// The tool grants one teammate is scoped to: company-wide, narrowed by the
+/// desks it sits on, then by its own declaration.
+///
+/// Split out of [`build_roster`] so a seat of a running episode resolves the
+/// same grants the roster agent of the same name does.
+pub(crate) fn grants_for_policy(
+    company: &CompanyRecord,
+    allow: &[String],
+    manifest_agent: &ManifestAgent,
+) -> Vec<String> {
+    let desk_tools = company.agent_desk_tools(&manifest_agent.id);
+    let desk_allows: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
+    agent_scoped_grants(allow, &desk_allows, manifest_agent.tools.as_deref())
+}
+
+/// The MCP `(server, tool)` pairs a teammate's gate lets run without parking.
+///
+/// Resolved through each server's stored tool policy, so an operator's
+/// refusal or approval requirement wins over the manifest declaration. Every
+/// teammate policy takes its read set from here, whether it serves the chat
+/// roster or an episode seat.
+pub(crate) fn agent_mcp_reads(deps: &HarnessDeps) -> crate::policy::McpReadSet {
+    crate::company::mcp_policy::mcp_allow_set(&deps.mcp_servers)
+}
+
+/// The approval policy one teammate is built with.
+///
+/// Extracted from [`build_roster`] so an episode seat is gated exactly as
+/// the roster agent of the same name is: the same budget, emergency gate,
+/// workspace, meter, MCP read set and Composio deflection.
+pub(crate) fn agent_policy_for(
+    company: &CompanyRecord,
+    deps: &HarnessDeps,
+    manifest_agent: &ManifestAgent,
+    policy: &Policy,
+    effective_budget: Option<f64>,
+    #[cfg_attr(not(feature = "composio"), allow(unused_variables))] grants: &[String],
+) -> ApprovalPolicy {
+    let mut agent_policy = ApprovalPolicy::new(policy, effective_budget)
+        .with_policy_hitl_disabled()
+        .with_requests(deps.approval_requests.clone())
+        // Issue #243: stamp who the parked effect belongs to, so approving it
+        // can hand the grant back to this agent rather than to nobody.
+        .with_agent(manifest_agent.id.clone())
+        .with_mcp_reads(agent_mcp_reads(deps));
+    if let Some(gate) = deps.emergency_gate.as_ref() {
+        agent_policy = agent_policy.with_emergency_gate(gate.clone());
+    }
+    if let Some(workspace) = deps.workspace.as_ref() {
+        agent_policy = agent_policy.with_workspace(workspace.clone(), company.id.clone());
+    }
+    // Issue #304: give the policy something to measure `budget_usd_daily`
+    // against. Only wired when the host has a meter — without one the cap
+    // arm stays inert and warns once, rather than parking every priced call
+    // on a host that can never answer the question.
+    if let Some(meter) = deps.meter.as_ref() {
+        agent_policy = agent_policy.with_spend(meter.clone(), company.id.clone());
+    }
+    agent_policy
+}
+
+/// The approval policy an episode seat is built with: the roster agent's
+/// policy, resolved from the company's policy and budget in force.
+#[cfg(feature = "openhuman")]
+pub(crate) fn seat_policy(
+    company: &CompanyRecord,
+    deps: &HarnessDeps,
+    manifest_agent: &ManifestAgent,
+    grants: &[String],
+) -> ApprovalPolicy {
+    agent_policy_for(
+        company,
+        deps,
+        manifest_agent,
+        &company.effective_policy(),
+        company.effective_budget(&manifest_agent.id),
+        grants,
+    )
+}
+
+/// The standing prompt one teammate carries as a seat of a running episode.
+///
+/// The persona [`build_roster`] would build for that teammate, less the
+/// hand-off tools and their briefs, rendered with OpenHuman's grounding and
+/// writing-style blocks so a seeded seat turn reads the prompt a cold turn
+/// would have composed.
+///
+/// # Errors
+///
+/// [`OpenCompanyError::Config`] when the company seats no teammate by that
+/// name, or whatever stops the session being built.
+#[cfg(feature = "openhuman")]
+pub(crate) fn seat_persona(
+    company: &CompanyRecord,
+    deps: &HarnessDeps,
+    seat: &str,
+) -> crate::Result<String> {
+    let live_roster = company.effective_agents();
+    let manifest_agent = live_roster
+        .iter()
+        .find(|agent| agent.id == seat)
+        .ok_or_else(|| {
+            crate::error::OpenCompanyError::Config(format!(
+                "hive episode: `{seat}` is seated at the desk but not on the roster"
+            ))
+        })?;
+    let grants = grants_for_policy(company, &company.manifest.tools.allow, manifest_agent);
+    let policy = seat_policy(company, deps, manifest_agent, &grants);
+    let instructions = company.effective_instructions(&manifest_agent.id);
+    let blueprint = build::build_agent_with_model(
+        &company.id,
+        &company.manifest.company.name,
+        manifest_agent,
+        Arc::new(policy),
+        deps,
+        &grants,
+        // An episode seat carries no skill deltas and no routed context: it
+        // is built for one episode and torn down with it.
+        &[],
+        &[],
+        instructions.as_deref(),
+        orchestrator::orchestrator_id(&live_roster).as_deref() == Some(manifest_agent.id.as_str()),
+        &crate::company::team_brief::seat_team_section(company, &manifest_agent.id),
+    )?;
+    // **The hand-off tools come off an episode seat's belt.**
+    //
+    // `spawn_task`, `delegate_to_desk` and `delegate_to_teammate` are wired
+    // onto every roster agent (`build.rs`), and each queues work the
+    // [`HarnessBrain`] drains. Inside an episode nothing drains that queue,
+    // so the orchestrator refuses the call in the model's own turn rather
+    // than parking it forever (`drain_unwired`).
+    //
+    // The refusal is handled; what it invites is not. A seat that reaches for
+    // one concludes delegation is impossible here and reports that to the
+    // operator -- "board actions are unavailable, so delegation is blocked",
+    // asking them to go and fix a board that was never the problem -- while
+    // the hive's own `ask` sat on the same belt the whole time. Offering a
+    // tool that cannot work in this context is worse than withholding it: it
+    // does not just fail, it argues the seat out of the tool that would have
+    // worked.
+    //
+    // Removed from the belt AND from the provider-visible names, because
+    // `episode_seat` builds the allowlist from these and a name the model can
+    // see is a name it will reach for.
+    let mut blueprint = blueprint;
+    blueprint
+        .tools
+        .retain(|tool| !EPISODE_WITHHELD_TOOLS.contains(&tool.name()));
+    blueprint
+        .native_tool_names
+        .retain(|name| !EPISODE_WITHHELD_TOOLS.contains(&name.as_str()));
+
+    // **And the briefs that describe them.**
+    //
+    // A seat is built by the same builder as an ordinary roster agent, so it
+    // inherits the orchestrator runtime's prose wholesale: how to hand work
+    // on, and how the board tracks it. Inside an episode there is no drain
+    // and no board, and `tinyhivemind` is the thing running the room -- a
+    // seat reaches a teammate with `ask`, which the episode's own belt
+    // serves.
+    //
+    // Taking the tools without the prose is the worst of both: the persona
+    // spends a paragraph on `delegate_to_teammate`, the belt does not have
+    // it, and a seat that goes looking concludes the capability was
+    // withdrawn. On a live run one did exactly that and told the operator to
+    // go and make "the board" available -- reporting, accurately, an
+    // affordance its prompt had promised and its belt could not honour.
+    //
+    // Removed by exact match on what was appended, so a brief that is
+    // reworded upstream is either removed whole or left whole, never
+    // half-cut.
+    for brief in [
+        orchestrator::orchestrator_brief(),
+        orchestrator::member_delegation_brief(),
+    ] {
+        if let Some(at) = blueprint.system_prompt.find(&brief) {
+            blueprint
+                .system_prompt
+                .replace_range(at..at + brief.len(), "");
+        }
+    }
+
+    // **And the ledger catalogue, which names them too.**
+    //
+    // The two briefs above are not the only prose that hands a seat a verb
+    // name. `ledger_brief` prints every native ledger's `written_by`, and the
+    // board's says "`spawn_task` to open a card, `assign_task` to hand it
+    // over" -- true of the company, and false of a seat whose belt was just
+    // stripped of the first. The strip above is by exact match on two known
+    // blocks and could not see a third.
+    //
+    // A live run paid for it. The claimer read the catalogue, went looking,
+    // found nothing, and told the operator "opening the task card on the
+    // board isn't something I can do directly from here", then routed the
+    // work through a teammate it had invented a reason to involve. The same
+    // failure the comment above describes, arriving by a different sentence.
+    //
+    // Driven off `EPISODE_WITHHELD_TOOLS` rather than off the `tasks` slug,
+    // so a ledger declared later whose writer prose names a withheld verb is
+    // covered without anyone remembering this exists.
+    for spec in deps.ledger_registry.specs() {
+        if spec.source != crate::ledger::LedgerSource::Native
+            || !EPISODE_WITHHELD_TOOLS
+                .iter()
+                .any(|tool| spec.written_by.contains(tool))
+        {
+            continue;
+        }
+        let rendered = crate::harness::ledger_tools::written_by_note(spec);
+        if let Some(at) = blueprint.system_prompt.find(&rendered) {
+            let replacement = crate::harness::ledger_tools::episode_written_by_note(
+                crate::hive::host::TOOL_PREFIX,
+            );
+            blueprint
+                .system_prompt
+                .replace_range(at..at + rendered.len(), &replacement);
+        }
+    }
+
+    // The belt reaches the pooled agent per turn through `EpisodeBelts`; the
+    // standing prompt cannot, because a seeded turn is not cold and composes
+    // none. The host puts this at the head of the seed instead -- see
+    // `EpisodeHost::persona` -- so it has to be the rendered prompt, not the
+    // bare body.
+    build::rendered_seat_persona(&blueprint)
+}
+
+/// The roster tools an episode seat is **not** built with.
+///
+/// Every one of these queues work for the [`HarnessBrain`] to drain, and no
+/// brain drains inside an episode. See `build_episode_seat` for why they are
+/// withheld rather than left to refuse.
+pub(crate) const EPISODE_WITHHELD_TOOLS: [&str; 3] =
+    ["spawn_task", "delegate_to_desk", "delegate_to_teammate"];
+
 pub(crate) fn build_roster(
     runtime: &openhuman_embed::Runtime,
     company: &CompanyRecord,
@@ -5730,13 +5992,6 @@ pub(crate) fn build_roster(
     // orchestrator, and it is the next one — not a teammate that is not built.
     let live_roster = company.effective_agents();
     let orchestrator = orchestrator::orchestrator_id(&live_roster);
-
-    // The company's per-server tool policy, resolved once and installed on every
-    // agent's policy so a bridge call the operator allows does not park under
-    // `auto`. Built from the same effective MCP servers the harness wires tools
-    // from, so the gate and the toolbelt cannot disagree about which server
-    // allows what.
-    let mcp_reads = crate::company::mcp_policy::mcp_allow_set(&deps.mcp_servers);
 
     let mut roster =
         Vec::with_capacity(company.manifest.agents.len() + company.overlay_agents.len());
@@ -5766,28 +6021,22 @@ pub(crate) fn build_roster(
         // reaches the system prompt this agent is built with — and it wins over
         // the blueprint without cloning the borrowed `&ManifestAgent`.
         let effective_instructions = company.effective_instructions(&manifest_agent.id);
-        let mut agent_policy = ApprovalPolicy::new(policy, effective_budget)
-            .with_policy_hitl_disabled()
-            .with_requests(deps.approval_requests.clone())
-            // Issue #243: stamp who the parked effect belongs to, so approving it
-            // can hand the grant back to this agent rather than to nobody.
-            .with_agent(manifest_agent.id.clone())
-            // Issue #1124: the per-server read-only MCP declaration, so a
-            // server-declared read-only bridge call does not park under `auto`.
-            .with_mcp_reads(mcp_reads.clone());
-        if let Some(gate) = deps.emergency_gate.as_ref() {
-            agent_policy = agent_policy.with_emergency_gate(gate.clone());
-        }
-        if let Some(workspace) = deps.workspace.as_ref() {
-            agent_policy = agent_policy.with_workspace(workspace.clone(), company.id.clone());
-        }
-        // Issue #304: give the policy something to measure `budget_usd_daily`
-        // against. Only wired when the host has a meter — without one the cap
-        // arm stays inert and warns once, rather than parking every priced call
-        // on a host that can never answer the question.
-        if let Some(meter) = deps.meter.as_ref() {
-            agent_policy = agent_policy.with_spend(meter.clone(), company.id.clone());
-        }
+        let grants = grants_for_policy(company, allow, manifest_agent);
+        // `mut` for the Composio arm below, which is the only thing that
+        // reassigns it -- and is feature-gated, so a build without that
+        // feature would see the binding as needlessly mutable. Same
+        // `cfg_attr` the `grants` parameter above carries, for the same
+        // reason: one feature owns the mutation and every other build must
+        // compile clean under `-D warnings`.
+        #[cfg_attr(not(feature = "composio"), allow(unused_mut))]
+        let mut agent_policy = agent_policy_for(
+            company,
+            deps,
+            manifest_agent,
+            policy,
+            effective_budget,
+            &grants,
+        );
         let is_orchestrator = orchestrator.as_deref() == Some(manifest_agent.id.as_str());
         // Three-level narrowing: company → the desks this teammate sits on →
         // the teammate itself. `agent_desk_tools` resolves through the record's
@@ -5822,7 +6071,7 @@ pub(crate) fn build_roster(
             &company.id,
             company_name,
             manifest_agent,
-            agent_policy,
+            Arc::new(agent_policy),
             deps,
             &grants,
             skill_deltas,
@@ -5872,30 +6121,21 @@ pub(crate) fn build_roster(
         // operator set an override for it — and an override wins uniformly, the
         // one reason `overlay_agent_to_manifest` can keep `prompt: None`.
         let effective_instructions = company.effective_instructions(&manifest_agent.id);
-        let mut agent_policy = ApprovalPolicy::new(policy, effective_budget)
-            .with_policy_hitl_disabled()
-            .with_requests(deps.approval_requests.clone())
-            // An overlay teammate is a real roster agent and re-dispatches the
-            // same way a manifest one does (issue #243).
-            .with_agent(manifest_agent.id.clone())
-            // Issue #1124: the same per-server read-only MCP declaration the
-            // manifest agents get — an overlay teammate calls the same servers.
-            .with_mcp_reads(mcp_reads.clone());
-        if let Some(gate) = deps.emergency_gate.as_ref() {
-            agent_policy = agent_policy.with_emergency_gate(gate.clone());
-        }
-        if let Some(workspace) = deps.workspace.as_ref() {
-            agent_policy = agent_policy.with_workspace(workspace.clone(), company.id.clone());
-        }
-        if let Some(meter) = deps.meter.as_ref() {
-            agent_policy = agent_policy.with_spend(meter.clone(), company.id.clone());
-        }
         // An overlay teammate is scoped by its desks the same as a manifest one:
         // it can be seated on a desk, and a desk ceiling that applied to only
         // half its members would not be a ceiling.
         let desk_tools = company.agent_desk_tools(&manifest_agent.id);
         let desk_allows: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
         let grants = agent_scoped_grants(allow, &desk_allows, manifest_agent.tools.as_deref());
+        #[cfg_attr(not(feature = "composio"), allow(unused_mut))]
+        let mut agent_policy = agent_policy_for(
+            company,
+            deps,
+            &manifest_agent,
+            policy,
+            effective_budget,
+            &grants,
+        );
         // Issue #1759 (S2): same Composio deflection wiring as the manifest loop
         // — an overlay teammate that holds the Composio grant is guarded on the
         // same terms, including the `composio_capability_admits` check (PR
@@ -5911,7 +6151,7 @@ pub(crate) fn build_roster(
             &company.id,
             company_name,
             &manifest_agent,
-            agent_policy,
+            Arc::new(agent_policy),
             deps,
             &grants,
             skill_deltas,
@@ -6023,6 +6263,7 @@ pub(crate) fn workflow_wiring_deps(
     plan: Option<capability_budget::CapabilityPlan>,
 ) -> HarnessDeps {
     HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         provider: Arc::new(provider::MockProvider::default()),
         provider_slug: "mock".to_string(),
@@ -6058,6 +6299,7 @@ pub(crate) fn workflow_wiring_deps(
         deep_trace: None,
         workflow_revisions: None,
         approval_requests: policy::ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities,
@@ -6129,3 +6371,6 @@ mod built_in_tests_part09;
 #[cfg(test)]
 #[path = "built_in_tests_part10.rs"]
 mod built_in_tests_part10;
+#[cfg(all(test, feature = "openhuman"))]
+#[path = "mcp_reads_tests.rs"]
+mod mcp_reads_tests;

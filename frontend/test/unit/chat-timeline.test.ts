@@ -130,6 +130,91 @@ describe("buildTimeline", () => {
   });
 
   /**
+   * A row that only carries outputs did not speak.
+   *
+   * A seat that writes a file and then reports on it emits an empty `post`
+   * carrying the workspace link and then the write-up. Counting the carrier
+   * as a second utterance folded the answer: a live run wrote a campaign
+   * brief, asked six teammates, and showed the operator a chip rather than
+   * the report. The host already keeps such a row out of what other seats
+   * read as speech; this is the same judgement on the render side.
+   *
+   * The carrier is promoted with it, never apart — lifting the write-up and
+   * leaving its file links folded would put one turn's output on two
+   * surfaces, the exact split this rule refuses for a capped turn.
+   */
+  it("promotes an answer whose turn also emitted an outputs-only carrier", () => {
+    const entries = buildTimeline(
+      [
+        message({ id: "a", text: "own the pricing launch" }),
+        message({
+          id: "b",
+          from: "company",
+          text: "",
+          parentId: "a",
+          at: T0 + 1,
+          outputs: [{ kind: "workspace-node", targetId: "n1", title: "brief.md" }],
+        }),
+        message({ id: "c", from: "company", text: "Brief is written and signed off.", parentId: "a", at: T0 + 2 }),
+      ],
+      CHANNEL,
+      [],
+    );
+
+    expect(entries.map((e) => e.message.id)).toEqual(["a", "b", "c"]);
+  });
+
+  /**
+   * Every child of the root shares its bucket, not just this turn's, so
+   * carrier promotion stops at the operator's next line. Without the bound,
+   * `[root, answer, follow-up, laterCarrier]` passes every other test — the
+   * answer is the first non-carrier and nothing interleaves it with the root
+   * — and the later carrier is lifted out of the thread the operator
+   * deliberately opened.
+   */
+  it("does not promote a carrier that belongs to a later exchange", () => {
+    const outputs = [{ kind: "workspace-node", targetId: "n1", title: "brief.md" }];
+    const entries = buildTimeline(
+      [
+        message({ id: "a", text: "own the pricing launch" }),
+        message({ id: "b", from: "company", text: "On it.", parentId: "a", at: T0 + 1 }),
+        message({ id: "c", text: "and the paid ads?", parentId: "a", at: T0 + 2 }),
+        message({ id: "d", from: "company", text: "", parentId: "a", at: T0 + 3, outputs }),
+      ],
+      CHANNEL,
+      [],
+    );
+
+    expect(entries.map((e) => e.message.id)).toEqual(["a", "b"]);
+  });
+
+  /**
+   * Two things actually said still fold. The carrier rule narrows what counts
+   * as speech; it does not retire the boundary promotion was built for.
+   */
+  it("still folds a turn that spoke twice, carrier or not", () => {
+    const entries = buildTimeline(
+      [
+        message({ id: "a", text: "own the pricing launch" }),
+        message({
+          id: "b",
+          from: "company",
+          text: "",
+          parentId: "a",
+          at: T0 + 1,
+          outputs: [{ kind: "workspace-node", targetId: "n1", title: "brief.md" }],
+        }),
+        message({ id: "c", from: "company", text: "Partial write-up.", parentId: "a", at: T0 + 2 }),
+        message({ id: "d", from: "system", text: "This turn hit its cap.", parentId: "a", at: T0 + 3 }),
+      ],
+      CHANNEL,
+      [],
+    );
+
+    expect(entries.map((e) => e.message.id)).toEqual(["a"]);
+  });
+
+  /**
    * A settle marker is runtime-generated but it is not an answer, and #1890 B
    * put markers in the thread that raised the card on purpose. Promoting one
    * into the channel would undo that from the render side.

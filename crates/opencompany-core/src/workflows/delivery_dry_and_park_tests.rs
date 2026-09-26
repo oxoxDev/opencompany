@@ -4,7 +4,7 @@ use super::*;
 use async_trait::async_trait;
 
 use crate::company::parse_workflow;
-use crate::ports::types::CompanyId;
+use crate::ports::types::{Actor, ActorKind, CompanyId, Verdict};
 
 /// An `output` node that only exists to pause for approval is control flow,
 /// not a report-back that lost its address. It contributes no row, so a
@@ -253,4 +253,55 @@ async fn park_and_journal_releases_the_continuation_slot_when_the_journal_write_
          so the slot armed for it before the attempt must be released — otherwise the turn \
          is left permanently blocked on a decision that can never arrive"
     );
+}
+
+/// A workflow park is the same transaction a cycle's is: it holds the card's
+/// checkout on the grant set and tells every console it parked.
+#[tokio::test]
+async fn park_and_journal_holds_the_work_unit_and_announces_the_park() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let h = Harness::new(dir.path(), false, false).with_parking(dir.path(), "full");
+    let parking = h.deps.parking.clone().expect("with_parking wired it");
+    let effect = Effect {
+        kind: "shell".to_string(),
+        group: EffectGroup::Other,
+        amount_usd: None,
+        established_thread: false,
+        first_time_counterparty: false,
+        payload: serde_json::json!({ "call": "shell" }),
+        agent: Some("ceo".to_string()),
+        run_id: None,
+    };
+
+    let id = parking
+        .park_and_journal(
+            &CompanyId::new("acme"),
+            effect,
+            crate::runtime::journal::TaskLink::from_task_id(Some("card-7")),
+            Some("ops".to_string()),
+            None,
+        )
+        .await
+        .expect("park succeeds");
+
+    assert!(
+        parking.grants.any_for_task("card-7"),
+        "the card's checkout is held while its approval waits"
+    );
+    let parked: Vec<_> = h
+        .events
+        .read_from(
+            &CompanyId::new("acme"),
+            crate::ports::types::EventSeq::new(0),
+            usize::MAX,
+        )
+        .await
+        .expect("event log reads")
+        .into_iter()
+        .filter_map(|stored| match stored.event {
+            CompanyEvent::ApprovalParked { approval_id, .. } => Some(approval_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(parked, vec![id]);
 }

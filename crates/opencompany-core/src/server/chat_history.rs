@@ -18,9 +18,10 @@ use crate::error::OpenCompanyError;
 use crate::ports::CompanyStore;
 use crate::ports::types::{
     Actor, ActorKind, Attachment, ChatOutput, ChatOutputKind, CompanyEvent, CompanyId,
-    CompanyRecord, EventSeq, Mention, MentionTarget, StoredEvent, TurnStep,
+    CompanyRecord, EventSeq, Mention, MentionTarget, StoredEvent, TurnStep, UtteranceKind,
 };
 use crate::server::ops::language::DEFAULT_DESK;
+use crate::server::readable::{DisplayNames, project_history};
 
 // Conversation identity now lives in `tinyhivemind_core::chat`, and these are
 // re-exported so every existing caller keeps its path (issue #65, #435).
@@ -99,6 +100,58 @@ pub async fn resolve_seed_desk(
     desk
 }
 
+/// The other spelling the same operator DM is journaled under, if `key` names
+/// one.
+///
+/// A DM has two correct addresses and the host uses both. The console posts an
+/// ordinary teammate's DM under the **bare** teammate id (`dmThreadId`,
+/// `views/room/channels.ts`), while a DM hive keys its episode -- and therefore
+/// every row the episode journals (`hive::conducted`'s `chat:`) -- under
+/// `dm:<id>`. A reader that matched only the address it was asked for saw half
+/// its own conversation: the operator's message under one key and the episode's
+/// replies under the other, so an episode's transcript vanished on reload while
+/// the company sat blocked on an approval it had raised there.
+///
+/// `agent_channels` already folds both spellings for an agent's own session and
+/// says why ("the console and the route disagree and both are correct"); this
+/// is that rule, for a reader that starts from either address.
+///
+/// # Why this is only reached for a non-desk key
+///
+/// Because a declared desk resolves first. A blueprint may name both a desk and
+/// a teammate `main` -- manifest validation does not forbid the collision
+/// (issue #1743) -- and the desk must keep the bare key, so this is asked only
+/// once `resolve_desk_id` has declined it.
+#[must_use]
+pub fn dm_sibling(record: &CompanyRecord, key: &str) -> Option<String> {
+    // **A declared desk owns its key outright, and grows no second one.**
+    //
+    // Asserted here rather than assumed of the callers. `desk_aliases` does
+    // reach this only after `resolve_desk_id` declines, but `operator`'s own
+    // `resolve_desk` matches `manifest.group_chats` alone -- so an **overlay**
+    // desk, created from the console and absent from the manifest, arrives
+    // looking unmatched. Where one shares an id with a teammate, that desk's
+    // transcript would have taken the teammate's DM rows (tinysweeper on
+    // #2484). `resolve_desk_id` is the rule that knows about overlays, so it
+    // is the one asked.
+    if record.resolve_desk_id(key).is_some() {
+        return None;
+    }
+    let prefix = crate::runtime::assignee::DM_PREFIX;
+    // **The exact id first, and only then the prefix.**
+    //
+    // A teammate may itself be named `dm:<something>` -- nothing forbids it,
+    // and this module already carries the mirror case of a teammate named for
+    // a General spelling. Stripping first would answer `dm:ceo` with `ceo`'s
+    // sibling while a teammate literally called `dm:ceo` sat in the roster,
+    // handing one teammate's DM the other's rows.
+    if let Some(agent) = record.resolve_roster_agent_id(key) {
+        return Some(format!("{prefix}{agent}"));
+    }
+    key.strip_prefix(prefix)
+        .and_then(|bare| record.resolve_roster_agent_id(bare))
+}
+
 /// [`resolve_seed_desk`] for a caller that already holds the record.
 ///
 /// The cycle's briefings do: they are handed a `&CompanyRecord` and were paying
@@ -121,10 +174,15 @@ pub fn desk_aliases(record: &CompanyRecord, chat_id: Option<&str>) -> (String, S
     // that wrong here does not merely miss lines, it *merges* two desks: `owns`
     // would then be handed one desk's id and another's name.
     let Some(id) = record.resolve_desk_id(desk) else {
-        // Not a desk this company declares — an ad-hoc thread id or a DM. It
-        // still owns everything journaled under that exact string, which is
-        // what the verbatim pair says.
-        return (desk.to_string(), desk.to_string());
+        // Not a desk this company declares — an ad-hoc thread id or a DM.
+        //
+        // An ad-hoc thread owns everything journaled under that exact string,
+        // which is what the verbatim pair says. A DM owns **both** spellings it
+        // is journaled under, and `owns` already matches either slot — so the
+        // sibling rides in the name slot, which that function only ever
+        // compares and never renders. See [`dm_sibling`].
+        let sibling = dm_sibling(record, desk).unwrap_or_else(|| desk.to_string());
+        return (desk.to_string(), sibling);
     };
     let name = record
         .manifest
@@ -187,6 +245,25 @@ fn trivially_resolved(chat_id: Option<&str>) -> Option<(String, String)> {
 /// The `desk` side stays a plain `&str` on purpose: a caller asking "is this
 /// record's origin the desk I am reading?" always has a desk, and taking an
 /// `Option` there would re-open the question this answers.
+/// Does a chat id stamped on a room's own **bookkeeping** name the conversation
+/// being read?
+///
+/// [`owns`] answers this for the rows a reader renders, and answers it against
+/// both slots the resolver produced. The events that are not rows --
+/// `ConversationOpened`/`Concluded`, a referral's crossing marker -- were
+/// compared to `desk_id` alone, which is the same question asked half as
+/// widely. For a DM that is the difference between attaching an exchange and
+/// dropping it: the episode journals its bookkeeping under `dm:<id>` while the
+/// console reads by the bare id, so an operator whose teammates had just held
+/// two full consultations was shown neither.
+///
+/// One rule for both, so a conversation cannot own a row and disown the
+/// bookkeeping that explains it.
+fn bookkeeping_names(stored: &str, desk_id: &str, desk_name: &str) -> bool {
+    same_conversation(Some(stored), Some(desk_id))
+        || same_conversation(Some(stored), Some(desk_name))
+}
+
 pub fn stamped_conversation_is(origin: Option<&str>, desk: &str) -> bool {
     origin.is_some_and(|origin| same_conversation(Some(origin), Some(desk)))
 }
@@ -477,6 +554,42 @@ pub struct ReferralLine {
     pub outbound: bool,
 }
 
+/// One agent-to-agent exchange on this desk, folded onto the `ask` row that
+/// opened it.
+///
+/// Same idiom and the same reason as [`ReferralConversation`] beside it, with
+/// one difference worth stating: a crossing's relayed rows are *dropped*
+/// host-side, while these are *kept* — in the pair channel the exchange was
+/// written to. The desk still never sees them, because a desk reads its own
+/// channel and they are not in it, so without this fold the only trace of two
+/// seats talking is the concluding paraphrase. The rows exist; this is what
+/// carries them to the row that sent the seats aside.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentConversation {
+    /// The `ask` row it is rooted at, and its identity.
+    ///
+    /// Two seats can hold several exchanges in one episode, and they share a
+    /// channel: `pair_conversation` is deterministic, so every one of them is
+    /// `dm:<a>+<b>`. Without the root they are indistinguishable -- same
+    /// asker, same askee, same channel -- and a reader sees the same line
+    /// twice with no way to tell which is which.
+    pub root: u64,
+    /// The seat that asked.
+    pub asker_id: String,
+    /// The seat it asked.
+    pub askee_id: String,
+    /// The channel the exchange is written to (`dm:{a}+{b}`).
+    pub conversation_id: String,
+    /// Whether it has ended. A live exchange is worded in the present tense,
+    /// for the reason [`ReferralConversation`] words a running crossing that
+    /// way: past tense is a claim that something is over.
+    pub concluded: bool,
+    /// Whether it ended by running out of turns rather than by concluding.
+    pub forced: bool,
+    /// The exchange itself, in transcript order.
+    pub lines: Vec<ReferralLine>,
+}
+
 /// The whole exchange between an agent on this desk and somebody who is not,
 /// folded onto the report that brought it home.
 ///
@@ -540,6 +653,7 @@ impl MessageView {
             by_person: false,
             referred_from: None,
             referral_conversation: None,
+            agent_conversations: Vec::new(),
             aside_audience: audience,
             episode: None,
             steps: Vec::new(),
@@ -661,7 +775,8 @@ pub struct MessageView {
     /// The message text.
     pub text: String,
     /// **What the agent was actually handed for this row** — the text before
-    /// [`readable_moves`] rewrote it into operator-facing prose.
+    /// [`readable_moves`](crate::server::readable::readable_moves) projected it
+    /// for a person.
     ///
     /// Same reasoning as [`Self::cue_author`], applied to the other half of
     /// the cue line: `render_cues` in `agent_session.rs` prepends
@@ -670,7 +785,7 @@ pub struct MessageView {
     /// a surface that claims to show what the model saw — the raw-turns view
     /// — must not feed it [`Self::text`], which has already had `!support
     /// #topic ^3` turned into prose. Equal to [`Self::text`] on every row
-    /// `readable_moves` does not touch.
+    /// the display projection does not touch.
     pub cue_text: String,
     /// When it was journaled, epoch millis.
     pub at_millis: f64,
@@ -704,6 +819,14 @@ pub struct MessageView {
     pub referred_from: Option<ReferredFrom>,
     /// The crossing this report brought home, when it brought one.
     pub referral_conversation: Option<ReferralConversation>,
+    /// The agent-to-agent exchanges this row reported, oldest first.
+    ///
+    /// A list, not one: several exchanges legitimately land on the same row.
+    /// Every exchange still running folds onto the row that sent the seats
+    /// aside, and one seat can open several from a single desk message --
+    /// which it does whenever the first answer does not settle the question.
+    /// A single slot kept whichever was folded last and dropped the rest.
+    pub agent_conversations: Vec<AgentConversation>,
     /// The addressees of this row when the host narrowed it — a seat's `dm`
     /// inside a desk — else empty. Projected as `audience`; an operator reads
     /// the row regardless, because audience is a coordination device between
@@ -1002,10 +1125,11 @@ impl MessageView {
                     // `body_of`'s `AgentReply` arm names the agent, so this does.
                     cue_author: agent_id.clone(),
                     author: agent_id,
-                    // `body_of`'s `AgentReply` arm hands the agent `text.clone()`
-                    // untouched — clone before `readable_moves` consumes it below.
+                    // `body_of`'s `AgentReply` arm hands the agent this body
+                    // untouched; `text` is projected for a person at the end of
+                    // `history_for_desk`.
                     cue_text: text.clone(),
-                    text: readable_moves(text),
+                    text,
                     at_millis,
                     mine: false,
                     // The runtime wrote this, whichever brain produced it.
@@ -1013,6 +1137,7 @@ impl MessageView {
                     // Set by the referral fold in `history_for_desk`, never here.
                     referred_from: None,
                     referral_conversation: None,
+                    agent_conversations: Vec::new(),
                     aside_audience: audience,
                     episode,
                     steps,
@@ -1094,6 +1219,7 @@ impl MessageView {
                     // Set by the referral fold in `history_for_desk`, never here.
                     referred_from: None,
                     referral_conversation: None,
+                    agent_conversations: Vec::new(),
                     aside_audience: Vec::new(),
                     episode: None,
                     id,
@@ -1188,6 +1314,7 @@ impl MessageView {
                 // Set by the referral fold in `history_for_desk`, never here.
                 referred_from: None,
                 referral_conversation: None,
+                agent_conversations: Vec::new(),
                 aside_audience: Vec::new(),
                 episode: None,
                 steps: Vec::new(),
@@ -1225,6 +1352,7 @@ impl MessageView {
                 // Set by the referral fold in `history_for_desk`, never here.
                 referred_from: None,
                 referral_conversation: None,
+                agent_conversations: Vec::new(),
                 aside_audience: Vec::new(),
                 episode: None,
                 steps: Vec::new(),
@@ -1522,6 +1650,7 @@ pub async fn history_for_desk(
 
     // One roster read per history, not one per message.
     let authors = author_labels(runtime).await?;
+    let names = DisplayNames::load(runtime).await;
     let mut cursor = before_seq.map(EventSeq::new);
     let mut messages = Vec::with_capacity(first);
     while messages.len() < first {
@@ -1620,14 +1749,198 @@ pub async fn history_for_desk(
 
     drop_dead_cards(runtime, &mut messages).await?;
     drop_dead_outputs(runtime, &mut messages).await?;
-    attach_referral_origins(runtime, desk_id, &mut messages).await?;
+    attach_referral_origins(runtime, desk_id, desk_name, &mut messages).await?;
+    attach_agent_conversations(runtime, desk_id, desk_name, &mut messages).await?;
+    project_history(&mut messages, &names);
     Ok(messages)
 }
 
 /// projection already refuses that trade once (see the orphan arm below).
+/// Folds each agent-to-agent exchange onto the `ask` row that opened it.
+///
+/// The exchange's own rows are written to the pair channel, so a desk reading
+/// its own channel never sees them: the `ConversationOpened` reference is the
+/// only trace here, and on its own it can say that two seats talked but not
+/// what they said. This reads the pair channel out of the same page and hands
+/// the rows to the row that sent them aside.
+///
+/// Mirrors [`attach_referral_origins`] deliberately, down to the lookback: a
+/// conversation whose `ask` fell outside the window renders with whatever part
+/// of it the page holds, which is the same bounded-widening bargain a crossing
+/// makes. Silent when nothing matches — an episode that never opened one is
+/// every episode before seats could ask each other.
+async fn attach_agent_conversations(
+    runtime: &CompanyRuntime,
+    desk_id: &str,
+    desk_name: &str,
+    messages: &mut [MessageView],
+) -> Result<(), OpenCompanyError> {
+    let Some(oldest) = messages
+        .iter()
+        .filter_map(|m| m.id.parse::<u64>().ok())
+        .min()
+    else {
+        return Ok(());
+    };
+    const LOOKBACK: u64 = 64;
+    let page = runtime
+        .events()
+        .read_from(
+            runtime.id(),
+            EventSeq::new(oldest.saturating_sub(LOOKBACK)),
+            4096,
+        )
+        .await?;
+
+    // Opened on THIS desk. The reference row is journaled to the desk even
+    // though the exchange is not, which is the whole point of it.
+    let mut opened: Vec<(u64, String, String, String)> = Vec::new();
+    let mut ended: std::collections::HashMap<u64, (u64, bool)> = std::collections::HashMap::new();
+    for stored in page.iter() {
+        match &stored.event {
+            CompanyEvent::ConversationOpened {
+                chat_id,
+                conversation_id,
+                root,
+                asker,
+                askee,
+                ..
+            } if bookkeeping_names(chat_id, desk_id, desk_name) => {
+                opened.push((*root, conversation_id.clone(), asker.clone(), askee.clone()));
+            }
+            CompanyEvent::ConversationConcluded {
+                chat_id,
+                root,
+                forced,
+                ..
+            } if bookkeeping_names(chat_id, desk_id, desk_name) => {
+                ended.insert(*root, (stored.seq.value(), *forced));
+            }
+            _ => {}
+        }
+    }
+    if opened.is_empty() {
+        return Ok(());
+    }
+
+    for (root, conversation_id, asker, askee) in opened {
+        // **The exchange is the ask row and everything rooted at it**, not
+        // every row in the channel. Two seats that ask each other inside one
+        // episode share a single `dm:<a>+<b>` channel and their conversations
+        // interleave there, so collecting by channel alone hands each of them
+        // the other's rows — the same trap
+        // `two_crossings_to_one_person_each_fold_their_own_exchange` pins for a
+        // crossing, reached here by a different road.
+        let lines: Vec<ReferralLine> = page
+            .iter()
+            .filter(|stored| {
+                let CompanyEvent::AgentReply {
+                    chat_id,
+                    parent,
+                    episode,
+                    ..
+                } = &stored.event
+                else {
+                    return false;
+                };
+                // The conclusion is threaded under the ask too, so a seat's
+                // thread read reaches it; here it would be the askee's last
+                // line said twice. `Dm` is the conductor's alone: `dm` is
+                // unserved, so no seat writes one.
+                if episode
+                    .as_ref()
+                    .is_some_and(|episode| matches!(episode.kind, UtteranceKind::Dm))
+                {
+                    return false;
+                };
+                *chat_id == conversation_id
+                    && (stored.seq.value() == root || *parent == Some(EventSeq::new(root)))
+            })
+            .filter_map(|stored| match &stored.event {
+                CompanyEvent::AgentReply { agent_id, text, .. } => Some(ReferralLine {
+                    author_id: agent_id.clone(),
+                    // Empty for the seat that asked, exactly as a crossing
+                    // leaves it: the row this folds onto already names them.
+                    author_label: if *agent_id == asker {
+                        String::new()
+                    } else {
+                        askee.clone()
+                    },
+                    text: text.clone(),
+                    outbound: *agent_id == asker,
+                }),
+                _ => None,
+            })
+            .collect();
+        if lines.is_empty() {
+            continue;
+        }
+
+        // **The asker's report**, which is not the row the exchange is rooted
+        // at and not simply the row before the conclusion either.
+        //
+        // An `ask` is written to the pair channel, so `root` names a row this
+        // desk does not have. And the askee cross-posts its conclusion to the
+        // desk *before* the asker wraps up, so "the last desk row before the
+        // conclusion" lands on the seat that was ASKED — which then reads
+        // "Implementation Planner ... asked @implementation_planner", a seat
+        // asking itself, the one thing that did not happen.
+        //
+        // The exchange belongs to the question that caused it, so it folds
+        // onto the asker's first desk row after the conclusion: the report
+        // that brought the answer home. One still running has no report yet
+        // and folds onto the row that sent the seats aside — the ask's own
+        // parent, which is also the asker's.
+        // The row that sent the seats aside: the ask's own parent, which is
+        // always on this desk and always exists. Every exchange falls back to
+        // it, so none can be dropped for want of somewhere to go.
+        let sent_aside = page.iter().find_map(|stored| match &stored.event {
+            CompanyEvent::AgentReply { parent, .. } if stored.seq.value() == root => {
+                parent.map(|seq| seq.value())
+            }
+            _ => None,
+        });
+        let anchor = match ended.get(&root) {
+            Some((concluded_at, _)) => page
+                .iter()
+                .find(|stored| {
+                    stored.seq.value() > *concluded_at
+                        && matches!(
+                            &stored.event,
+                            CompanyEvent::AgentReply { chat_id, agent_id, .. }
+                                if bookkeeping_names(chat_id, desk_id, desk_name) && *agent_id == asker
+                        )
+                })
+                .map(|stored| stored.seq.value())
+                // **A concluded exchange the asker never reported.** It asked
+                // again instead, or the episode ended under it. Anchoring only
+                // on the report discarded the exchange outright -- a live run
+                // concluded two and showed neither, because the asker kept
+                // asking and never posted to the desk.
+                .or(sent_aside),
+            None => sent_aside,
+        };
+        let Some(anchor) = anchor else { continue };
+        let Some(view) = messages.iter_mut().find(|m| m.id == anchor.to_string()) else {
+            continue;
+        };
+        view.agent_conversations.push(AgentConversation {
+            root,
+            asker_id: asker,
+            askee_id: askee,
+            conversation_id,
+            concluded: ended.contains_key(&root),
+            forced: ended.get(&root).map(|(_, forced)| *forced).unwrap_or(false),
+            lines,
+        });
+    }
+    Ok(())
+}
+
 async fn attach_referral_origins(
     runtime: &CompanyRuntime,
     desk_id: &str,
+    desk_name: &str,
     messages: &mut Vec<MessageView>,
 ) -> Result<(), OpenCompanyError> {
     let Some(oldest) = messages
@@ -1674,7 +1987,7 @@ async fn attach_referral_origins(
         else {
             continue;
         };
-        if to_desk != desk_id {
+        if !bookkeeping_names(to_desk, desk_id, desk_name) {
             continue;
         }
         // **A crossing that went to a PERSON lives in its own conversation.**
@@ -1798,9 +2111,7 @@ async fn attach_referral_origins(
                     } else {
                         target.clone()
                     },
-                    // The ask is a committed MOVE — the grammar is addressed to
-                    // the fold, never to a person reading a transcript.
-                    text: readable_moves(words),
+                    text: words,
                     outbound: agent_id == asker,
                 });
             }
@@ -2108,7 +2419,7 @@ async fn attach_referral_origins(
                     lines.push(ReferralLine {
                         author_id: target.clone(),
                         author_label: String::new(),
-                        text: readable_moves(crate::hive::referral::asked_message(&text)),
+                        text: crate::hive::referral::asked_message(&text),
                         outbound: true,
                     });
                 }
@@ -2177,7 +2488,7 @@ async fn attach_referral_origins(
                             Some(ReferralLine {
                                 author_id: agent_id.clone(),
                                 author_label: agent_id.clone(),
-                                text: readable_moves(text.clone()),
+                                text: text.clone(),
                                 outbound: false,
                             })
                         }
@@ -2194,11 +2505,11 @@ async fn attach_referral_origins(
                                 // The room's attribution removed — this line is
                                 // already attributed by the fold that carries
                                 // it. See `referral::unattributed`.
-                                text: readable_moves(crate::hive::referral::unattributed(
+                                text: crate::hive::referral::unattributed(
                                     asker,
                                     from_desk_name,
                                     &text,
-                                )),
+                                ),
                                 outbound: false,
                             });
                         }
@@ -2281,9 +2592,7 @@ async fn attach_referral_origins(
                             lines: vec![ReferralLine {
                                 author_id: asker.clone(),
                                 author_label: asker_label.clone(),
-                                // A room's question is a committed MOVE, and the
-                                // grammar is addressed to the fold.
-                                text: readable_moves(text),
+                                text,
                                 outbound: false,
                             }],
                         });
@@ -2330,16 +2639,6 @@ fn strip_relay_note(event: &CompanyEvent) -> Option<String> {
         .map_or(text.as_str(), |(answer, _)| answer)
         .trim();
     (!words.is_empty()).then(|| words.to_string())
-}
-
-/// The operator-facing body of a reply.
-///
-/// An identity since plan hive-desks, Phase 4: a seat speaks through a tool
-/// call, so nothing a person reads carries a move grammar to rewrite. Kept as
-/// a function because every projection calls it at the display edge, and the
-/// seam is where a future rewrite would go.
-pub(crate) fn readable_moves(text: String) -> String {
-    text
 }
 
 /// Blanks `task_id` on any row naming a card the board no longer has
@@ -2578,6 +2877,10 @@ mod tests_terminal;
 #[path = "chat_history_dead_card_test.rs"]
 mod dead_card_test;
 
+/// Where a referred line says it came from, and who it says is speaking.
+#[cfg(test)]
+#[path = "chat_history_agent_conversation_test.rs"]
+mod agent_conversation_test;
 #[cfg(test)]
 #[path = "chat_history_referral_origin_crossing_test.rs"]
 mod referral_origin_crossing_test;
@@ -2587,7 +2890,7 @@ mod referral_origin_episode_test;
 #[cfg(test)]
 #[path = "chat_history_referral_origin_relay_test.rs"]
 mod referral_origin_relay_test;
-/// Where a referred line says it came from, and who it says is speaking.
+
 #[cfg(test)]
 #[path = "chat_history_referral_origin_test_support.rs"]
 mod referral_origin_test_support;

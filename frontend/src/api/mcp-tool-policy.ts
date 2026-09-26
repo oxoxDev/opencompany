@@ -36,15 +36,30 @@ export interface ToolPolicyRow {
 }
 
 /**
+ * One tier's bulk default.
+ *
+ * `stored` is the difference between a decision and a nominal value. An unset
+ * tier still reports a `mode` for reference, but the host does not apply it to
+ * a tool whose tier only came from discovery — so a row under it reads "Asks"
+ * while this reads "Runs". A control that renders `mode` alone invites an
+ * operator to confirm what looks like the current value and grant a bulk allow
+ * by doing so.
+ */
+export interface TierDefault {
+  mode: ApprovalMode;
+  stored: boolean;
+}
+
+/**
  * A server's whole resolved policy.
  *
- * `tierDefaults` is **total** — every tier is present, resolved — so the console
- * renders what the host decided instead of shipping a second copy of the
- * fallbacks that could drift from it.
+ * `tierDefaults` is **total** — every tier is present — so the console renders
+ * what the host decided instead of shipping a second copy of the fallbacks that
+ * could drift from it.
  */
 export interface ToolPolicyDocument {
   server: string;
-  tierDefaults: Record<ToolTier, ApprovalMode>;
+  tierDefaults: Record<ToolTier, TierDefault>;
   tools: ToolPolicyRow[];
   /** When discovery last succeeded. `0` reads as never. */
   discoveredAtMillis: number;
@@ -63,7 +78,8 @@ export interface ToolPolicyPatchEntry {
  * by sending it with neither field rather than by sending nulls.
  */
 export interface ToolPolicyPatch {
-  tierDefaults?: Partial<Record<ToolTier, ApprovalMode>>;
+  /** A tier named `null` is cleared back to unset. */
+  tierDefaults?: Partial<Record<ToolTier, ApprovalMode | null>>;
   tools?: ToolPolicyPatchEntry[];
 }
 

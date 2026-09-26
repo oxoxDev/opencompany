@@ -188,6 +188,7 @@ fn read_then_answer(n: usize, answer: &'static str) -> Vec<Turn> {
 /// control left standing, which is the condition #988 is about.
 fn deps(model_url: String, dir: &std::path::Path) -> HarnessDeps {
     HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -230,6 +231,7 @@ fn deps(model_url: String, dir: &std::path::Path) -> HarnessDeps {
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -296,7 +298,7 @@ async fn company_agent(
         &company,
         "Acme",
         &manifest_agent,
-        policy,
+        std::sync::Arc::new(policy),
         &deps,
         &["docs".to_string()],
         &[],

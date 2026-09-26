@@ -227,10 +227,20 @@ pub fn model_for_tier(tier: Option<&str>) -> String {
 /// them, and pointing an agent at a tool it was not granted is the "a tool
 /// granted, unmentioned" problem pointed the other way. The agents that do
 /// have them are told in [`orchestrator::orchestrator_brief`].
-const MENTION_BRIEF: &str = " Naming a teammate: write their name or id as ordinary text when you are \
-referring to them — \"qa_engineer has the failing case\". An `@` in your reply renders a chip and \
+const MENTION_BRIEF: &str = " Naming a teammate: write their name as ordinary text when you are \
+referring to them: \"Quinn has the failing case\". An `@` in your reply renders a chip and \
 nothing more: it notifies nobody and starts no work, so it cannot hand anything over. Reaching for \
 `@` to make somebody pick something up does not make them pick it up. ";
+
+/// Who reads what an agent writes, and what belongs in a tool call instead.
+///
+/// Every agent, pooled or seated: a reply, a desk post and a relayed answer
+/// all land in front of a person. States the audience and the ordering, not a
+/// length budget; OpenHuman's own style rules own tone.
+pub(crate) const READER_BRIEF: &str = " A person reads what you post. Lead with the answer in \
+plain words, usually a few short sentences; offer detail rather than dump it. Refer to teammates, \
+desks and work by name. Ids, tool names, card, run and sequence numbers, and JSON belong in tool \
+calls, never in what you write. ";
 
 /// The persona system prompt for a company agent.
 ///
@@ -316,7 +326,7 @@ pub fn build_agent_with_model(
     company: &CompanyId,
     company_name: &str,
     manifest_agent: &ManifestAgent,
-    policy: ApprovalPolicy,
+    policy: Arc<ApprovalPolicy>,
     deps: &HarnessDeps,
     grants: &[String],
     skill_deltas: &[SkillState],
@@ -367,6 +377,8 @@ pub fn build_agent_with_model(
     // Deliberate-memory tools, oc-authored over this company's own context
     // port — see `memory_tools`'s doc comment for why not the vendored ones.
     let mut tools: Vec<Box<dyn Tool>> = memory_tools(deps, company, &manifest_agent.id);
+    // Belt tools this agent keeps but is not offered — see AgentBlueprint::unadvertised.
+    let mut unadvertised: Vec<String> = Vec::new();
     // Approvals are an explicit agent action, not a policy side effect. Every
     // roster agent gets this intrinsic tool regardless of external grants.
     tools.push(Box::new(
@@ -503,10 +515,18 @@ pub fn build_agent_with_model(
     // node through `park_gated_calls`. There is no belt on which the question
     // would stage into a queue nothing empties — the `media` failure mode the
     // publish gate below guards against.
+    let agent_label = manifest_agent
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(manifest_agent.role.trim())
+        .to_string();
     tools.push(Box::new(
         crate::harness::built_in::blockers::EscalateToHumanTool::new(
             deps.approval_requests.clone(),
             manifest_agent.id.clone(),
+            agent_label,
         ),
     ));
 
@@ -941,6 +961,7 @@ pub fn build_agent_with_model(
     // Every agent, granted tools or not: an `@` is something any of them can
     // write, and what it does is not guessable from the fact that it renders.
     persona.push_str(MENTION_BRIEF);
+    persona.push_str(READER_BRIEF);
 
     // How this company talks, when it talks by calling a tool.
     //
@@ -1214,6 +1235,22 @@ pub fn build_agent_with_model(
     // `orchestrator_tools` above, and wiring a second, scoped copy beside its
     // unrestricted one would put two tools with the same name on one belt.
     else {
+        // **Kept on the belt, withheld from the model.**
+        //
+        // `ask` replaced these for a teammate, and they were never honestly
+        // available to one: a hive seat has them stripped per turn
+        // (`EPISODE_WITHHELD_TOOLS`), because the queue they fill is drained
+        // by a brain that does not run inside an episode — while the prompt
+        // went on naming them. Observed live: a copywriter read "Never tell
+        // anyone a teammate is out of reach — you can, with
+        // `delegate_to_teammate`" on a turn where the tool was not on its
+        // belt, and answered by broadcasting a hand-off that transferred
+        // nothing to a teammate that never ran.
+        //
+        // The orchestrator and workflow nodes are untouched: they delegate by
+        // design, and this is the member branch.
+        unadvertised.push(crate::runtime::delegation_tools::DELEGATE_TO_DESK_TOOL.to_owned());
+        unadvertised.push(crate::runtime::delegation_tools::DELEGATE_TO_TEAMMATE_TOOL.to_owned());
         persona.push_str(&orchestrator::member_delegation_brief());
         tools.extend(orchestrator::member_delegation_tools(
             &deps.delegations,
@@ -1311,6 +1348,7 @@ pub fn build_agent_with_model(
         system_prompt: persona,
         tools,
         native_tool_names,
+        unadvertised,
         #[cfg(feature = "mcp")]
         company_mcp_servers,
         chat_model,
@@ -1339,6 +1377,19 @@ pub struct AgentBlueprint {
     pub tools: Vec<Box<dyn Tool>>,
     /// The belt's OpenHuman-native tool names — the spec's `ToolScopeSpec`.
     pub native_tool_names: Vec<String>,
+    /// Belt tools this agent keeps but is **not** offered.
+    ///
+    /// `ToolScopeSpec::Named` is the advertisement, so a name left off it is
+    /// dropped before the model sees it — the tool, its queue and its drain
+    /// are untouched, and any caller that still reaches for one works as
+    /// before.
+    ///
+    /// Carried per agent rather than as a constant because the answer is not
+    /// the same for everyone: the orchestrator and a workflow agent node
+    /// delegate as a matter of design, and a workflow run that could not hand
+    /// work on would lose the notice that says so
+    /// (`an_ungrounded_hand_off_surfaces_on_the_runs_own_notices`).
+    pub unadvertised: Vec<String>,
     /// This agent's own granted MCP servers (issue: company servers were
     /// unreachable once the native-dispatch builder was removed — see
     /// `embed_servers_for_agent`'s doc comment), attached directly to the
@@ -1354,7 +1405,11 @@ pub struct AgentBlueprint {
     /// The agent's own workspace directory (file tools sandbox / turn cwd).
     pub workspace: PathBuf,
     /// The approval policy the (Phase 3) tool handler decides under.
-    pub policy: ApprovalPolicy,
+    /// Shared, because both consumers need their own handle: the MCP server
+    /// admits speech calls against it, and it rides the native belt as that
+    /// belt's gate (`agent_spec_for`). A `Box` here would force one of them
+    /// to go without.
+    pub policy: Arc<ApprovalPolicy>,
     /// The definition name the agent runs under — its manifest id, or
     /// `integrations_agent` when Composio toolkits are wired.
     pub definition_name: String,
@@ -1432,6 +1487,49 @@ pub fn native_tool_names(tools: &[Box<dyn Tool>]) -> Vec<String> {
         .collect()
 }
 
+/// One teammate as a custom agent definition, for whichever hosted authority
+/// is about to resolve it.
+///
+/// Every turn OpenHuman runs is a *hosted root invocation*: before composing
+/// a message it resolves the agent's id against the host catalogue and
+/// refuses the turn when the id is not there. This entry is how a teammate
+/// declares itself, and both of this crate's agent shapes need one -- the
+/// pooled [`AgentSpec`] agent, which carries the entry on the config the
+/// embedded runtime threads through, and the
+/// [`episode_seat`](episode_seat) session host, which projects it to an
+/// `AgentDefinition` the session carries itself. One constructor so the two
+/// cannot describe the same teammate differently.
+///
+/// `tools` is the authority, not a hint: the resolved definition's tool list
+/// becomes the turn's allow-list, intersected with the belt the agent was
+/// actually built with. Naming nothing denies everything rather than
+/// allowing everything -- the hosted allow-list is fail-closed -- so this
+/// always takes the whole belt.
+#[cfg(feature = "openhuman")]
+fn registry_entry(
+    runtime_id: &str,
+    definition_name: &str,
+    system_prompt: &str,
+    tools: Vec<String>,
+) -> oh::agent::registry::AgentRegistryEntry {
+    oh::agent::registry::AgentRegistryEntry {
+        id: runtime_id.to_string(),
+        name: definition_name.to_string(),
+        description: format!("OpenCompany agent {definition_name}"),
+        source: oh::agent::registry::AgentRegistrySource::Custom,
+        enabled: true,
+        // The blueprint's own model is already on the session or the spec;
+        // a pin here would be a second opinion about the same turn.
+        model: None,
+        system_prompt: Some(system_prompt.to_string()),
+        tool_allowlist: tools,
+        tool_denylist: Vec::new(),
+        subagents: oh::agent::registry::types::AgentSubagentPolicy::default(),
+        tags: Vec::new(),
+        metadata: serde_json::Value::Null,
+    }
+}
+
 /// Renders a blueprint into the [`AgentSpec`] the runtime instantiates.
 ///
 /// * `runtime_id` is [`runtime_agent_id`](crate::session_key::runtime_agent_id);
@@ -1461,15 +1559,65 @@ pub fn agent_spec_for(
     runtime_id: &str,
     provider: openhuman_embed::Provider,
     mcp: Option<&McpAttach>,
+    belt: Option<&Arc<Vec<Arc<dyn Tool>>>>,
+    gate: Option<&Arc<crate::harness::policy::ApprovalPolicy>>,
+    seating: Option<&crate::hive::seating::EpisodeBelts>,
 ) -> AgentSpec {
-    // Plan hive-desks Phase 3: this crate's own tools reach the agent over
-    // the `opencompany` MCP server, which the model calls through OpenHuman's
-    // bridge tools — so those two join the native scope whenever the server
-    // is attached, and the prompt says where the belt went. Without an
-    // attachment (no listener yet: a roster built by a test that never
-    // dispatches) the spec is exactly the Phase 2 one.
+    // **This crate's own tools are native.**
+    //
+    // They used to reach the model only over the `opencompany` MCP server,
+    // because an `AgentSpec` had no seam for a host's own `dyn Tool` and MCP
+    // was the one road a spec offered. The model paid for that road: a
+    // discovery call to learn the catalogue, and an `mcp_call_tool` envelope
+    // whose inner `arguments` object carries no schema a provider can validate
+    // or constrain decoding against. Observed live, a teammate asked to
+    // convene a room spent three calls guessing argument names before it got
+    // one right, then a fourth on `mcp_list_tools` to read the schema it
+    // should have been handed.
+    //
+    // `AgentSpec::tools` takes them directly now: own schema on the wire, own
+    // name, validated arguments. The belt is shared and this factory mints
+    // owned handles onto it per turn (`hive::shared_tool`), so nothing is
+    // rebuilt.
+    //
+    // The MCP attachment stays for what MCP is actually for — the speech tools
+    // an episode seat answers with, and any server an operator connected to
+    // this company. A company with neither carries no bridge tools at all.
     let mut tool_names = blueprint.native_tool_names.clone();
     let mut system_prompt = blueprint.system_prompt.clone();
+    if let Some(belt) = belt {
+        for tool in belt.iter() {
+            let name = tool.name().to_string();
+            if blueprint.unadvertised.contains(&name) {
+                continue;
+            }
+            if !tool_names.contains(&name) {
+                tool_names.push(name);
+            }
+        }
+    }
+    // **The scope has to allow what a seated turn may carry.**
+    //
+    // `ToolScopeSpec::Named` is fixed when the agent is registered; the
+    // episode's belt arrives per turn. A name the scope does not list is
+    // dropped before the model sees it, so a seat was offered its teammate's
+    // belt and told to reach the room over MCP -- the envelope this work
+    // exists to remove, still there because the scope had never heard of
+    // `desk_complete_episode`.
+    //
+    // Listing them here costs nothing on an ordinary turn: the belt factory
+    // decides whether the tools exist at all, and the episode's own admission
+    // gates them when they do. The scope only stops being a reason they
+    // cannot.
+    for speech in crate::hive::tools::served_speech_tool_names()
+        .into_iter()
+        .chain([crate::hive::takeover::TAKE_OVER_TOOL])
+    {
+        let prefixed = format!("{}{speech}", crate::hive::host::TOOL_PREFIX);
+        if !tool_names.contains(&prefixed) {
+            tool_names.push(prefixed);
+        }
+    }
     if let Some(mcp) = mcp {
         for bridge in ["mcp_list_tools", "mcp_call_tool"] {
             if !tool_names.iter().any(|name| name == bridge) {
@@ -1478,20 +1626,12 @@ pub fn agent_spec_for(
         }
         system_prompt.push_str(&opencompany_mcp_brief(&mcp.allow_tools));
     }
-    let entry = oh::agent::registry::AgentRegistryEntry {
-        id: runtime_id.to_string(),
-        name: blueprint.definition_name.clone(),
-        description: format!("OpenCompany agent {}", blueprint.definition_name),
-        source: oh::agent::registry::AgentRegistrySource::Custom,
-        enabled: true,
-        model: None,
-        system_prompt: Some(system_prompt.clone()),
-        tool_allowlist: tool_names.clone(),
-        tool_denylist: Vec::new(),
-        subagents: oh::agent::registry::types::AgentSubagentPolicy::default(),
-        tags: Vec::new(),
-        metadata: serde_json::Value::Null,
-    };
+    let entry = registry_entry(
+        runtime_id,
+        &blueprint.definition_name,
+        &system_prompt,
+        tool_names.clone(),
+    );
     let mut spec = AgentSpec::new(runtime_id)
         .definition(
             AgentDefinitionSpec::new()
@@ -1502,6 +1642,133 @@ pub fn agent_spec_for(
         )
         .provider(provider)
         .access(Access::full());
+    if let Some(belt) = belt {
+        let belt = Arc::clone(belt);
+        // **The gate travels with the belt.**
+        //
+        // While these tools were served over MCP, every call went through
+        // `McpAgent::serve_call`, which checked the company's `ApprovalPolicy`
+        // before dispatching. A native tool runs inside OpenHuman's own loop
+        // and never reaches that handler, so a belt handed over without its
+        // gate is a belt with no approval on it at all — the manifest
+        // `[policy]`, the per-agent budget and the HITL parks all silently
+        // stop applying.
+        let gate = gate.map(Arc::clone);
+        let seating = seating.cloned().unwrap_or_default();
+        // Withheld from the model but kept on the belt. `ToolScopeSpec::Named`
+        // is not enough on its own: a per-turn belt carries its own `visible`
+        // set, and `HostTurnTools::advertised` fills that with *every* name it
+        // holds — so a name dropped from the registration scope is advertised
+        // again the moment the factory runs. Observed live: a member's pooled
+        // turn was still offered both delegate verbs.
+        let unadvertised = blueprint.unadvertised.clone();
+        spec = spec.tools(move |turn| {
+            let mut tools = crate::hive::shared_tool::owned_belt(&belt);
+            // **A seated turn carries the episode's tools too.**
+            //
+            // The belt is composed per turn and the turn says which
+            // conversation it is for, so an episode that lent this teammate a
+            // belt gets it back here -- on the turns it runs as a seat, and
+            // on no others. That is what lets one teammate answer its
+            // operator and sit in a room without being two agents.
+            let seated = seating.lent_to(turn.session_id());
+            let Some(loan) = seated else {
+                let visible: std::collections::HashSet<String> = tools
+                    .iter()
+                    .map(|tool| tool.name().to_owned())
+                    .filter(|name| !unadvertised.contains(name))
+                    .collect();
+                let belt = openhuman_embed::HostTurnTools {
+                    tools,
+                    visible,
+                    policy: None,
+                };
+                return match &gate {
+                    Some(gate) => belt.with_policy(
+                        Arc::clone(gate) as Arc<dyn oh::agent::tool_policy::ToolPolicy>
+                    ),
+                    None => belt,
+                };
+            };
+            // **What a seat still may not reach.**
+            //
+            // These queue work for the `HarnessBrain` to drain, and no brain
+            // drains inside an episode. The persona has their prose cut to
+            // match (`seat_persona`), so the seat is neither told about them
+            // nor handed them -- which is the only honest pairing until the
+            // queues drain on a seated turn. Then both go.
+            tools.retain(|tool| {
+                !crate::harness::built_in::EPISODE_WITHHELD_TOOLS.contains(&tool.name())
+            });
+            let episode = loan.source.belt();
+            // **`broadcast` is withheld in an operator's direct line.**
+            //
+            // There is no room to broadcast to: the roster is bound so `ask`
+            // has targets, not so a message can be addressed to it. See
+            // `seating::broadcast_withheld_in` for what two live runs cost.
+            let withheld = crate::hive::seating::broadcast_withheld_in(
+                loan.dm,
+                crate::hive::host::TOOL_PREFIX,
+            );
+            let kept = |name: &str| withheld.as_deref() != Some(name);
+            let mut visible: std::collections::HashSet<String> =
+                tools.iter().map(|tool| tool.name().to_owned()).collect();
+            visible.extend(episode.names().iter().filter(|name| kept(name)).cloned());
+            let mut episode_tools = episode.tools;
+            episode_tools.retain(|tool| kept(tool.name()));
+            tools.append(&mut episode_tools);
+            // **A guest seat can claim the work instead of answering it.**
+            //
+            // `take_over` wraps the room's own `complete_episode`, so the
+            // conversation that asked still concludes -- which is the only
+            // thing that releases the asker -- and the operator is told in
+            // this teammate's own line. `None` for every seat the episode
+            // lent no takeover: a desk seat, and the teammate whose DM it is.
+            if let Some(takeover) =
+                crate::hive::takeover::tool_for(&loan, crate::hive::host::TOOL_PREFIX)
+            {
+                tracing::debug!(
+                    tool = %takeover.name(),
+                    "[hive] a guest seat was offered the takeover verb"
+                );
+                visible.insert(takeover.name().to_owned());
+                tools.push(takeover);
+            } else if loan.takeover.is_some() {
+                // **A guest that got no verb, said out loud.**
+                //
+                // `tool_for` answers `None` two ways and only one is ordinary:
+                // no takeover on the loan (a desk seat, or the teammate whose
+                // DM it is). The other is a loan that HAS one whose
+                // `complete_episode` could not be lifted off a spare belt --
+                // a renamed tool, a changed prefix, an episode that served a
+                // narrower set. That path withholds the verb silently, and the
+                // seat then does what a live run showed it do: agree in words
+                // to own the work, reach for `complete_episode`, and leave the
+                // operator's own line empty.
+                tracing::warn!(
+                    prefix = crate::hive::host::TOOL_PREFIX,
+                    "[hive] a guest seat was lent a takeover but got no verb: `complete_episode` was \
+                     not on its belt to wrap"
+                );
+            }
+            // **The gate is the episode's, over this company's.**
+            //
+            // `with_policy` *replaces* the session's policy rather than
+            // sitting in front of it, so composition is ours to do:
+            // `admit` answers for the episode's own names and defers every
+            // other call to the company gate. Passing `None` would deny the
+            // teammate every tool it otherwise has.
+            let admit = loan.source.belt().admit(
+                gate.as_ref()
+                    .map(|gate| Arc::clone(gate) as Arc<dyn oh::agent::tool_policy::ToolPolicy>),
+            );
+            openhuman_embed::HostTurnTools {
+                tools,
+                visible,
+                policy: Some(admit),
+            }
+        });
+    }
     if let Some(mcp) = mcp {
         spec = attach_opencompany_mcp(spec, mcp);
     }
@@ -1532,6 +1799,29 @@ pub fn agent_spec_for(
             .entries
             .retain(|existing| existing.id != entry.id);
         config.agent_registry.entries.push(entry);
+        // Pin the pooled turn to provider-native tool calls.
+        //
+        // A pooled turn's dialect comes from `agent.tool_dispatcher`
+        // (`resolve_dispatcher_kind`, reached via `agent_chat_for` ->
+        // `from_config_with_definition`), and OpenHuman's schema default for
+        // that field is `"python"` — which resolves to
+        // `DispatcherKind::Code(CodeStyle::Python)` *before* the native-support
+        // arm is consulted, so an explicit choice wins over a model that can do
+        // native calling perfectly well. `CodeDialect::should_send_tool_specs()`
+        // is `false`, so the model is handed the catalogue as prose in the
+        // system prompt and asked to write Python, and never sees a structured
+        // tool spec at all.
+        //
+        // That is the wrong protocol for this crate: every OpenCompany tool
+        // reaches a pooled teammate over the `opencompany` MCP server as
+        // `mcp_call_tool` with a JSON `arguments` object, which is a structured
+        // call described in prose. Models answer it with whatever markup they
+        // favour, and `native_salvage` exists to parse the result back out.
+        //
+        // `episode_seat` already pins `NativeDialect` explicitly, so the two
+        // agent shapes disagreed about the tool protocol for no reason. Pin the
+        // pooled path to the same one.
+        config.agent.tool_dispatcher = "native".into();
     })
 }
 
@@ -1553,6 +1843,53 @@ fn opencompany_mcp_brief(tools: &[String]) -> String {
     brief.push_str(&tools.join(", "));
     brief.push('\n');
     brief
+}
+
+/// `blueprint.system_prompt` rendered the way OpenHuman renders an agent's standing
+/// prompt: the body, then the shared grounding contract and the writing-style
+/// block read from `blueprint.workspace`.
+///
+/// A seat's every turn is seeded, and a seeded session is never cold, so the
+/// runtime composes no prompt of its own for it. The text returned here is
+/// the only system prompt such a turn carries.
+///
+/// # Errors
+///
+/// A prompt section failing to render.
+#[cfg(feature = "openhuman")]
+pub fn rendered_seat_persona(blueprint: &AgentBlueprint) -> crate::Result<String> {
+    let tools = Vec::new();
+    let visible = std::collections::HashSet::new();
+    let context = oh::agent::prompts::PromptContext {
+        workspace_dir: &blueprint.workspace,
+        model_name: &blueprint.model,
+        agent_id: &blueprint.definition_name,
+        tools: &tools,
+        workflows: &[],
+        dispatcher_instructions: "",
+        learned: oh::agent::prompts::LearnedContextData::default(),
+        visible_tool_names: &visible,
+        tool_call_format: oh::agent::prompts::ToolCallFormat::Native,
+        connected_integrations: &[],
+        connected_identities_md: String::new(),
+        include_profile: false,
+        include_memory_md: false,
+        curated_snapshot: None,
+        user_identity: None,
+        personality_roster: Vec::new(),
+        agents_md_global: None,
+        agents_md_local: None,
+    };
+    let rendered =
+        oh::agent::prompts::SystemPromptBuilder::from_final_body(blueprint.system_prompt.clone())
+            .build(&context)
+            .map_err(|error| crate::error::OpenCompanyError::Harness(error.to_string()))?;
+    tracing::debug!(
+        agent = %blueprint.definition_name,
+        bytes = rendered.len(),
+        "[harness] rendered seat persona"
+    );
+    Ok(rendered)
 }
 
 /// The catalogue brief again, on a turn's text, for a session whose pinned
@@ -1610,7 +1947,7 @@ pub fn build_agent(
     company: &CompanyId,
     company_name: &str,
     manifest_agent: &ManifestAgent,
-    policy: ApprovalPolicy,
+    policy: Arc<ApprovalPolicy>,
     deps: &HarnessDeps,
     grants: &[String],
     skill_deltas: &[SkillState],

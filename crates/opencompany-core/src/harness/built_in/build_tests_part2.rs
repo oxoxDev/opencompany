@@ -427,7 +427,7 @@ fn every_built_agent_states_a_raised_tool_iteration_cap() {
         &CompanyId::new("acme"),
         "Acme",
         &manifest_agent,
-        ApprovalPolicy::new(&Policy::default(), None),
+        std::sync::Arc::new(ApprovalPolicy::new(&Policy::default(), None)),
         &deps,
         &[],
         &[],

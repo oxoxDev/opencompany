@@ -40,118 +40,85 @@ fn extractor(behaviour: Behaviour) -> PayloadExtractor {
     }
 }
 
-async fn run(behaviour: Behaviour, hint: Option<&str>, raw: &str) -> SummarizeOutcome {
+/// Drives one prepared call the way TinyJuice does: build it, then hand it the
+/// request TinyJuice would have written.
+///
+/// The prompt is TinyJuice's now, so `raw` arrives as `GenerateRequest::prompt`
+/// rather than as a payload this crate frames itself.
+async fn run(behaviour: Behaviour, raw: &str) -> anyhow::Result<String> {
     let ctx = tinyagents_harness::context::RunContext::new(
         tinyagents_harness::context::RunConfig::new("payload-extract-test"),
         oh::agent::tinyagents::host::run_context::OpenHumanRunContext::default(),
     );
-    extractor(behaviour)
-        .maybe_summarize_in_parent(&ctx, "GITHUB_LIST_ISSUES", hint, raw)
-        .await
-        .expect("the extractor degrades, it never errors")
+    let call = extractor(behaviour)
+        .prepare(&ctx)
+        .expect("preparing binds handles and cannot fail here");
+    call(GenerateRequest {
+        context_token: "test".to_string(),
+        purpose: "tool_result".to_string(),
+        system: "Summarise the payload.".to_string(),
+        prompt: raw.to_string(),
+        max_output_tokens: 512,
+    })
+    .await
 }
 
 fn big() -> String {
-    // Over `PASS_THROUGH_BYTES`, or the size gate short-circuits to
-    // `NotNeeded` and none of the branches below is reached — which is
-    // exactly what happened when that gate was added: five tests here
-    // began passing through instead of exercising the paths they name.
-    let payload = format!(
+    // No size gate here any more: TinyJuice decides *whether* to summarise and
+    // only then asks. What these cases are about is what this host does once
+    // it has been asked.
+    format!(
         "[{}]",
         vec![r#"{"number":1,"title":"a flaky test"}"#; 2_000].join(",")
-    );
-    assert!(
-        payload.len() > PASS_THROUGH_BYTES,
-        "the fixture must clear the pass-through gate"
-    );
-    payload
+    )
 }
 
-/// Without a hint the extraction has nothing to select against and would be
-/// guessing as blindly as the byte cut it replaces, so it declines.
-#[tokio::test]
-async fn no_task_hint_declines_rather_than_guessing() {
-    let outcome = run(Behaviour::Reply("30 issues"), None, &big()).await;
-    assert!(matches!(
-        outcome,
-        SummarizeOutcome::Unavailable(UnavailableReason::Disabled)
-    ));
-}
-
-/// A provider failure must leave the turn holding the raw payload, not fail
-/// the turn: extraction is an improvement on truncation, never a dependency.
+/// A provider failure must leave the caller holding the raw payload, which
+/// downstream truncation still bounds. It must never take the turn down: the
+/// result is large, not broken.
 #[tokio::test]
 async fn a_provider_error_leaves_the_raw_payload_standing() {
-    let outcome = run(Behaviour::Fail, Some("list the issues"), &big()).await;
-    assert!(matches!(
-        outcome,
-        SummarizeOutcome::Unavailable(UnavailableReason::Failed)
-    ));
+    let error = run(Behaviour::Fail, &big())
+        .await
+        .expect_err("a failed call is an error, not a summary");
+    assert!(
+        format!("{error}").contains("payload summary failed"),
+        "{error}"
+    );
 }
 
-/// The deadline is the point: a slow extraction is worse than none, because
-/// the turn is already at its cap when this runs.
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn a_hanging_provider_times_out_rather_than_stalling_the_turn() {
-    let outcome = run(Behaviour::Hang, Some("list the issues"), &big()).await;
-    assert!(matches!(
-        outcome,
-        SummarizeOutcome::Unavailable(UnavailableReason::Failed)
-    ));
+    let error = run(Behaviour::Hang, &big())
+        .await
+        .expect_err("a hung call is an error, not a summary");
+    assert!(format!("{error}").contains("timed out"), "{error}");
 }
 
-/// An empty answer is a failed extraction, not an empty tool result — the
-/// difference decides whether the model sees the payload at all.
+/// Empty is a failure, not a summary: substituting it would replace the tool's
+/// output with nothing at all.
 #[tokio::test]
 async fn an_empty_answer_is_treated_as_a_failure() {
-    let outcome = run(Behaviour::Reply("   \n  "), Some("list the issues"), &big()).await;
-    assert!(matches!(
-        outcome,
-        SummarizeOutcome::Unavailable(UnavailableReason::Failed)
-    ));
+    let error = run(Behaviour::Reply("   \n  "), &big())
+        .await
+        .expect_err("blank is not an answer");
+    assert!(format!("{error}").contains("returned nothing"), "{error}");
 }
 
-/// A "summary" at least as long as the payload has extracted nothing, and
-/// substituting it would spend a model call to make the result no smaller.
+/// The path that matters: a working model, and its answer carried back.
 #[tokio::test]
-async fn a_summary_that_does_not_shrink_is_not_used() {
-    let raw = r#"[{"number":1}]"#;
-    let outcome = run(
-        Behaviour::Reply("this reply is considerably longer than the payload it summarises"),
-        Some("list the issues"),
-        raw,
-    )
-    .await;
-    assert!(matches!(outcome, SummarizeOutcome::NotNeeded));
+async fn the_models_answer_is_what_is_returned() {
+    let summary = run(Behaviour::Reply("400 issues; #1 a flaky test"), &big())
+        .await
+        .expect("a summary");
+    assert!(summary.contains("400 issues"), "{summary}");
 }
 
-/// The path that matters: a hint, a working model, and an answer shorter
-/// than what it replaces.
-#[tokio::test]
-async fn a_shorter_answer_is_returned_as_the_summary() {
-    let outcome = run(
-        Behaviour::Reply("400 issues; #1 a flaky test"),
-        Some("list the issues"),
-        &big(),
-    )
-    .await;
-    match outcome {
-        SummarizeOutcome::Summarized(summary) => {
-            assert!(
-                summary.summary.contains("400 issues"),
-                "the model's answer must be what is carried: {}",
-                summary.summary
-            );
-        }
-        other => panic!("expected a summary, got {other:?}"),
-    }
-}
-
-/// A summary built from a prefix must say so. The summary *replaces* the
-/// tool output, so without this the turn holds a confident account of a
-/// payload the model only partly read — an incomplete list presented as a
-/// complete one, which is the failure this extractor exists to end (codex
-/// on tinyhumansai/opencompany#2153).
+/// A summary built from a prefix must say so. The summary *replaces* the tool
+/// output, so without this the turn holds a confident account of a payload the
+/// model only partly read — an incomplete list presented as a complete one,
+/// which is the failure this exists to end (codex on
+/// tinyhumansai/opencompany#2153).
 #[tokio::test]
 async fn a_summary_from_a_truncated_payload_discloses_the_cut() {
     let huge = format!("[{}]", vec![r#"{"n":1}"#; 60_000].join(","));
@@ -159,48 +126,30 @@ async fn a_summary_from_a_truncated_payload_discloses_the_cut() {
         huge.len() > MAX_EXTRACT_INPUT_CHARS,
         "the fixture must exceed the ceiling or nothing is cut"
     );
-    let outcome = run(
-        Behaviour::Reply("60000 records"),
-        Some("list the records"),
-        &huge,
-    )
-    .await;
-
-    match outcome {
-        SummarizeOutcome::Summarized(summary) => {
-            assert!(
-                summary.summary.contains("later records were not examined"),
-                "the cut must be disclosed: {}",
-                summary.summary
-            );
-            assert!(
-                summary.summary.contains("full output is on disk"),
-                "the recovery route must be named: {}",
-                summary.summary
-            );
-            assert!(
-                summary.summary.contains("60000 records"),
-                "the model's answer is still carried: {}",
-                summary.summary
-            );
-        }
-        other => panic!("expected a summary, got {other:?}"),
-    }
+    let summary = run(Behaviour::Reply("60000 records"), &huge)
+        .await
+        .expect("a summary");
+    assert!(
+        summary.contains("later records were not examined"),
+        "the cut must be disclosed: {summary}"
+    );
+    assert!(
+        summary.contains("full output is on disk"),
+        "the recovery route must be named: {summary}"
+    );
+    assert!(summary.contains("60000 records"), "{summary}");
 
     // A payload under the ceiling carries no such notice.
     let small = run(
         Behaviour::Reply("two records"),
-        Some("list the records"),
         &format!("[{}]", vec![r#"{"n":1}"#; 400].join(",")),
     )
-    .await;
-    if let SummarizeOutcome::Summarized(summary) = small {
-        assert!(
-            !summary.summary.contains("not examined"),
-            "nothing was cut, so nothing is disclosed: {}",
-            summary.summary
-        );
-    }
+    .await
+    .expect("a summary");
+    assert!(
+        !small.contains("not examined"),
+        "nothing was cut, so nothing is disclosed: {small}"
+    );
 }
 
 /// The input ceiling exists so a multi-megabyte payload is neither billed in
@@ -222,27 +171,5 @@ fn the_input_ceiling_cuts_on_a_character_boundary() {
     assert!(
         wide.starts_with(kept),
         "the cut keeps the head of the payload"
-    );
-}
-
-/// The archetype is referenced, not restated. A copy would drift from
-/// upstream the moment either side edited the extraction contract, and the
-/// first version of this file learned that the expensive way — a
-/// hand-written prompt that omitted the per-record identifier line produced
-/// thirty issue numbers with no titles.
-///
-/// This asserts the *clauses this crate depends on are present in what is
-/// sent*. It deliberately no longer compares `system_prompt()` with the
-/// constant it returns, which was `assert_eq!(X, X)` and could not fail
-/// (tinysweeper on tinyhumansai/opencompany#2153).
-#[test]
-fn the_prompt_carries_the_clauses_this_crate_relies_on() {
-    assert!(
-        system_prompt().contains("Identifiers preserved"),
-        "the per-record identifier section is what gives each kept record a line"
-    );
-    assert!(
-        system_prompt().contains("Never drop them"),
-        "identifiers are the archetype's first-order rule"
     );
 }

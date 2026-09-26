@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 import { ApprovalRow } from "./ApprovalRow";
 import { ChatLiveReceipt, type ChatReceipt } from "./ChatLiveReceipt";
 import { EpisodeCompleteMarker } from "./EpisodeCompleteMarker";
+import { EpisodeWaitingMarker } from "./EpisodeWaitingMarker";
 import { RoundBand } from "./RoundBand";
 import { MessageRow } from "./MessageRow";
 import { StepTimeline } from "./StepTimeline";
@@ -314,6 +315,11 @@ export function MessageTimeline({
     }
     if (item.kind === "episode_complete") {
       return <EpisodeCompleteMarker key={item.key} episode={item.episode} agentNames={agentNames} />;
+    }
+    if (item.kind === "episode_waiting") {
+      return (
+        <EpisodeWaitingMarker key={item.key} episode={item.episode} seats={item.seats} agentNames={agentNames} />
+      );
     }
     if (item.kind === "message") {
       return (

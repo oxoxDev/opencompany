@@ -389,12 +389,32 @@ function inlineFirstReplies(
     // So promotion stops at the boundary it was always about: a lone answer.
     // When the runtime spoke more than once, the whole turn stays folded and
     // the chip says so.
-    const runtimeReplies = bucket.filter(
-      (r) => (r.from === "company" && !r.byPerson) || r.from === "system",
-    );
+    //
+    // **A row that only carries outputs did not speak.**
+    //
+    // A seat that writes a file and then reports on it emits two rows: an
+    // empty `post` carrying the workspace link, and the write-up. Counting
+    // the first as a second utterance folds the second — so a live run wrote
+    // a campaign brief, asked six teammates, and showed the operator a chip
+    // instead of the answer, because the turn had "spoken twice".
+    //
+    // It had not. The host already draws this line on its own side, where
+    // `a_row_that_only_carries_outputs_is_not_shown_to_seats_as_speech`
+    // keeps such a row out of what the other seats read. This is the same
+    // judgement on the render side: the link still renders under whichever
+    // row it belongs to, it just stops being evidence that the runtime said
+    // more than one thing.
+    const runtime = (r: ChatMessage): boolean =>
+      (r.from === "company" && !r.byPerson) || r.from === "system";
+    const carrier = (r: ChatMessage): boolean =>
+      runtime(r) && r.text.trim().length === 0 && (r.outputs?.length ?? 0) > 0;
+    const runtimeReplies = bucket.filter((r) => runtime(r) && !carrier(r));
     if (runtimeReplies.length > 1) continue;
     const root = position.get(rootId);
-    const first = bucket[0];
+    // Skips the carriers, never anything else -- an operator's own follow-up
+    // is not one, so the guard below still sees it first when they wrote
+    // again before the agent answered.
+    const first = bucket.find((r) => !carrier(r));
     // **Only the runtime's own answer is ever promoted** (codex on #1972).
     //
     // `bucket[0]` is merely the earliest reply, and that is the *operator's*
@@ -432,7 +452,26 @@ function inlineFirstReplies(
         break;
       }
     }
-    if (!interleaved) inline.add(first.id);
+    if (!interleaved) {
+      inline.add(first.id);
+      // **The whole turn, or none of it — and only this turn.**
+      //
+      // Promotion is only safe because it empties the chip. Lifting the
+      // write-up and leaving its file links folded would put one turn's
+      // output on two surfaces — the exact split this rule refuses for a
+      // capped turn — and hand the reader a chip holding blank rows.
+      //
+      // Bounded at the operator's next line, because every child of the root
+      // is in this bucket, not just this turn's. `[root, answer, follow-up,
+      // laterCarrier]` passes every test above — the answer is the first
+      // non-carrier and nothing interleaves it with the root — and promoting
+      // every carrier would lift a file link belonging to a later exchange
+      // into the channel, out of the thread the operator deliberately opened.
+      for (const row of bucket) {
+        if (row.from === "you") break;
+        if (carrier(row)) inline.add(row.id);
+      }
+    }
   }
   return inline;
 }
@@ -642,7 +681,61 @@ export type TimelineItem =
       key: string;
       at: number;
       episode: Episode;
+    }
+  | {
+      /** The seats of an open episode parked on an operator decision, after its last row. */
+      kind: "episode_waiting";
+      key: string;
+      at: number;
+      episode: Episode;
+      seats: WaitingSeat[];
     };
+
+/** A seat waiting on the operator, and the approvals it is waiting on. */
+export interface WaitingSeat {
+  agentId: string;
+  approvalIds: string[];
+}
+
+/** The episode an approval item was raised in, when a seat raised it. */
+function approvalEpisodeId(item: Extract<TimelineItem, { kind: "approval" }>): string | undefined {
+  const ids = new Set(item.approvals.map((approval) => approval.episode?.id));
+  if (ids.size !== 1) return undefined;
+  return [...ids][0];
+}
+
+/**
+ * The seats of `episode` still waiting on the operator.
+ *
+ * A seat the frames parked counts until it resumes, unless every approval it
+ * named has been decided here. A pending approval a seat raised counts on its
+ * own, which is what survives a reload that dropped the frames.
+ */
+export function waitingSeats(
+  episode: Episode,
+  approvals: ApprovalSummary[],
+  decided: Record<string, DecidedApproval> = {},
+): WaitingSeat[] {
+  if (episode.status === "completed") return [];
+  const seats = new Map<string, WaitingSeat>();
+  const add = (agentId: string, approvalIds: string[]) => {
+    const held = seats.get(agentId);
+    if (!held) {
+      seats.set(agentId, { agentId, approvalIds: [...approvalIds] });
+      return;
+    }
+    for (const id of approvalIds) if (!held.approvalIds.includes(id)) held.approvalIds.push(id);
+  };
+  for (const seat of episode.waiting ?? []) {
+    const settled = seat.approvalIds.length > 0 && seat.approvalIds.every((id) => decided[id]);
+    if (!settled) add(seat.agentId, seat.approvalIds.filter((id) => !decided[id]));
+  }
+  for (const approval of approvals) {
+    if (approval.episode?.id !== episode.id || decided[approval.id]) continue;
+    add(approval.episode.seat, [approval.id]);
+  }
+  return [...seats.values()];
+}
 
 /**
  * Interleave a channel's messages and the approvals raised in it, oldest first.
@@ -751,7 +844,45 @@ export function buildTimelineItems(
   // renders. `sort` is stable in every engine this ships to, so equal `at`
   // keeps insertion order — messages first, then cards.
   const ordered = items.sort((a, b) => a.at - b.at);
-  return episodes.length === 0 ? ordered : groupEpisodes(ordered, episodes);
+  const all = [...episodes, ...parkedOnlyEpisodes(episodes, approvals, decided)];
+  return all.length === 0 ? ordered : groupEpisodes(ordered, all, decided);
+}
+
+/**
+ * An open episode for each seat approval whose episode the rows and frames do
+ * not know, so a seat parked before any reply still gets its band and waiting
+ * marker after a reload.
+ */
+function parkedOnlyEpisodes(
+  episodes: Episode[],
+  approvals: ApprovalSummary[],
+  decided: Record<string, DecidedApproval>,
+): Episode[] {
+  const known = new Set(episodes.map((episode) => episode.id));
+  const minted = new Map<string, Episode>();
+  for (const approval of approvals) {
+    const ref = approval.episode;
+    if (!ref || known.has(ref.id) || decided[approval.id]) continue;
+    let episode = minted.get(ref.id);
+    if (!episode) {
+      episode = {
+        id: ref.id,
+        participants: [],
+        status: "open",
+        rounds: [{ episodeId: ref.id, revision: 0, status: "open", seats: [], messageIds: [] }],
+        messageIds: [],
+        openedAt: approval.at_millis,
+        roundCount: 1,
+        referrals: [],
+        conversations: [],
+        live: false,
+      };
+      minted.set(ref.id, episode);
+    }
+    if (!episode.participants.includes(ref.seat)) episode.participants.push(ref.seat);
+    episode.openedAt = Math.min(episode.openedAt ?? approval.at_millis, approval.at_millis);
+  }
+  return [...minted.values()];
 }
 
 /**
@@ -764,24 +895,49 @@ export function buildTimelineItems(
  * its last round. Rows an episode claims that are not in this window (history
  * that has not loaded) are simply absent: the band renders what it has.
  *
- * Approvals raised mid-round stay in the channel at their own time, beside the
- * band rather than inside it: a card is a question to the operator, not a
- * seat's utterance.
+ * An approval a seat of the episode raised sits inside its band, since the
+ * episode is waiting on it; any other approval stays in the channel at its own
+ * time. An open episode with a seat waiting on the operator gets a waiting
+ * marker after its last row.
  */
-function groupEpisodes(items: TimelineItem[], episodes: Episode[]): TimelineItem[] {
+function groupEpisodes(
+  items: TimelineItem[],
+  episodes: Episode[],
+  decided: Record<string, DecidedApproval>,
+): TimelineItem[] {
   const owner = new Map<string, { episode: Episode; round: EpisodeRound }>();
+  const latest = new Map<string, { episode: Episode; round: EpisodeRound }>();
   for (const episode of episodes) {
     for (const round of episode.rounds) {
       for (const id of round.messageIds) owner.set(id, { episode, round });
     }
+    const round = episode.rounds[episode.rounds.length - 1];
+    if (round) latest.set(episode.id, { episode, round });
   }
+  const approvals: ApprovalSummary[] = [];
+  for (const item of items) if (item.kind === "approval") approvals.push(...item.approvals);
 
   const out: TimelineItem[] = [];
   const blocks = new Map<string, Extract<TimelineItem, { kind: "round" }>>();
-  const blockKey = (round: EpisodeRound) => `round:${round.episodeId}:${round.revision}`;
+  /**
+   * One band per **episode**, not per revision.
+   *
+   * It used to key on the revision too, so every wave opened another band and
+   * an episode that ran nine of them stacked nine. They also carried the raw
+   * revision number, which is not a count: conversation waves take revisions
+   * of their own, so a desk that ran nine rounds showed a band labelled
+   * "Round 17". One band holding every row is what an episode actually is.
+   */
+  const blockKey = (round: EpisodeRound) => `round:${round.episodeId}`;
 
   for (const item of items) {
-    const owned = item.kind === "message" ? owner.get(item.entry.message.id) : undefined;
+    const episodeId = item.kind === "approval" ? approvalEpisodeId(item) : undefined;
+    const owned =
+      item.kind === "message"
+        ? owner.get(item.entry.message.id)
+        : episodeId
+          ? latest.get(episodeId)
+          : undefined;
     if (!owned) {
       out.push(item);
       continue;
@@ -800,6 +956,9 @@ function groupEpisodes(items: TimelineItem[], episodes: Episode[]): TimelineItem
       blocks.set(key, block);
       out.push(block);
     }
+    // The live state is the newest wave's, so a band that outlives several
+    // shows the seats working now rather than the ones that finished first.
+    if (owned.round.revision >= block.round.revision) block.round = owned.round;
     block.items.push(item);
   }
 
@@ -812,6 +971,11 @@ function groupEpisodes(items: TimelineItem[], episodes: Episode[]): TimelineItem
       const held = blocks.get(blockKey(round));
       if (held) {
         last = Math.max(last, ...held.items.map((row) => row.at));
+        // A wave that has opened but committed nothing yet is still the live
+        // one, and it owns no rows to carry it in above — without this the
+        // band freezes on the last wave that spoke and shows seats as
+        // finished while they are working.
+        if (round.revision >= held.round.revision) held.round = round;
         continue;
       }
       const at = Math.max(round.startedAt ?? -Infinity, last === -Infinity ? -Infinity : last + 1);
@@ -827,6 +991,17 @@ function groupEpisodes(items: TimelineItem[], episodes: Episode[]): TimelineItem
       blocks.set(block.key, block);
       out.push(block);
       last = at;
+    }
+    const waiting = waitingSeats(episode, approvals, decided);
+    if (waiting.length > 0) {
+      const raised = approvals
+        .filter((approval) => approval.episode?.id === episode.id)
+        .map((approval) => approval.at_millis);
+      let at = Math.max(last, ...raised);
+      if (at === -Infinity) at = episode.openedAt ?? -Infinity;
+      if (at !== -Infinity) {
+        out.push({ kind: "episode_waiting", key: `episode_waiting:${episode.id}`, at, episode, seats: waiting });
+      }
     }
     if (episode.status === "completed") {
       const at = Math.max(episode.completedAt ?? -Infinity, last === -Infinity ? -Infinity : last + 1);

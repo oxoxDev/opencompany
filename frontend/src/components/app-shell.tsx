@@ -157,6 +157,7 @@ import { ReferralRunningProvider } from "@/views/room/referral-running";
 import { TeamView } from "@/views/TeamView";
 import { NotificationsView } from "@/views/NotificationsView";
 import { LedgersView, MANAGE_SEGMENT } from "@/views/LedgersView";
+import { ArtifactRoute } from "@/views/ArtifactRoute";
 import { TaskDetailRoute } from "@/views/TaskDetailRoute";
 import { InboxView } from "@/views/InboxView";
 import { FeedbackView } from "@/views/FeedbackView";
@@ -3775,6 +3776,12 @@ export function AppShell({
           {/* All that is left of the Tasks page: the card detail. `sub` is a
               real id by the time this renders — `REWRITE_RETIRED` sent every
               other `#/tasks…` address to the board in Ledgers. */}
+          {/* A published deliverable, addressed as itself. The chat row links
+              here rather than at the card `publish_artifact` minted to satisfy
+              the artifact store's `(task_id, source)` identity. */}
+          {view === "artifacts" && (
+            <ArtifactRoute client={client} company={company} artifactId={sub ?? ""} />
+          )}
           {view === "tasks" && (
             <TaskDetailRoute
               client={client}
@@ -3913,6 +3920,7 @@ export function AppShell({
               client={client}
               company={company}
               sub={sub}
+              agentNames={agentNames}
               onOpenAgent={(agentId, options) =>
                 agentId
                   ? // Issue #1989: `?edit` lands on the detail page with its

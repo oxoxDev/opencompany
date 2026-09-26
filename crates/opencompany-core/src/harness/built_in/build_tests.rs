@@ -130,6 +130,7 @@ fn pin_deps(root: std::path::PathBuf) -> HarnessDeps {
     let mcp_home = Some(root.join("mcp"));
     let audit_root = root;
     HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -163,6 +164,7 @@ fn pin_deps(root: std::path::PathBuf) -> HarnessDeps {
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: toolbelt::CapabilityFilter::AllowAll,
@@ -235,7 +237,7 @@ fn built_tool_names_delegating(
         &CompanyId::new("acme"),
         "Acme",
         &manifest_agent,
-        policy,
+        std::sync::Arc::new(policy),
         &deps,
         &grants,
         &[],
@@ -288,7 +290,7 @@ fn built_tool_names_with_search(grants: &[&str]) -> Vec<String> {
         &CompanyId::new("acme"),
         "Acme",
         &manifest_agent,
-        policy,
+        std::sync::Arc::new(policy),
         &deps,
         &grants,
         &[],
@@ -340,7 +342,7 @@ fn built_native_caps_with_search(grants: &[&str]) -> Vec<String> {
         &CompanyId::new("acme"),
         "Acme",
         &manifest_agent,
-        policy,
+        std::sync::Arc::new(policy),
         &deps,
         &grants,
         &[],
@@ -400,7 +402,7 @@ fn built_tool_names_with_byo_search(grants: &[&str], provider: &str) -> Vec<Stri
         &CompanyId::new("acme"),
         "Acme",
         &manifest_agent,
-        policy,
+        std::sync::Arc::new(policy),
         &deps,
         &grants,
         &[],
@@ -449,7 +451,7 @@ fn built_tool_names_with_workspace(grants: &[&str]) -> Vec<String> {
         &CompanyId::new("acme"),
         "Acme",
         &manifest_agent,
-        policy,
+        std::sync::Arc::new(policy),
         &deps,
         &grants,
         &[],
@@ -496,7 +498,7 @@ fn built_tool_names_with_artifacts(grants: &[&str]) -> Vec<String> {
         &CompanyId::new("acme"),
         "Acme",
         &manifest_agent,
-        policy,
+        std::sync::Arc::new(policy),
         &deps,
         &grants,
         &[],
@@ -532,6 +534,8 @@ fn git_log(workspace: &std::path::Path) -> String {
     .unwrap()
 }
 
+#[path = "build_seat_persona_tests.rs"]
+mod seat_persona_tests;
 #[path = "build_tests_part1.rs"]
 mod tests_part1;
 #[path = "build_tests_part2.rs"]

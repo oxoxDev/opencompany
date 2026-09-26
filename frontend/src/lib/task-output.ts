@@ -59,6 +59,24 @@ export function artifactHref(
 }
 
 /**
+ * `#/artifacts/<artifactId>?v=<n>` — a published deliverable on its own page.
+ *
+ * Distinct from [`artifactHref`] on purpose. That one opens the **card's**
+ * Artifacts tab, which is right where the card is the subject: the board's
+ * primary link, and a workflow run's file list, both of which are looking at a
+ * task and want its outputs in place.
+ *
+ * A chat row is not looking at a task. `publish_artifact` mints a card only
+ * because an `ArtifactRecord`'s identity is `(task_id, source)` and the store
+ * will not take an artifact without one (`ports/artifacts.rs`) — a storage
+ * requirement, not a piece of work. Sending the reader through it made them
+ * open a board item to read the thing the row was already offering.
+ */
+export function artifactPageHref(artifactId: string, version: number): string {
+  return `#/artifacts/${encodeURIComponent(artifactId)}?v=${version}`;
+}
+
+/**
  * `#/tasks/<id>?run=<runId>` — the task's Attempts tab, with that attempt's
  * trace open. This is what "no artifact" resolves to, which is why it is a
  * first-class address rather than a fallback with no URL.

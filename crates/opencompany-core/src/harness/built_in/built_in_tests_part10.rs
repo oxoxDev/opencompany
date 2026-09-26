@@ -377,7 +377,7 @@ fn nothing_that_declares_itself_executable_is_internal_or_grantable() {
         &CompanyId::new("acme"),
         "Acme",
         &manifest_agent,
-        ApprovalPolicy::new(&Policy::default(), None),
+        std::sync::Arc::new(ApprovalPolicy::new(&Policy::default(), None)),
         &deps,
         &["*".to_string()],
         &[],
