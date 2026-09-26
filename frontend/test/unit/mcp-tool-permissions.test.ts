@@ -37,7 +37,7 @@ vi.mock("@/api/mcp-tool-policy", async () => {
 });
 
 const { policyTarget } = await import("@/api/mcp-tool-policy");
-const { McpToolPermissions } = await import("@/views/mcp/McpToolPermissions");
+const { McpToolPermissions, tierPatch } = await import("@/views/mcp/McpToolPermissions");
 
 function row(over: Partial<McpServer> & { source: McpSource }): McpServer {
   return {
@@ -57,9 +57,9 @@ function doc(over: Partial<ToolPolicyDocument> = {}): ToolPolicyDocument {
   return {
     server: "notion",
     tierDefaults: {
-      read_only: "always_allow",
-      interactive: "needs_approval",
-      write_delete: "needs_approval",
+      read_only: { mode: "always_allow", stored: false },
+      interactive: { mode: "needs_approval", stored: false },
+      write_delete: { mode: "needs_approval", stored: false },
     },
     tools: [],
     discoveredAtMillis: 1,
@@ -99,7 +99,7 @@ function el(testId: string): HTMLElement | null {
   return container.querySelector(`[data-testid="${testId}"]`);
 }
 
-async function mount(server: McpServer, canManage = true) {
+async function mount(server: McpServer, canManage = true, reloadKey = 0) {
   await act(async () => {
     root.render(
       createElement(McpToolPermissions, {
@@ -107,6 +107,7 @@ async function mount(server: McpServer, canManage = true) {
         company: "acme",
         server,
         canManage,
+        reloadKey,
         onClose: () => {},
       }),
     );
@@ -222,5 +223,140 @@ describe("a server nothing has discovered yet", () => {
     await mount(row({ source: "runtime" }));
 
     expect(el("mcp-permissions-empty")).not.toBeNull();
+  });
+});
+
+describe("what the per-tier control says is set", () => {
+  it("reads as unset when the host stored nothing for that tier", async () => {
+    // The bug this pins: the control rendered the tier's nominal mode, so a
+    // fresh server showed "Read-only: Runs" while every read-only row showed
+    // "Asks" — and choosing the value already on screen granted a bulk allow.
+    api.readToolPolicy.mockResolvedValue(doc());
+
+    await mount(row({ source: "runtime" }));
+
+    const trigger = container.querySelector<HTMLElement>("#tier-read_only");
+    expect(trigger?.textContent).toContain("Not set");
+    expect(trigger?.textContent).not.toContain("Runs");
+  });
+
+  it("reads as the stored mode once an operator has written one", async () => {
+    api.readToolPolicy.mockResolvedValue(
+      doc({
+        tierDefaults: {
+          read_only: { mode: "always_allow", stored: true },
+          interactive: { mode: "needs_approval", stored: false },
+          write_delete: { mode: "needs_approval", stored: false },
+        },
+      }),
+    );
+
+    await mount(row({ source: "runtime" }));
+
+    expect(container.querySelector("#tier-read_only")?.textContent).toContain("Runs");
+  });
+});
+
+describe("a tool the allow and deny lists keep from being sent", () => {
+  it("says so on the row, because its mode will never be consulted", async () => {
+    api.readToolPolicy.mockResolvedValue(
+      doc({
+        tools: [
+          {
+            tool: "place_order",
+            effectiveTier: "interactive",
+            mode: "needs_approval",
+            isOverride: false,
+          },
+        ],
+      }),
+    );
+
+    await mount(row({ source: "runtime", disallowedTools: ["place_order"] }));
+
+    expect(container.textContent).toContain("Not sent");
+  });
+
+  it("says nothing when the lists let every discovered tool through", async () => {
+    api.readToolPolicy.mockResolvedValue(
+      doc({
+        tools: [
+          {
+            tool: "place_order",
+            effectiveTier: "interactive",
+            mode: "needs_approval",
+            isOverride: false,
+          },
+        ],
+      }),
+    );
+
+    await mount(row({ source: "runtime" }));
+
+    expect(container.textContent).not.toContain("Not sent");
+  });
+});
+
+describe("what a choice in the tier control means on the wire", () => {
+  it("sends the mode when one was chosen", () => {
+    expect(tierPatch("read_only", "always_allow")).toEqual({
+      tierDefaults: { read_only: "always_allow" },
+    });
+  });
+
+  it("sends null when the tier was put back to unset", () => {
+    // Not an omitted key: the host reads a missing tier as "leave it alone",
+    // so an omission would leave the bulk allow in force and the control
+    // would read as cleared while the gate went on letting tools through.
+    expect(tierPatch("read_only", "unset")).toEqual({
+      tierDefaults: { read_only: null },
+    });
+  });
+
+  it("clears the tier the operator named, not some other one", () => {
+    expect(tierPatch("write_delete", "unset")).toEqual({
+      tierDefaults: { write_delete: null },
+    });
+  });
+});
+
+describe("a probe that ran while the panel was open", () => {
+  it("re-reads the policy, because the probe rewrote what it resolves against", async () => {
+    api.readToolPolicy.mockResolvedValue(doc({ discoveredAtMillis: 0 }));
+
+    const server = row({ source: "runtime" });
+    await mount(server);
+    expect(el("mcp-permissions-empty")).not.toBeNull();
+    expect(api.readToolPolicy).toHaveBeenCalledTimes(1);
+
+    api.readToolPolicy.mockResolvedValue(
+      doc({
+        discoveredAtMillis: 2,
+        tools: [
+          {
+            tool: "search_pages",
+            effectiveTier: "read_only",
+            suggestedTier: "read_only",
+            mode: "needs_approval",
+            isOverride: false,
+          },
+        ],
+      }),
+    );
+    await mount(server, true, 1);
+
+    expect(api.readToolPolicy).toHaveBeenCalledTimes(2);
+    expect(el("mcp-permissions-empty")).toBeNull();
+    expect(container.textContent).toContain("search_pages");
+  });
+
+  it("does not re-read when nothing probed it", async () => {
+    api.readToolPolicy.mockResolvedValue(doc());
+
+    const server = row({ source: "runtime" });
+    await mount(server);
+    await mount(server);
+
+    expect(api.readToolPolicy).toHaveBeenCalledTimes(1);
   });
 });

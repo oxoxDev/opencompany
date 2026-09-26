@@ -2809,7 +2809,7 @@ async fn recipient_is_established(rt: &CompanyRuntime, to: &str) -> bool {
 /// prefix `dm-` so the result cannot lead with `-`, cannot be empty, cannot
 /// collide with a card id, and reads as "a conversation's branch" in `git log`.
 /// `None` when nothing usable survives.
-fn sanitize_work_segment(thread: &str) -> Option<String> {
+pub(crate) fn sanitize_work_segment(thread: &str) -> Option<String> {
     let cleaned: String = thread
         .chars()
         .map(|c| {
@@ -3009,6 +3009,10 @@ fn cycle_task_id(
             | CompanyEvent::BroadcastRouted { .. }
             | CompanyEvent::DmDelivered { .. }
             | CompanyEvent::EpisodeCompleted { .. }
+            | CompanyEvent::ConversationOpened { .. }
+            | CompanyEvent::ConversationConcluded { .. }
+            | CompanyEvent::EpisodeSeatParked { .. }
+            | CompanyEvent::EpisodeSeatResumed { .. }
             | CompanyEvent::EpisodeStateSaved { .. }
             | CompanyEvent::WorkflowEnabledChanged { .. }
             | CompanyEvent::WorkflowRunFinished { .. }
@@ -3260,6 +3264,10 @@ fn cycle_conversation(
             | CompanyEvent::BroadcastRouted { .. }
             | CompanyEvent::DmDelivered { .. }
             | CompanyEvent::EpisodeCompleted { .. }
+            | CompanyEvent::ConversationOpened { .. }
+            | CompanyEvent::ConversationConcluded { .. }
+            | CompanyEvent::EpisodeSeatParked { .. }
+            | CompanyEvent::EpisodeSeatResumed { .. }
             | CompanyEvent::EpisodeStateSaved { .. }
             | CompanyEvent::WorkflowEnabledChanged { .. }
             | CompanyEvent::WorkflowRunFinished { .. }
@@ -3481,6 +3489,17 @@ impl<'a> CycleHostImpl<'a> {
         }
     }
 
+    /// The runtime's park transaction, over this company's live handles.
+    fn parker(&self) -> crate::runtime::approval_park::ApprovalParker {
+        crate::runtime::approval_park::ApprovalParker::new(
+            self.rt.approvals.clone(),
+            self.rt.journal.clone(),
+            self.rt.grants.clone(),
+            self.rt.continuations.clone(),
+            self.rt.events.clone(),
+        )
+    }
+
     /// Parks `effect` on the approval gate, journals it durably, and records the
     /// id on this cycle's outcome.
     ///
@@ -3491,90 +3510,20 @@ impl<'a> CycleHostImpl<'a> {
     /// original [`ApprovalId`] regardless of who decided it.
     async fn park(&self, effect: Effect) -> Result<ApprovalId> {
         let approval_id = self
-            .rt
-            .approvals
-            .park(&self.company, effect.clone())
-            .await?;
-        self.rt
-            .journal
-            .record_parked(
-                &approval_id,
-                &effect,
-                now_millis(),
-                TaskLink::from_task_id(self.task_id.as_deref()),
-                // Which channel, and — issue #435 — where inside it, so the
-                // continuation can be threaded back under the same root rather
-                // than landing flat in the channel. Built as one value so the
-                // pair cannot be written down describing two different places.
-                ApprovalConversation {
-                    thread: self.thread_id.clone(),
-                    parent: self.thread_parent,
-                },
-                // Issue #469: which turn is blocked on this. Recorded here
-                // because this is the one write path into the approval queue, so
-                // the count the continuation queue keeps below cannot describe a
-                // different set of approvals from the one that is parked.
-                Some(self.cycle_id.clone()),
-            )
-            .await?;
-        // Issue #796: a parked approval mints no grant until it resolves, so
-        // until then neither grant map names this work unit. Mark it pending on
-        // the shared grant set so an unrelated turn's `sweep_orphans` treats the
-        // checkout this parked step is holding as live rather than orphaned. The
-        // key is derived exactly as `approval_work_key` derives the grant's
-        // `origin_task` (the card, else the sanitised thread), so the pending
-        // mark and the grant it becomes name one unit; cleared when the approval
-        // is settled or expires.
-        if let Some(work) = self
-            .task_id
-            .clone()
-            .or_else(|| self.thread_id.as_deref().and_then(sanitize_work_segment))
-        {
-            self.rt.grants.mark_pending(&approval_id, work);
-        }
-        // …and armed on the live counter in the same breath. A turn that parks
-        // four calls is blocked on four decisions; the runtime holds its
-        // continuation until the last of them lands and then runs it once.
-        // Strictly after the journal write, so a crash between the two replays
-        // as "still parked" and is re-armed by recovery rather than leaving a
-        // counter for an approval no record describes.
-        self.rt.continuations.arm(&self.cycle_id);
-        // Issue #379: tell every subscribed console a request just parked, so an
-        // inline card can appear in the conversation *as it happens* rather than
-        // on the next poll of the approvals feed.
-        //
-        // Strictly **after** the journal write, and best-effort — the same
-        // division `sweep_expired_approvals` draws. The journal is the binding
-        // record of what is parked; the event is an advisory nudge, and a failed
-        // log write must not undo a park that already happened (the queue would
-        // then hold an effect no record describes). A console that misses the
-        // frame still sees the approval on its next feed refresh.
-        //
-        // Deliberately **thin**: an id, a kind and a thread. The payload is not
-        // here because `pending_approvals()` is the single place #372's
-        // host-side redaction runs, and a payload-bearing durable event would
-        // open a second surface that has to redact — and eventually will not.
-        // The console reacts by refreshing the feed and renders from the
-        // redacted summary. One round trip, on purpose.
-        if let Err(err) = self
-            .rt
-            .events
-            .append(
+            .parker()
+            .park(
                 &self.company,
-                CompanyEvent::ApprovalParked {
-                    approval_id: approval_id.clone(),
-                    effect_kind: effect.kind.clone(),
-                    thread: self.thread_id.clone(),
+                effect.clone(),
+                crate::runtime::approval_park::ParkSite {
+                    task: TaskLink::from_task_id(self.task_id.as_deref()),
+                    conversation: ApprovalConversation {
+                        thread: self.thread_id.clone(),
+                        parent: self.thread_parent,
+                    },
+                    turn: Some(self.cycle_id.clone()),
                 },
             )
-            .await
-        {
-            tracing::warn!(
-                approval_id = %approval_id,
-                error = %err,
-                "approval parked and journaled, but its event-log entry failed",
-            );
-        }
+            .await?;
         self.parked
             .lock()
             .expect("parked poisoned")

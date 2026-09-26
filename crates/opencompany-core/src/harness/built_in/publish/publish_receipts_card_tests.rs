@@ -146,45 +146,61 @@ async fn dropping_the_claim_stops_publishing_again() {
     let tool = PublishArtifactTool::new(dir.path(), "maya", queue.clone());
 
     let claim = queue.claim(PublishDestination::Task);
-    assert!(!run(&tool, json!({ "path": "spec.md" })).await.is_error);
-    drop(claim);
-
+    let outcome = PUBLISH_SCOPE
+        .scope(claim.scope, async {
+            let published = !run(&tool, json!({ "path": "spec.md" })).await.is_error;
+            drop(claim);
+            (
+                published,
+                queue.destination(),
+                queue.queued(),
+                run(&tool, json!({ "path": "spec.md" })).await.is_error,
+            )
+        })
+        .await;
+    assert!(outcome.0, "the claimed publish succeeds");
     assert_eq!(
-        queue.destination(),
+        outcome.1,
         PublishDestination::Unclaimed,
         "the claim must release on drop"
     );
     assert_eq!(
-        queue.queued(),
-        0,
-        "releasing must also clear, so nothing leaks into the next caller"
+        outcome.2, 0,
+        "releasing must also discard, so nothing leaks into the next caller"
     );
     assert!(
-        run(&tool, json!({ "path": "spec.md" })).await.is_error,
+        outcome.3,
         "publishing must be refused once the claim has ended"
     );
 }
 
-/// Claiming clears, so one caller can never be handed the previous caller's
-/// staged file. This is the invariant `run_task`'s hand-written `clear()` used
-/// to carry, now enforced by the claim itself.
-#[test]
-fn claiming_clears_whatever_a_previous_caller_left_staged() {
+/// A new claim is a fresh bucket, so one caller can never be handed the
+/// previous caller's staged file.
+#[tokio::test]
+async fn a_new_claim_never_sees_what_a_previous_caller_left_staged() {
     let queue = PendingPublishQueue::default();
     let claim = queue.claim(PublishDestination::Task);
-    queue.push(PendingPublish {
-        agent: "maya".to_string(),
-        source: "stale.md".to_string(),
-        title: "stale".to_string(),
-        kind: ArtifactKind::Text,
-        note: None,
-        payload: PublishPayload::Text("old".to_string()),
-    });
-    drop(claim);
+    claim
+        .scoped(async {
+            assert!(queue.push(PendingPublish {
+                agent: "maya".to_string(),
+                source: "stale.md".to_string(),
+                title: "stale".to_string(),
+                kind: ArtifactKind::Text,
+                note: None,
+                payload: PublishPayload::Text("old".to_string()),
+            }));
+        })
+        .await;
 
-    let _claim = queue.claim(PublishDestination::Conversation);
-    assert_eq!(queue.queued(), 0);
-    assert_eq!(queue.destination(), PublishDestination::Conversation);
+    let next = queue.claim(PublishDestination::Conversation);
+    assert!(next.sources().is_empty());
+    assert_eq!(next.destination(), PublishDestination::Conversation);
+    assert_eq!(
+        claim.sources(),
+        ["stale.md"],
+        "the first claim keeps its own"
+    );
 }
 
 /// The receipt must describe **this** caller's destination. One sentence written
@@ -194,13 +210,21 @@ fn claiming_clears_whatever_a_previous_caller_left_staged() {
 async fn the_receipt_names_the_destination_the_caller_actually_has() {
     let dir = workspace(&[("spec.md", b"# Spec")]);
 
-    let (task_queue, _task_claim) = claimed(PublishDestination::Task);
+    let (task_queue, task_claim) = claimed(PublishDestination::Task);
     let task_tool = PublishArtifactTool::new(dir.path(), "maya", task_queue);
-    let task_receipt = text_of(&run(&task_tool, json!({ "path": "spec.md" })).await);
+    let task_receipt = text_of(
+        &task_claim
+            .scoped(run(&task_tool, json!({ "path": "spec.md" })))
+            .await,
+    );
 
-    let (chat_queue, _chat_claim) = claimed(PublishDestination::Conversation);
+    let (chat_queue, chat_claim) = claimed(PublishDestination::Conversation);
     let chat_tool = PublishArtifactTool::new(dir.path(), "maya", chat_queue);
-    let chat_receipt = text_of(&run(&chat_tool, json!({ "path": "spec.md" })).await);
+    let chat_receipt = text_of(
+        &chat_claim
+            .scoped(run(&chat_tool, json!({ "path": "spec.md" })))
+            .await,
+    );
 
     assert!(
         task_receipt.contains("this task's Artifacts tab"),

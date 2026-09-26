@@ -250,7 +250,7 @@ async fn delegate_to_desk_relays_the_answer_in_a_second_orchestrator_turn() {
     );
     // …and it is the relay turn, whose prompt framed the hand-back.
     assert!(
-        bubble.text.contains("Relay their answer"),
+        bubble.text.contains("Pass their answer along"),
         "the operator bubble is the relay turn: {:?}",
         bubble.text
     );

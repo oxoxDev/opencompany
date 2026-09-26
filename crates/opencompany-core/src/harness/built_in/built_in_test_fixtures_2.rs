@@ -31,6 +31,7 @@ pub(super) fn scripted_agent(
 pub(super) fn scripted_agent_over(provider: ScriptedProvider) -> (Arc<CompanyAgent>, HarnessDeps) {
     let dir = tempfile::tempdir().expect("tempdir");
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -66,6 +67,7 @@ pub(super) fn scripted_agent_over(provider: ScriptedProvider) -> (Arc<CompanyAge
         deep_trace: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -302,6 +304,7 @@ pub(super) fn deps_with_plan(
     plan: Option<crate::harness::capability_budget::CapabilityPlan>,
 ) -> HarnessDeps {
     HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -336,6 +339,7 @@ pub(super) fn deps_with_plan(
         deep_trace: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -514,7 +518,7 @@ pub(super) fn belt(grants: &[&str], is_orchestrator: bool, wire_everything: bool
         &CompanyId::new("acme"),
         "Acme",
         &manifest_agent,
-        policy,
+        std::sync::Arc::new(policy),
         &deps,
         &grants,
         &[],

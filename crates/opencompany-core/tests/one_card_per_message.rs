@@ -206,7 +206,7 @@ impl Ctx {
     /// continuation, which runs *before* the hand-off has opened its card.
     fn is_relay(&self) -> bool {
         self.user
-            .contains("Relay their answer back to the operator")
+            .contains("Pass their answer along to the operator")
     }
 }
 

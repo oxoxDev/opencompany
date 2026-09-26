@@ -111,6 +111,46 @@ pub fn ledger_tools(
     ]
 }
 
+/// How a native ledger's "who writes this, since not `record_entry`" reads in
+/// a persona.
+///
+/// Its own function because an episode seat has to find this exact string to
+/// replace it -- see [`episode_written_by_note`]. Built in one place so the
+/// two can never disagree about what was rendered.
+#[must_use]
+pub fn written_by_note(spec: &crate::ledger::LedgerSpec) -> String {
+    format!(" _(read-only here: {})_", spec.written_by)
+}
+
+/// What replaces it for a seat inside an episode.
+///
+/// The standing line names both verbs that write the board, and only one of
+/// them is off this belt: `EPISODE_WITHHELD_TOOLS` takes `spawn_task`, while
+/// `assign_task` is the orchestrator's and stays. The swap runs for every
+/// episode seat, the orchestrator's included, so a sentence denying both
+/// would tell that seat it cannot hand a card over when it can -- the same
+/// defect this exists to remove, pointed the other way. It therefore claims
+/// only what is true of every seat: the verb that *opens* a card is gone.
+///
+/// A live run shows what leaving the standing line costs: the claimer read
+/// the catalogue, went looking for `spawn_task`, told the operator "opening
+/// the task card on the board isn't something I can do directly from here",
+/// and invented a route through another teammate.
+///
+/// The registry line stays as it is -- it describes the company, and
+/// `registry_tests` holds it to naming those verbs on purpose. What changes
+/// is what an episode seat is shown in its place.
+///
+/// Takes the prefix for the reason every note here does: the belt carries
+/// `desk_ask`, and a note that says `ask` names a tool the seat cannot see.
+#[must_use]
+pub fn episode_written_by_note(prefix: &str) -> String {
+    format!(
+        " _(read-only here, and the verb that opens a card is not on your belt inside an \
+         episode either. `{prefix}ask` the teammate who should do the work instead.)_"
+    )
+}
+
 /// The prompt section describing the surface.
 ///
 /// Sync over an already-resolved registry, because the prompt is assembled
@@ -140,7 +180,7 @@ pub fn ledger_brief(registry: &crate::ledger::Registry) -> String {
         let purpose = crate::ledger::budget::truncate(&spec.purpose, 300);
         brief.push_str(&format!("- `{}` — {purpose}", spec.slug));
         if spec.source == LedgerSource::Native {
-            brief.push_str(&format!(" _(read-only here: {})_", spec.written_by));
+            brief.push_str(&written_by_note(spec));
         } else if !spec.writable_by("") {
             brief.push_str(" _(writable by a named few; try it and the refusal says who)_");
         }

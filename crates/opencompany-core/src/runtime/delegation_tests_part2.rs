@@ -302,24 +302,27 @@ async fn a_workflow_the_handler_already_carded_opens_no_second_card() {
 /// Paired so a fix that simply stopped writing In Review would fail here.
 #[tokio::test]
 async fn a_hand_off_that_finished_cleanly_lands_in_review() {
-    let fx = Fixture::new();
-    let turns = ScriptedTurns::new(
-        &fx,
-        vec![
-            Turn::queueing("on it", vec![handoff("read the pricing repo")]),
-            Turn::reply("modules.md is written"),
-            Turn::reply("relayed"),
-        ],
-    );
-    fx.runner(&turns)
-        .handle_operator_message("chief", "map out the pricing repo", Some("general"))
-        .await
-        .expect("operator message handled");
+    crate::harness::built_in::policy::policy_test_helpers_tests::in_cycle(async {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::queueing("on it", vec![handoff("read the pricing repo")]),
+                Turn::reply("modules.md is written"),
+                Turn::reply("relayed"),
+            ],
+        );
+        fx.runner(&turns)
+            .handle_operator_message("chief", "map out the pricing repo", Some("general"))
+            .await
+            .expect("operator message handled");
 
-    let cards = fx.cards().await;
-    assert_eq!(cards.len(), 1, "{cards:?}");
-    assert_eq!(cards[0].column, COLUMN_IN_REVIEW, "{cards:?}");
-    assert_eq!(fx.approvals.queued(), 0, "nothing was parked");
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(cards[0].column, COLUMN_IN_REVIEW, "{cards:?}");
+        assert_eq!(fx.approvals.queued(), 0, "nothing was parked");
+    })
+    .await;
 }
 
 /// An approval left over from an *earlier* turn must not park this card.
@@ -327,67 +330,73 @@ async fn a_hand_off_that_finished_cleanly_lands_in_review() {
 /// was already holding cannot be misread as something this turn did.
 #[tokio::test]
 async fn an_approval_parked_before_this_turn_does_not_park_its_card() {
-    let fx = Fixture::new();
-    // Something a previous turn parked and nobody has resolved yet.
-    fx.approvals.push(crate::harness::policy::ApprovalRequest {
-        tool: "send_email".to_string(),
-        reason: "supervised".to_string(),
-        effect: crate::ports::types::Effect {
-            kind: "send_email".to_string(),
-            group: crate::ports::types::EffectGroup::Other,
-            amount_usd: None,
-            established_thread: false,
-            first_time_counterparty: false,
-            payload: serde_json::json!({}),
-            agent: Some("someone_else".to_string()),
-            run_id: None,
-        },
-    });
+    crate::harness::built_in::policy::policy_test_helpers_tests::in_cycle(async {
+        let fx = Fixture::new();
+        // Something a previous turn parked and nobody has resolved yet.
+        fx.approvals.push(crate::harness::policy::ApprovalRequest {
+            tool: "send_email".to_string(),
+            reason: "supervised".to_string(),
+            effect: crate::ports::types::Effect {
+                kind: "send_email".to_string(),
+                group: crate::ports::types::EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({}),
+                agent: Some("someone_else".to_string()),
+                run_id: None,
+            },
+        });
 
-    let turns = ScriptedTurns::new(
-        &fx,
-        vec![
-            Turn::queueing("on it", vec![handoff("read the pricing repo")]),
-            Turn::reply("modules.md is written"),
-            Turn::reply("relayed"),
-        ],
-    );
-    fx.runner(&turns)
-        .handle_operator_message("chief", "map out the pricing repo", Some("general"))
-        .await
-        .expect("operator message handled");
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::queueing("on it", vec![handoff("read the pricing repo")]),
+                Turn::reply("modules.md is written"),
+                Turn::reply("relayed"),
+            ],
+        );
+        fx.runner(&turns)
+            .handle_operator_message("chief", "map out the pricing repo", Some("general"))
+            .await
+            .expect("operator message handled");
 
-    let cards = fx.cards().await;
-    assert_eq!(
-        cards[0].column, COLUMN_IN_REVIEW,
-        "this turn parked nothing of its own: {cards:?}"
-    );
+        let cards = fx.cards().await;
+        assert_eq!(
+            cards[0].column, COLUMN_IN_REVIEW,
+            "this turn parked nothing of its own: {cards:?}"
+        );
+    })
+    .await;
 }
 
 /// A desk **hand-off** whose turn parks: the delegate stopped at an
 /// unauthorised call, so its card is blocked rather than reviewable.
 #[tokio::test]
 async fn a_hand_off_whose_turn_parks_also_leaves_its_card_blocked() {
-    let fx = Fixture::new();
-    let turns = ScriptedTurns::new(
-        &fx,
-        vec![
-            Turn::queueing("on it", vec![handoff("read the pricing repo")]),
-            Turn::parked("I need approval before I can read the repo", "fs_read"),
-            Turn::reply("relayed"),
-        ],
-    );
-    fx.runner(&turns)
-        .handle_operator_message("chief", "map out the pricing repo", Some("general"))
-        .await
-        .expect("operator message handled");
+    crate::harness::built_in::policy::policy_test_helpers_tests::in_cycle(async {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::queueing("on it", vec![handoff("read the pricing repo")]),
+                Turn::parked("I need approval before I can read the repo", "fs_read"),
+                Turn::reply("relayed"),
+            ],
+        );
+        fx.runner(&turns)
+            .handle_operator_message("chief", "map out the pricing repo", Some("general"))
+            .await
+            .expect("operator message handled");
 
-    let cards = fx.cards().await;
-    assert_eq!(cards.len(), 1, "{cards:?}");
-    assert_eq!(
-        cards[0].column, COLUMN_PAUSED,
-        "the delegate parked its first call: {cards:?}"
-    );
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(
+            cards[0].column, COLUMN_PAUSED,
+            "the delegate parked its first call: {cards:?}"
+        );
+    })
+    .await;
 }
 
 /// One message, one card. When the REST chat handler has opened a card for

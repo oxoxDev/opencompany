@@ -30,7 +30,7 @@ use oh::mcp::registry::types::{ConnStatus, InstalledServer, McpTool};
 use oh::security::{SecurityPolicy, ToolOperation};
 use tinytools::{PermissionLevel, Tool, ToolCallOptions, ToolResult};
 
-use crate::company::mcp::{AuthMaterial, McpServerDecl, stdio_install_refusal};
+use crate::company::mcp::{AuthMaterial, McpServerDecl};
 use crate::error::OpenCompanyError;
 use crate::harness::mcp_probe::{
     McpFailure, McpFailureQueue, classify_mcp_error, operator_message, scrub, strip_endpoint,
@@ -740,54 +740,6 @@ impl McpRuntime {
             .await
             .map(|outcome| outcome.value)
             .map_err(|e| OpenCompanyError::Harness(format!("mcp registry lookup failed: {e}")))
-    }
-
-    /// Installs a directory entry by qualified name and returns the resulting
-    /// record. Idempotent upstream: re-installing a server already present
-    /// refreshes its env/config onto the existing row rather than writing a
-    /// second one.
-    ///
-    /// **Refuses a stdio install.** Upstream's picker already prefers a hosted
-    /// HTTP connection over a local subprocess, so this only fires for an entry
-    /// that offers *nothing but* stdio — which this deployment cannot launch
-    /// (see [`stdio_install_refusal`]). The search filter above keeps such
-    /// entries off the operator's screen in the first place; this is the belt to
-    /// that braces, because a caller can POST a qualified name the search never
-    /// offered. A refused install that we ourselves created is rolled back; one
-    /// that was already on disk is left alone, since it is not ours to remove.
-    pub async fn install_from_directory(
-        &self,
-        qualified_name: String,
-        env: HashMap<String, String>,
-    ) -> crate::Result<InstalledServer> {
-        let outcome = oh::mcp::registry::ops::mcp_clients_install(
-            &self.directory_config(),
-            qualified_name.clone(),
-            env,
-            None,
-        )
-        .await
-        .map_err(|e| OpenCompanyError::Harness(format!("mcp install failed: {e}")))?;
-        let already_installed = outcome
-            .value
-            .get("already_installed")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let record = outcome.value.get("server").cloned().ok_or_else(|| {
-            OpenCompanyError::Harness("mcp install returned no server record".to_string())
-        })?;
-        let server: InstalledServer = serde_json::from_value(record).map_err(|e| {
-            OpenCompanyError::Harness(format!("mcp install record is unreadable: {e}"))
-        })?;
-        if server.transport.deployment_url().is_none() {
-            if !already_installed {
-                let _ = self.uninstall(&server.server_id).await;
-            }
-            return Err(OpenCompanyError::InvalidRequest(stdio_install_refusal(
-                &qualified_name,
-            )));
-        }
-        Ok(server)
     }
 
     /// Rotate an install's environment values (write-only, never read back).

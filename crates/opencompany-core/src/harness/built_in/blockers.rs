@@ -285,16 +285,26 @@ pub const ESCALATE_TO_HUMAN_TOOL: &str = "escalate_to_human";
 /// batch returns an explicit refusal.
 pub struct EscalateToHumanTool {
     requests: crate::harness::built_in::policy::ApprovalRequestQueue,
-    agent: String,
+    agent_id: String,
+    agent_label: String,
 }
 
 impl EscalateToHumanTool {
     /// Builds the tool over the shared approval-request queue, for one agent.
+    ///
+    /// `agent_label` is the name a person reads (the roster display name, or
+    /// the role when there is none) — never the roster id itself, which
+    /// `agent_id` carries separately for the card's "Asked by" attribution.
     pub fn new(
         requests: crate::harness::built_in::policy::ApprovalRequestQueue,
-        agent: String,
+        agent_id: String,
+        agent_label: String,
     ) -> Self {
-        Self { requests, agent }
+        Self {
+            requests,
+            agent_id,
+            agent_label,
+        }
     }
 }
 
@@ -352,11 +362,20 @@ impl tinytools::Tool for EscalateToHumanTool {
             .map(str::trim)
             .filter(|c| !c.is_empty());
 
+        // A person reading this card by role or name, never by roster id —
+        // falling back to a generic label rather than ever printing the id.
+        let trimmed_label = self.agent_label.trim();
+        let asker_label = if trimmed_label.is_empty() {
+            "a teammate"
+        } else {
+            trimmed_label
+        };
+
         // The reason a person reads is the question plus whatever the agent
         // already worked out — not a wrapper sentence about escalation, which
         // would push the actual question down the card.
         let reason = match context {
-            Some(context) => format!("{question}\n\nWhat {} already has: {context}", self.agent),
+            Some(context) => format!("{question}\n\nWhat {asker_label} already has: {context}"),
             None => question.clone(),
         };
 
@@ -373,38 +392,61 @@ impl tinytools::Tool for EscalateToHumanTool {
             // answer, so it groups with nothing.
             group_key: None,
         };
+        let mut payload_json = serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null);
+        // The one blocker shape with an unambiguous asker: an additive JSON
+        // key rather than a `BlockerPayload` field, so `crate::ports::blockers::asked_by`
+        // can hand the console an "Asked by" name without every other blocker
+        // construction site having to grow a field it would only ever set to
+        // `None`. See that function's doc comment.
+        if let serde_json::Value::Object(fields) = &mut payload_json {
+            fields.insert(
+                "asked_by".to_string(),
+                serde_json::Value::String(self.agent_id.clone()),
+            );
+        }
         let effect = crate::ports::types::Effect {
             kind: payload.effect_kind(),
             group: crate::ports::types::EffectGroup::Other,
             amount_usd: None,
             established_thread: false,
             first_time_counterparty: false,
-            payload: serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null),
+            payload: payload_json,
             // `None`, even though an agent did raise this and the field exists
             // to name one. `Some(agent)` means "a tool call openhuman blocked",
             // and approving one mints a single-use grant and re-dispatches the
             // agent to run that exact call again — which here would call
             // `escalate_to_human` a second time and park the same question.
             // Carrying the operator's answer back into the turn is #1863; until
-            // it lands, approving a blocker is deliberately inert.
+            // it lands, approving a blocker is deliberately inert. The asking
+            // agent still reaches the card through the payload's `asked_by`
+            // key, which carries no such re-dispatch meaning.
             agent: None,
             // Stamped by the dispatch boundary's `stamp_run`, which retro-fills
             // every request this turn queued.
             run_id: None,
         };
-        if !self
+        use crate::harness::built_in::policy::ApprovalPush;
+        match self
             .requests
             .push_blocker(crate::harness::built_in::policy::ApprovalRequest {
                 tool: ESCALATE_TO_HUMAN_TOOL.to_string(),
                 reason,
                 effect,
-            })
-        {
-            return Ok(ToolResult::error(format!(
-                "Your question was not raised: this batch already has the maximum of {} approval \
-                 requests. Stop and wait for the queued requests to be resolved, then ask again.",
-                crate::harness::built_in::policy::MAX_APPROVAL_REQUESTS_PER_TURN
-            )));
+            }) {
+            ApprovalPush::Queued => {}
+            ApprovalPush::OverCap => {
+                return Ok(ToolResult::error(format!(
+                    "Your question was not raised: this batch already has the maximum of {} \
+                     approval requests. Stop and wait for the queued requests to be resolved, then \
+                     ask again.",
+                    crate::harness::built_in::policy::MAX_APPROVAL_REQUESTS_PER_TURN
+                )));
+            }
+            ApprovalPush::Unclaimed => {
+                return Ok(ToolResult::error(
+                    crate::harness::approval_tool::NOT_RECORDED.to_string(),
+                ));
+            }
         }
 
         Ok(ToolResult::success(format!(

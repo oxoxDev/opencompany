@@ -24,6 +24,9 @@ pub mod advance;
 pub mod approval_display;
 /// Which card owns a parked approval on the queue read (#1891).
 pub mod approval_ownership;
+/// The shared park transaction every approval path goes through. See
+/// [`approval_park`].
+pub mod approval_park;
 /// Brain-agnostic resolution of a task card's `assignee` against the full
 /// roster — teammates, overlay teammates and desks (issue #205). Shared by the
 /// harness dispatch path and the REST write boundary so the board's assignee
@@ -69,6 +72,9 @@ pub mod delegation_tools;
 /// hand-written edit to a file a ledger renders, and names the tool that
 /// actually writes the row.
 pub mod derived_guard;
+/// Handing an operator's decision back to the hive episode seat that asked.
+/// See [`episode_resume`].
+pub mod episode_resume;
 /// Single-use grants minted when an operator approves a blocked tool call
 /// (issue #243). Compiled in every build: the journal records and their replay
 /// are feature-independent, so a company that ran under the harness stays

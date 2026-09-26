@@ -268,6 +268,7 @@ fn projects_a_gap_with_structural_fields_only() {
     let value = super::project_stream_item_for_viewer(
         &EventStreamItem::Gap { missed: 44 },
         &std::collections::HashMap::new(),
+        &crate::server::readable::DisplayNames::default(),
         &Viewer::Operator,
         true,
     )
@@ -433,6 +434,7 @@ fn projects_the_agents_own_body_beside_the_operators() {
     let value = super::project_event_for_viewer(
         &stored,
         &std::collections::HashMap::new(),
+        &crate::server::readable::DisplayNames::default(),
         &Viewer::Operator,
         true,
     )
@@ -513,6 +515,7 @@ fn a_reply_with_no_move_carries_the_same_body_twice() {
     let value = super::project_event_for_viewer(
         &stored,
         &std::collections::HashMap::new(),
+        &crate::server::readable::DisplayNames::default(),
         &Viewer::Operator,
         true,
     )
@@ -551,9 +554,14 @@ fn projects_agent_reply_with_viewer_mention_metadata() {
         steps: Vec::new(),
     });
     let authors = std::collections::HashMap::from([(String::from("u-1"), String::from("Ada"))]);
-    let value =
-        super::project_event_for_viewer(&stored, &authors, &Viewer::User("u-1".into()), false)
-            .expect("agent_reply is an attention signal");
+    let value = super::project_event_for_viewer(
+        &stored,
+        &authors,
+        &crate::server::readable::DisplayNames::default(),
+        &Viewer::User("u-1".into()),
+        false,
+    )
+    .expect("agent_reply is an attention signal");
     assert_eq!(
         value["mentions"],
         serde_json::json!([
@@ -586,6 +594,7 @@ fn drops_owner_fallback_report_from_a_non_admin_viewer() {
     let non_admin = super::project_event_for_viewer(
         &event,
         &std::collections::HashMap::new(),
+        &crate::server::readable::DisplayNames::default(),
         &Viewer::User("member-1".into()),
         false,
     );
@@ -597,6 +606,7 @@ fn drops_owner_fallback_report_from_a_non_admin_viewer() {
     let admin = super::project_event_for_viewer(
         &event,
         &std::collections::HashMap::new(),
+        &crate::server::readable::DisplayNames::default(),
         &Viewer::User("admin-1".into()),
         true,
     )
@@ -611,6 +621,7 @@ fn drops_owner_fallback_report_from_a_non_admin_viewer() {
     let operator = super::project_event_for_viewer(
         &event,
         &std::collections::HashMap::new(),
+        &crate::server::readable::DisplayNames::default(),
         &Viewer::Operator,
         true,
     )

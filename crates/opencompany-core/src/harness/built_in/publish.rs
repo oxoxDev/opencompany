@@ -48,11 +48,11 @@
 //! ready, because it had been told exactly that. A tool that cannot fail
 //! launders the failure through the agent into a confident falsehood.
 //!
-//! So the queue carries a [`PublishDestination`] alongside the staged items,
-//! and a drain site **claims** it — [`PendingPublishQueue::claim`] — for the
-//! span in which it promises to drain. The claim is what the receipt is written
-//! from, so the sentence the agent reads describes that caller's actual
-//! destination rather than one case's sentence reused everywhere.
+//! So a drain site **claims** a bucket — [`PendingPublishQueue::claim`] — with
+//! a [`PublishDestination`], and runs its turn inside
+//! [`PublishClaim::scoped`]. The tool finds that bucket through the task-local
+//! scope, so the receipt names that caller's actual destination and two turns
+//! running at once never stage into each other's bucket.
 //!
 //! The default is [`PublishDestination::Unclaimed`], and that direction is the
 //! whole guarantee. A turn run from a path that has not claimed a destination —
@@ -85,6 +85,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -244,27 +245,31 @@ pub struct PendingPublish {
 /// Where the publishes staged on a queue are going to be recorded — and
 /// therefore what the tool is entitled to tell the agent (issue #445).
 ///
-/// Read at `execute()` time, so the receipt describes the caller that made the
-/// call. The variants are the *reachable destinations*, not the call sites: two
-/// paths that file into the same place share one variant, because the agent's
-/// receipt is about where its file lands, not about which function ran it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Read at `execute()` time from the calling turn's own claim, so the receipt
+/// describes the caller that made the call. The variants are the *reachable
+/// destinations*, not the call sites.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum PublishDestination {
-    /// Nothing will drain. **The default, and deliberately so.**
-    ///
-    /// Any turn whose caller has not claimed a destination lands here and the
-    /// tool refuses in-turn. That is the fail-safe direction: a new turn-running
-    /// path added later inherits an honest refusal rather than the silent drop
-    /// that made #445 a lie told through the agent.
+    /// Nothing will drain, and the tool refuses in-turn. The default: a turn
+    /// outside every claim lands here.
     #[default]
     Unclaimed,
     /// A dispatched card's settle path drains this, filing each publish on that
-    /// card. The pre-#445 behaviour, unchanged.
+    /// card.
     Task,
     /// A conversation turn drains this, and publishing **mints the card** that
-    /// carries the artifact — a chat deliverable is real work, so it gets the
-    /// board record the console can already open.
+    /// carries the artifact.
     Conversation,
+    /// A hive episode seat turn drains this, filing each publish on a card
+    /// minted for the room, as a conversation does.
+    Episode {
+        /// The desk the episode runs on.
+        desk_id: String,
+        /// The episode the seat turn belongs to.
+        episode_id: String,
+        /// The conversation root the episode answers into, when it has one.
+        thread_root: Option<crate::ports::types::EventSeq>,
+    },
 }
 
 impl PublishDestination {
@@ -274,7 +279,7 @@ impl PublishDestination {
     /// Returning `None` rather than a "sorry" string is what keeps the refusal
     /// path and the success path from ever being confused: there is no receipt
     /// to render, so the caller is forced to produce a tool **error** instead.
-    fn receipt_tail(self) -> Option<&'static str> {
+    fn receipt_tail(&self) -> Option<&'static str> {
         match self {
             Self::Unclaimed => None,
             Self::Task => Some("It appears on this task's Artifacts tab when the run finishes."),
@@ -282,6 +287,10 @@ impl PublishDestination {
                 "Because this is a conversation and not a task, it is filed on a new board card \
                  for this conversation when your turn finishes — the operator opens it from that \
                  card's Artifacts tab.",
+            ),
+            Self::Episode { .. } => Some(
+                "When your turn finishes it is filed on a board card for this room and linked \
+                 from your message here — the operator opens it from that card's Artifacts tab.",
             ),
         }
     }
@@ -309,13 +318,15 @@ fn cannot_publish_here(path: &str) -> String {
 /// brain that drains it see the same queue because
 /// [`HarnessDeps`](crate::harness::HarnessDeps) clones share this handle.
 ///
-/// The destination (#445) rides the **same handle** rather than sitting beside
-/// it in `HarnessDeps`, which is not a tidiness choice: `build_agent` hands the
-/// tool this one clone and nothing else, so carrying the claim here makes it
-/// impossible to wire a tool that cannot see where its publishes are going.
+/// Staged publishes are bucketed per [`PublishClaim`], and the tool finds its
+/// bucket through the task-local scope the claim installs — the
+/// [`TurnOutputCollector`](crate::harness::turn_outputs::TurnOutputCollector)
+/// shape. Two turns running at once therefore stage into, and drain, only
+/// their own bucket, each with its own destination.
 #[derive(Clone, Default)]
 pub struct PendingPublishQueue {
-    inner: Arc<Mutex<Vec<PendingPublish>>>,
+    scopes: Arc<Mutex<BTreeMap<u64, PublishBucket>>>,
+    next_scope: Arc<AtomicU64>,
     /// Addressable workspace/artifact outputs produced while this queue's
     /// cached tools run. Kept on the same shared dependency as publishes so
     /// both output kinds necessarily reach the same chat-turn drain.
@@ -324,12 +335,20 @@ pub struct PendingPublishQueue {
     /// (issue #1192) — the source path, recorded at the moment the refusal is
     /// raised.
     ///
-    /// A second bucket rather than a variant in `inner`, and the separation is
-    /// the load-bearing part: a refused file is by definition **not** staged,
-    /// so it must not be visible to [`sources`](Self::sources). See that
-    /// method's note.
+    /// A second bucket rather than a variant in the staged list, and the
+    /// separation is the load-bearing part: a refused file is by definition
+    /// **not** staged, so it must not be visible to [`sources`](Self::sources).
     refusals: Arc<Mutex<BTreeMap<PublishRefusalScope, Vec<String>>>>,
-    destination: Arc<Mutex<PublishDestination>>,
+}
+
+struct PublishBucket {
+    destination: PublishDestination,
+    staged: Vec<PendingPublish>,
+}
+
+tokio::task_local! {
+    /// The publish claim the current turn stages into.
+    static PUBLISH_SCOPE: u64;
 }
 
 impl PendingPublishQueue {
@@ -338,9 +357,22 @@ impl PendingPublishQueue {
         self.outputs.clone()
     }
 
-    /// Stages a publish.
-    pub fn push(&self, publish: PendingPublish) {
-        self.inner.lock().expect("publish queue").push(publish);
+    /// Stages a publish into the current claim's bucket.
+    ///
+    /// Returns `false`, staging nothing, outside every claim or under a claim
+    /// whose destination is [`PublishDestination::Unclaimed`].
+    pub fn push(&self, publish: PendingPublish) -> bool {
+        let Some(scope) = Self::current_scope() else {
+            return false;
+        };
+        let mut scopes = self.scopes.lock().expect("publish queue");
+        match scopes.get_mut(&scope) {
+            Some(bucket) if bucket.destination != PublishDestination::Unclaimed => {
+                bucket.staged.push(publish);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Records that a publish of `source` was **refused** because nothing in
@@ -348,11 +380,7 @@ impl PendingPublishQueue {
     ///
     /// Written at the one site that raises the refusal, so what a caller later
     /// reports is a fact the tool produced rather than an inference drawn from
-    /// its prose. Matching on
-    /// [`cannot_publish_here`]'s wording would be the same drift trap a
-    /// classifier keyed on a `Display` string always is: the sentence is
-    /// agent-facing copy and will be reworded, and the day it is, the operator's
-    /// notice silently stops appearing with every test still green.
+    /// its prose.
     pub fn push_refusal(&self, source: String) {
         self.refusals
             .lock()
@@ -391,72 +419,113 @@ impl PendingPublishQueue {
         }
     }
 
-    /// Where staged publishes are currently headed.
+    /// Where the current turn's staged publishes are headed.
     pub fn destination(&self) -> PublishDestination {
-        *self.destination.lock().expect("publish destination")
+        let Some(scope) = Self::current_scope() else {
+            return PublishDestination::Unclaimed;
+        };
+        self.scopes
+            .lock()
+            .expect("publish queue")
+            .get(&scope)
+            .map(|bucket| bucket.destination.clone())
+            .unwrap_or_default()
     }
 
-    /// Claims this queue for a drain site that promises to drain it, for as long
-    /// as the returned [`PublishClaim`] lives.
+    /// Opens a fresh bucket headed for `destination`, owned by the returned
+    /// [`PublishClaim`] for as long as it lives.
     ///
-    /// Clears on the way in for the reason the drain sites already cleared by
-    /// hand — a prior turn's staged file must never be attributed to this
-    /// caller — and, via [`PublishClaim`]'s `Drop`, on the way out too. The exit
-    /// half is the one that is new and load-bearing: an early return, a `?`, or
-    /// a panic mid-run used to leave items staged and the next caller to clear
-    /// them, so correctness depended on every future path remembering. Now the
-    /// claim's scope *is* the window in which publishing works.
+    /// A publish only reaches the bucket from inside
+    /// [`PublishClaim::scoped`]. Refusals the calling scope already holds are
+    /// cleared on the way in, as a prior turn's refusal is not this caller's.
     #[must_use = "the claim releases on drop; dropping it immediately un-claims the queue"]
     pub fn claim(&self, destination: PublishDestination) -> PublishClaim {
-        self.clear();
-        *self.destination.lock().expect("publish destination") = destination;
+        let scope = self
+            .next_scope
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        self.scopes.lock().expect("publish queue").insert(
+            scope,
+            PublishBucket {
+                destination,
+                staged: Vec::new(),
+            },
+        );
+        self.clear_refusals_in(&Self::current_refusal_scope());
         PublishClaim {
             queue: self.clone(),
+            scope,
         }
     }
 
-    /// Empties the queue. Called before each turn so nothing a prior turn — an
-    /// operator chat turn earlier in the same cycle, or an abandoned redirect
-    /// re-run — staged can be attributed to this card.
+    /// Empties the current claim's staged publishes and the current refusal
+    /// bucket.
     ///
-    /// Empties **both** buckets (issue #1192), for the reason the staged half is
-    /// emptied: a redirect abandons the previous turn's work, and a refusal that
-    /// turn provoked is part of the work being abandoned. Surfacing it on the
-    /// re-run would report a refusal against a turn that never asked.
+    /// Both go together: a redirect abandons the previous turn's work, and a
+    /// refusal that turn provoked is part of the work being abandoned.
     pub fn clear(&self) {
-        self.inner.lock().expect("publish queue").clear();
+        if let Some(scope) = Self::current_scope() {
+            self.clear_staged(scope);
+        }
         self.clear_refusals_in(&Self::current_refusal_scope());
     }
 
-    /// Drains every staged publish (FIFO), emptying the queue.
+    /// Drains the current claim's staged publishes (FIFO). Empty outside every
+    /// claim.
     pub fn drain(&self) -> Vec<PendingPublish> {
-        let mut guard = self.inner.lock().expect("publish queue");
-        std::mem::take(&mut *guard)
+        Self::current_scope().map_or_else(Vec::new, |scope| self.take_staged(scope))
     }
 
-    /// The paths staged so far, without draining.
+    /// The paths the current claim has staged so far, without draining.
     ///
     /// This is the nudge's whole gate: `changed − staged` is what the agent
     /// wrote and did not offer.
     ///
-    /// **A refused publish is deliberately NOT in here** (issue #1192).
-    /// Refusals live in their own bucket precisely so this list keeps meaning
-    /// "offered and accepted". A file whose publish was refused is still
-    /// unpublished — it is the file *most* at risk of being lost — so folding
-    /// refusals in would make the #244 unpublished-work scan go quiet on exactly
-    /// the case it exists for.
+    /// **A refused publish is deliberately NOT in here** (issue #1192): a file
+    /// whose publish was refused is still unpublished, so folding refusals in
+    /// would make the unpublished-work scan go quiet on exactly the case it
+    /// exists for.
     pub fn sources(&self) -> Vec<String> {
-        self.inner
-            .lock()
-            .expect("publish queue")
-            .iter()
-            .map(|p| p.source.clone())
-            .collect()
+        Self::current_scope().map_or_else(Vec::new, |scope| self.staged_sources(scope))
     }
 
-    /// How many publishes are staged.
+    /// How many publishes the current claim has staged.
     pub fn queued(&self) -> usize {
-        self.inner.lock().expect("publish queue").len()
+        Self::current_scope().map_or(0, |scope| {
+            self.scopes
+                .lock()
+                .expect("publish queue")
+                .get(&scope)
+                .map_or(0, |bucket| bucket.staged.len())
+        })
+    }
+
+    fn current_scope() -> Option<u64> {
+        PUBLISH_SCOPE.try_with(|scope| *scope).ok()
+    }
+
+    fn take_staged(&self, scope: u64) -> Vec<PendingPublish> {
+        self.scopes
+            .lock()
+            .expect("publish queue")
+            .get_mut(&scope)
+            .map(|bucket| std::mem::take(&mut bucket.staged))
+            .unwrap_or_default()
+    }
+
+    fn staged_sources(&self, scope: u64) -> Vec<String> {
+        self.scopes
+            .lock()
+            .expect("publish queue")
+            .get(&scope)
+            .map(|bucket| bucket.staged.iter().map(|p| p.source.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    fn clear_staged(&self, scope: u64) {
+        if let Some(bucket) = self.scopes.lock().expect("publish queue").get_mut(&scope) {
+            bucket.staged.clear();
+        }
     }
 
     fn current_refusal_scope() -> PublishRefusalScope {
@@ -517,24 +586,69 @@ impl Drop for PublishRefusalClaim {
 /// The live claim on a [`PendingPublishQueue`] — proof that some drain site is
 /// listening (issue #445).
 ///
-/// Held for the span in which a caller promises to drain; on `Drop` the queue
-/// returns to [`PublishDestination::Unclaimed`] and is emptied, so publishing is
-/// off again the moment that promise ends. Mirrors the RAII shape the in-flight
-/// steer guard already uses in the brain, for the same reason: the cleanup has
-/// to happen on **every** exit path, including the ones nobody wrote by hand.
+/// Owns one bucket for as long as it lives. Publishes reach it only from inside
+/// [`scoped`](Self::scoped); on `Drop` the bucket and anything still staged in
+/// it are discarded, so publishing is off again the moment the promise ends.
 ///
 /// Deliberately not [`Clone`] — two live claims would mean two owners of one
-/// promise, and the second to drop would un-claim the queue underneath the
-/// first.
+/// promise.
 pub struct PublishClaim {
     queue: PendingPublishQueue,
+    scope: u64,
+}
+
+impl PublishClaim {
+    /// Runs `fut` with this claim as the ambient publish destination.
+    pub async fn scoped<F, T>(&self, fut: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        PUBLISH_SCOPE.scope(self.scope, fut).await
+    }
+
+    /// Drains this claim's staged publishes (FIFO).
+    pub fn drain(&self) -> Vec<PendingPublish> {
+        self.queue.take_staged(self.scope)
+    }
+
+    /// The paths this claim has staged so far, without draining.
+    pub fn sources(&self) -> Vec<String> {
+        self.queue.staged_sources(self.scope)
+    }
+
+    /// Discards this claim's staged publishes and the current refusal bucket.
+    pub fn clear(&self) {
+        self.queue.clear_staged(self.scope);
+        self.queue
+            .clear_refusals_in(&PendingPublishQueue::current_refusal_scope());
+    }
+
+    /// Where this claim files what it drains.
+    pub fn destination(&self) -> PublishDestination {
+        self.queue
+            .scopes
+            .lock()
+            .expect("publish queue")
+            .get(&self.scope)
+            .map(|bucket| bucket.destination.clone())
+            .unwrap_or_default()
+    }
+
+    /// Whether this claim has anywhere to file a publish.
+    pub fn is_claimed(&self) -> bool {
+        self.destination() != PublishDestination::Unclaimed
+    }
 }
 
 impl Drop for PublishClaim {
     fn drop(&mut self) {
-        *self.queue.destination.lock().expect("publish destination") =
-            PublishDestination::Unclaimed;
-        self.queue.clear();
+        self.queue
+            .scopes
+            .lock()
+            .expect("publish queue")
+            .remove(&self.scope);
+        self.queue
+            .clear_refusals_in(&PendingPublishQueue::current_refusal_scope());
     }
 }
 
@@ -952,7 +1066,8 @@ impl Tool for PublishArtifactTool {
         // is no it is the only fact that matters — validating a path we are not
         // going to publish would only produce a more specific way of being
         // unable to publish.
-        let Some(receipt_tail) = self.queue.destination().receipt_tail() else {
+        let destination = self.queue.destination();
+        let Some(receipt_tail) = destination.receipt_tail() else {
             tracing::warn!(
                 path = %raw_path.trim(),
                 "[publish] `publish_artifact` was called from a turn with no claimed \
@@ -1013,14 +1128,17 @@ impl Tool for PublishArtifactTool {
             .filter(|n| !n.is_empty())
             .map(str::to_string);
 
-        self.queue.push(PendingPublish {
+        if !self.queue.push(PendingPublish {
             agent: self.agent.clone(),
             source: source.clone(),
             title: title.clone(),
             kind,
             note,
             payload: payload.clone(),
-        });
+        }) {
+            self.queue.push_refusal(source.clone());
+            return Ok(ToolResult::error(cannot_publish_here(&source)));
+        }
 
         // The message describes what was **captured**, in the past tense,
         // because that is the only thing still true after a later shell step
@@ -1421,6 +1539,8 @@ pub fn declined_note(unpublished_files: &[String], reply: &str) -> String {
         reply = reply.trim(),
     )
 }
+
+pub(crate) mod filing;
 
 #[cfg(test)]
 #[path = "publish/publish_test_helpers_tests.rs"]

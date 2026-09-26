@@ -9,7 +9,7 @@ import { UtteranceChip } from "@/components/episode/UtteranceChip";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import { consoleHref } from "@/lib/console-paths";
-import { artifactHref } from "@/lib/task-output";
+import { artifactPageHref } from "@/lib/task-output";
 import { IN_FLIGHT_COLUMNS } from "@/lib/board-columns";
 import { isHostMessageId, type ChatMessage } from "@/lib/chat";
 import { turnFailureAction, type TurnFailure } from "@/lib/turn-failure";
@@ -28,7 +28,7 @@ import {
   type TimelineEntry,
 } from "./model";
 import { EchoPlaceholder, echoMarkerFor } from "./EchoPlaceholder";
-import { CardChip, ReferralChip, ReferralConversation } from "./StepTimeline";
+import { AgentConversation, CardChip, ReferralChip, ReferralConversation } from "./StepTimeline";
 import { WorkingIndicator } from "./WorkingIndicator";
 
 interface Props {
@@ -403,14 +403,22 @@ export function MessageRow({
             // referral are `company` lines, so that test called every answer
             // an ask. Falling back to "asked" matches a host too old to say.
             direction={message.referredFrom.direction ?? "asked"}
+            agentNames={agentNames}
           />
         )}
         {/* And what actually crossed. The chip says a referral happened; this
             says what was asked and what came back, collapsed so the desk still
             reads as its own conversation. */}
         {message.referralConversation && (
-          <ReferralConversation crossing={message.referralConversation} rowId={message.id} />
+          <ReferralConversation
+            crossing={message.referralConversation}
+            rowId={message.id}
+            agentNames={agentNames}
+          />
         )}
+        {message.agentConversations?.map((exchange) => (
+          <AgentConversation key={exchange.root} exchange={exchange} agentNames={agentNames} />
+        ))}
         {/* What this line was inside its episode — its speech act and, for a
             dm, who it went to. Absent for every ordinary reply, which is what
             keeps a DM, `#general` and a single-responder desk rendering exactly
@@ -423,7 +431,7 @@ export function MessageRow({
             agentNames={agentNames}
           />
         )}
-        {message.taskId && (
+        {message.taskId && !cardOnlyCarriesAnArtifact(message) && (
           <div className="flex flex-wrap items-center gap-2">
             <CardChip
               taskId={message.taskId}
@@ -669,6 +677,27 @@ function SystemPill({
 }
 
 /** The reply-level buttons for objects this turn produced. */
+/**
+ * Whether this row's card exists only to carry something it already shows.
+ *
+ * `publish_artifact` inside an episode mints a card, because an
+ * `ArtifactRecord`'s identity is `(task_id, source)` and the store will not
+ * take an artifact without a task (`ports/artifacts.rs`). That card is a
+ * storage requirement, not a piece of work: the deliverable is already on this
+ * row as an `outputs` entry, linking straight to the artifact, so rendering a
+ * second chip sends the reader to a board item whose only content is the thing
+ * they were already looking at.
+ *
+ * A card from `spawn_task` carries no artifact of its own and still renders —
+ * there the card IS the work, and the board is where it belongs.
+ */
+function cardOnlyCarriesAnArtifact(message: ChatMessage): boolean {
+  if (!message.taskId) return false;
+  return (message.outputs ?? []).some(
+    (output) => output.kind === "artifact" && output.taskId === message.taskId,
+  );
+}
+
 export function OutputLinkRow({ outputs }: { outputs: NonNullable<ChatMessage["outputs"]> }) {
   const [expanded, setExpanded] = useState(false);
   const links: {
@@ -690,7 +719,7 @@ export function OutputLinkRow({ outputs }: { outputs: NonNullable<ChatMessage["o
     if (output.taskId !== undefined && output.version !== undefined) {
       links.push({
         key: `${output.kind}:${output.targetId}:${output.version}`,
-        href: artifactHref(output.taskId, output.targetId, output.version),
+        href: artifactPageHref(output.targetId, output.version),
         label: output.title,
         kind: output.kind,
       });

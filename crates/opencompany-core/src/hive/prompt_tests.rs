@@ -66,7 +66,10 @@ fn a_solo_seat_is_offered_post_and_complete_only_and_a_retry_keeps_the_sentinel(
     assert!(prompt.contains("## Reminder\nYour previous answer (attempt 2)"));
     assert!(prompt.contains("(none)"));
     assert!(prompt.contains("tool `post` | `complete_episode`,"));
-    assert!(!prompt.contains("`broadcast`"));
+    // Not offered. The word still appears inside `post`'s own description,
+    // which contrasts the two, so this checks the catalogue line rather than
+    // the whole prompt.
+    assert!(!prompt.contains("- `broadcast`:"));
 }
 
 #[test]
@@ -171,6 +174,7 @@ async fn the_sharing_walk_hands_a_window_first_and_only_the_delta_afterwards() {
         company.clone(),
         "engineering".into(),
         "Engineering desk".into(),
+        Vec::new(),
     );
     let conversation = adapter.conversation(None);
     let viewer = Viewer::Agent {

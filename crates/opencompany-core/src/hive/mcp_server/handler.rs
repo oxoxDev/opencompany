@@ -305,6 +305,11 @@ async fn read(host: &McpHost, agent: &McpAgent, limit: usize) -> Value {
         agent.company.clone(),
         surface.id.clone(),
         surface.id.clone(),
+        // No pair channels. This reads a desk's own history back to an agent
+        // asking for it; a private exchange between two seats is theirs, and
+        // reaching it needs the turn that is inside it, not a read of the
+        // room. Empty admits none.
+        Vec::new(),
     );
     let page = match log.read_before(None, limit).await {
         Ok(page) => page,

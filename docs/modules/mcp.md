@@ -119,7 +119,7 @@ alias `…/company/…`). See [`server::ops::mcp`](../../src/server/ops/mcp.rs).
 | `PUT` | `…/mcp/config` | Replace the declared set from that document (admin-only). |
 | `GET` | `…/mcp/registry/search?q=&page=&pageSize=` | Browse the upstream directories. |
 | `GET` | `…/mcp/registry/entry?qualifiedName=` | One entry, with the install decision already made. |
-| `POST` | `…/mcp/registry/install` | Install an entry (+ write-only `env` values) and connect it. |
+| `POST` | `…/mcp/registry/install` | Declare an entry as one of this company's servers (+ a write-only credential). |
 | `POST` | `…/mcp/registry/{serverId}/connect` | Dial an installed server. |
 | `POST` | `…/mcp/registry/{serverId}/disconnect` | Drop the live session, keeping the install. |
 | `PUT` | `…/mcp/registry/{serverId}/env` | Rotate an install's credentials (write-only). |
@@ -134,6 +134,26 @@ takes the ordinary company scope.
 Discovery is gated on the `openhuman` feature (the MCP transport lives there);
 without it the route reports `not_wired` and the console falls back to the
 declared tool lists. Every mutating response carries a `note` reminder.
+
+`…/mcp/registry/install` writes the **same runtime index** `POST …/mcp/servers`
+writes, so a server found in the directory is an ordinary `runtime`-sourced row
+and the rest of the surface — conflicts, manifest override rules, probes,
+credential rotation, delete — treats it exactly like one an admin typed in by
+hand. It used to write OpenHuman's *separate* install store, through an RPC
+that upstream has since removed: the directory there is browse-only now, and a
+server found in it is declared by the reader rather than installed by a
+catalogue action. Declaring it here, from the entry the console already
+fetched, is what saves the operator retyping an endpoint they are looking at.
+
+The credential is supplied the way `POST …/mcp/servers` supplies one — a
+`token` plus an `authKind` of `bearer`, `header` or `queryParam` — not as the
+`env` map the removed RPC took. An entry's `requiredEnvKeys` names a launcher's
+environment, and a hosted HTTPS endpoint has no launcher, so how the secret
+reaches the server is a question to answer rather than guess from a key's
+spelling. The console shows those keys beside the field as guidance.
+
+The other registry routes still address OpenHuman's install store, which still
+holds anything installed there before this change.
 
 ## `mcp.json` — the same configuration as one document
 

@@ -275,6 +275,7 @@ pub(super) fn record(budget: Option<f64>) -> CompanyRecord {
 pub(super) fn deps_for(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<FsOps>) {
     let ops = Arc::new(FsOps::new(dir));
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -318,6 +319,7 @@ pub(super) fn deps_for(base_url: String, dir: &std::path::Path) -> (HarnessDeps,
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,

@@ -74,17 +74,8 @@ name = "Morning"
     );
 }
 
-/// Issue #1162: the Team column is the one the orchestrator is told to take
-/// a hand-off target from, so every row must lead with a token the
-/// delegation tools can ground. An overlay teammate was listed under its
-/// **display name** while a manifest agent was listed under its **id** —
-/// two namespaces rendered identically, and `mint_agent_id` guarantees the
-/// name is not the id.
-///
-/// The two halves are pinned together deliberately: the assertion is not
-/// "the line contains `dana_designer`" but "the token the line prints
-/// resolves", so a render that drifts from the resolver fails here rather
-/// than in production.
+/// Every roster row leads with the name a person knows and carries the id the
+/// delegation tools ground, and that printed id resolves.
 #[tokio::test]
 async fn query_company_lists_a_teammate_under_the_id_delegation_grounds() {
     let mut record = seeded_record(&CompanyId::new("acme"));
@@ -113,18 +104,15 @@ async fn query_company_lists_a_teammate_under_the_id_delegation_grounds() {
         .find(|line| line.contains("Designer"))
         .unwrap_or_else(|| panic!("no teammate line: {out}"));
     assert!(
-        line.contains(&id),
-        "the row must lead with the groundable id: {line}"
+        line.starts_with("- **Dana Designer**, Designer"),
+        "the row must lead with the name: {line}"
     );
-    assert!(
-        line.contains("known as Dana Designer"),
-        "the display name must survive as a label: {line}"
-    );
-    // The token the roster prints is the token delegation accepts.
     let printed = line
-        .split("**")
-        .nth(1)
-        .unwrap_or_else(|| panic!("no bold token: {line}"));
+        .split_once("(id `")
+        .and_then(|(_, rest)| rest.split_once('`'))
+        .map(|(id, _)| id)
+        .unwrap_or_else(|| panic!("no id for tool calls: {line}"));
+    assert_eq!(printed, id, "{line}");
     assert_eq!(
         record.resolve_teammate_key(printed),
         crate::ports::types::TeammateResolution::Agent(id),
@@ -149,12 +137,23 @@ async fn query_company_tool_lists_the_desks_delegation_accepts() {
         .output_for_llm(true);
 
     assert!(out.contains("## Desks"), "{out}");
+    let row = |id: &str| {
+        out.lines()
+            .find(|line| line.contains(&format!("(id `{id}` for tool calls)")))
+            .unwrap_or_else(|| panic!("no row for `{id}`: {out}"))
+            .to_string()
+    };
+    let strategy = row("strategy");
     assert!(
-        out.contains("**strategy** — lead: writer"),
-        "a delegatable desk must name its id and lead: {out}"
+        strategy.starts_with("- **") && !strategy.starts_with("- **strategy**"),
+        "a desk row leads with its name: {strategy}"
     );
     assert!(
-        out.contains("**archive** — no member on the roster"),
+        strategy.contains("lead: ") && !strategy.contains("lead: writer"),
+        "the lead is named, not given by id: {strategy}"
+    );
+    assert!(
+        row("archive").contains("no member on the roster"),
         "a leadless desk must say it cannot be handed work: {out}"
     );
 }

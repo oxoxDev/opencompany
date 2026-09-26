@@ -39,14 +39,29 @@ pub struct ToolPolicyRowDto {
     pub is_override: bool,
 }
 
+/// One tier's bulk default, and whether an operator actually wrote it.
+///
+/// `stored` is what stops the console presenting a nominal value as a live one.
+/// An unstored tier carries [`default_mode_for`]'s nominal mode for reference,
+/// but `resolve_policy` does not apply it to a merely-suggested tier — so a row
+/// under that tier reads `NeedsApproval` while this says `AlwaysAllow`. Naming
+/// which of the two an operator is looking at is the difference between
+/// confirming a displayed value and unknowingly granting a bulk allow.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TierDefaultDto {
+    pub mode: crate::company::mcp_policy::ApprovalMode,
+    pub stored: bool,
+}
+
 /// A server's whole permission document as the console reads it.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolPolicyDto {
     pub server: String,
-    /// Every tier's effective bulk default — **total**, so the console never
-    /// ships its own copy of the fallbacks and cannot drift from them.
-    pub tier_defaults: std::collections::BTreeMap<String, crate::company::mcp_policy::ApprovalMode>,
+    /// Every tier's bulk default — **total**, so the console never ships its own
+    /// copy of the fallbacks and cannot drift from them.
+    pub tier_defaults: std::collections::BTreeMap<String, TierDefaultDto>,
     pub tools: Vec<ToolPolicyRowDto>,
     /// When discovery last succeeded, if ever. `0` reads as never.
     pub discovered_at_millis: u64,
@@ -65,12 +80,12 @@ pub fn tool_policy_dto(
     let tier_defaults = ToolTier::ALL
         .iter()
         .map(|tier| {
-            let mode = policies
-                .tier_defaults
-                .get(tier)
-                .copied()
-                .unwrap_or_else(|| default_mode_for(*tier));
-            (tier.as_str().to_string(), mode)
+            let stored = policies.tier_defaults.get(tier).copied();
+            let dto = TierDefaultDto {
+                mode: stored.unwrap_or_else(|| default_mode_for(*tier)),
+                stored: stored.is_some(),
+            };
+            (tier.as_str().to_string(), dto)
         })
         .collect();
 
@@ -107,9 +122,12 @@ pub fn tool_policy_dto(
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PutToolPolicy {
+    /// A named tier is set; a tier named with `null` is cleared back to unset.
+    /// Same shape as a `tools` entry naming neither field — naming a thing is
+    /// how it is changed, and naming it as nothing is how it is undone.
     #[serde(default)]
     pub tier_defaults:
-        Option<std::collections::HashMap<String, crate::company::mcp_policy::ApprovalMode>>,
+        Option<std::collections::HashMap<String, Option<crate::company::mcp_policy::ApprovalMode>>>,
     #[serde(default)]
     pub tools: Option<Vec<PutToolPolicyEntry>>,
 }
@@ -154,7 +172,10 @@ pub fn apply_tool_policy_patch(
                 .find(|candidate| candidate.as_str() == tier.trim())
                 .copied()
                 .ok_or_else(|| format!("`{tier}` is not a tool tier."))?;
-            stored.tier_defaults.insert(parsed, mode);
+            match mode {
+                Some(mode) => stored.tier_defaults.insert(parsed, mode),
+                None => stored.tier_defaults.remove(&parsed),
+            };
         }
     }
 

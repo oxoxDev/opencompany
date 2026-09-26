@@ -243,33 +243,37 @@ pub struct ApprovalRequest {
 ///
 /// The queue handle is one per company and cannot be otherwise — see
 /// [`ApprovalRequestQueue`] — so the separation between turns lives here, in
-/// the key, rather than in separate queues.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// the key, rather than in separate queues. There is no unclaimed bucket: a
+/// push outside every claim is refused, because nothing would park it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ApprovalScope {
-    /// A request pushed outside any [`claim`](ApprovalRequestQueue::claim).
-    ///
-    /// The default, and deliberately **not** an error. Every production turn
-    /// runs under a claim, so this bucket should stay empty there; making an
-    /// unclaimed push panic or drop would trade a mis-attribution bug for a
-    /// lost-approval bug, and #395 exists because a lost approval is the worse
-    /// one. It is drained by the chat cycle alongside [`Cycle`](Self::Unscoped)
-    /// — which is exactly the pre-#439 behaviour for anything unclaimed.
-    #[default]
-    Unscoped,
     /// The company's chat cycle, including every dispatched card and delegated
-    /// turn that runs inside it.
-    ///
-    /// One at a time per company: `CycleRunner` holds a serial lock, so this
-    /// bucket has a single writer. It is still concurrent with any number of
-    /// workflow runs, which is the race #439 is about.
+    /// turn that runs inside it. `CycleRunner` holds a serial lock, so this
+    /// bucket has a single writer.
     Cycle,
-    /// One workflow run, keyed by its run id.
-    ///
-    /// Workflow runs are `tokio::spawn`ed and are **not** under the cycle lock,
-    /// so two of them genuinely overlap. That is the race a boundary index
-    /// could never fix: both runs take a boundary against one shared vector and
-    /// the later `split_off` swallows the earlier run's tail.
+    /// One workflow run, keyed by its run id. Runs are spawned outside the
+    /// cycle lock, so two of them genuinely overlap.
     Run(String),
+    /// One hive episode seat turn, keyed by the seat.
+    Seat(String),
+}
+
+/// What [`ApprovalRequestQueue::push`] did with a request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApprovalPush {
+    /// Queued in the current claim's bucket, or already there.
+    Queued,
+    /// Refused: the claim's batch is already at its cap.
+    OverCap,
+    /// Refused: no claim is active on this task, so nothing would park it.
+    Unclaimed,
+}
+
+impl ApprovalPush {
+    /// Whether the request will reach the operator.
+    pub fn is_queued(self) -> bool {
+        self == Self::Queued
+    }
 }
 
 /// A shared, in-memory queue of approval-gated tool calls — the exact
@@ -325,13 +329,7 @@ pub struct ApprovalRequestQueue {
 
 #[derive(Default)]
 struct ApprovalQueueState {
-    buckets: BTreeMap<ApprovalScope, Vec<QueuedApproval>>,
-    next_sequence: u64,
-}
-
-struct QueuedApproval {
-    request: ApprovalRequest,
-    sequence: u64,
+    buckets: BTreeMap<ApprovalScope, Vec<ApprovalRequest>>,
 }
 
 /// What one cycle-end drain took, and what it threw away (issue #561).
@@ -513,94 +511,78 @@ impl ApprovalClaim {
     /// Runs `fut` with this claim's scope installed, so every
     /// [`push`](ApprovalRequestQueue::push) inside it files into this bucket.
     ///
-    /// The whole turn goes inside. A push that escapes the future lands in
-    /// [`ApprovalScope::Unscoped`] rather than in another turn's bucket — the
-    /// conservative direction, since the cycle drains that too.
+    /// The whole turn goes inside. A push that escapes the future is refused
+    /// as [`ApprovalPush::Unclaimed`].
     pub async fn scoped<F, T>(&self, fut: F) -> T
     where
         F: std::future::Future<Output = T>,
     {
         CURRENT_SCOPE.scope(self.scope.clone(), fut).await
     }
+
+    /// Drains this claim's own bucket in enqueue order, whatever scope the
+    /// calling task has installed.
+    pub fn drain(&self, cap: usize) -> DrainedRequests {
+        self.queue.drain_scope(&self.scope, cap)
+    }
 }
 
 impl Drop for ApprovalClaim {
     fn drop(&mut self) {
-        // The exit half, and the load-bearing one: a turn that returned early —
-        // an error, a steer, a panic unwinding through here — must not leave
-        // its entries for whoever claims this scope next. A workflow run id is
-        // unique, so this is belt-and-braces there; for `Cycle` it is the
-        // guarantee that replaced the explicit `clear()` at the top of
-        // `run_cycle`.
         self.queue.discard(&self.scope);
     }
 }
 
 impl ApprovalRequestQueue {
-    /// Enqueues a gated call in the current scope, deduplicated by effect.
-    /// Overflow is counted and reported by the drain.
-    pub fn push(&self, request: ApprovalRequest) {
-        self.push_with_cap(request, usize::MAX);
+    /// Enqueues a gated call in the current claim's scope, deduplicated by
+    /// effect. Refused as [`ApprovalPush::Unclaimed`] outside every claim.
+    pub fn push(&self, request: ApprovalRequest) -> ApprovalPush {
+        self.push_with_cap(request, usize::MAX)
     }
 
-    /// Accepts a blocker only within the first eight entries of its drain order.
-    /// Cycle and Unscoped share that order; Run scopes are independent.
-    pub(super) fn push_blocker(&self, request: ApprovalRequest) -> bool {
+    /// Accepts a blocker only within the first eight entries of its scope.
+    pub(super) fn push_blocker(&self, request: ApprovalRequest) -> ApprovalPush {
         self.push_with_cap(request, MAX_APPROVAL_REQUESTS_PER_TURN)
     }
 
-    fn push_with_cap(&self, request: ApprovalRequest, cap: usize) -> bool {
+    fn push_with_cap(&self, request: ApprovalRequest, cap: usize) -> ApprovalPush {
+        let Some(scope) = Self::current_scope() else {
+            log::warn!(
+                "[approval] '{}' was raised outside any approval claim; refusing it rather than \
+                 queueing a request nothing will park",
+                request.tool
+            );
+            return ApprovalPush::Unclaimed;
+        };
         let explicit = request.tool == crate::harness::approval_tool::REQUEST_APPROVAL_TOOL
             || request.tool == super::blockers::ESCALATE_TO_HUMAN_TOOL;
         if explicit {
             let _ = EXPLICIT_REQUEST_PENDING.try_with(|pending| pending.set(true));
         }
-        let scope = Self::current_scope();
         let mut guard = self.inner.lock().expect("approval request queue");
-        let shared = match &scope {
-            ApprovalScope::Cycle => guard.buckets.get(&ApprovalScope::Unscoped),
-            ApprovalScope::Unscoped => guard.buckets.get(&ApprovalScope::Cycle),
-            ApprovalScope::Run(_) => None,
-        };
-        let bucket = guard.buckets.get(&scope).map_or(&[][..], Vec::as_slice);
-        if let Some((position, existing)) = bucket.iter().enumerate().find(|(_, q)| {
-            q.request.effect.kind == request.effect.kind
-                && q.request.effect.payload == request.effect.payload
-                && q.request.effect.agent == request.effect.agent
+        let bucket = guard.buckets.entry(scope).or_default();
+        if let Some(position) = bucket.iter().position(|queued| {
+            queued.effect.kind == request.effect.kind
+                && queued.effect.payload == request.effect.payload
+                && queued.effect.agent == request.effect.agent
         }) {
-            let earlier_shared = shared.map_or(0, |entries| {
-                entries
-                    .iter()
-                    .take_while(|entry| entry.sequence < existing.sequence)
-                    .count()
-            });
-            return position.saturating_add(earlier_shared) < cap;
+            return if position < cap {
+                ApprovalPush::Queued
+            } else {
+                ApprovalPush::OverCap
+            };
         }
-        if bucket.len().saturating_add(shared.map_or(0, Vec::len)) >= cap {
-            return false;
+        if bucket.len() >= cap {
+            return ApprovalPush::OverCap;
         }
-        let sequence = guard.next_sequence;
-        guard.next_sequence = sequence
-            .checked_add(1)
-            .expect("approval queue sequence exhausted");
-        guard
-            .buckets
-            .entry(scope)
-            .or_default()
-            .push(QueuedApproval { request, sequence });
-        true
+        bucket.push(request);
+        ApprovalPush::Queued
     }
 
-    /// The scope pushes are currently filing into.
-    ///
-    /// Outside any claim — every test that pushes directly, and any turn entry
-    /// point not yet under one — this is [`ApprovalScope::Unscoped`], which the
-    /// chat cycle drains. That fallback is why adding a scope cannot lose a
-    /// request.
-    fn current_scope() -> ApprovalScope {
-        CURRENT_SCOPE
-            .try_with(ApprovalScope::clone)
-            .unwrap_or_default()
+    /// The scope pushes are currently filing into, or `None` outside every
+    /// claim.
+    fn current_scope() -> Option<ApprovalScope> {
+        CURRENT_SCOPE.try_with(ApprovalScope::clone).ok()
     }
 
     /// Whether the current turn has asked the operator for approval or an answer.
@@ -643,10 +625,9 @@ impl ApprovalRequestQueue {
 
     /// How many requests sit in `scope`, observed **without** claiming it.
     ///
-    /// Test-only, and it exists because claiming is not a neutral observation:
-    /// [`claim`](Self::claim) clears on entry, so asserting through a fresh
-    /// claim cannot distinguish "`Drop` emptied this" from "my own claim just
-    /// did". Reading the map directly is the only way to test the exit half.
+    /// Test-only: [`claim`](Self::claim) clears on entry, so asserting through
+    /// a fresh claim cannot distinguish "`Drop` emptied this" from "my own
+    /// claim just did".
     #[cfg(test)]
     fn len_in(&self, scope: &ApprovalScope) -> usize {
         self.inner
@@ -657,39 +638,36 @@ impl ApprovalRequestQueue {
             .map_or(0, Vec::len)
     }
 
-    /// Empties the current scope's bucket.
-    ///
-    /// Retained for the callers that clear without claiming. Under a claim this
-    /// is redundant — [`claim`](Self::claim) already clears on entry and `Drop`
-    /// clears on exit.
+    /// Empties the current claim's bucket. A no-op outside every claim.
     pub fn clear(&self) {
-        self.discard(&Self::current_scope());
+        if let Some(scope) = Self::current_scope() {
+            self.discard(&scope);
+        }
     }
 
-    /// Drains the current scope in enqueue order, counting discarded overflow.
-    /// Cycle also drains Unscoped in their combined enqueue order.
+    /// Drains the current claim's bucket in enqueue order, counting discarded
+    /// overflow. Empty outside every claim.
+    ///
     /// A cap below [`MAX_APPROVAL_REQUESTS_PER_TURN`] imposes a smaller limit
     /// than blocker admission; production drains use that constant.
     pub fn drain(&self, cap: usize) -> DrainedRequests {
-        let scope = Self::current_scope();
-        let mut guard = self.inner.lock().expect("approval request queue");
-        let mut queued = guard.buckets.remove(&scope).unwrap_or_default();
-        if scope == ApprovalScope::Cycle {
-            queued.extend(
-                guard
-                    .buckets
-                    .remove(&ApprovalScope::Unscoped)
-                    .unwrap_or_default(),
-            );
-            queued.sort_unstable_by_key(|entry| entry.sequence);
+        match Self::current_scope() {
+            Some(scope) => self.drain_scope(&scope, cap),
+            None => DrainedRequests::new(Vec::new(), 0, cap),
         }
+    }
+
+    fn drain_scope(&self, scope: &ApprovalScope, cap: usize) -> DrainedRequests {
+        let mut queued = self
+            .inner
+            .lock()
+            .expect("approval request queue")
+            .buckets
+            .remove(scope)
+            .unwrap_or_default();
         let discarded = queued.len().saturating_sub(cap);
         queued.truncate(cap);
-        DrainedRequests::new(
-            queued.into_iter().map(|entry| entry.request).collect(),
-            discarded,
-            cap,
-        )
+        DrainedRequests::new(queued, discarded, cap)
     }
 
     /// Builds a queue whose grant set is one the caller already holds.
@@ -730,11 +708,14 @@ impl ApprovalRequestQueue {
     /// "everything so far, from anyone". Within a scope there is one writer, so
     /// it now means what #242 always assumed it did.
     pub fn queued(&self) -> usize {
+        let Some(scope) = Self::current_scope() else {
+            return 0;
+        };
         self.inner
             .lock()
             .expect("approval request queue")
             .buckets
-            .get(&Self::current_scope())
+            .get(&scope)
             .map_or(0, Vec::len)
     }
 
@@ -757,7 +738,9 @@ impl ApprovalRequestQueue {
     ///
     /// [`BLOCKER_EFFECT_PREFIX`]: crate::ports::blockers::BLOCKER_EFFECT_PREFIX
     pub fn blockers_since(&self, from: usize) -> usize {
-        let scope = Self::current_scope();
+        let Some(scope) = Self::current_scope() else {
+            return 0;
+        };
         let guard = self.inner.lock().expect("approval request queue");
         let Some(bucket) = guard.buckets.get(&scope) else {
             return 0;
@@ -766,7 +749,7 @@ impl ApprovalRequestQueue {
         bucket
             .iter()
             .skip(from)
-            .filter(|entry| entry.request.effect.kind.starts_with(&prefix))
+            .filter(|entry| entry.effect.kind.starts_with(&prefix))
             .count()
     }
 
@@ -785,14 +768,16 @@ impl ApprovalRequestQueue {
     /// added" is now true by construction rather than by a boundary that a
     /// concurrent run could invalidate.
     pub fn stamp_run(&self, from: usize, run_id: &str) -> usize {
-        let scope = Self::current_scope();
+        let Some(scope) = Self::current_scope() else {
+            return 0;
+        };
         let mut guard = self.inner.lock().expect("approval request queue");
         let Some(bucket) = guard.buckets.get_mut(&scope) else {
             return 0;
         };
         let mut stamped = 0;
         for entry in bucket.iter_mut().skip(from) {
-            entry.request.effect.run_id = Some(run_id.to_string());
+            entry.effect.run_id = Some(run_id.to_string());
             stamped += 1;
         }
         stamped
@@ -1030,6 +1015,12 @@ impl ApprovalPolicy {
     pub fn with_mcp_reads(mut self, reads: McpReadSet) -> Self {
         self.mcp_reads = reads;
         self
+    }
+
+    /// The MCP read set bridge calls are graded against.
+    #[cfg(test)]
+    pub(crate) fn mcp_reads(&self) -> &McpReadSet {
+        &self.mcp_reads
     }
 
     /// Installs the company workspace for authorship-aware mutation grading.
@@ -1558,17 +1549,23 @@ impl ApprovalPolicy {
     /// Every `RequireApproval` arm of [`check`](ToolPolicy::check) goes through
     /// here — a decision that skipped it would refuse the tool without ever
     /// reaching the operator, which is exactly the bug this closes.
+    ///
+    /// Outside every approval claim nothing would park the request, so the
+    /// call is denied outright and the reason says so.
     fn require_approval(
         &self,
         tool: &str,
         args: &serde_json::Value,
         reason: String,
     ) -> ToolPolicyDecision {
-        self.requests.push(ApprovalRequest {
+        let pushed = self.requests.push(ApprovalRequest {
             tool: tool.to_string(),
             reason: reason.clone(),
             effect: self.effect_for(tool, args),
         });
+        if pushed == ApprovalPush::Unclaimed {
+            return ToolPolicyDecision::deny(unrecorded_approval_reason(tool, &reason));
+        }
         log::debug!(
             "[approval] tool '{tool}' requires operator approval — queued to park ({reason})"
         );
@@ -2120,6 +2117,15 @@ impl ToolPolicy for ApprovalPolicy {
 /// `read_*`, and "mutates or reaches outside" alone reads as a bug in the tier.
 /// The reason lives in [`crate::policy::consequence::denial_reason`], next to
 /// the classification it explains, so the two cannot drift.
+/// The deny reason for a gated call raised where no approval can be recorded.
+pub(crate) fn unrecorded_approval_reason(tool: &str, reason: &str) -> String {
+    format!(
+        "'{tool}' needs operator approval ({reason}), but this turn cannot record an approval \
+         request, so the call was refused and nobody was asked. Do not tell anyone you asked \
+         for approval."
+    )
+}
+
 fn readonly_denial_suffix(tool: &str) -> String {
     crate::policy::consequence::denial_reason(tool)
         .map(|why| format!(" — {why}"))
@@ -2180,7 +2186,7 @@ mod policy_spend_cap_tests;
 #[cfg(test)]
 #[cfg(test)]
 #[path = "policy/policy_test_helpers_tests.rs"]
-mod policy_test_helpers_tests;
+pub(crate) mod policy_test_helpers_tests;
 #[cfg(test)]
 #[path = "policy/policy_autonomy_tests.rs"]
 mod tests_autonomy;

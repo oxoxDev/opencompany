@@ -47,6 +47,7 @@ use axum::Router;
 use axum::routing::{delete, get, post, put};
 
 use crate::AppState;
+use crate::company::McpServer;
 use crate::company::mcp::{McpHealth, McpSource};
 use crate::server::ops::mcp::{McpServerDto, RosterAgentDto};
 use crate::server::ops::scoped;
@@ -221,6 +222,40 @@ fn slugify(raw: &str) -> Option<String> {
     }
     let trimmed = out.trim_matches('-');
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// The directory entry as this company's own server declaration.
+///
+/// Lives here rather than beside the route so it compiles and is tested
+/// without the `mcp` feature, like every other rule in this module.
+///
+/// The qualified name is the row's name, which is what the directory, the
+/// console's source badge and a later `PUT …/mcp/servers/{name}` all agree on.
+/// Tool lists are left empty — the directory says nothing about which of a
+/// server's tools this company wants, and an empty pair means "all of them",
+/// which is what an install has always meant.
+///
+/// Its only caller is the route in `wired`, which is `#[cfg(feature = "mcp")]`
+/// — so on a build without that feature the rule is exercised by the tests
+/// below and by nothing else, which is the shape this module is for.
+#[cfg_attr(not(feature = "mcp"), allow(dead_code))]
+pub(super) fn declaration_from_directory(
+    qualified_name: &str,
+    endpoint: &str,
+    description: Option<String>,
+) -> McpServer {
+    McpServer {
+        name: qualified_name.to_string(),
+        endpoint: endpoint.to_string(),
+        description,
+        command: None,
+        allowed_tools: Vec::new(),
+        disallowed_tools: Vec::new(),
+        read_only_tools: Vec::new(),
+        timeout_secs: 30,
+        enabled: true,
+        auth_secret: None,
+    }
 }
 
 /// Folds registry installs into the List A rows, in place.

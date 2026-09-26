@@ -50,35 +50,41 @@ async fn a_standing_grant_admits_repeat_calls_with_any_arguments() {
 /// to mean one hour.
 #[tokio::test]
 async fn an_expired_standing_grant_re_parks() {
-    let (p, grants) = granting_policy("supervised", &[], "ops");
-    // Already past — and deliberately left in the set, so this proves the
-    // redemption check rather than the sweep.
-    grants.grant_standing(standing("ops", "file_write", 1));
+    in_cycle(async {
+        let (p, grants) = granting_policy("supervised", &[], "ops");
+        // Already past — and deliberately left in the set, so this proves the
+        // redemption check rather than the sweep.
+        grants.grant_standing(standing("ops", "file_write", 1));
 
-    assert!(matches!(
-        p.check(&request("file_write", serde_json::json!({}))).await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
-    assert_eq!(grants.standing_count(), 1, "the sweep did not run here");
+        assert!(matches!(
+            p.check(&request("file_write", serde_json::json!({}))).await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+        assert_eq!(grants.standing_count(), 1, "the sweep did not run here");
+    })
+    .await;
 }
 
 #[tokio::test]
 async fn a_standing_grant_is_scoped_to_its_agent_and_tool() {
-    let (p, grants) = granting_policy("supervised", &[], "marketing");
-    // Granted to a different teammate.
-    grants.grant_standing(standing("ops", "file_write", far_future()));
-    assert!(matches!(
-        p.check(&request("file_write", serde_json::json!({}))).await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
+    in_cycle(async {
+        let (p, grants) = granting_policy("supervised", &[], "marketing");
+        // Granted to a different teammate.
+        grants.grant_standing(standing("ops", "file_write", far_future()));
+        assert!(matches!(
+            p.check(&request("file_write", serde_json::json!({}))).await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
 
-    let (p, grants) = granting_policy("supervised", &[], "ops");
-    grants.grant_standing(standing("ops", "file_write", far_future()));
-    // A different tool for the right teammate.
-    assert!(matches!(
-        p.check(&request("send_email", serde_json::json!({}))).await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
+        let (p, grants) = granting_policy("supervised", &[], "ops");
+        grants.grant_standing(standing("ops", "file_write", far_future()));
+        // A different tool for the right teammate.
+        assert!(matches!(
+            p.check(&request("send_email", serde_json::json!({}))).await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+    })
+    .await;
 }
 
 /// The single-use grant burns first, even when a standing grant would also
@@ -117,45 +123,48 @@ async fn the_single_use_grant_is_consumed_first() {
 /// and mode arms and park.
 #[tokio::test]
 async fn a_standing_grant_refuses_a_priced_call() {
-    let (p, grants) = granting_policy("supervised", &[], "ops");
-    grants.grant_standing(standing("ops", "file_write", far_future()));
+    in_cycle(async {
+        let (p, grants) = granting_policy("supervised", &[], "ops");
+        grants.grant_standing(standing("ops", "file_write", far_future()));
 
-    // Same tool, same grant — the only difference is a declared amount.
-    assert_eq!(
-        p.check(&request("file_write", serde_json::json!({ "path": "a" })))
-            .await,
-        ToolPolicyDecision::Allow
-    );
-    assert!(
-        matches!(
+        // Same tool, same grant — the only difference is a declared amount.
+        assert_eq!(
+            p.check(&request("file_write", serde_json::json!({ "path": "a" })))
+                .await,
+            ToolPolicyDecision::Allow
+        );
+        assert!(
+            matches!(
+                p.check(&request(
+                    "file_write",
+                    serde_json::json!({ "path": "a", "amount_usd": 25.0 })
+                ))
+                .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "a declared amount must park even under a standing grant"
+        );
+
+        // And the metered read, which is priced without declaring anything.
+        let (p, grants) = granting_policy("supervised", &[], "ops");
+        grants.grant_standing(standing(
+            "ops",
+            crate::harness::search::WEB_SEARCH_TOOL,
+            far_future(),
+        ));
+        assert_ne!(
             p.check(&request(
-                "file_write",
-                serde_json::json!({ "path": "a", "amount_usd": 25.0 })
+                crate::harness::search::WEB_SEARCH_TOOL,
+                serde_json::json!({ "query": "x" })
             ))
             .await,
-            ToolPolicyDecision::RequireApproval { .. }
-        ),
-        "a declared amount must park even under a standing grant"
-    );
-
-    // And the metered read, which is priced without declaring anything.
-    let (p, grants) = granting_policy("supervised", &[], "ops");
-    grants.grant_standing(standing(
-        "ops",
-        crate::harness::search::WEB_SEARCH_TOOL,
-        far_future(),
-    ));
-    assert_ne!(
-        p.check(&request(
-            crate::harness::search::WEB_SEARCH_TOOL,
-            serde_json::json!({ "query": "x" })
-        ))
-        .await,
-        ToolPolicyDecision::Deny {
-            reason: String::new()
-        },
-        "sanity: this asserts the arm was not reached, not the tier's answer"
-    );
+            ToolPolicyDecision::Deny {
+                reason: String::new()
+            },
+            "sanity: this asserts the arm was not reached, not the tier's answer"
+        );
+    })
+    .await;
 }
 
 /// `readonly` outranks a standing grant, and leaves it intact.
@@ -182,15 +191,18 @@ async fn readonly_outranks_a_standing_grant_and_leaves_it_intact() {
 
 #[tokio::test]
 async fn an_unbound_policy_ignores_standing_grants_entirely() {
-    let queue = ApprovalRequestQueue::default();
-    let grants = queue.grants();
-    let p = policy("supervised", &[], None).with_requests(queue);
-    grants.grant_standing(standing("ops", "send_email", far_future()));
+    in_cycle(async {
+        let queue = ApprovalRequestQueue::default();
+        let grants = queue.grants();
+        let p = policy("supervised", &[], None).with_requests(queue);
+        grants.grant_standing(standing("ops", "send_email", far_future()));
 
-    assert!(matches!(
-        p.check(&request("send_email", serde_json::json!({}))).await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
+        assert!(matches!(
+            p.check(&request("send_email", serde_json::json!({}))).await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+    })
+    .await;
 }
 
 /// What may be granted standing is decided by what a tool can **reach**,
@@ -298,49 +310,52 @@ fn a_composio_read_may_be_granted_standing_and_a_send_may_not() {
 #[tokio::test]
 #[cfg(feature = "openhuman")]
 async fn a_drifted_composio_read_no_longer_parks_as_spend() {
-    let drifted = || serde_json::json!({ "tool": "GITHUB_ISSUES_LIST_FOR_REPO" });
-    for mode in ["supervised", "auto"] {
-        let p = policy(mode, &[], None).with_agent("ops");
-        assert_eq!(
-            p.check(&request("composio_execute", drifted())).await,
-            ToolPolicyDecision::Allow,
-            "under `{mode}` a GitHub issue read must run, not park behind a card \
+    in_cycle(async {
+        let drifted = || serde_json::json!({ "tool": "GITHUB_ISSUES_LIST_FOR_REPO" });
+        for mode in ["supervised", "auto"] {
+            let p = policy(mode, &[], None).with_agent("ops");
+            assert_eq!(
+                p.check(&request("composio_execute", drifted())).await,
+                ToolPolicyDecision::Allow,
+                "under `{mode}` a GitHub issue read must run, not park behind a card \
              that says it spends money"
+            );
+        }
+        // The card never says spend, whatever tier is asking.
+        assert_eq!(
+            classify_group("composio_execute", &drifted()),
+            EffectGroup::Other,
         );
-    }
-    // The card never says spend, whatever tier is asking.
-    assert_eq!(
-        classify_group("composio_execute", &drifted()),
-        EffectGroup::Other,
-    );
-    // …and the two boundaries the fix does not move. `readonly` still
-    // refuses: this reaches a third party's account with the company's
-    // credential, which is exactly what that tier promises not to do.
-    let ro = policy("readonly", &[], None).with_agent("ops");
-    assert!(matches!(
-        ro.check(&request("composio_execute", drifted())).await,
-        ToolPolicyDecision::Deny { .. }
-    ));
-    // And an inferred read is not mintable: a verb is evidence, and a
-    // standing grant outlives the call it was cut from.
-    assert!(!grantable("composio_execute", &drifted()));
-    // The control, in the same tiers: a send that merely misses the
-    // catalogue is still a send. `GITHUB_INVENT_A_NEW_VERB` names no verb
-    // this layer knows, so nothing about #1818 rescues it.
-    for mode in ["supervised", "auto"] {
-        let p = policy(mode, &[], None).with_agent("ops");
-        assert!(
-            matches!(
-                p.check(&request(
-                    "composio_execute",
-                    serde_json::json!({ "tool": "GITHUB_INVENT_A_NEW_VERB" })
-                ))
-                .await,
-                ToolPolicyDecision::RequireApproval { .. }
-            ),
-            "under `{mode}` an action nobody has classified must still park"
-        );
-    }
+        // …and the two boundaries the fix does not move. `readonly` still
+        // refuses: this reaches a third party's account with the company's
+        // credential, which is exactly what that tier promises not to do.
+        let ro = policy("readonly", &[], None).with_agent("ops");
+        assert!(matches!(
+            ro.check(&request("composio_execute", drifted())).await,
+            ToolPolicyDecision::Deny { .. }
+        ));
+        // And an inferred read is not mintable: a verb is evidence, and a
+        // standing grant outlives the call it was cut from.
+        assert!(!grantable("composio_execute", &drifted()));
+        // The control, in the same tiers: a send that merely misses the
+        // catalogue is still a send. `GITHUB_INVENT_A_NEW_VERB` names no verb
+        // this layer knows, so nothing about #1818 rescues it.
+        for mode in ["supervised", "auto"] {
+            let p = policy(mode, &[], None).with_agent("ops");
+            assert!(
+                matches!(
+                    p.check(&request(
+                        "composio_execute",
+                        serde_json::json!({ "tool": "GITHUB_INVENT_A_NEW_VERB" })
+                    ))
+                    .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "under `{mode}` an action nobody has classified must still park"
+            );
+        }
+    })
+    .await;
 }
 
 /// The grantability answer and the parking answer are read from one
@@ -412,25 +427,28 @@ fn web_search_is_still_a_priced_call() {
 /// follow. Calling *through* a server still parks.
 #[tokio::test]
 async fn listing_mcp_servers_and_tools_runs_without_asking() {
-    let p = policy("supervised", &[], None);
-    for tool in [
-        "mcp_list_servers",
-        "mcp_list_tools",
-        "mcp_registry_list_tools",
-    ] {
-        assert_eq!(
-            p.check(&request(tool, serde_json::json!({}))).await,
-            ToolPolicyDecision::Allow,
-            "`{tool}` reads local registration state and reaches nothing"
-        );
-    }
-    for tool in ["mcp_call_tool", "mcp_registry_tool_call"] {
-        assert!(
-            matches!(
+    in_cycle(async {
+        let p = policy("supervised", &[], None);
+        for tool in [
+            "mcp_list_servers",
+            "mcp_list_tools",
+            "mcp_registry_list_tools",
+        ] {
+            assert_eq!(
                 p.check(&request(tool, serde_json::json!({}))).await,
-                ToolPolicyDecision::RequireApproval { .. }
-            ),
-            "`{tool}` can perform any effect the remote server advertises"
-        );
-    }
+                ToolPolicyDecision::Allow,
+                "`{tool}` reads local registration state and reaches nothing"
+            );
+        }
+        for tool in ["mcp_call_tool", "mcp_registry_tool_call"] {
+            assert!(
+                matches!(
+                    p.check(&request(tool, serde_json::json!({}))).await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "`{tool}` can perform any effect the remote server advertises"
+            );
+        }
+    })
+    .await;
 }

@@ -24,6 +24,7 @@ pub(super) fn brain_that_steers_itself(
         calls: std::sync::atomic::AtomicUsize::new(0),
     });
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -59,6 +60,7 @@ pub(super) fn brain_that_steers_itself(
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -174,6 +176,7 @@ pub(super) fn brain_that_selects_with(
         selector_calls: std::sync::atomic::AtomicUsize::new(0),
     });
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -207,6 +210,7 @@ pub(super) fn brain_that_selects_with(
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -437,6 +441,7 @@ pub(super) fn brain_that_delegates_with(
         steer: steer.clone(),
     });
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -470,6 +475,7 @@ pub(super) fn brain_that_delegates_with(
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
