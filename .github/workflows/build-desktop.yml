@@ -83,26 +83,14 @@ on:
         description: Attach outputs to the DRAFT GitHub Release named by `tag` instead of uploading Actions artifacts. Requires `sign`.
         type: boolean
         default: false
-    # THE SIGNING SECRETS ARE NOT PASSED BY THE CALLER. The APPLE_*,
-    # APP_STORE_CONNECT_* and TAURI_SIGNING_* secrets live only in the
-    # `Production` environment, and
-    # both jobs below declare `environment: Production`. GitHub resolves a
-    # job's environment secrets in the job that declares the environment, and
-    # for a reusable workflow "the environment secret will be used, and not
-    # the secret passed from the caller workflow" (docs: Reusing workflows →
-    # limitations). A caller job that `uses:` a workflow cannot declare an
-    # environment itself, so a mapping there could only ever hand over a
-    # repository-level copy — which no longer exists.
-    #
-    # They stay DECLARED here, all optional, for one reason: `actionlint` types
-    # `secrets.*` in a `workflow_call` workflow from this list and rejects any
-    # name it does not contain. Declared-and-not-passed resolves to the
-    # environment secret at run time. `guard` names the missing one when an
-    # input needs it.
-    #
-    # SENTRY_AUTH_TOKEN is the exception: it is a repository secret, not a
-    # Production one, so callers pass it by name — never `secrets: inherit`,
-    # which would also hand over everything else the repository holds.
+    # THE CALLER MUST PASS EVERY SIGNING NAME. The APPLE_*, APP_STORE_CONNECT_*
+    # and TAURI_SIGNING_* secrets live only in the `Production` environment,
+    # which both jobs below declare. A reusable workflow sees an environment
+    # secret only when the caller passes that name: the caller's value is empty
+    # (it has no environment), and the job's `Production` value replaces it.
+    # Declared here but not passed, a name resolves empty and `guard` fails.
+    # Callers pass names one by one, never `secrets: inherit`, which would hand
+    # over every repository secret.
     secrets:
       APPLE_CERTIFICATE_BASE64:
         required: false
