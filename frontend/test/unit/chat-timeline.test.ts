@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import type { ChatOutput } from "@/api/types";
 import { buildTimeline, type Channel } from "@/views/room/model";
 import type { ChatMessage } from "@/lib/chat";
-import type { ChatOutput } from "@/api/types";
 
 /**
  * Timeline folding by parent.
