@@ -8,9 +8,9 @@ use futures::stream::{self, BoxStream};
 
 use crate::Result;
 use crate::ports::events::{EventLog, EventStreamItem};
-use crate::ports::types::{
-    CompanyEvent, CompanyId, CompanyRecord, EventSeq, ReplyEpisode, StoredEvent,
-};
+#[cfg(feature = "openhuman")]
+use crate::ports::types::CompanyRecord;
+use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, ReplyEpisode, StoredEvent};
 
 /// An in-memory journal, the smallest thing that satisfies the port.
 ///
@@ -157,6 +157,7 @@ pub(crate) fn agent_reply_in(
 }
 
 /// A record parsed from a manifest.
+#[cfg(feature = "openhuman")]
 pub(crate) fn record(manifest: &str) -> CompanyRecord {
     let manifest: crate::company::CompanyManifest =
         toml::from_str(manifest).expect("test manifest parses");
@@ -164,6 +165,7 @@ pub(crate) fn record(manifest: &str) -> CompanyRecord {
 }
 
 /// Two desks of two sharing the CEO — the `hive_demo` shape.
+#[cfg(feature = "openhuman")]
 pub(crate) const TWO_DESKS: &str = r#"
 [company]
 name = "Acme"
