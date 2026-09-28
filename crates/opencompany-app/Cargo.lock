@@ -3827,7 +3827,7 @@ dependencies = [
 
 [[package]]
 name = "opencompany-app"
-version = "0.3.0"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3849,7 +3849,7 @@ dependencies = [
 
 [[package]]
 name = "opencompany-core"
-version = "0.3.0"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "argon2",
