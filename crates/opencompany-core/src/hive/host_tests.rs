@@ -137,7 +137,7 @@ async fn a_conclusion_is_threaded_under_the_conversation_it_concludes() {
         .unwrap();
     host.event(&tinyhivemind_driver::Event::Asked {
         seat: "ada".into(),
-        askee: "grace".into(),
+        askees: vec!["grace".into()],
         root: tinyhivemind::Sequence(ask.value()),
     });
 
@@ -208,7 +208,7 @@ async fn a_row_written_to_a_pair_channel_is_addressed_to_that_pair() {
         .unwrap();
     host.event(&tinyhivemind_driver::Event::Asked {
         seat: "ada".into(),
-        askee: "grace".into(),
+        askees: vec!["grace".into()],
         root: tinyhivemind::Sequence(ask.value()),
     });
 
