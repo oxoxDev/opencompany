@@ -329,11 +329,19 @@ jobs:
     permissions:
       contents: write # uploads into the draft Release
     uses: ./.github/workflows/build-desktop.yml
-    # Only the repository-level Sentry token is passed. The APPLE_*,
-    # APP_STORE_CONNECT_* and TAURI_SIGNING_* secrets live in the `Production`
-    # environment, which the called workflow's own jobs declare — see its
-    # `secrets:` note.
+    # Each signing name must be passed for the called workflow to see it; the
+    # value here is empty and the called job's `Production` environment
+    # supplies the real one. See build-desktop.yml's `secrets:` note.
     secrets:
+      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+      APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64 }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
     with:
       build_ref: ${{ needs.prepare-build.outputs.build_ref }}
