@@ -29,6 +29,7 @@ on:
   push:
     branches:
       - spike/windows-desktop-build
+      - spike/windows-desktop-main
   workflow_dispatch:
 
 permissions:
