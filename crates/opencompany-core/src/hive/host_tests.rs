@@ -146,7 +146,7 @@ async fn a_conclusion_is_threaded_under_the_conversation_it_concludes() {
             "author": "grace",
             "utterance": { "kind": "dm", "to": ["ada"], "message": "concluded our conversation: no, ship it" },
             "thread": null,
-            "only_for": "ada",
+            "only_for": ["ada"],
             "conversation": ask.value(),
             "purpose": { "kind": "desk" },
         })))
@@ -156,7 +156,7 @@ async fn a_conclusion_is_threaded_under_the_conversation_it_concludes() {
             "author": "grace",
             "utterance": { "kind": "broadcast", "message": "freeze policy: none on file" },
             "thread": null,
-            "only_for": null,
+            "only_for": [],
             "conversation": ask.value(),
             "purpose": { "kind": "desk" },
         })))
@@ -219,7 +219,7 @@ async fn a_row_written_to_a_pair_channel_is_addressed_to_that_pair() {
             "author": "grace",
             "utterance": { "kind": "complete_episode", "message": "no freeze needed" },
             "thread": ask.value(),
-            "only_for": null,
+            "only_for": [],
             "conversation": null,
             "purpose": { "kind": "desk" },
         })))
@@ -230,7 +230,7 @@ async fn a_row_written_to_a_pair_channel_is_addressed_to_that_pair() {
             "author": "grace",
             "utterance": { "kind": "broadcast", "message": "freeze policy: none" },
             "thread": null,
-            "only_for": null,
+            "only_for": [],
             "conversation": null,
             "purpose": { "kind": "desk" },
         })))
@@ -288,7 +288,7 @@ async fn a_committed_row_names_the_wave_its_turn_opened_in() {
             "author": "ada",
             "utterance": { "kind": "complete_episode", "message": "done" },
             "thread": null,
-            "only_for": null,
+            "only_for": [],
             "conversation": null,
             "purpose": { "kind": "desk" },
         })))
@@ -448,7 +448,7 @@ async fn a_non_owners_deskless_row_stays_out_of_the_operators_dm() {
         "author": "ada",
         "utterance": { "kind": "post", "message": "" },
         "thread": null,
-        "only_for": null,
+        "only_for": [],
         "conversation": null,
         "purpose": { "kind": "desk" },
     })))
@@ -483,7 +483,7 @@ async fn a_dm_owners_own_row_still_lands_on_its_line() {
         "author": "grace",
         "utterance": { "kind": "post", "message": "here is where it stands" },
         "thread": null,
-        "only_for": null,
+        "only_for": [],
         "conversation": null,
         "purpose": { "kind": "desk" },
     })))
@@ -506,7 +506,7 @@ async fn a_desk_row_is_unchanged_whoever_wrote_it() {
         "author": "ada",
         "utterance": { "kind": "post", "message": "shipping the freeze note" },
         "thread": null,
-        "only_for": null,
+        "only_for": [],
         "conversation": null,
         "purpose": { "kind": "desk" },
     })))

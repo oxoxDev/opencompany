@@ -49,7 +49,7 @@ fn post(text: &str) -> Commit {
         "author": "ceo",
         "utterance": { "kind": "post", "message": text },
         "thread": null,
-        "only_for": null,
+        "only_for": [],
         "conversation": null,
         "purpose": { "kind": "desk" },
     }))

@@ -79,7 +79,7 @@ fn commit(author: &str, utterance: serde_json::Value) -> Commit {
         "author": author,
         "utterance": utterance,
         "thread": null,
-        "only_for": null,
+        "only_for": [],
         "conversation": null,
         "purpose": { "kind": "desk" },
     }))
@@ -213,7 +213,7 @@ async fn an_ask_does_not_carry_a_delivery_into_a_private_conversation() {
 
     host.commit(&commit(
         "one",
-        serde_json::json!({ "kind": "ask", "to": "two", "message": "does the outline hold?" }),
+        serde_json::json!({ "kind": "ask", "to": ["two"], "message": "does the outline hold?" }),
     ))
     .expect("commits");
     host.settle_deliveries();
