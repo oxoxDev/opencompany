@@ -378,6 +378,7 @@ async fn tool_slugs_omits_a_granted_but_unwired_tool_and_says_why() {
     let store = FsCompanyStore::new(home.clone());
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),

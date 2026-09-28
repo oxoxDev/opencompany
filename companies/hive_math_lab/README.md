@@ -1,12 +1,21 @@
 # Hive Math Lab
 
+> **Migration note.** The trace-grammar hive this bundle was written against
+> (`[group_chat.hive]`: quorum, turn budget, blind round, per-seat moves,
+> asides) has been replaced by completion-driven rooms — concurrent rounds,
+> speech as a tool call, Jev routing, referral — configured by
+> `[group_chat.routing]` ([`docs/spec/runtime/hive.md`](../../docs/spec/runtime/hive.md)).
+> A `[group_chat.hive]` block is refused at load with a migration hint; the
+> desks below keep their seats and their referral settings, and the grammar
+> paragraphs describe the design the bundle was tuned under, not what runs.
+
 The [Agentic Math Lab](../math_lab/README.md), re-seated on **one
 desk** instead of four, so a stated problem is answered by a tinyhivemind
 deliberation episode rather than by an orchestrator handing work from lead to
 lead. The desk keeps the parent lab's three working roles and adds three more
 instruments a hand-off chain had no seat for: a literal reading of the
 statement, a brute force with no clever step to be wrong about, and a memory
-of what this lab already knows. See `docs/spec/runtime/hivemind.md` for the
+of what this lab already knows. See `docs/spec/runtime/hive.md` for the
 mechanics and `scripts/hive-euler.py` for the headless Project Euler driver.
 
 ## The solvers desk

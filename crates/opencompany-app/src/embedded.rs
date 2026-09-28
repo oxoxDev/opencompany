@@ -261,8 +261,8 @@ pub async fn start_with(
         // edit on a freshly booted host already has a rebuilder to reach for.
         .with_rebuilder(std::sync::Arc::new(opencompany::desktop::DesktopRebuilder))
         // Without this `hub_identity()` is `None`, and every surface that asks
-        // the hub whose token this is answers as though the host belonged to no
-        // ecosystem: the Account page reports the balance unknown, and
+        // the hub about this host's key answers as though the host belonged to
+        // no ecosystem: the Account page reports the balance unknown, and
         // `credential/link/start` refuses before it builds a URL. Unconditional
         // rather than `#[cfg]`-guarded, for the same reason
         // `install_into_embedded_core` above is: this crate's `opencompany`

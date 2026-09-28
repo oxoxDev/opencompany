@@ -13,26 +13,29 @@
 //!   unreachable.
 //! - The dev echo of that code is gated on [`AppConfig::is_local_only`], which
 //!   is false for exactly the hosted deployment that has this problem.
-//! - The platform hub needs the hub wired.
 //!
-//! So a self-hosted company with no mail and no hub could not be signed into at
-//! all. The console said as much — *"an admin can issue you one if you have
-//! none"* — with nobody to ask.
+//! So a self-hosted company with no mail could not be signed into at all. The
+//! console said as much — *"an admin can issue you one if you have none"* —
+//! with nobody to ask.
 //!
-//! # Why the host, and not another route
+//! Two answers live here, for two different callers:
 //!
-//! This is deliberately **not** reachable over HTTP. The authority it relies on
-//! is possession of the process and its storage, which an operator already has
-//! and a request never does. Adding an HTTP surface would mean inventing a way
-//! to authenticate the one caller who cannot yet authenticate.
-//!
-//! # What it will not do
-//!
-//! It issues a password only to an address that is *already* eligible — named
-//! in the manifest's `[users] admins`, or injected as the deployment's
-//! bootstrap admin. It cannot invent membership, so it is not a way to add
-//! someone to a company; it only makes an existing standing invite usable
-//! without mail.
+//! - [`issue_password`] is the **host-side** one (`opencompany issue-password`).
+//!   It is deliberately not reachable over HTTP: the authority it relies on is
+//!   possession of the process and its storage, which an operator already has
+//!   and a request never does. It issues a password only to an address that is
+//!   *already* eligible — named in the manifest's `[users] admins`, or injected
+//!   as the deployment's bootstrap admin — and cannot invent membership.
+//! - [`claim_first_admin`] is the **console** one (`POST …/auth/claim`), for the
+//!   person who just started a host and is looking at its sign-in screen with
+//!   no way in. It is open exactly as long as the company has **no users at
+//!   all**, and closes for good the moment the first one exists. Whoever
+//!   reaches a fresh host first picks the admin login and its password — the
+//!   same first-run claim every self-hosted product with a login screen makes,
+//!   and the alternative was a shell command nobody running `docker compose
+//!   up` had been told about. Where the deployment already named its first
+//!   admin, only that address may claim; a stranger reaching a provisioned
+//!   tenant first must not be able to take it.
 
 use std::sync::Arc;
 
@@ -223,6 +226,89 @@ pub async fn issue_password(
         created,
         must_change_password: require_change,
     })
+}
+
+/// Why a first-admin claim was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimRefusal {
+    /// Somebody already holds an account here, so there is no first admin left
+    /// to claim. The ordinary sign-in is the way in.
+    AlreadyClaimed,
+    /// The deployment named its first admin (manifest or environment) and this
+    /// is not that address.
+    NotTheNamedAdmin,
+}
+
+/// Whether `company` still has no users, which is the one state in which
+/// [`claim_first_admin`] is open.
+pub async fn is_unclaimed(
+    users: &Arc<dyn UserStore>,
+    company: &CompanyId,
+) -> Result<bool, OpenCompanyError> {
+    Ok(users.list_users(company).await?.is_empty())
+}
+
+/// Mints the first admin of a company nobody has joined yet, with a password.
+///
+/// `standing` is what [`standing_admins`] returned for this company. When it
+/// names anybody, `email` has to be one of them — the deployment decided who
+/// owns this instance and a first-come claim must not overrule it. When it is
+/// empty the address is the caller's to choose, and it is stored as typed
+/// (lowercased and trimmed, like every login identity) with no check that it
+/// is a mailbox: on a host with no mail transport there is nothing to send to,
+/// and a plain username is a perfectly good login.
+///
+/// Refuses with [`ClaimRefusal::AlreadyClaimed`] the moment any user exists.
+/// The check and the write are not one transaction, so two claims racing on an
+/// empty company can both succeed; that window is a few milliseconds on a host
+/// that has just booted, and the second claim is visible on the roster to the
+/// first, which is the honest place for it to be.
+pub async fn claim_first_admin(
+    users: &Arc<dyn UserStore>,
+    company: &CompanyId,
+    standing: &[String],
+    email: &str,
+    plaintext: &str,
+) -> Result<Result<UserRecord, ClaimRefusal>, OpenCompanyError> {
+    // The same rule the manifest validator applies to `[users].admins`, so a
+    // login that could not have been written there cannot be claimed here
+    // either — in particular the `none`-mode owner's own `local:owner` key.
+    if !crate::ports::users::is_usable_admin_email(email) {
+        return Err(OpenCompanyError::InvalidRequest(
+            "that is not a usable login — an email address or a single word".into(),
+        ));
+    }
+    let email = normalize_email(email);
+    if !is_unclaimed(users, company).await? {
+        return Ok(Err(ClaimRefusal::AlreadyClaimed));
+    }
+    if !standing.is_empty() && !standing.contains(&email) {
+        return Ok(Err(ClaimRefusal::NotTheNamedAdmin));
+    }
+    password::validate(plaintext, &email)?;
+    let hash = password::hash(&token::OsTokens, plaintext)?;
+    let now = crate::ports::now_millis();
+    let user = UserRecord {
+        id: generate_id(),
+        email: email.clone(),
+        display_name: None,
+        avatar: None,
+        role: UserRole::Admin,
+        status: UserStatus::Active,
+        password_hash: Some(hash),
+        // They chose this password themselves a moment ago; there is nothing
+        // to replace.
+        must_change_password: false,
+        created_at_millis: now,
+        last_seen_at_millis: Some(now),
+        updated_at_millis: now,
+    };
+    users.upsert_user(company, &user).await?;
+    if let Some(mut invite) = users.find_invite_by_email(company, &email).await? {
+        invite.accepted_at_millis = Some(now);
+        users.upsert_invite(company, &invite).await?;
+    }
+    Ok(Ok(user))
 }
 
 #[cfg(test)]

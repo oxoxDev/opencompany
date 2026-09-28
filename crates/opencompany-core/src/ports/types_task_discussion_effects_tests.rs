@@ -146,6 +146,7 @@ fn agent_card_round_trips_with_extended_fields() {
 
 fn desk_record(toml_src: &str, overlay: Vec<OverlayDeskMember>) -> CompanyRecord {
     CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
@@ -187,20 +188,20 @@ fn desk_record_ordered(
 fn desk_hive_overrides_precede_manifest_and_are_replaced_or_cleared() {
     let manifest = "[company]\nname = \"Acme\"\n\
          [[group_chat]]\nid = \"studio\"\nname = \"Studio\"\nmembers = []\n\
-         [group_chat.hive]\nquorum = 2\n";
+         [group_chat.routing]\nround_width = 2\n";
     let mut record = desk_record(manifest, Vec::new());
 
     // The manifest wins where no edit exists, and an unknown desk falls
     // through to the default rather than borrowing another desk's table.
-    assert_eq!(record.effective_desk_hive("studio").quorum, Some(2));
+    assert_eq!(record.effective_desk_hive("studio").round_width, Some(2));
     assert_eq!(
         record.effective_desk_hive("unknown"),
-        crate::hivemind::HiveConfig::default()
+        crate::hive::routing::RoutingConfig::default()
     );
     assert!(!record.desk_hive_is_installed("studio"));
 
-    let first = crate::hivemind::HiveConfig {
-        quorum: Some(1),
+    let first = crate::hive::routing::RoutingConfig {
+        round_width: Some(1),
         ..Default::default()
     };
     record.upsert_desk_hive(DeskHiveOverride {
@@ -208,10 +209,10 @@ fn desk_hive_overrides_precede_manifest_and_are_replaced_or_cleared() {
         hive: first,
     });
     assert!(record.desk_hive_is_installed("studio"));
-    assert_eq!(record.effective_desk_hive("studio").quorum, Some(1));
+    assert_eq!(record.effective_desk_hive("studio").round_width, Some(1));
 
-    let replacement = crate::hivemind::HiveConfig {
-        quorum: Some(3),
+    let replacement = crate::hive::routing::RoutingConfig {
+        round_width: Some(3),
         ..Default::default()
     };
     record.upsert_desk_hive(DeskHiveOverride {
@@ -219,10 +220,10 @@ fn desk_hive_overrides_precede_manifest_and_are_replaced_or_cleared() {
         hive: replacement,
     });
     assert_eq!(record.overlay_desk_hive.len(), 1);
-    assert_eq!(record.effective_desk_hive("studio").quorum, Some(3));
+    assert_eq!(record.effective_desk_hive("studio").round_width, Some(3));
     assert!(record.clear_desk_hive("studio"));
     assert!(!record.clear_desk_hive("studio"));
-    assert_eq!(record.effective_desk_hive("studio").quorum, Some(2));
+    assert_eq!(record.effective_desk_hive("studio").round_width, Some(2));
 }
 
 /// The effective membership is the manifest members first, then overlay

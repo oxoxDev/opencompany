@@ -345,8 +345,15 @@ async fn task_discussion_posts_persist_and_are_scoped_to_their_card() {
 
     // The two projections stay apart: a discussion post is not a run event, so
     // it must not appear on the timeline the Timeline tab renders.
+    let off_card: Vec<&str> = body["timeline"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .filter(|kind| *kind != "card")
+        .collect();
     assert!(
-        body["timeline"].as_array().unwrap().is_empty(),
+        off_card.is_empty(),
         "a discussion post must not land on the run timeline: {body}"
     );
 

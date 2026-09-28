@@ -260,50 +260,6 @@ export function setupHandoffHasScope(): boolean {
 }
 
 /**
- * Whether the current address rode in on a hub sign-in that was asked to land
- * on setup's destination.
- *
- * The host puts the destination on the hub's return URI as a *query* parameter
- * (`?company=…&from=setup`), because a fragment cannot cross the OAuth round
- * trip — the hub appends its own `token=` to whatever it was given, and
- * anything after a `#` there would swallow it.
- */
-export function arrivedViaHubSetupHandoff(scope?: SetupHandoffScope): boolean {
-  const params = new URLSearchParams(window.location.search);
-  if (params.get(SETUP_HANDOFF_FLAG) !== "setup") return false;
-  if (!scope) return true;
-  return (
-    params.get("connection") === scope.connection &&
-    params.get("company") === (scope.company ?? "single")
-  );
-}
-
-/**
- * Consumes a hub-carried setup destination, translating it into the same
- * one-shot hash marker a setup hand-off link carries.
- *
- * An ecosystem sign-in returns to `/?company=…&from=setup`; the token
- * redemption strips the hub's own params but leaves `from`. This reads it,
- * takes it out of the query, and writes `#/company?from=setup` — the exact
- * landing a setup link would have produced — so the shell applies the same
- * welcome suppression and route, then clears the marker like any other
- * hand-off. A reload after the conversion has neither the query flag nor the
- * hash marker, so it cannot re-apply either.
- */
-export function absorbHubSetupHandoff(scope?: SetupHandoffScope): void {
-  if (!arrivedViaHubSetupHandoff(scope)) return;
-  const params = new URLSearchParams(window.location.search);
-  params.delete(SETUP_HANDOFF_FLAG);
-  const qs = params.toString();
-  window.history.replaceState(
-    {},
-    "",
-    window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash,
-  );
-  window.location.hash = scope ? setupHandoffFragment(scope) : SETUP_HANDOFF_FRAGMENT;
-}
-
-/**
  * Removes the hand-off flag from the address.
  *
  * One-shot: the suppression it enables belongs to the arrival it rode in on,

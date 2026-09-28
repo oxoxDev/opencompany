@@ -278,6 +278,7 @@ fn tools_and_tool_history_serialize_to_openai_wire() {
             invalid: None,
         }],
         usage: None,
+        origin: None,
     });
     let tool_result = Message::tool("call_1", "3 in stock");
     let wire = wire_messages(&[assistant, tool_result]);

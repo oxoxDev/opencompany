@@ -38,6 +38,7 @@ fn the_setup_answers_survive_the_overlay_blob() {
         automate: "meta ads, order dispatch".into(),
     };
     let mut record = CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
@@ -259,6 +260,7 @@ fn a_message_with_no_mentions_serializes_as_it_did_before_the_field() {
 fn a_reply_with_no_mentions_serializes_as_it_did_before_the_fields() {
     let event = CompanyEvent::AgentReply {
         audience: Vec::new(),
+        episode: None,
         chat_id: "general".to_string(),
         agent_id: "ceo".to_string(),
         text: "hi".to_string(),
@@ -563,12 +565,13 @@ fn agent_reply_steps_are_additive_and_omitted_when_empty() {
     // A tool-less reply serializes without the `steps` key.
     let tool_less = CompanyEvent::AgentReply {
         audience: Vec::new(),
+        episode: None,
         mentions: Vec::new(),
         mention_depth: 0,
         parent: None,
         task_id: None,
         outputs: Vec::new(),
-        chat_id: "main".to_string(),
+        chat_id: "general".to_string(),
         agent_id: "ceo".to_string(),
         text: "hi".to_string(),
         steps: Vec::new(),
@@ -579,12 +582,13 @@ fn agent_reply_steps_are_additive_and_omitted_when_empty() {
     // A reply with a timeline round-trips it.
     let with_steps = CompanyEvent::AgentReply {
         audience: Vec::new(),
+        episode: None,
         mentions: Vec::new(),
         mention_depth: 0,
         parent: None,
         task_id: None,
         outputs: Vec::new(),
-        chat_id: "main".to_string(),
+        chat_id: "general".to_string(),
         agent_id: "ceo".to_string(),
         text: "done".to_string(),
         steps: vec![TurnStep {

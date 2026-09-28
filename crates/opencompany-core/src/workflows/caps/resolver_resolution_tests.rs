@@ -41,6 +41,7 @@ fn store_with_globals_disable(
     ))
     .expect("valid manifest");
     Arc::new(MemStore(std::sync::Mutex::new(Some(CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
@@ -71,6 +72,7 @@ pub(super) fn store_with(overlays: Vec<OverlayWorkflow>) -> Arc<dyn CompanyStore
     let manifest: CompanyManifest =
         toml::from_str("[company]\nname = \"Acme\"\n").expect("valid manifest");
     Arc::new(MemStore(std::sync::Mutex::new(Some(CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),

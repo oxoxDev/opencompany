@@ -117,6 +117,7 @@ async fn a_run_that_settles_during_the_read_is_not_buried_by_a_synthetic_finish(
     let id = CompanyId::new("acme");
     FsCompanyStore::new(home.clone())
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),

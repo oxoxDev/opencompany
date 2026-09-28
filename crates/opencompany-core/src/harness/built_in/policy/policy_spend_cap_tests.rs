@@ -129,52 +129,55 @@ fn a_declared_cap_reports_itself_unenforced_once_policy_hitl_is_off() {
 ///   budget they wrote down is advisory.
 #[tokio::test]
 async fn at_cap_a_priced_call_parks_through_the_metered_read_and_full_carve_outs() {
-    let meter = FixedMeter::with(vec![spend_sample("analyst", 5.00, today())]);
+    in_cycle(async {
+        let meter = FixedMeter::with(vec![spend_sample("analyst", 5.00, today())]);
 
-    let (supervised, _) = capped_policy(
-        "supervised",
-        None,
-        5.0,
-        "analyst",
-        meter.clone() as Arc<dyn UsageMeter>,
-    );
-    let decision = supervised
-        .check(&request(
-            "web_search",
-            serde_json::json!({ "query": "acme pricing" }),
-        ))
-        .await;
-    assert!(
-        matches!(decision, ToolPolicyDecision::RequireApproval { .. }),
-        "a metered read must park once the agent is out of budget: {decision:?}"
-    );
-
-    let (full, _) = capped_policy(
-        "full",
-        None,
-        5.0,
-        "analyst",
-        meter.clone() as Arc<dyn UsageMeter>,
-    );
-    assert!(
-        matches!(
-            full.check(&request("media_generate_image", serde_json::json!({})))
-                .await,
-            ToolPolicyDecision::RequireApproval { .. }
-        ),
-        "full autonomy is not a budget exemption"
-    );
-    assert!(
-        matches!(
-            full.check(&request(
-                "pay_invoice",
-                serde_json::json!({ "amount_usd": 1.0 })
+        let (supervised, _) = capped_policy(
+            "supervised",
+            None,
+            5.0,
+            "analyst",
+            meter.clone() as Arc<dyn UsageMeter>,
+        );
+        let decision = supervised
+            .check(&request(
+                "web_search",
+                serde_json::json!({ "query": "acme pricing" }),
             ))
-            .await,
-            ToolPolicyDecision::RequireApproval { .. }
-        ),
-        "an amount-bearing call must park at cap under full autonomy too"
-    );
+            .await;
+        assert!(
+            matches!(decision, ToolPolicyDecision::RequireApproval { .. }),
+            "a metered read must park once the agent is out of budget: {decision:?}"
+        );
+
+        let (full, _) = capped_policy(
+            "full",
+            None,
+            5.0,
+            "analyst",
+            meter.clone() as Arc<dyn UsageMeter>,
+        );
+        assert!(
+            matches!(
+                full.check(&request("media_generate_image", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "full autonomy is not a budget exemption"
+        );
+        assert!(
+            matches!(
+                full.check(&request(
+                    "pay_invoice",
+                    serde_json::json!({ "amount_usd": 1.0 })
+                ))
+                .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "an amount-bearing call must park at cap under full autonomy too"
+        );
+    })
+    .await;
 }
 
 /// The remaining-budget boundary, and why the arm sits **above**
@@ -187,39 +190,42 @@ async fn at_cap_a_priced_call_parks_through_the_metered_read_and_full_carve_outs
 /// unreachable by construction.
 #[tokio::test]
 async fn a_declared_amount_that_breaches_the_remaining_budget_parks() {
-    let meter = FixedMeter::with(vec![spend_sample("analyst", 4.20, today())]);
-    let (p, _) = capped_policy(
-        "supervised",
-        Some(5.0),
-        5.0,
-        "analyst",
-        meter.clone() as Arc<dyn UsageMeter>,
-    );
+    in_cycle(async {
+        let meter = FixedMeter::with(vec![spend_sample("analyst", 4.20, today())]);
+        let (p, _) = capped_policy(
+            "supervised",
+            Some(5.0),
+            5.0,
+            "analyst",
+            meter.clone() as Arc<dyn UsageMeter>,
+        );
 
-    // $4.20 spent + $3.00 = $7.20 > $5.00 cap — parks despite being under
-    // the $5 auto-approve threshold.
-    assert!(
-        matches!(
+        // $4.20 spent + $3.00 = $7.20 > $5.00 cap — parks despite being under
+        // the $5 auto-approve threshold.
+        assert!(
+            matches!(
+                p.check(&request(
+                    "pay_invoice",
+                    serde_json::json!({ "amount_usd": 3.0 })
+                ))
+                .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "a sub-threshold spend that breaches the day's remaining budget must park"
+        );
+
+        // $4.20 + $0.50 = $4.70 <= $5.00 — still fits, so auto-approve applies.
+        assert_eq!(
             p.check(&request(
                 "pay_invoice",
-                serde_json::json!({ "amount_usd": 3.0 })
+                serde_json::json!({ "amount_usd": 0.5 })
             ))
             .await,
-            ToolPolicyDecision::RequireApproval { .. }
-        ),
-        "a sub-threshold spend that breaches the day's remaining budget must park"
-    );
-
-    // $4.20 + $0.50 = $4.70 <= $5.00 — still fits, so auto-approve applies.
-    assert_eq!(
-        p.check(&request(
-            "pay_invoice",
-            serde_json::json!({ "amount_usd": 0.5 })
-        ))
-        .await,
-        ToolPolicyDecision::Allow,
-        "a spend that fits inside the remaining budget is unaffected"
-    );
+            ToolPolicyDecision::Allow,
+            "a spend that fits inside the remaining budget is unaffected"
+        );
+    })
+    .await;
 }
 
 /// A spend cap caps **spend**. At cap a teammate can still read and can
@@ -232,34 +238,37 @@ async fn a_declared_amount_that_breaches_the_remaining_budget_parks() {
 /// the budget arm swallowed a free call".
 #[tokio::test]
 async fn free_reads_and_sends_are_untouched_at_cap() {
-    let meter = FixedMeter::with(vec![spend_sample("analyst", 9.99, today())]);
-    let (p, _) = capped_policy(
-        "supervised",
-        None,
-        5.0,
-        "analyst",
-        meter.clone() as Arc<dyn UsageMeter>,
-    );
+    in_cycle(async {
+        let meter = FixedMeter::with(vec![spend_sample("analyst", 9.99, today())]);
+        let (p, _) = capped_policy(
+            "supervised",
+            None,
+            5.0,
+            "analyst",
+            meter.clone() as Arc<dyn UsageMeter>,
+        );
 
-    assert_eq!(
-        p.check(&request("read_file", serde_json::json!({}))).await,
-        ToolPolicyDecision::Allow,
-        "a free read costs nothing and must survive the cap"
-    );
+        assert_eq!(
+            p.check(&request("read_file", serde_json::json!({}))).await,
+            ToolPolicyDecision::Allow,
+            "a free read costs nothing and must survive the cap"
+        );
 
-    let decision = p
-        .check(&request(
-            "send_email",
-            serde_json::json!({ "to": "a@b.test" }),
-        ))
-        .await;
-    match decision {
-        ToolPolicyDecision::RequireApproval { reason, .. } => assert!(
-            reason.contains("supervised"),
-            "a free send parks for the ordinary tier reason, not the budget: {reason}"
-        ),
-        other => panic!("send_email must still park under supervised: {other:?}"),
-    }
+        let decision = p
+            .check(&request(
+                "send_email",
+                serde_json::json!({ "to": "a@b.test" }),
+            ))
+            .await;
+        match decision {
+            ToolPolicyDecision::RequireApproval { reason, .. } => assert!(
+                reason.contains("supervised"),
+                "a free send parks for the ordinary tier reason, not the budget: {reason}"
+            ),
+            other => panic!("send_email must still park under supervised: {other:?}"),
+        }
+    })
+    .await;
 }
 
 /// The ordering pin, mirroring `a_grant_beats_always_approve`: the operator's
@@ -271,38 +280,41 @@ async fn free_reads_and_sends_are_untouched_at_cap() {
 /// answer makes approval mean nothing.
 #[tokio::test]
 async fn a_grant_releases_a_budget_parked_call_once_then_it_re_parks() {
-    let meter = FixedMeter::with(vec![spend_sample("analyst", 5.00, today())]);
-    let (p, grants) = capped_policy(
-        "supervised",
-        None,
-        5.0,
-        "analyst",
-        meter.clone() as Arc<dyn UsageMeter>,
-    );
-    let args = serde_json::json!({ "query": "acme pricing" });
+    in_cycle(async {
+        let meter = FixedMeter::with(vec![spend_sample("analyst", 5.00, today())]);
+        let (p, grants) = capped_policy(
+            "supervised",
+            None,
+            5.0,
+            "analyst",
+            meter.clone() as Arc<dyn UsageMeter>,
+        );
+        let args = serde_json::json!({ "query": "acme pricing" });
 
-    // Out of budget: parks.
-    assert!(matches!(
-        p.check(&request("web_search", args.clone())).await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
-
-    // The operator approves that exact call.
-    grants.grant(granted("analyst", "web_search", args.clone()));
-    assert_eq!(
-        p.check(&request("web_search", args.clone())).await,
-        ToolPolicyDecision::Allow,
-        "an approved at-cap call must run; otherwise approval authorises nothing"
-    );
-
-    // Single-use: the budget is still exhausted, so the next one re-parks.
-    assert!(
-        matches!(
-            p.check(&request("web_search", args)).await,
+        // Out of budget: parks.
+        assert!(matches!(
+            p.check(&request("web_search", args.clone())).await,
             ToolPolicyDecision::RequireApproval { .. }
-        ),
-        "one approval buys one over-budget call, not a raised cap"
-    );
+        ));
+
+        // The operator approves that exact call.
+        grants.grant(granted("analyst", "web_search", args.clone()));
+        assert_eq!(
+            p.check(&request("web_search", args.clone())).await,
+            ToolPolicyDecision::Allow,
+            "an approved at-cap call must run; otherwise approval authorises nothing"
+        );
+
+        // Single-use: the budget is still exhausted, so the next one re-parks.
+        assert!(
+            matches!(
+                p.check(&request("web_search", args)).await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "one approval buys one over-budget call, not a raised cap"
+        );
+    })
+    .await;
 }
 
 /// `readonly` outranks the budget arm, as it outranks the grant: the brake
@@ -425,31 +437,34 @@ async fn a_cap_with_no_meter_is_inert() {
 /// is one call waiting on a human who can wave it through.
 #[tokio::test]
 async fn a_failing_meter_parks_priced_calls_and_leaves_free_ones_alone() {
-    let (p, _) = capped_policy(
-        "full",
-        None,
-        5.0,
-        "analyst",
-        Arc::new(FailingMeter) as Arc<dyn UsageMeter>,
-    );
+    in_cycle(async {
+        let (p, _) = capped_policy(
+            "full",
+            None,
+            5.0,
+            "analyst",
+            Arc::new(FailingMeter) as Arc<dyn UsageMeter>,
+        );
 
-    let decision = p
-        .check(&request(
-            "pay_invoice",
-            serde_json::json!({ "amount_usd": 1.0 }),
-        ))
-        .await;
-    match decision {
-        ToolPolicyDecision::RequireApproval { reason, .. } => assert!(
-            reason.contains("could not be verified"),
-            "the park must say the budget is unknown, not that it is exceeded: {reason}"
-        ),
-        other => panic!("an unreadable budget must park a spend: {other:?}"),
-    }
+        let decision = p
+            .check(&request(
+                "pay_invoice",
+                serde_json::json!({ "amount_usd": 1.0 }),
+            ))
+            .await;
+        match decision {
+            ToolPolicyDecision::RequireApproval { reason, .. } => assert!(
+                reason.contains("could not be verified"),
+                "the park must say the budget is unknown, not that it is exceeded: {reason}"
+            ),
+            other => panic!("an unreadable budget must park a spend: {other:?}"),
+        }
 
-    assert_eq!(
-        p.check(&request("read_file", serde_json::json!({}))).await,
-        ToolPolicyDecision::Allow,
-        "a free call never reaches the budget arm, so a meter outage cannot gate it"
-    );
+        assert_eq!(
+            p.check(&request("read_file", serde_json::json!({}))).await,
+            ToolPolicyDecision::Allow,
+            "a free call never reaches the budget arm, so a meter outage cannot gate it"
+        );
+    })
+    .await;
 }

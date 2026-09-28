@@ -6,6 +6,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { listMemory, type MemoryEntry } from "@/api/memory";
 import { listTasks, type Task } from "@/api/tasks";
 import type { DeskDto } from "@/api/types";
+import { isGeneralDesk } from "@/lib/desks";
 import { getWorkflow, listWorkflows, type WorkflowGraph } from "@/api/workflows";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { PageHeader } from "@/components/page-header";
@@ -241,7 +242,7 @@ export function Overview({ client, company, companyName }: Props) {
       const tasks = tasksResult.status === "fulfilled" ? tasksResult.value : ([] as Task[]);
       const roster = rosterResult.status === "fulfilled" ? rosterResult.value : null;
       const desksRead = desksResult.status === "fulfilled";
-      const desks = desksRead ? desksResult.value : ([] as DeskDto[]);
+      const desks = desksRead ? desksResult.value.filter((d) => !isGeneralDesk(d)) : ([] as DeskDto[]);
       const people = peopleResult.status === "fulfilled" ? peopleResult.value : ([] as Person[]);
       const memories =
         memoriesResult.status === "fulfilled"

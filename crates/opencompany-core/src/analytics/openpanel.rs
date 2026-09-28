@@ -46,7 +46,7 @@ use crate::analytics::{Envelope, NullTracker, Tracker};
 /// # A transport that cannot be built is a [`NullTracker`], never a degraded one
 ///
 /// [`HttpOpenPanelTracker::new`] is fallible because the HTTP client it wraps is
-/// where the credential headers and the send timeout are configured, and both
+/// where the credential header and the send timeout are configured, and both
 /// are load-bearing. The obvious fallback — `reqwest::Client::default()` — is
 /// the wrong answer twice: that client carries **no default headers**, so every
 /// request goes out unauthenticated and is refused, and it carries **no
@@ -110,10 +110,6 @@ pub use http::HttpOpenPanelTracker;
 /// `debug!`, which is the silent failure this whole module is built around.
 #[cfg(feature = "analytics")]
 pub const CLIENT_ID_HEADER: &str = "openpanel-client-id";
-
-/// The header OpenPanel takes the client secret in.
-#[cfg(feature = "analytics")]
-pub const CLIENT_SECRET_HEADER: &str = "openpanel-client-secret";
 
 /// Names this client on the operator's own collector.
 ///
@@ -187,8 +183,8 @@ mod http {
     }
 
     struct Inner {
-        /// Carries the two credential headers as **default headers**, set once
-        /// at construction and marked sensitive.
+        /// Carries the client-id header as a **default header**, set once at
+        /// construction and marked sensitive.
         ///
         /// This is the whole of the credential handling, and it is the part of
         /// the change worth reading twice. Mixpanel wanted its token stamped
@@ -200,7 +196,7 @@ mod http {
         /// touches the body builder at all. There is no longer a code path that
         /// could put it in a payload.
         ///
-        /// `HeaderValue::set_sensitive` on both, which keeps them out of
+        /// `HeaderValue::set_sensitive` on it, which keeps it out of
         /// `HeaderValue`'s own `Debug` and out of HPACK's shared table on
         /// HTTP/2.
         client: reqwest::Client,
@@ -266,10 +262,10 @@ mod http {
         /// Builds a tracker and starts its drain loop.
         ///
         /// The credential is validated for header-safety in
-        /// [`crate::analytics::config::resolve`], which is why the two
-        /// `from_str` calls here can fall back rather than fail: by the time a
+        /// [`crate::analytics::config::resolve`], which is why the
+        /// `from_str` call here can fall back rather than fail: by the time a
         /// [`Decision::Report`](crate::analytics::config::Decision::Report)
-        /// exists, both halves are printable ASCII with no space, which is a
+        /// exists, the client id is printable ASCII with no space, which is a
         /// strict subset of what `HeaderValue` takes. The fallback is an empty
         /// header value, which the collector refuses with a 401 — a loud,
         /// bounded outcome rather than a panic at boot, for a branch that is
@@ -277,7 +273,7 @@ mod http {
         ///
         /// # Fallible, because there is no acceptable degraded client
         ///
-        /// The client built here is the only place the credential headers and
+        /// The client built here is the only place the credential header and
         /// [`SEND_TIMEOUT`] are set, so a client built without them is not a
         /// weaker version of this one — it is one that authenticates against
         /// nothing and can hang a shutdown. [`super::build`] turns the error
@@ -290,17 +286,16 @@ mod http {
         /// cross-origin sanitization removes only `Authorization`, `Cookie`,
         /// `cookie2`, `Proxy-Authorization` and `WWW-Authenticate`
         /// (`redirect.rs::remove_sensitive_headers`, reqwest 0.12.28, read
-        /// rather than assumed). The two `openpanel-client-*` headers are none
-        /// of those, so a `302` from the configured endpoint to any other
+        /// rather than assumed). `openpanel-client-id` is none of those, so a `302` from the configured endpoint to any other
         /// authority — a reverse proxy sending unauthenticated callers to an
         /// SSO host is the ordinary way one arrives — would have handed this
-        /// instance's write secret to a host the operator never named.
+        /// instance's write credential to a host the operator never named.
         /// `HeaderValue::set_sensitive` does not help: it governs `Debug` and
         /// HPACK indexing, not redirect handling.
         ///
         /// That sanitization also compares only **host and port**, never the
         /// scheme, so an `https` endpoint that redirected to `http://` on the
-        /// same host would have carried the secret across in cleartext — the
+        /// same host would have carried the credential across in cleartext — the
         /// `Silence::InsecureEndpoint` rule in
         /// [`crate::analytics::config`] bypassed by a response the operator
         /// does not control.
@@ -329,7 +324,7 @@ mod http {
         /// matcher has no implicit carve-out for `localhost` or `127.0.0.0/8`,
         /// checked rather than assumed. So on a host with `HTTP_PROXY` set and
         /// no matching `NO_PROXY`, `http://localhost:3000/track` was sent to the
-        /// proxy instead, in cleartext, with both credential headers on it.
+        /// proxy instead, in cleartext, with the credential header on it.
         ///
         /// So the cleartext case builds with
         /// [`reqwest::ClientBuilder::no_proxy`], which makes "it does not leave
@@ -357,7 +352,7 @@ mod http {
         /// constructor was `pub` it was also a way around it: the type is
         /// re-exported from a `pub mod`, so an `analytics`-enabled caller could
         /// hand it `http://collector.internal/track` directly and get a tracker
-        /// that posts the client secret across a network in cleartext, with
+        /// that posts the client id across a network in cleartext, with
         /// [`is_cleartext`] dutifully turning off the proxy on the way. A
         /// safety property enforced only by the route callers happen to take is
         /// the thing this module keeps arguing against, so the route is now the
@@ -426,8 +421,8 @@ mod http {
         }
     }
 
-    /// Every header this client sends on every request: the two credential
-    /// halves, marked sensitive, and the two that name the client.
+    /// Every header this client sends on every request: the client id, marked
+    /// sensitive, and the two that name the client.
     pub(super) fn request_headers(credentials: &ClientCredentials) -> reqwest::header::HeaderMap {
         use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
@@ -442,10 +437,6 @@ mod http {
         headers.insert(
             HeaderName::from_static(super::CLIENT_ID_HEADER),
             sensitive(credentials.expose_id()),
-        );
-        headers.insert(
-            HeaderName::from_static(super::CLIENT_SECRET_HEADER),
-            sensitive(credentials.expose_secret()),
         );
         // Compile-time constants, both. They name this client on a collector the
         // operator may be pointing several things at.
@@ -669,7 +660,7 @@ mod http {
         /// **A `3xx` is the same shape of exception, for the same reason.**
         /// This client follows no redirect at all — see
         /// [`HttpOpenPanelTracker::new`] for why the alternative hands the
-        /// write secret to a host nobody configured — so a redirecting endpoint
+        /// write credential to a host nobody configured — so a redirecting endpoint
         /// arrives here as a plain non-success response that will never
         /// resolve. It is a verdict on the endpoint, not on the event, so it
         /// abandons the drain and warns once rather than logging a `debug!` per
@@ -807,7 +798,7 @@ mod http {
                 status = %status,
                 dropped,
                 "[analytics] the collector answered with a redirect, which this client \
-                 never follows: the credential headers would otherwise travel to a host \
+                 never follows: the credential header would otherwise travel to a host \
                  OPENCOMPANY_ANALYTICS_ENDPOINT does not name. Every event will be \
                  dropped until that variable points at the collector directly. For a \
                  self-hosted OpenPanel behind its bundled Caddy that is \
@@ -826,9 +817,10 @@ mod http {
                 endpoint = %crate::analytics::boot::loggable_endpoint(&self.endpoint),
                 dropped,
                 "[analytics] the collector refused this instance's credential (401). \
-                 Every event will be dropped until OPENCOMPANY_ANALYTICS_CLIENT_ID and \
-                 OPENCOMPANY_ANALYTICS_CLIENT_SECRET name a write client on that \
-                 collector. Note that OpenPanel requires the client id to be a UUIDv4."
+                 Every event will be dropped until OPENCOMPANY_ANALYTICS_CLIENT_ID names \
+                 a write client on that collector whose secret check is off (\"ignore \
+                 CORS and secret\"). Note that OpenPanel requires the client id to be a \
+                 UUIDv4."
             );
         }
     }

@@ -21,6 +21,7 @@ fn manifest() -> CompanyManifest {
 async fn seed_company(store: &Arc<dyn crate::ports::CompanyStore>, id: &CompanyId) {
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_tool_grants: None,
             overlay_retired_agents: Vec::new(),

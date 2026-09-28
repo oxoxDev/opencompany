@@ -34,6 +34,7 @@ describe("fetchAuthConfig", () => {
       mode: "wallet",
       passwords: false,
       magicLink: false,
+      claimable: false,
     });
   });
 
@@ -66,7 +67,24 @@ describe("fetchAuthConfig", () => {
       mode: "email",
       passwords: true,
       magicLink: true,
+      claimable: false,
     });
+  });
+
+  it("assumes nothing is claimable on a host that omits the field", async () => {
+    // A host too old to report it has no claim route to send anyone to, so
+    // the offer to create an account must not appear.
+    const c = client({
+      get: async () => ({ mode: "email", passwords: true, magicLink: true }),
+    });
+    expect((await fetchAuthConfig(c, null)).claimable).toBe(false);
+  });
+
+  it("reports a claimable company when the host says so", async () => {
+    const c = client({
+      get: async () => ({ mode: "email", passwords: true, magicLink: false, claimable: true }),
+    });
+    expect((await fetchAuthConfig(c, null)).claimable).toBe(true);
   });
 
   it("assumes a magic link works on a host that cannot answer", async () => {

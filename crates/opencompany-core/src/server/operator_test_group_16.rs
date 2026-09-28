@@ -86,6 +86,7 @@ async fn thread_reply_review_feedback_marks_the_response_not_empty_handed() {
                 parent: None,
                 mentions: Vec::new(),
                 mention_depth: 0,
+                episode: None,
             },
         )
         .await

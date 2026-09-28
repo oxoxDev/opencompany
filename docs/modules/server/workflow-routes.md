@@ -199,20 +199,16 @@ are refused with a `400` when the workflow is written, not only when it runs:
 
 | Destination | Refused when | Checked in |
 | --- | --- | --- |
-| `channel` | the target is not one this **running company** can deliver to — `CompanyRuntime::deliverable_channel_ids()`, which is also what `GET …/workflows/wired-channels` serves the console's picker. Desk channels and enabled OpenHuman-provider manifest channels, plus the always-present `operator` channel (issue #1757) — now a durable, journal-backed destination, so the console offers it like any other rather than excluding it | `validate_draft_against_record` in `src/company/workflow_create.rs` (issue #1191), reading the deliverable set the caller passes in. Both write routes pass it; so does the proposal-apply path. The agent tool surfaces pass `None` (no runtime handle) and skip the rule |
+| `channel` | the target is not one this **running company** can deliver to — `CompanyRuntime::deliverable_channel_ids()`, which is also what `GET …/workflows/wired-channels` serves the console's picker. Desk channels and enabled OpenHuman-provider manifest channels, plus the always-present `operator` channel (issue #1757), so the console offers it like any other rather than excluding it | `validate_draft_against_record` in `src/company/workflow_create.rs` (issue #1191), reading the deliverable set the caller passes in. Both write routes pass it; so does the proposal-apply path. The agent tool surfaces pass `None` (no runtime handle) and skip the rule |
 | `email` | this company's `[tools].allow` does not grant `email`, which delivery answers with `Denied` / `EmailNotGranted` before it even looks for a mailbox | `validate_draft_against_record` in `src/company/workflow_create.rs`, beside the `tool_call` grant gate — so the orchestrator's `create_workflow` tool is held to it too |
 
 The `operator` destination above is a delivery-plane fact only — it is unrelated
-to how the console *lists* the feed. `GET {scope}/desks` carries zero operator
-logic: it is the company's real desks (manifest `[[group_chat]]`s plus
-operator-created overlay desks) and nothing else. The Operator feed's identity
-— its id (ordinarily `operator`, or the collision-fallback id for the one
-grandfathered company shape where a roster teammate already owns that id — see
-`CompanyRecord::operator_feed_channel`), name, and description — is served by
-its own read-only endpoint, `GET {scope}/operator-channel`, which the console
-renders as a pinned row below a divider in the chat rail rather than folding
-into the desk list (issue #1757 rework, replacing an earlier synthetic-desk
-approach that collided with #1762's `#general`).
+to how the console *lists* anything. `GET {scope}/desks` carries zero operator
+logic: it is `#general` followed by the company's real desks (manifest
+`[[group_chat]]`s plus operator-created overlay desks), and nothing else. There is no separate Operator
+feed to list: delivering to `operator` files a notification and posts the
+report in the DM of the agent responsible for the workflow, and the console
+offers no other surface for it.
 
 The `channel` rule lived on the two write routes until issue #1191, which is
 why applying a copilot proposal persisted a graph the editor then refused to

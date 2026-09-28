@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 
 import type { TurnStep } from "@/api/types";
+import { GENERAL_CHANNEL_ID } from "@/lib/chat";
 import { cn } from "@/lib/utils";
 import { TeammateAvatar } from "@/components/teammate-avatar";
+import { StepTimeline } from "./StepTimeline";
 import { runningStepLabel } from "./WorkingIndicator";
 import type { Channel } from "./model";
 
@@ -106,6 +108,34 @@ export function formatElapsed(ms: number): string {
 }
 
 /**
+ * Which agent the receipt should name, given the one a live frame just
+ * reported and the one it is already showing.
+ *
+ * **The newest frame's agent wins.** One query can span several agents: a desk
+ * hand-off runs the delegate's turn under the same `messageSeq`, and a hive
+ * episode passes the floor between seats for the whole deliberation — the
+ * episode's trigger seq is fixed at its start while `agent_id` is a per-turn
+ * argument. Latching the first agent seen therefore pinned the receipt to
+ * whoever spoke first and left it there while somebody else was visibly
+ * working, which is exactly the question this row exists to answer.
+ *
+ * **A frame with no agent changes nothing.** Absence is not a hand-back, and
+ * blanking the name mid-turn would drop the line to "Sent", reading as though
+ * the turn had been un-picked-up.
+ *
+ * Extracted from `AppShell.onTurnEvent` so a test can call the rule instead of
+ * restating it — the same reason `foldLiveFrame` lives apart from the shell,
+ * and the trap the #2068 review caught when a test duplicated a conditional
+ * and would have kept passing through a regression in the branch that runs.
+ */
+export function receiptAgentAfter(
+  current: string | undefined,
+  frameAgentId: string | undefined,
+): string | undefined {
+  return frameAgentId || current;
+}
+
+/**
  * The teammate on the other end of this receipt, by name — never a raw id.
  *
  * Resolves the captured `agentId` against the roster's name map, falling back
@@ -141,9 +171,13 @@ export function receiptStateLine(
   queued?: boolean,
 ): string {
   const step = runningStepLabel(steps);
-  if (step) return `On step ${step}`;
   const name = resolveReceiptAgentName(receipt, agentNames, channel);
+  // Who outranks what, because the steps row beneath already names the call in
+  // flight. A step used to replace the name outright, so a receipt that
+  // reached "On step …" stopped saying who for the rest of the turn — and a
+  // tool call is running for most of one.
   if (name) return `Picked up by ${name}`;
+  if (step) return `On step ${step}`;
   return queued ? "Queued" : "Sent";
 }
 
@@ -185,7 +219,7 @@ export function ChatLiveReceipt({
         name={channel.voice ?? channel.name}
         tone={channel.tone}
         avatar={channel.member?.avatar}
-        company={channel.kind === "channel" && channel.id === "main"}
+        company={channel.kind === "channel" && channel.id === GENERAL_CHANNEL_ID}
         className="size-9 shrink-0"
       />
       <div className="min-w-0 flex-1 space-y-1.5">
@@ -222,6 +256,17 @@ export function ChatLiveReceipt({
             No update for 30s… still waiting.
           </p>
         )}
+        {/* What this turn has done so far, under the line that says who is
+            doing it — the pairing this component's own `steps` doc has
+            described since it was written, and did not render.
+
+            Collapsed to "N steps", as a finished reply's timeline is, and
+            auto-opening on a failed or parked step so a gated call is visible
+            while it can still be acted on rather than after the fact (#411).
+            These retire the instant the turn settles and the reply's durable
+            steps take over, which is why they are not the "what the agent saw"
+            claim Raw turns owns. */}
+        {steps.length > 0 && <StepTimeline steps={steps} />}
       </div>
     </div>
   );

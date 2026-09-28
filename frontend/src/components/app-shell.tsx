@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { OpenCompanyClient } from "@/api/client";
 import {
   ApiError,
@@ -65,9 +65,17 @@ import {
   type AgentReplyEvent,
   budgetProximityExpiresAt,
   type CompanyStreamEvent,
+  type EpisodeFrame,
   isBudgetProximityExpired,
+  type TurnBracketFrame,
   useEvents,
 } from "@/hooks/use-events";
+import { EMPTY_EPISODE_FRAMES, reduceEpisodeFrame } from "@/lib/episode-frames";
+import {
+  coordinationObservations,
+  EMPTY_TURN_LEDGER,
+  reduceTurnBracket,
+} from "@/lib/coordination";
 import { useLedgerNav } from "@/hooks/use-ledger-nav";
 import {
   mentionCountsByChannel,
@@ -101,15 +109,14 @@ import {
   fromHistory,
   reconcileTranscript,
   hostMessageId,
-  liveFrameThreadKey,
   liveReplyIdentity,
   replyVoice,
-  MAIN_THREAD_ID,
+  GENERAL_CHANNEL_ID,
   makeMessage,
   mergeHistoryInOrder,
 } from "@/lib/chat";
 import { CONNECTION_PROVIDERS } from "@/lib/connections";
-import { defaultDesks, GENERAL_CHANNEL, type Desk } from "@/lib/desks";
+import { defaultDesks, type Desk } from "@/lib/desks";
 import { lifecycle } from "@/lib/language";
 import { mergeReadFloors, unreadCount } from "@/lib/unread";
 import {
@@ -123,14 +130,14 @@ import { ConsoleProvider } from "@/lib/console-context";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
 import { drainReReadQueue, type PendingReRead } from "@/lib/re-read-queue";
-import { fetchWithOneRetry } from "@/lib/fetch-with-retry";
 import { Overview } from "@/views/Overview";
 import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
 import { readLastChannel } from "@/lib/last-channel";
 import { RoomView } from "@/views/RoomView";
-import { shouldClearReceipt } from "@/views/room/ChatLiveReceipt";
+import { receiptAgentAfter, shouldClearReceipt } from "@/views/room/ChatLiveReceipt";
 import {
+  buildChannels,
   channelForThread,
   channelIdForThread,
   deskFromDto,
@@ -139,7 +146,7 @@ import {
   type ReferralWorking,
   runningCrossingRows,
   HISTORY_UNSTARTED,
-  isOperatorChannelDto,
+  firstChannel,
   type DecidedApproval,
   type HistoryStatus,
 } from "@/views/room/model";
@@ -147,6 +154,7 @@ import { ReferralRunningProvider } from "@/views/room/referral-running";
 import { TeamView } from "@/views/TeamView";
 import { NotificationsView } from "@/views/NotificationsView";
 import { LedgersView, MANAGE_SEGMENT } from "@/views/LedgersView";
+import { ArtifactRoute } from "@/views/ArtifactRoute";
 import { TaskDetailRoute } from "@/views/TaskDetailRoute";
 import { InboxView } from "@/views/InboxView";
 import { FeedbackView } from "@/views/FeedbackView";
@@ -371,28 +379,8 @@ function connectErrorMessage(code: string, provider: string | null): string {
  */
 function channelMap(desks: Desk[], members: TeamMember[]): Record<string, string> {
   const map: Record<string, string> = {};
-  // Every spelling the host folds the company-wide line under (issue #1743).
-  //
-  // The main line used to be seeded with the first desk's id instead: with no
-  // `#general` channel to land in, it was parked on whichever desk sorted
-  // first, so it would still be somewhere the operator could find it. That is
-  // now actively wrong — an unaddressed message and its reply were rendered in
-  // `#engineering`, complete with an unread badge, while the host's own
-  // history for that desk was empty.
-  //
-  // Resolved through `channelIdForThread` rather than answered here, so there
-  // is one rule and not two: a blueprint desk grandfathered under a General id
-  // owns the line in its own company, and `buildChannels` renders no built-in
-  // channel beside it — pointing these spellings at a `main` nothing renders
-  // parks live frames and their unread badges where they cannot be opened.
-  for (const spelling of ["", MAIN_THREAD_ID, "General", GENERAL_CHANNEL]) {
-    const channelId = channelIdForThread(spelling, desks, members);
-    if (channelId) map[spelling] = channelId;
-  }
-  // `dmThreadId`, not `m.id`: a teammate whose id is a General spelling is
-  // addressed on `dm:<id>`, and the host emits its live frames under that key.
-  // Seeded bare, `channelForThread` could place neither that DM's reply nor its
-  // working indicator anywhere at all (issue #1743).
+  // `dmThreadId`, not `m.id`: a teammate whose id is `general` is addressed on
+  // `dm:<id>`, and the host emits its live frames under that key.
   for (const threadId of [...desks.map((d) => d.id), ...members.map(dmThreadId)]) {
     const channelId = channelIdForThread(threadId, desks, members);
     if (channelId) map[threadId] = channelId;
@@ -840,6 +828,7 @@ export function AppShell({
   // Not a replacement: a frame with no `messageSeq` still keys by thread, which
   // is every turn answering no journaled message and every older host.
   const setLiveStepsByMessage = scopedRoomWriters.setLiveStepsByMessage;
+  const setLiveAgentByTurn = scopedRoomWriters.setLiveAgentByTurn;
   /**
    * Retires the live rows of every message that now has durable steps of its
    * own, and of every message named in `alsoDrop`.
@@ -1282,40 +1271,18 @@ export function AppShell({
         if (list) list.push({ channelId });
         else channelsByThread.set(threadId, [{ channelId }]);
       }
-      // Every resolved thread gets its own fetch, even when nothing renders as
-      // a channel — the main line is a thread with no Chat channel. And every
-      // channel's backing thread is in `threadIds`, so the union is the full
+      // Every resolved thread gets its own fetch, even when nothing renders it
+      // as a channel. And every channel's backing thread is in `threadIds`, so the union is the full
       // set, each exactly once (issue #1690).
       [...new Set([...threadIds, ...channelsByThread.keys()])].forEach((threadId) =>
         hydrateThread(threadId, channelsByThread.get(threadId) ?? []),
       );
     };
 
-    Promise.all([
-      client.listDesks(company).catch(() => null),
-      // The always-present Operator feed's identity (issue #1757 rework) —
-      // fetched alongside desks, not derived from them, since it is its own
-      // surface now. `null` on any failure (offline, or a host that predates
-      // the route) rather than sinking the whole pass: a company can still
-      // rehydrate its real desks/DMs without the pinned Operator row.
-      //
-      // One retry (issue #1781 review, Codex P2): `RoomView` fetches this
-      // same identity independently for rendering the pinned row, so a
-      // single dropped request here — while `RoomView`'s own, later call
-      // succeeds — used to render the row but permanently omit its id from
-      // this pass's rehydration targets and five-second polling, since this
-      // pass had already given up. A bounded retry closes the common
-      // transient case without turning the fetch into an open-ended one; see
-      // `fetchWithOneRetry`'s doc for why it is extracted rather than inline.
-      fetchWithOneRetry(() => client.getOperatorChannel(company)),
-    ])
-      .then(async ([desks, operatorChannelRaw]) => {
-        // See `isOperatorChannelDto`'s doc comment — a client stub that
-        // resolves every unlisted method to `[]` would otherwise satisfy the
-        // `Promise.all` type and reach the field reads below.
-        const operatorChannel = isOperatorChannelDto(operatorChannelRaw)
-          ? operatorChannelRaw
-          : null;
+    client
+      .listDesks(company)
+      .catch(() => null)
+      .then(async (desks) => {
         if (cancelled || requestCompany !== company) return;
         // Issue #151 §3.3: desks first, then one DM thread per roster teammate.
         // The roster is fetched separately and tolerated as optional — a host
@@ -1342,74 +1309,19 @@ export function AppShell({
         // no extra request and is scoped to the company the effect ran for.
         setAgentNames(Object.fromEntries(roster.map((m) => [m.id, m.name])));
         // Keep the addressing this loop resolves, not just its side effect.
-        //
-        // The Operator feed's id is folded in here too (issue #1781 review,
-        // Codex P2): `channelMap` only knows desks and roster teammates, so
-        // without this the map a **live** SSE frame is resolved through
-        // (`channelForThread(chatChannelByThread, event.chatId)`, a few
-        // hundred lines below) missed the Operator channel entirely and
-        // dropped the frame — `renderAgentReply` returns on the very next
-        // line when the lookup misses. The five-second history poll still
-        // recovered it eventually, because the `channels` rehydration-target
-        // list a little further down already carries this same id→id pair;
-        // this closes the live-event gap the poll was quietly papering over.
-        setChatChannelByThread({
-          ...channelMap(chatDesks, roster),
-          ...(operatorChannel ? { [operatorChannel.id]: operatorChannel.id } : {}),
-        });
-        // The channel `RoomView` lands on when the hash names none, which since
-        // issue #1743 is the built-in `#general` rather than the first desk —
-        // the two must agree, or a line with nowhere else to go lands in a
-        // channel the operator is not looking at. Resolved rather than
-        // hard-coded, for the reason `generalChannelId` gives: a grandfathered
-        // blueprint desk owns the line in its own company, and `main` is then
-        // not a channel at all.
-        setFirstDeskChannelId(channelIdForThread(MAIN_THREAD_ID, chatDesks, roster));
-        // Fold the Operator feed's id into the same rehydration pass, keyed on
-        // its own id both as channel and thread (its channel id *is* its
-        // thread id — `chat/history?desk=<id>` reads it through the ordinary
-        // path). Without this, `RoomView`'s pinned row would sit on a channel
-        // id `historyReady` never sees a status for until `discovered` alone
-        // resolves it, and `transcripts[operatorChannel.id]` would never fill
-        // in — the spinner-forever failure mode this pass exists to avoid.
-        const threadIds = [
-          ...resolved.map((t) => t.id),
-          ...(operatorChannel ? [operatorChannel.id] : []),
-        ];
+        setChatChannelByThread(channelMap(chatDesks, roster));
+        // Unaddressed system lines go to the channel a bare Room route opens:
+        // `#general` when the host lists it, since it is pinned first.
+        setFirstDeskChannelId(firstChannel(buildChannels(roster, chatDesks))?.id ?? null);
+        const threadIds = resolved.map((t) => t.id);
         const channels = [
-          // `#general` is not in the desk list (it is not a desk), so its
-          // history has to be named here or nothing would rehydrate it on
-          // reload — the one channel every company has would come back empty.
-          {
-            channelId: channelIdForThread(MAIN_THREAD_ID, chatDesks, roster) ?? MAIN_THREAD_ID,
-            threadId: MAIN_THREAD_ID,
-          },
           ...chatDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
-          // A DM's history is fetched under the teammate's **own id** — but
-          // that id is not always this DM's address. A manifest may declare a
-          // teammate whose id is a General spelling (`mint_agent_id` reserves
-          // `main` and `General`, but a blueprint is not something this console
-          // overrules), and `GET chat/history?desk=main` then returns the
-          // *folded General conversation*, not that teammate's transcript:
-          // `is_general_chat` has folded `""`, `main`, `General` and `general`
-          // into one conversation since issue #65. Naming `dm:<id>` as its
-          // channel therefore poured the company-wide line into that DM on
-          // every reload.
-          //
-          // Resolved through `channelIdForThread` so the one rule that decides
-          // where a thread renders decides it here too (issue #1743). For every
-          // ordinary teammate that is exactly `dm:<id>`, unchanged.
+          // A DM's history is read under `dmThreadId`, which is not always the
+          // teammate's bare id — see its doc.
           ...roster.map((m) => ({
             channelId: channelIdForThread(dmThreadId(m), chatDesks, roster) ?? dmChannelId(m),
-            // The address the DM is actually written under. Bare, this fetched
-            // the folded General history for a teammate whose id is a General
-            // spelling, so its own transcript could never be recovered after a
-            // reload (issue #1743).
             threadId: dmThreadId(m),
           })),
-          ...(operatorChannel
-            ? [{ channelId: operatorChannel.id, threadId: operatorChannel.id }]
-            : []),
         ];
         const rehydrateAll = () => rehydrateTargets(threadIds, channels);
         // SSE remains the fast path. This catches a persisted channel message
@@ -1422,8 +1334,8 @@ export function AppShell({
         setHydration((h) => ({ ...h, discovered: true }));
       })
       .catch(() => {
-        // Last-resort safety net: `listDesks`/`getOperatorChannel` already
-        // degrade to `null` on their own failure above, so this only fires on
+        // Last-resort safety net: `listDesks` already degrades to `null` on
+        // its own failure above, so this only fires on
         // something unexpected inside the `.then` (e.g. a state setter
         // throwing) — keep the static default threads so the console still
         // renders something rather than getting stuck.
@@ -1433,20 +1345,10 @@ export function AppShell({
         // than carry the previous company's map into a receipt here (#1934).
         setAgentNames({});
         setChatChannelByThread(channelMap(fallbackDesks, []));
-        // `MAIN_THREAD_ID`, not `fallbackDesks[0]?.id`: `defaultDesks()` no
-        // longer carries a fabricated `main` row (issue #1743), so the first
-        // fallback desk is just whichever one sorts first — landing the
-        // console on an arbitrary desk on an unexpected error instead of the
-        // company-wide line every other path opens on (issue #1781 review,
-        // Codex P2/medium).
-        setFirstDeskChannelId(MAIN_THREAD_ID);
+        setFirstDeskChannelId(firstChannel(buildChannels([], fallbackDesks))?.id ?? null);
         const threadIds = defaultThreads().map((t) => t.id);
         const channels = [
-          // `#general` is not a desk here either — same reason the success
-          // path above names it explicitly. Without this entry `mainThread()`
-          // is still in `threadIds` (via `defaultThreads()`) but has no
-          // channel to rehydrate history through.
-          { channelId: MAIN_THREAD_ID, threadId: MAIN_THREAD_ID },
+          { channelId: GENERAL_CHANNEL_ID, threadId: GENERAL_CHANNEL_ID },
           ...fallbackDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
         ];
         const rehydrateAll = () => rehydrateTargets(threadIds, channels);
@@ -1921,7 +1823,6 @@ export function AppShell({
           next,
           loadedByChannel,
           chatChannelByThreadRef.current,
-          firstDeskChannelId ?? undefined,
           mentionReReadSubjectsRef.current,
         );
         if (threadIds.length > 0) {
@@ -1989,7 +1890,7 @@ export function AppShell({
         // keeping it is safer than making durable unread mentions disappear.
         // The next successful refresh reconciles the optimistic snapshot.
       });
-  }, [client, company, firstDeskChannelId, reReadSettledThread]);
+  }, [client, company, reReadSettledThread]);
 
   useEffect(() => {
     mentionFeedRevision.current++;
@@ -2068,17 +1969,7 @@ export function AppShell({
     [client, company, scope.connection, refreshMentions],
   );
 
-  const mentionCounts = useMemo(() => {
-    // `main` may be undefined while the desks/roster effect has not resolved —
-    // passing a fabricated `""` would file every legacy "General"/"main"
-    // mention under a channel the rail never has, invisible and unclearable.
-    // The lib drops those rows when there is no rendered main channel.
-    return mentionCountsByChannel(
-      mentionFeed,
-      firstDeskChannelId ?? undefined,
-      new Set(Object.values(chatChannelByThread)),
-    );
-  }, [mentionFeed, firstDeskChannelId, chatChannelByThread]);
+  const mentionCounts = useMemo(() => mentionCountsByChannel(mentionFeed), [mentionFeed]);
   const mentionFeedRef = useRef(mentionFeed);
   mentionFeedRef.current = mentionFeed;
   /**
@@ -2119,15 +2010,6 @@ export function AppShell({
         : mentionsToClear(
             mentionFeedRef.current,
             channelId,
-            // Same undefined-means-none signal as the count memo: with no
-            // rendered main channel the general-chat arm matches nothing.
-            firstDeskChannelId ?? undefined,
-            new Set(
-              Object.keys(chatChannelByThread).filter(
-                (threadId) => chatChannelByThread[threadId] === channelId,
-              ),
-            ),
-            new Set(Object.values(chatChannelByThread)),
             replyParents ?? new Map(),
             openThreadId ?? null,
             loadedMessageIds,
@@ -2221,9 +2103,7 @@ export function AppShell({
    * next — #368's bug, re-introduced one surface over.
    */
   const noteInChannel = (threadId: string | null | undefined, line: string) => {
-    // Through `channelForThread`, not a bare index: the host accepts any casing
-    // of a General spelling and echoes back the one the caller used, so a map
-    // of four literals misses `MAIN` from an API client (issue #1743).
+    // Through `channelForThread` so a `dm:`-prefixed thread resolves too.
     const target = threadId ? (channelForThread(chatChannelByThread, threadId) ?? undefined) : undefined;
     if (!target) {
       noteSystem(line);
@@ -2253,11 +2133,6 @@ export function AppShell({
       // The event names a thread; `chatChannelByThread` is the only thing that
       // knows which channel renders it. An id no channel owns is a no-op:
       // better silent than in the wrong place.
-      //
-      // `channelForThread`, for the reason `noteInChannel` gives: the map holds
-      // four literal General spellings and the host echoes whatever casing the
-      // caller addressed, so a bare index drops the live reply and it appears
-      // only when polling recovers the durable history (issue #1743).
       const channelId = channelForThread(chatChannelByThread, event.chatId);
       if (!channelId) return;
       // This turn's answer is here, carrying the authoritative folded steps, so
@@ -2370,9 +2245,7 @@ export function AppShell({
       // racing it, still running. Only the actual reply — never an advisory
       // interleaved before it — is a completion signal.
       if (from !== "system" && !hasOtherOpenTurns(room.readRoom().openTurns, event.chatId)) {
-        setLiveStepsByThread((prev) =>
-          prev[event.chatId]?.length ? { ...prev, [event.chatId]: [] } : prev,
-        );
+        clearLiveThread(event.chatId);
       }
     },
     // `useEvents` holds its callbacks in refs, so this identity churning as the
@@ -2416,7 +2289,7 @@ export function AppShell({
   /**
    * Who is answering a crossing right now, per asking desk (#2341 live report).
    *
-   * A referred turn runs through `HiveReferralRunner::refer`, outside the
+   * A referred turn runs on the far desk's own episode, outside the
    * `turn_started`/`turn_settled` bracket every other turn is announced by — so
    * while a crossing ran, and `pair_messages` lets that be several model turns,
    * the desk showed a generic working row naming nobody. The `referral` frame
@@ -2429,6 +2302,36 @@ export function AppShell({
    * the answerer for the rest of the episode.
    */
   const [referralWorking, setReferralWorking] = useState<Record<string, ReferralWorking>>({});
+
+  /**
+   * The live half of every desk's episodes (`lib/episode-frames.ts`), and the
+   * chat turn brackets behind them (`lib/coordination.ts`).
+   *
+   * Owned here rather than in `RoomView` for the reason `transcripts` is: a
+   * round keeps running while the operator is on Company or Flows, and the
+   * band has to be right the moment they come back. Two reducers rather than
+   * one because they answer different questions — which seats a round has and
+   * what each is doing, versus how many models are thinking at once across
+   * the whole company — and the Comms graph wants the second without the
+   * first. Both are bounded, so a console left open on a busy company holds a
+   * fixed amount of either.
+   */
+  const [episodeFrames, foldEpisodeFrame] = useReducer(reduceEpisodeFrame, EMPTY_EPISODE_FRAMES);
+  const [turnLedger, foldTurnBracket] = useReducer(reduceTurnBracket, EMPTY_TURN_LEDGER);
+  const onEpisodeEvent = useCallback((event: EpisodeFrame) => foldEpisodeFrame(event), []);
+  const onTurnBracket = useCallback((event: TurnBracketFrame) => {
+    foldTurnBracket(event);
+    // A seat's bracket inside an episode also drives its lane on the band.
+    if (event.episodeId) foldEpisodeFrame(event);
+  }, []);
+  /** Bumped on `desk_routing_configured`, so an open routing editor re-reads. */
+  const [deskRoutingTick, setDeskRoutingTick] = useState(0);
+  const [rosterTick, setRosterTick] = useState(0);
+  /** What the episode frames say for the Comms graph: who spoke to whom. */
+  const commsObservations = useMemo(
+    () => coordinationObservations(episodeFrames, turnLedger),
+    [episodeFrames, turnLedger],
+  );
 
   const injectAgentReply = useCallback(
     (event: AgentReplyEvent) => {
@@ -2517,10 +2420,37 @@ export function AppShell({
   // value handed back to the caller and threaded through to whichever
   // terminal callback eventually clears the receipt it stamped.
   const receiptGenRef = useRef(0);
+  /**
+   * Retires a thread bucket's live rows **and** the agent they named.
+   *
+   * The two are one fact — "this is what the turn on this thread is doing, and
+   * who is doing it" — and a thread key is reused by every turn a conversation
+   * ever runs. Clearing only the rows leaves the previous turn's agent on the
+   * key, so the next turn's row names whoever answered last until a frame
+   * happens to carry a new id. On a turn that never reports one, that is the
+   * whole turn (CodeRabbit on #2423).
+   *
+   * Per-query buckets do not need this: their key is the message, which is
+   * never reused, and `clearLiveRowsSettledBy` already retires them together.
+   */
+  const clearLiveThread = useCallback(
+    (threadId: string, force = false) => {
+      setLiveStepsByThread((prev) =>
+        force || prev[threadId]?.length ? { ...prev, [threadId]: [] } : prev,
+      );
+      setLiveAgentByTurn((prev) => {
+        if (!(threadId in prev)) return prev;
+        const next = { ...prev };
+        delete next[threadId];
+        return next;
+      });
+    },
+    [setLiveStepsByThread, setLiveAgentByTurn],
+  );
   const onSendStart = useCallback((threadId: string) => {
     pendingPostThreadsRef.current.started(threadId);
     activeTurnThreadRef.current = threadId;
-    setLiveStepsByThread((prev) => ({ ...prev, [threadId]: [] }));
+    clearLiveThread(threadId, true);
     // `lastFrameAt` seeds to `startedAt` so the stall check is "no frame for
     // 30s" from the send, not an instant stall.
     const now = Date.now();
@@ -2530,7 +2460,7 @@ export function AppShell({
       [threadId]: { startedAt: now, lastFrameAt: now, gen },
     }));
     return gen;
-  }, []);
+  }, [clearLiveThread]);
   const onSendEnd = useCallback(
     (threadId: string, gen?: number, responseTexts?: readonly string[]) => {
       // `ended` hands back any held system-attributed frame the settled
@@ -2542,13 +2472,10 @@ export function AppShell({
       const released = pendingPostThreadsRef.current.ended(threadId, responseTexts);
       released.forEach((frame) => renderAgentReply(frame));
       if (activeTurnThreadRef.current === threadId) activeTurnThreadRef.current = null;
-      setLiveStepsByThread((prev) => {
-        if (!prev[threadId]?.length) return prev;
-        return { ...prev, [threadId]: [] };
-      });
+      clearLiveThread(threadId);
       clearReceipt(threadId, gen);
     },
-    [clearReceipt, renderAgentReply],
+    [clearLiveThread, clearReceipt, renderAgentReply],
   );
   /**
    * A chat POST that resolved for a company the operator has since left
@@ -2874,14 +2801,7 @@ export function AppShell({
     // when a frame carries no chatId (older host / background turn).
     const frameThreadId =
       ("chatId" in event && event.chatId) || activeTurnThreadRef.current;
-    // …then through the shared resolver, which normalizes General spellings and
-    // leaves every other id in the host-thread namespace these maps are keyed
-    // in. Its doc carries the reasoning for both halves and for why an
-    // unresolved General alias falls back to `MAIN_THREAD_ID` rather than to
-    // its own spelling.
-    const threadId = frameThreadId
-      ? liveFrameThreadKey(chatChannelByThreadRef.current, frameThreadId)
-      : frameThreadId;
+    const threadId = frameThreadId;
     if (!threadId) {
       // No chat bubble to fold the frame into. A dispatched card raised from a
       // conversation now DOES stream — `run_steered_background` derives its
@@ -2916,16 +2836,38 @@ export function AppShell({
       if (!rows) return prev;
       return { ...prev, [rowKey]: rows };
     });
+    // …and who is speaking, under the same key the rows went to.
+    //
+    // `openTurns` already carries an agent, but it is the one the host STARTED
+    // the turn on and it is never revised — right for a single responder, wrong
+    // the moment the floor moves. A desk hand-off runs the delegate under this
+    // same query, and a deliberating room passes the floor between seats for
+    // the length of the episode: `messageSeq` holds still while `agentId`
+    // changes with every turn. So the frames are the only thing that knows who
+    // is working *now*, and `receiptAgentAfter` is the rule for reading them —
+    // shared with the receipt rather than restated, since a second copy is how
+    // the two rows would come to name different people for one turn.
+    setLiveAgentByTurn((prev) => {
+      const frameAgentId = "agentId" in event ? event.agentId : undefined;
+      const next = receiptAgentAfter(prev[rowKey], frameAgentId);
+      // Unchanged is the common case — most frames in a run carry the same
+      // agent — so keep the object identity and let React bail out.
+      if (!next || next === prev[rowKey]) return prev;
+      return { ...prev, [rowKey]: next };
+    });
     // Keep this thread's receipt alive off the same frame (issue #1934): a frame
     // arriving means the turn is advancing, so bump `lastFrameAt` (which clears
-    // any stall) and capture the first agent id we see. Guarded on an existing
+    // any stall) and name whoever is working right now. Guarded on an existing
     // receipt — a stray background frame for a thread we never sent on must not
     // conjure one, mirroring the `if (!threadId) return` guard above.
+    //
+    // Who is named is `receiptAgentAfter`'s rule, not this callback's — see it
+    // for why the newest frame's agent wins over the first one seen.
     setReceiptByThread((prev) => {
       const existing = prev[threadId];
       if (!existing) return prev;
       const frameAgentId = "agentId" in event ? event.agentId : undefined;
-      const agentId = existing.agentId ?? (frameAgentId || undefined);
+      const agentId = receiptAgentAfter(existing.agentId, frameAgentId);
       return { ...prev, [threadId]: { ...existing, lastFrameAt: Date.now(), agentId } };
     });
   }, []);
@@ -3131,6 +3073,15 @@ export function AppShell({
       },
       [reReadSettledThread],
     ),
+    // The episode frames and the turn brackets fold into the shell's two
+    // ledgers; `RoomView` draws the band off the first, the Comms graph and
+    // the Observatory read both. Payloads, not counters: the band is a fold,
+    // not a re-read, and the transcript's `episode` field is what corrects a
+    // dropped frame on the next hydration.
+    onEpisodeEvent,
+    onTurnBracket,
+    onDeskRoutingConfigured: useCallback(() => setDeskRoutingTick((n) => n + 1), []),
+    onRosterChanged: useCallback(() => setRosterTick((n) => n + 1), []),
     // Issue #377. Beside the board tick above, not instead of it: a settle both
     // moves a card between columns and needs saying in the conversation the
     // card came from.
@@ -3590,6 +3541,11 @@ export function AppShell({
               // Skipping setup must not be a dead end: an unstaffed company keeps
               // a visible way back in.
               onRunSetup={() => setSetupForced(true)}
+              // Who spoke to whom inside episodes, for `#/company/comms`, and
+              // the tick that re-reads a desk's routing editor when another
+              // session installs or resets a block.
+              commsObservations={commsObservations}
+              deskRoutingTick={deskRoutingTick}
             />
           )}
           {/* Mounted on EVERY route, not only on `#/chat` (issue #2130).
@@ -3621,6 +3577,7 @@ export function AppShell({
           <RoomView
               client={client}
               company={company}
+              rosterRevision={rosterTick}
               // What the agents in this company are allowed to do without
               // asking, rendered on the composer's toolbar row. Nothing renders
               // until the host has said what the tier is, rather than guessing
@@ -3679,12 +3636,19 @@ export function AppShell({
               failedApprovals={failedApprovals}
               budgetProximity={budgetProximity}
               onDismissBudgetProximity={() => setBudgetProximity(null)}
+              episodeFrames={episodeFrames}
             />
           </ReferralRunningProvider>
           {view === "inbox" && <InboxView client={client} company={company} />}
           {/* All that is left of the Tasks page: the card detail. `sub` is a
               real id by the time this renders — `REWRITE_RETIRED` sent every
               other `#/tasks…` address to the board in Ledgers. */}
+          {/* A published deliverable, addressed as itself. The chat row links
+              here rather than at the card `publish_artifact` minted to satisfy
+              the artifact store's `(task_id, source)` identity. */}
+          {view === "artifacts" && (
+            <ArtifactRoute client={client} company={company} artifactId={sub ?? ""} />
+          )}
           {view === "tasks" && (
             <TaskDetailRoute
               client={client}
@@ -3823,6 +3787,7 @@ export function AppShell({
               client={client}
               company={company}
               sub={sub}
+              agentNames={agentNames}
               onOpenAgent={(agentId, options) =>
                 agentId
                   ? // Issue #1989: `?edit` lands on the detail page with its
@@ -3896,10 +3861,6 @@ export function AppShell({
               // for a poll interval. The same `Array.isArray` guard that
               // built it applies — `mentionFeed` is never anything else.
               notifications={mentionFeed}
-              channels={{
-                rendered: new Set(Object.values(chatChannelByThread)),
-                mainChannelId: firstDeskChannelId ?? undefined,
-              }}
               onNotificationsRead={markNotificationsRead}
               chatChannelByThread={chatChannelByThread}
               onResolved={noteSystem}

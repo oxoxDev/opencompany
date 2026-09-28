@@ -201,8 +201,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
 use openhuman_core as oh;
+use tinytools::{PermissionLevel, Tool, ToolResult};
 
 use crate::company::artifact_mirror::{MirrorOutcome, mirror_node_edit};
 // One rule for what a node's path is and what a caller may pass as one, shared
@@ -306,7 +306,7 @@ const _: () = assert!(MAX_CONTENT_BYTES + READ_OVERHEAD_BYTES <= TOOL_RESULT_BUD
 /// Deliberately the same as [`MAX_CONTENT_BYTES`]: a note an agent may write
 /// must stay a note the agent can read back in full, or the next write would be
 /// refused as oversized.
-const MAX_WRITE_BYTES: usize = MAX_CONTENT_BYTES;
+pub(crate) const MAX_WRITE_BYTES: usize = MAX_CONTENT_BYTES;
 
 /// Bytes a [`WORKSPACE_SEARCH_TOOL`] result reserves for everything that is not
 /// a hit: the header (with the narrowing guidance), the truncation notice, the

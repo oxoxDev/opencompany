@@ -37,8 +37,8 @@ use tinyflows::caps::ToolInvoker;
 use tinyflows::error::{EngineError, Result as TfResult};
 
 use oh::security::SecurityPolicy;
-use oh::tools::{Tool, ToolResult};
 use openhuman_core as oh;
+use tinytools::{Tool, ToolResult};
 
 use crate::harness::search::{SearchBackend, SearchMetering};
 use crate::harness::search_byo::TenantSearch;

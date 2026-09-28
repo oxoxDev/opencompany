@@ -81,34 +81,12 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let manifest: CompanyManifest = toml::from_str(MANIFEST)?;
-    let record = CompanyRecord {
-        overlay_desk_hive: Vec::new(),
-        overlay_retired_agents: Vec::new(),
-        overlay_agent_edits: Vec::new(),
-        id: CompanyId::new("demo"),
-        manifest,
-        ledger: Vec::new(),
-        lifecycle: "running".to_string(),
-        overlay_agents: Vec::new(),
-        overlay_desk_members: Vec::new(),
-        overlay_desk_order: Vec::new(),
-        overlay_desks: Vec::new(),
-        overlay_workflows: Vec::new(),
-        overlay_budgets: Vec::new(),
-        overlay_policy: None,
-        overlay_tool_grants: None,
-        overlay_desk_tools: Default::default(),
-        disabled_workflows: Vec::new(),
-        template_provenance: None,
-        setup: None,
-        name_confirmed: false,
-        activation_completed_at: None,
-        created_at_millis: None,
-    };
+    let record = CompanyRecord::from_manifest(CompanyId::new("demo"), manifest);
 
     let dir = tempfile::tempdir()?;
     let meter = Arc::new(CapturingMeter::default());
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         ledgers: None,
         ledger_registry: Default::default(),
@@ -145,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: opencompany::harness::policy::ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: opencompany::harness::toolbelt::CapabilityFilter::AllowAll,

@@ -10,6 +10,7 @@
 import { useMemo } from "react";
 
 import { cn } from "@/lib/utils";
+import type { RoundBandSpan } from "./model";
 import {
   concurrencyProfile,
   formatOffset,
@@ -33,6 +34,12 @@ const TONE: Record<SpanState, string> = {
 
 interface Props {
   spans: Span[];
+  /**
+   * The rounds the attempts were seats of (`roundsFromRuns`), drawn as bands
+   * above the lanes. Optional and empty by default, so a run with no episodes
+   * draws exactly what it always did.
+   */
+  rounds?: RoundBandSpan[];
   /** The clock an open span is measured against. */
   nowMs: number;
   /** The span currently selected, if any. */
@@ -40,7 +47,7 @@ interface Props {
   onSelect?: (span: Span) => void;
 }
 
-export function WaterfallLens({ spans, nowMs, selectedId, onSelect }: Props) {
+export function WaterfallLens({ spans, rounds = [], nowMs, selectedId, onSelect }: Props) {
   const { lanes, marks, profile, peak, window } = useMemo(() => {
     const window = windowFor(spans, nowMs);
     return {
@@ -77,6 +84,46 @@ export function WaterfallLens({ spans, nowMs, selectedId, onSelect }: Props) {
           </span>
         ))}
       </div>
+
+      {/* The rounds, as bands: the seats of one round ran together, and the
+          band is what says so — bars that merely overlap could be two
+          unrelated turns. Labelled by round, tinted by whether it is still
+          open. */}
+      {rounds.length > 0 && (
+        <div className="flex items-start gap-2" data-testid="observatory-rounds">
+          <span className="text-muted-foreground w-28 shrink-0 pt-0.5 text-xs">rounds</span>
+          <div className="relative h-5 min-w-0 flex-1">
+            {rounds.map((round) => {
+              const from = Math.min(Math.max((round.startMs - window.startMs) / totalMs, 0), 1);
+              const to = Math.min(
+                Math.max(((round.endMs ?? nowMs) - window.startMs) / totalMs, from),
+                1,
+              );
+              return (
+                <span
+                  key={round.key}
+                  className={cn(
+                    "absolute inset-y-0 flex items-center overflow-hidden rounded border px-1 text-3xs tabular-nums",
+                    round.endMs === null
+                      ? "border-status-running/60 bg-status-running-soft text-status-running-text"
+                      : "border-dashed text-muted-foreground",
+                  )}
+                  style={{ left: `${from * 100}%`, width: `${Math.max(to - from, 0.004) * 100}%` }}
+                  title={`round ${round.revision + 1} · ${round.agentIds.join(", ")}${
+                    round.chatId ? ` · #${round.chatId}` : ""
+                  }`}
+                  data-testid="observatory-round"
+                  data-episode-id={round.episodeId}
+                  data-round-revision={round.revision}
+                  data-round-open={round.endMs === null ? "true" : "false"}
+                >
+                  R{round.revision + 1} · {round.agentIds.length}
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <div className="flex flex-col gap-1">
         {lanes.map((lane) => (
@@ -149,8 +196,11 @@ export function WaterfallLens({ spans, nowMs, selectedId, onSelect }: Props) {
             );
           })}
         </div>
-        <span className="text-muted-foreground w-16 shrink-0 text-right text-xs tabular-nums">
-          peak {peak}
+        <span
+          className="text-muted-foreground w-24 shrink-0 text-right text-xs tabular-nums"
+          data-testid="observatory-peak"
+        >
+          peak {peak} concurrent
         </span>
       </div>
     </div>

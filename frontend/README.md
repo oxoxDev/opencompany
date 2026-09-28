@@ -35,9 +35,8 @@ and survives a refresh.
 **Node 22 or newer** — `.nvmrc` pins it and `engines.node` declares it, so
 `nvm use` picks it up and `npm` warns if you are below it. CI and
 `frontend/Dockerfile` both build on 22; the floor exists because a version
-mismatch does not announce itself as one. It surfaces wherever the newer
-runtime happens to have moved a global, deep inside a dependency, and reads as
-a dependency bug (issues #852 and #858).
+mismatch surfaces deep inside a dependency and reads as a dependency bug
+(issues #852 and #858).
 
 The desktop build additionally needs **pnpm 10 or newer** — `tauri.conf.json`
 runs `pnpm dev` / `pnpm build`, and `pnpm-workspace.yaml` uses a key pnpm 9
@@ -71,9 +70,8 @@ The same build works against any host/company. Resolution order (first wins):
 3. **Build env** — `VITE_OC_API`, `VITE_OC_COMPANY`, `VITE_OC_TOKEN`
 4. **Defaults** — same-origin API, single-company mode
 
-- **Single-company (prosumer)** hosts: omit `company`; the console
-  auto-selects the sole company (falling back to the `/api/v1/company/*`
-  aliases).
+- **Single-company (prosumer)** hosts: omit `company`; the console auto-selects
+  the sole company (falling back to the `/api/v1/company/*` aliases).
 - **Multi-company (platform)** hosts: it lists companies and shows a picker;
   `?company=<id>` jumps straight in. Add `?token=` for platform/operator auth.
 
@@ -125,13 +123,10 @@ backend should read.
 Everything is decoupled so you can embed parts elsewhere:
 
 - [`src/api/client.ts`](src/api/client.ts) — a typed `OpenCompanyClient` with no
-  React dependency; use it from any TS app. Includes a forward-looking
-  `connections` seam that light hosts can ignore.
-- [`src/api/types.ts`](src/api/types.ts) — the API payload types, mirrored from
-  the Rust server.
+  React dependency (plus a `connections` seam light hosts can ignore), and
+  [`src/api/types.ts`](src/api/types.ts), the payload types mirrored from Rust.
 - [`src/views/`](src/views/) and [`src/components/`](src/components/) —
-  prop-driven views and pieces (`ChatView`, `LedgersView`, `WorkflowsView`,
-  `FeedbackForm`, …).
+  prop-driven views and pieces (`ChatView`, `LedgersView`, `WorkflowsView`, …).
 
 ## Build
 
@@ -170,16 +165,12 @@ below is for what is only true in a browser driving a live host: a disabled
 affordance explaining itself, a banner that must not be a toast, a redirect that
 survives a full-page navigation.
 
-The line matters because each is tempted into the other's territory. A browser
-walk *can* reach a pure helper — through six layers of render, in forty seconds,
-reporting the failure as "the board looked wrong". A unit test cannot reach a
-redirect at all. Put a helper here the moment it has a second caller or a branch
-worth naming.
-
-A test earns its place by being **seen failing** against the behaviour it
-guards. Every test in `test/unit/` was proven red by breaking its subject before
-it was trusted — a test that passes while asserting nothing is worse than no
-test, because it reports coverage.
+The line matters because each is tempted into the other's territory: a browser
+walk *can* reach a pure helper, through six layers of render, in forty seconds,
+reporting "the board looked wrong"; a unit test cannot reach a redirect at all.
+Put a helper here the moment it has a second caller or a branch worth naming,
+and see it **fail** against the behaviour it guards before trusting it — a
+test that passes while asserting nothing reports coverage it does not have.
 
 ## End-to-end suite
 
@@ -209,15 +200,11 @@ built by the `Rust` job and passed across as an artifact (issue #428).
 tinycortex)`, with the fixtures below behind it, and is the only thing that runs
 the four specs described next (issue #467).
 
-Neither existed for a long time: `typecheck:e2e` was the only automated coverage
-`test/e2e/` had, and type-checking proves a spec compiles, not that it holds.
-`workflow-edit-delete.spec.ts` spent months red against a fixture that was never
-committed; two further specs were found red against product changes that had
-been deliberate, one of which had been filed as a bug that did not exist.
-Nothing reported any of it, because nothing ran it.
-
-Run the suite before touching a view it covers — CI is a backstop, not a
-substitute for seeing your own change work.
+Neither existed for a long time: `typecheck:e2e` proves a spec compiles, not
+that it holds, and `workflow-edit-delete.spec.ts` spent months red against a
+fixture nobody committed while nothing ran it. Run the suite before touching a
+view it covers — CI is a backstop, not a substitute for seeing your own change
+work.
 
 ### The four specs a default-feature host cannot run
 
@@ -261,9 +248,12 @@ host at them:
   carrying `__MOCK_PLAN__ [[…],[…]]` scripts a whole **turn** instead of a single
   call — several calls in one assistant message, and several steps across the
   turn's tool loop — which is what lets one goal fan out to two teammates and be
-  closed out afterwards. Set `MOCK_BRAIN_DEBUG=1` to have it dump each request
-  it receives, which is the fastest way to find out why an arm stopped matching.
-  Bind with `PW_MOCK_BRAIN_BIND` (default `127.0.0.1:8099`).
+  closed out afterwards. A turn opening with the host's seat sentinel (`Hive
+  turn: desk …, episode …, round N.`) ends in one speech act on the
+  `opencompany` MCP server: `post` (asking the desk `__MOCK_REFER__
+  [<agent>:]<desk>` names), then `broadcast` (or `dm` to `__MOCK_DM__
+  <agent>`), then `complete_episode`. `MOCK_BRAIN_DEBUG=1` dumps each request
+  it receives. Bind with `PW_MOCK_BRAIN_BIND` (default `127.0.0.1:8099`).
 
 * [`test/e2e/mcp-server.mjs`](test/e2e/mcp-server.mjs) — an HTTP MCP server with
   two tools. HTTP, not stdio: this host rejects any MCP declaration carrying a
@@ -360,6 +350,27 @@ It uses the same real-model proxy and the same environment variables as the lane
 above, on a company and a data root of its own, and **CI does not run it** for
 the same reasons plus one more: it takes tens of minutes.
 
+### The lane where a desk answers as a room
+
+```sh
+cargo build --locked --features openhuman,mcp --bin opencompany
+npm --prefix frontend run e2e:hive        # PW_LIVE_BRAIN=1 PW_HIVE=1 npm run e2e
+scripts/measure-coordination.sh --mock    # the same company, measured, no browser
+```
+
+`desk-episode-live.spec.ts` serves [`companies/hive_demo`](../companies/hive_demo)
+— two desks of two seats sharing the CEO — behind the mock brain's hive arm,
+and asserts what the console *shows* of an episode: a `round-band` with two
+lanes working at once, the `dm` chip on the round the directive named, the
+`episode-complete` marker, and a `chat/history` row with `episode.kind ===
+"complete_episode"`; then that a reload rebuilds the bands from the transcript
+alone. A lane of its own for the reason the Euler lane is: the harness
+company's desks have one seat each, and a one-seat desk runs no round.
+`scripts/measure-coordination.mjs` reads the same `/events` frames without a
+browser and prints peak concurrent turns, same-agent overlaps, rounds per
+episode, dms, broadcasts and cross-desk referrals against the thresholds in
+`scripts/lib/coordination-metrics.mjs` (`node --test` covers it).
+
 ### The lane that compares pixels
 
 ```sh
@@ -382,28 +393,22 @@ measurably different from the chrome" fails that. None of those assertions
 should become "it looks like it did last week".
 
 What a baseline catches is the complement — the regression nobody had a
-quantity for, because nobody knew to write one. A token that shifted lightness
-across every surface. A web font that stopped loading and fell back. Padding
-lost on one view out of eight. A reviewer spots all three in a screenshot in a
-second and in a diff not at all.
+quantity for: a token that shifted lightness everywhere, a web font that fell
+back, padding lost on one view out of eight. A reviewer spots all three in a
+screenshot in a second and in a diff not at all.
 
-**CI does not run it.** Baselines are per-platform — Playwright suffixes each
-file with the platform name, and the ones committed here were recorded on
-`linux`. A required check that is red for everyone not on the recording
-platform teaches people to reach for `--update-snapshots` without looking,
-which is how a baseline suite stops meaning anything. Run it either side of a
-styling change and read the diff Playwright writes into `playwright-report/`.
+**CI does not run it.** Baselines are per-platform (the committed ones were
+recorded on `linux`), and a required check that is red for everyone else
+teaches people to reach for `--update-snapshots` without looking. Run it either
+side of a styling change and read the diff in `playwright-report/`.
 
-The false-positive rate is what makes this worth having, so the spec leaves the
-page on the real clock — the console paints time-derived labels *relative to
-now*, and a frozen page clock against a host that keeps real time would make
-those labels less stable, not more — and masks the labels that would otherwise
-drift. It also disables animations, waits on `document.fonts.ready`, hides the
-fading overlay scrollbar, and masks regions whose *value* legitimately changes
-between runs. To exempt something new, put `data-visual-volatile` on it at the
-call site rather than adding a CSS path to the mask list — a path stops masking
-anything the day it changes, and a mask that matches nothing looks exactly like
-a mask that was not needed.
+To keep the false-positive rate low the spec leaves the page on the real clock
+(time-derived labels are painted *relative to now*) and masks the labels that
+would drift, disables animations, waits on `document.fonts.ready`, hides the
+overlay scrollbar, and masks regions whose *value* legitimately changes between
+runs. To exempt something new, put `data-visual-volatile` on it at the call
+site rather than adding a CSS path to the mask list — a path stops masking
+anything the day it changes.
 
 Some specs skip **the other way**, in the live lane only, and say so where they
 sit: three in `chat-live-events.spec.ts`, which find the reply to their own turn

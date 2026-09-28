@@ -413,7 +413,7 @@ fn step_label(tools: &[Box<dyn Tool>]) -> String {
         // name it was given.
         arguments: Value::Null,
         iteration: 1,
-        display_label: Some(oh::tools::traits::humanize_tool_name(WEB_SEARCH_TOOL)),
+        display_label: Some(tinytools::humanize_tool_name(WEB_SEARCH_TOOL)),
         display_detail: None,
     };
     fold_steps(vec![labels.apply(started)])

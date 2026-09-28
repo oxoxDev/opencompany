@@ -108,46 +108,24 @@ name = "Creative studio"
 members = ["copywriter", "editor"] # ids from the roster
 tools = ["docs.*"]                 # NEW: this desk's tool ceiling. Optional;
                                    # empty narrows nothing. See runtime/tools.md
-hive = { enabled = true, turn_budget = 6, quorum = 2, blind_round = true,
-         require_evidential = true, refutation_cap = 2,
-         dominance_cap = 4, repetition_cap = 2,
-         moves = { copywriter = ["propose", "support", "commit"],
-                   editor = ["object", "refute", "evidence", "question"] } }
-                                   # how this desk answers. Every key optional;
-                                   # omit the table entirely for the defaults.
-                                   # `moves` assigns each member the markers it
-                                   # may open a line with — a room where
-                                   # everyone may `!propose` votes instead of
-                                   # deliberating. A member the table omits
-                                   # keeps every move. `commit` (with
-                                   # `question`/`defer`) is ungated: every
-                                   # seat keeps it whether or not the table
-                                   # names it, so a `commit` entry here is
-                                   # accepted for documentation only and
-                                   # restricts nothing. See runtime/hivemind.md
+[group_chat.routing]               # how this desk paces the episodes it opens.
+round_width = 2                    # seats a round runs at once (default 5)
+choice_option_limit = 8            # alternatives per Jev Choice, incl. `none`
+max_rounds = 12                    # rounds before the host closes the episode
+turn_timeout_secs = 600            # one seat turn, from holding its turn_lock
+                                   # Every key optional; omit the table for the
+                                   # defaults. A zero is refused, not clamped.
+                                   # The retired `[group_chat.hive]` block is
+                                   # refused at load with a migration hint.
+                                   # See runtime/hive.md
 
-[speech]                           # optional speech-tool override
-disabled = true                    # on by default; true opts this company out
-                                   # By default every agent's belt carries
-                                   # desk_post / desk_dm / desk_close /
-                                   # desk_read, and a turn's return text becomes
-                                   # private thinking. A turn that calls none of
-                                   # them still has its text journaled, so this
-                                   # can never silence anybody.
-                                   # Company-level, not per-desk: speech is a
-                                   # property of an agent's session, which spans
-                                   # every desk it sits on. See runtime/speech.md
-
-[group_chat.hive.referral]         # NEW: may this desk ask ANOTHER desk?
+[group_chat.routing.referral]      # may this desk ask ANOTHER desk?
 enabled = true                     # off unless this says so; the whole block
                                    # defaults to referring nothing
-max_hops = 2                       # chain depth; 2 is one round trip
+max_hops = 1                       # chain depth; 2 is one round trip
 reach = "desks"                    # local | channels | desks — widens strictly
 returns = true                     # carry the answer back to the desk that asked
-peer_cap = 2                       # crossing questions per episode. The library
-                                   # bounds depth; only a host knows what a
-                                   # question costs, so width is ours
-                                   # See runtime/hivemind-referral.md
+                                   # See runtime/hive.md#referral
 
 [tools]
 provider = "openhuman"             # openhuman (default) | builtin
@@ -209,6 +187,11 @@ persisted to the `CompanyStore`, not written back into the manifest file.
 
 - `opencompany check <dir>` — validate a manifest, print effective config,
   lint deprecations (e.g. `agents.toml` filename).
+- `opencompany measure --company <id> [--data-dir <dir>] [--since <seq>]
+  [--json] [--assert]` — fold a company's journal into the coordination
+  numbers the hive desks are measured by ([hive.md](hive.md#measuring)); no
+  host needs to be running. `--assert` exits with the number of missed
+  thresholds.
 - The 18 `examples/*` crates shrink to a manifest plus a two-line `main`
   calling `opencompany::run_company(manifest_path)`; they double as the
   [Template Gallery](../product/templates.md) source.

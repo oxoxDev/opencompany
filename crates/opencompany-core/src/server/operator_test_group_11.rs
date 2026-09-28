@@ -268,6 +268,7 @@ fn projects_a_gap_with_structural_fields_only() {
     let value = super::project_stream_item_for_viewer(
         &EventStreamItem::Gap { missed: 44 },
         &std::collections::HashMap::new(),
+        &crate::server::readable::DisplayNames::default(),
         &Viewer::Operator,
         true,
     )
@@ -283,6 +284,7 @@ fn projects_agent_reply_with_chat_fields_and_steps() {
     use crate::ports::types::{TurnStep, TurnStepKind, TurnStepStatus};
     let v = super::project_event(&stored(CompanyEvent::AgentReply {
         audience: Vec::new(),
+        episode: None,
         mentions: Vec::new(),
         mention_depth: 0,
         parent: None,
@@ -348,6 +350,9 @@ fn a_crossing_names_the_thread_whose_fold_changed() {
         target: "product_designer".into(),
         returning: false,
         rows: None,
+        episode_id: None,
+        to_episode_id: None,
+        hop: 0,
     }))
     .expect("a crossing is projected at all");
 
@@ -396,6 +401,9 @@ fn a_returning_crossing_names_the_desk_that_asked() {
         target: "software_engineer".into(),
         returning: true,
         rows: None,
+        episode_id: None,
+        to_episode_id: None,
+        hop: 0,
     }))
     .expect("a return is projected at all");
 
@@ -412,6 +420,7 @@ fn a_returning_crossing_names_the_desk_that_asked() {
 fn projects_the_agents_own_body_beside_the_operators() {
     let stored = stored(CompanyEvent::AgentReply {
         audience: Vec::new(),
+        episode: None,
         mentions: Vec::new(),
         mention_depth: 0,
         parent: None,
@@ -425,6 +434,7 @@ fn projects_the_agents_own_body_beside_the_operators() {
     let value = super::project_event_for_viewer(
         &stored,
         &std::collections::HashMap::new(),
+        &crate::server::readable::DisplayNames::default(),
         &Viewer::Operator,
         true,
     )
@@ -432,12 +442,57 @@ fn projects_the_agents_own_body_beside_the_operators() {
 
     assert_eq!(
         value["cueText"], "!support #kettle ^16 the swap is the customer's first preference",
-        "the room's grammar is what the fold reads; it must survive on this frame: {value}"
+        "the body as the model wrote it rides on the frame: {value}"
     );
     assert_eq!(
-        value["text"], "the swap is the customer's first preference",
-        "and the operator reads prose, exactly as the reload already gives them: {value}"
+        value["text"], "!support #kettle ^16 the swap is the customer's first preference",
+        "and nothing is rewritten for the operator since the move grammar retired: {value}"
     );
+    assert!(
+        value.get("episode").is_none(),
+        "outside an episode: {value}"
+    );
+    assert!(value.get("audience").is_none(), "desk-visible: {value}");
+}
+
+/// The episode metadata and the audience ride on the live frame exactly as
+/// the reload projects them (plan hive-desks, Phase 4), so a live row and its
+/// rehydrated twin fold into the same round.
+#[test]
+fn projects_episode_and_audience_on_a_seat_reply() {
+    use crate::ports::types::{ReplyEpisode, RoutedBy, UtteranceKind};
+    let stored = stored(CompanyEvent::AgentReply {
+        audience: vec!["engineer".into()],
+        mentions: Vec::new(),
+        mention_depth: 0,
+        parent: None,
+        task_id: None,
+        outputs: Vec::new(),
+        chat_id: "engineering".into(),
+        agent_id: "ceo".into(),
+        text: "quietly, the short form".into(),
+        steps: Vec::new(),
+        episode: Some(ReplyEpisode {
+            id: "ep-1".into(),
+            revision: 3,
+            kind: UtteranceKind::Dm,
+            to: vec!["engineer".into()],
+            routed_by: Some(RoutedBy {
+                plan: crate::hive::routing::RoutingPlanDto::One {
+                    primary_id: "engineer".into(),
+                },
+                router: crate::hive::routing::Router::Fallback,
+            }),
+        }),
+    });
+    let value = super::project_event(&stored).expect("agent_reply is an attention signal");
+    assert_eq!(value["episode"]["id"], "ep-1");
+    assert_eq!(value["episode"]["revision"], 3);
+    assert_eq!(value["episode"]["kind"], "dm");
+    assert_eq!(value["episode"]["to"], serde_json::json!(["engineer"]));
+    assert_eq!(value["episode"]["routedBy"]["router"], "fallback");
+    assert_eq!(value["episode"]["routedBy"]["plan"]["kind"], "one");
+    assert_eq!(value["audience"], serde_json::json!(["engineer"]));
 }
 
 /// And on a desk that does not deliberate the two are byte-equal, so no
@@ -446,6 +501,7 @@ fn projects_the_agents_own_body_beside_the_operators() {
 fn a_reply_with_no_move_carries_the_same_body_twice() {
     let stored = stored(CompanyEvent::AgentReply {
         audience: Vec::new(),
+        episode: None,
         mentions: Vec::new(),
         mention_depth: 0,
         parent: None,
@@ -459,6 +515,7 @@ fn a_reply_with_no_move_carries_the_same_body_twice() {
     let value = super::project_event_for_viewer(
         &stored,
         &std::collections::HashMap::new(),
+        &crate::server::readable::DisplayNames::default(),
         &Viewer::Operator,
         true,
     )
@@ -472,6 +529,7 @@ fn projects_agent_reply_with_viewer_mention_metadata() {
     use crate::ports::types::{Mention, MentionTarget};
     let stored = stored(CompanyEvent::AgentReply {
         audience: Vec::new(),
+        episode: None,
         mentions: vec![
             Mention {
                 target: MentionTarget::User { id: "u-1".into() },
@@ -496,9 +554,14 @@ fn projects_agent_reply_with_viewer_mention_metadata() {
         steps: Vec::new(),
     });
     let authors = std::collections::HashMap::from([(String::from("u-1"), String::from("Ada"))]);
-    let value =
-        super::project_event_for_viewer(&stored, &authors, &Viewer::User("u-1".into()), false)
-            .expect("agent_reply is an attention signal");
+    let value = super::project_event_for_viewer(
+        &stored,
+        &authors,
+        &crate::server::readable::DisplayNames::default(),
+        &Viewer::User("u-1".into()),
+        false,
+    )
+    .expect("agent_reply is an attention signal");
     assert_eq!(
         value["mentions"],
         serde_json::json!([
@@ -516,6 +579,7 @@ fn projects_agent_reply_with_viewer_mention_metadata() {
 fn drops_owner_fallback_report_from_a_non_admin_viewer() {
     let event = stored(CompanyEvent::AgentReply {
         audience: Vec::new(),
+        episode: None,
         mentions: Vec::new(),
         mention_depth: 0,
         parent: None,
@@ -530,6 +594,7 @@ fn drops_owner_fallback_report_from_a_non_admin_viewer() {
     let non_admin = super::project_event_for_viewer(
         &event,
         &std::collections::HashMap::new(),
+        &crate::server::readable::DisplayNames::default(),
         &Viewer::User("member-1".into()),
         false,
     );
@@ -541,6 +606,7 @@ fn drops_owner_fallback_report_from_a_non_admin_viewer() {
     let admin = super::project_event_for_viewer(
         &event,
         &std::collections::HashMap::new(),
+        &crate::server::readable::DisplayNames::default(),
         &Viewer::User("admin-1".into()),
         true,
     )
@@ -555,6 +621,7 @@ fn drops_owner_fallback_report_from_a_non_admin_viewer() {
     let operator = super::project_event_for_viewer(
         &event,
         &std::collections::HashMap::new(),
+        &crate::server::readable::DisplayNames::default(),
         &Viewer::Operator,
         true,
     )
@@ -566,6 +633,7 @@ fn drops_owner_fallback_report_from_a_non_admin_viewer() {
 fn projects_agent_reply_with_its_thread_parent() {
     let v = super::project_event(&stored(CompanyEvent::AgentReply {
         audience: Vec::new(),
+        episode: None,
         mentions: Vec::new(),
         mention_depth: 0,
         parent: Some(EventSeq::new(4)),
@@ -599,6 +667,9 @@ fn projects_turn_started_with_structural_keys_only() {
             kind: ActorKind::User,
             id: "u-1".into(),
         }),
+        agent_id: None,
+        episode_id: None,
+        round_revision: None,
     }))
     .expect("an accepted turn is an attention signal");
     assert_eq!(v["type"], "turn_started");
@@ -619,6 +690,9 @@ fn projects_turn_started_with_structural_keys_only() {
         chat_id: "General".into(),
         parent: None,
         by: None,
+        agent_id: None,
+        episode_id: None,
+        round_revision: None,
     }))
     .expect("an accepted turn is an attention signal");
     assert!(v.get("parentId").is_none(), "unexpected parentId: {v}");
@@ -633,6 +707,11 @@ fn projects_turn_settled_without_the_failure_reason() {
     let v = super::project_event(&stored(CompanyEvent::TurnFailed {
         turn_id: "turn-1".into(),
         error: "connection to db-primary.internal refused".into(),
+        agent_id: None,
+        chat_id: None,
+        episode_id: None,
+        round_revision: None,
+        outcome: None,
     }))
     .expect("a settled turn is an attention signal");
     assert_eq!(v["type"], "turn_settled");
@@ -640,8 +719,209 @@ fn projects_turn_settled_without_the_failure_reason() {
     let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(
         keys,
-        ["type", "seq", "atMillis", "turnId"],
+        ["type", "seq", "atMillis", "turnId", "outcome"],
         "the settle frame grew a key: {v}"
+    );
+    assert_eq!(v["outcome"], "failed");
+}
+
+/// A seat's turn bracket carries the seat and the round on both frames (plan
+/// hive-desks, Phase 4), and a timed-out seat says so.
+#[test]
+fn projects_the_seat_and_round_on_a_hive_turn_bracket() {
+    use crate::ports::types::TurnOutcome;
+    let started = super::project_event(&stored(CompanyEvent::TurnStarted {
+        turn_id: "turn-7".into(),
+        chat_id: "engineering".into(),
+        parent: None,
+        by: None,
+        agent_id: Some("ceo".into()),
+        episode_id: Some("ep-1".into()),
+        round_revision: Some(2),
+    }))
+    .expect("turn_started");
+    assert_eq!(started["type"], "turn_started");
+    assert_eq!(started["agentId"], "ceo");
+    assert_eq!(started["episodeId"], "ep-1");
+    assert_eq!(started["roundRevision"], 2);
+    let settled = super::project_event(&stored(CompanyEvent::TurnSettled {
+        turn_id: "turn-7".into(),
+        agent_id: Some("ceo".into()),
+        chat_id: Some("engineering".into()),
+        episode_id: Some("ep-1".into()),
+        round_revision: Some(2),
+        outcome: TurnOutcome::NoUtterance,
+    }))
+    .expect("turn_settled");
+    assert_eq!(settled["type"], "turn_settled");
+    assert_eq!(settled["outcome"], "no_utterance");
+    assert_eq!(settled["chatId"], "engineering");
+    assert_eq!(settled["episodeId"], "ep-1");
+    assert_eq!(settled["roundRevision"], 2);
+    let timed_out = super::project_event(&stored(CompanyEvent::TurnFailed {
+        turn_id: "turn-8".into(),
+        error: "ran past 600s".into(),
+        agent_id: Some("engineer".into()),
+        chat_id: Some("engineering".into()),
+        episode_id: Some("ep-1".into()),
+        round_revision: Some(2),
+        outcome: Some(TurnOutcome::TimedOut),
+    }))
+    .expect("turn_settled");
+    assert_eq!(timed_out["outcome"], "timed_out");
+    assert_eq!(timed_out["agentId"], "engineer");
+    assert!(
+        timed_out.get("error").is_none(),
+        "the reason stays off the wire: {timed_out}"
+    );
+}
+
+/// The episode frames project one to one with their journal rows, camelCase,
+/// every one carrying the desk and the episode (plan hive-desks, Phase 4).
+#[test]
+fn projects_the_episode_frames() {
+    use crate::hive::routing::{Router, RoutingPlanDto};
+    use crate::ports::types::{EpisodeReason, RoundUtteranceRecord, UtteranceKind};
+    let plan = RoutingPlanDto::Hive {
+        primary_id: "engineer".into(),
+        invited_ids: vec!["ceo".into()],
+    };
+    let opened = super::project_event(&stored(CompanyEvent::EpisodeOpened {
+        chat_id: "engineering".into(),
+        episode_id: "ep-1".into(),
+        opened_by_seq: 4,
+        parent: Some(crate::ports::types::EventSeq::new(2)),
+        participants: vec!["engineer".into(), "ceo".into()],
+        plan: plan.clone(),
+        hop: 0,
+    }))
+    .expect("episode_opened");
+    assert_eq!(opened["type"], "episode_opened");
+    assert_eq!(opened["chatId"], "engineering");
+    assert_eq!(opened["episodeId"], "ep-1");
+    assert_eq!(opened["openedBySeq"], 4);
+    assert_eq!(opened["parentId"], "2");
+    assert_eq!(
+        opened["participants"],
+        serde_json::json!(["engineer", "ceo"])
+    );
+    assert_eq!(opened["plan"]["invitedIds"], serde_json::json!(["ceo"]));
+
+    let round = super::project_event(&stored(CompanyEvent::RoundStarted {
+        chat_id: "engineering".into(),
+        episode_id: "ep-1".into(),
+        revision: 0,
+        agent_ids: vec!["engineer".into(), "ceo".into()],
+    }))
+    .expect("round_started");
+    assert_eq!(round["type"], "round_started");
+    assert_eq!(round["revision"], 0);
+    assert_eq!(round["agentIds"], serde_json::json!(["engineer", "ceo"]));
+
+    let committed = super::project_event(&stored(CompanyEvent::RoundCommitted {
+        chat_id: "engineering".into(),
+        episode_id: "ep-1".into(),
+        revision: 0,
+        utterances: vec![
+            RoundUtteranceRecord {
+                agent_id: "engineer".into(),
+                sequence: 7,
+                kind: UtteranceKind::Broadcast,
+                message_seq: Some(7),
+                to: Vec::new(),
+            },
+            RoundUtteranceRecord {
+                agent_id: "ceo".into(),
+                sequence: 8,
+                kind: UtteranceKind::Dm,
+                message_seq: Some(8),
+                to: vec!["engineer".into()],
+            },
+        ],
+        actions: vec![serde_json::json!({"kind": "run_agents"})],
+    }))
+    .expect("round_committed");
+    assert_eq!(committed["type"], "round_committed");
+    assert_eq!(committed["utterances"][0]["messageSeq"], 7);
+    assert_eq!(committed["utterances"][0]["kind"], "broadcast");
+    assert!(committed["utterances"][0].get("to").is_none());
+    assert_eq!(
+        committed["utterances"][1]["to"],
+        serde_json::json!(["engineer"])
+    );
+    assert_eq!(committed["actions"][0]["kind"], "run_agents");
+
+    let routed = super::project_event(&stored(CompanyEvent::BroadcastRouted {
+        chat_id: "engineering".into(),
+        episode_id: "ep-1".into(),
+        revision: 0,
+        agent_id: "engineer".into(),
+        message_seq: 7,
+        plan: RoutingPlanDto::Fallback {
+            primary_id: "ceo".into(),
+            reason: "provider_unavailable".into(),
+        },
+        probabilities: None,
+        router: Router::Fallback,
+    }))
+    .expect("broadcast_routed");
+    assert_eq!(routed["type"], "broadcast_routed");
+    assert_eq!(routed["messageSeq"], 7);
+    assert_eq!(routed["router"], "fallback");
+    assert_eq!(routed["plan"]["reason"], "provider_unavailable");
+    assert!(routed.get("probabilities").is_none());
+
+    let dm = super::project_event(&stored(CompanyEvent::DmDelivered {
+        chat_id: "engineering".into(),
+        episode_id: "ep-1".into(),
+        from: "ceo".into(),
+        to: vec!["engineer".into()],
+        message_seq: 8,
+    }))
+    .expect("dm_delivered");
+    assert_eq!(dm["type"], "dm_delivered");
+    assert_eq!(dm["from"], "ceo");
+    assert_eq!(dm["to"], serde_json::json!(["engineer"]));
+
+    let done = super::project_event(&stored(CompanyEvent::EpisodeCompleted {
+        chat_id: "engineering".into(),
+        episode_id: "ep-1".into(),
+        revision: 4,
+        completed_by: Some("ceo".into()),
+        rounds: 2,
+        reason: EpisodeReason::CompleteEpisode,
+        summary_seq: Some(11),
+    }))
+    .expect("episode_completed");
+    assert_eq!(done["type"], "episode_completed");
+    assert_eq!(done["revision"], 4);
+    assert_eq!(done["completedBy"], "ceo");
+    assert_eq!(done["rounds"], 2);
+    assert_eq!(done["reason"], "complete_episode");
+    assert_eq!(done["summarySeq"], 11);
+
+    let configured = super::project_event(&stored(CompanyEvent::DeskRoutingConfigured {
+        desk_id: "engineering".into(),
+        reset: true,
+        by: None,
+    }))
+    .expect("desk_routing_configured");
+    assert_eq!(configured["type"], "desk_routing_configured");
+    assert_eq!(configured["reset"], true);
+
+    // The checkpoint is the runtime's own and never reaches the stream.
+    assert!(
+        super::project_event(&stored(CompanyEvent::EpisodeStateSaved {
+            episode_id: "ep-1".into(),
+            desk: "engineering".into(),
+            thread_root: None,
+            revision: 4,
+            state: serde_json::json!({}),
+            sharing: Default::default(),
+            hop: 0,
+            origin: None,
+        }))
+        .is_none()
     );
 }
 

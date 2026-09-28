@@ -762,19 +762,25 @@ export function CreateCompanyDialog({
           </div>
         ) : (
           <div className="grid gap-1.5">
-            <Label htmlFor="create-company-admin">Admin email</Label>
+            <Label htmlFor="create-company-admin">Admin login</Label>
+            {/* `text`, not `email`: on a host with no mail the admin's login
+                may be a plain username, and an `email` input would refuse it
+                before `adminEmailProblem` — the rule the host shares — ever
+                saw it. */}
             <Input
               id="create-company-admin"
-              type="email"
+              type="text"
+              autoComplete="off"
               value={adminEmail}
               onChange={(e) => setAdminEmail(e.target.value)}
               placeholder="who can sign in as an admin"
               disabled={busy}
             />
             <p className="text-2xs text-muted-foreground">
-              Required — a company provisioned with no admin here has nobody
-              eligible to sign in unless this host has its own bootstrap admin
-              configured.
+              Required — an email address, or a username on a host that sends no
+              mail. A company provisioned with no admin here has nobody eligible
+              to sign in unless this host has its own bootstrap admin configured.
+              They claim the account with a password from the sign-in screen.
             </p>
           </div>
         )}

@@ -40,9 +40,8 @@
 //!   [`UserStore`](crate::ports::UserStore) (active `Admin` users). The graph
 //!   names no address, so an author cannot point it at an outsider. Constrained
 //!   by construction; no grant needed. With no admin address (or no mailbox) it
-//!   falls back to the **durable** operator channel (issue #1757) — the report
-//!   is journaled into the operator's main line, a real, readable delivery —
-//!   rather than dead-ending on the interactive in-memory buffer as it once did.
+//!   falls back to an operator notification plus the report in the DM of the
+//!   agent responsible for the workflow ([`report_dm`]).
 //! * **`email`** — the graph names an arbitrary address, so it is the dangerous
 //!   one and carries **two independent gates**, both fail-closed:
 //!   1. the company's `[tools].allow` must cover the `email` namespace (the same
@@ -146,9 +145,9 @@ use serde_json::Value;
 use crate::company::WorkflowFile;
 use crate::company::runtime::CompanyMail;
 use crate::company::{WorkflowDestinationDef, WorkflowNodeKind};
+use crate::ports::notifications::{Notification, NotificationStore, Subject, SubjectKind};
 use crate::ports::types::{
-    Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, CompanyRecord, Effect, EffectGroup,
-    OutboundMessage, Verdict,
+    ApprovalId, CompanyEvent, CompanyId, CompanyRecord, Effect, EffectGroup, OutboundMessage,
 };
 use crate::ports::{
     ApprovalGate, ChannelAdapter, DeliveryReason, DeliveryReport, DeliveryStatus, EmailRecord,
@@ -210,13 +209,12 @@ pub struct WorkflowDeliveryDeps {
     /// stance the mail handle takes.
     pub bootstrap_admin: Option<String>,
     /// Wired delivery adapters. The interactive `operator` adapter is never
-    /// present here — `RuntimeBuilder::build` drops it by identity and
-    /// substitutes a durable, journal-backed
-    /// [`DurableOperatorChannel`](crate::runtime::channel::DurableOperatorChannel)
-    /// under the same id, so `operator` is a first-class delivery target
-    /// (`post_to_operator`, `send_to_channel_adapter`), not a rejected one
-    /// (issue #1757).
+    /// present here — `RuntimeBuilder::build` drops it by identity. A report
+    /// bound for the operator goes through [`report_to_operator`] instead.
     pub channels: Vec<Arc<dyn ChannelAdapter>>,
+    /// Where an operator report files its notification. `None` skips the
+    /// notification; the report still lands in the responsible agent's DM.
+    pub notifications: Option<Arc<dyn NotificationStore>>,
     /// What a cold `email` recipient is parked on (issue #227). `None` fails
     /// closed to the pre-#227 behaviour: the report is `skipped`, never a
     /// `pending` row no queue is backing.
@@ -281,6 +279,12 @@ pub struct DeliveryParking {
     /// no trigger input), and released by the runtime's `continue_turn`. The same
     /// handle both sides share, for [`gates`](Self::gates)' reason.
     pub blocked_nodes: crate::runtime::blocked_nodes::BlockedNodeQueue,
+    /// The company's live grants, so a park marks its work unit's checkout as
+    /// held until the approval resolves.
+    pub grants: crate::runtime::grants::GrantSet,
+    /// The company's event journal, for the `ApprovalParked` nudge every
+    /// console listens for.
+    pub events: Arc<dyn EventLog>,
 }
 
 impl std::fmt::Debug for WorkflowDeliveryDeps {
@@ -486,6 +490,7 @@ pub async fn deliver_outputs(
         deliver_one(
             delivery,
             record,
+            workflow,
             &node.id,
             destination,
             &subject,
@@ -652,9 +657,11 @@ async fn journal_delivered(
 /// Dispatches one node's destination, appending every attempt's row to
 /// `reports`. `owner` can fan out to several admins, so this appends rather than
 /// returning a single report.
+#[allow(clippy::too_many_arguments)]
 async fn deliver_one(
     delivery: &WorkflowDeliveryDeps,
     record: &CompanyRecord,
+    workflow: &WorkflowFile,
     node_id: &str,
     destination: &WorkflowDestinationDef,
     subject: &str,
@@ -711,13 +718,9 @@ async fn deliver_one(
                         });
                     }
                 }
-                // No mailbox, or no admin has an address: fall back to the
-                // DURABLE operator channel (issue #1757). It journals the report
-                // into the operator's main line, so this is a genuine, readable
-                // delivery — not the discard-on-an-in-memory-buffer this arm used
-                // to report. It is a `Sent` row, and the fallback only fails when
-                // no operator adapter is wired at all (a misconfigured build),
-                // never silence.
+                // No mailbox, or no admin has an address: the report goes to
+                // the operator as a notification and into the DM of the agent
+                // responsible for the workflow.
                 _ => {
                     let (why, why_reason) = if delivery.mail.is_none() {
                         (
@@ -731,31 +734,22 @@ async fn deliver_one(
                         )
                     };
                     reports.push(
-                        post_to_operator(delivery, record, subject, text)
+                        match report_to_operator(delivery, record, workflow, subject, text, true)
                             .await
-                            .map(|()| {
-                                row(
-                                    Some(crate::runtime::channel::OPERATOR_CHANNEL.to_string()),
-                                    DeliveryStatus::Sent,
-                                    why_reason,
-                                    format!("{why}, so the report went to the operator channel"),
-                                )
-                            })
-                            // The channel's own failure class (`_class`) is
-                            // dropped in favour of naming the fallback, which is
-                            // the part an operator reading a host log needs: the
-                            // interesting fact is that `owner` had nowhere left to
-                            // go. The full text, class included, is on `detail`.
-                            .unwrap_or_else(|(_class, detail)| {
-                                row(
-                                    Some(crate::runtime::channel::OPERATOR_CHANNEL.to_string()),
-                                    DeliveryStatus::Failed,
-                                    DeliveryReason::OwnerFallbackFailed,
-                                    format!(
-                                        "{why}, and the operator channel fallback failed: {detail}"
-                                    ),
-                                )
-                            }),
+                        {
+                            Ok(dm) => row(
+                                Some(dm.clone()),
+                                DeliveryStatus::Sent,
+                                why_reason,
+                                format!("{why}, so the report went to the operator and to {dm}"),
+                            ),
+                            Err((_class, detail)) => row(
+                                None,
+                                DeliveryStatus::Failed,
+                                DeliveryReason::OwnerFallbackFailed,
+                                format!("{why}, and the operator fallback failed: {detail}"),
+                            ),
+                        },
                     );
                 }
             }
@@ -833,8 +827,28 @@ async fn deliver_one(
 
         // --- channel: only a channel the deployment already wired ------------
         "channel" => {
+            if target == crate::runtime::channel::OPERATOR_CHANNEL {
+                reports.push(
+                    match report_to_operator(delivery, record, workflow, subject, text, false).await
+                    {
+                        Ok(dm) => row(
+                            Some(target.to_string()),
+                            DeliveryStatus::Sent,
+                            DeliveryReason::ChannelPosted,
+                            format!("reported to the operator and to {dm}"),
+                        ),
+                        Err((reason, detail)) => row(
+                            Some(target.to_string()),
+                            DeliveryStatus::Failed,
+                            reason,
+                            detail,
+                        ),
+                    },
+                );
+                return;
+            }
             reports.push(
-                match post_to_channel(delivery, record, target, subject, text).await {
+                match post_to_channel(delivery, target, subject, text).await {
                     Ok(()) => row(
                         Some(target.to_string()),
                         DeliveryStatus::Sent,
@@ -997,67 +1011,27 @@ async fn park_cold_recipient(
 }
 
 impl DeliveryParking {
-    /// Parks `effect` on the gate and journals it — **both halves or neither**.
+    /// The shared park transaction over this bundle's handles.
+    fn parker(&self) -> crate::runtime::approval_park::ApprovalParker {
+        crate::runtime::approval_park::ApprovalParker::new(
+            self.approvals.clone(),
+            self.journal.clone(),
+            self.grants.clone(),
+            self.continuations.clone(),
+            self.events.clone(),
+        )
+    }
+
+    /// Parks `effect` on the gate and journals it — **both halves or neither**
+    /// — through the shared [`ApprovalParker`](crate::runtime::approval_park::ApprovalParker),
+    /// then arms the workflow gate queue for `turn`.
     ///
-    /// The gate is in-memory; the journal is the durable record `/approvals`
-    /// reads and boot replay rehydrates. A gate entry the journal never recorded
-    /// is the worst of the three possible outcomes: it shows up in the
-    /// operator's queue now, vanishes on the next restart, and backs a `pending`
-    /// row that promises a card which no longer exists.
+    /// The parker counts `turn`'s continuation slot before the approval is
+    /// visible, retracts the gate entry if the journal write fails, marks the
+    /// work unit pending on the company's grants, and emits `ApprovalParked`.
     ///
-    /// Bundling the two handles in [`DeliveryParking`] makes the *mis-wiring* of
-    /// that state unrepresentable, but it does nothing about a **partial failure
-    /// at runtime** — `park` succeeding and `record_parked` erroring (a full
-    /// disk, a read-only volume, a serialization fault). So the journal write is
-    /// treated as the commit point: if it fails, the gate entry is retracted
-    /// before returning the error, and the caller degrades to whatever it does
-    /// when parking is unavailable.
-    ///
-    /// Retraction has to undo **two** things, because a failed `record_parked`
-    /// has already mutated the journal's in-memory queue (it inserts before it
-    /// appends, so the entry is live even though nothing reached disk):
-    ///
-    /// 1. [`ApprovalGate::resolve`] with [`Verdict::Deny`] — the trait's only
-    ///    removal verb, and the honest one: this effect must never execute. It
-    ///    is attributed to
-    ///    [`ActorKind::System`](crate::ports::types::ActorKind::System) (the
-    ///    runtime itself, as boot replay and the TTL sweep are) rather than to
-    ///    an operator who made no such decision.
-    /// 2. [`RuntimeJournal::record_resolved`] — which also removes before it
-    ///    appends, so it clears the in-memory queue entry that would otherwise
-    ///    show the operator a card `/approvals` lists but the gate can no longer
-    ///    execute. Its own append will usually fail for the same reason the
-    ///    first one did; that is fine and expected, since there is no
-    ///    `ApprovalParked` line on disk for it to pair with anyway.
-    ///
-    /// The ordering cannot simply be inverted to dodge this: `record_parked`
-    /// needs the [`ApprovalId`](crate::ports::types::ApprovalId) that `park`
-    /// mints, so the gate write must come first.
-    ///
-    /// Both rollback steps deliberately ignore their own errors and the
-    /// **original** journal error propagates — the effect is unparked either
-    /// way, and losing the real cause behind a cleanup error would make the
-    /// failure harder to diagnose, not easier.
-    ///
-    /// # Why this is `pub(crate)` rather than a private free function (#395)
-    ///
-    /// It was private to this module while cold-recipient delivery was the only
-    /// caller. Issue #395 found two more places that must park an effect from
-    /// *outside* a cycle — a workflow agent node's gated tool call, and a
-    /// `requires_approval` node the engine paused on — and neither has a
-    /// [`CycleHost`](crate::ports::brain::CycleHost) to reach
-    /// [`park_effect`](crate::ports::brain::CycleHost::park_effect) through.
-    ///
-    /// Widening `CycleHost` for them would have been the wrong seam: that trait
-    /// is the *cycle's* whole effect surface, and a workflow run is not a cycle.
-    /// What all three callers actually share is this transaction. So it becomes
-    /// a method on the bundle that already carries both handles — and which is
-    /// already threaded down the workflow path as
-    /// [`HarnessDeps::delivery`](crate::harness::HarnessDeps)`.parking`.
-    ///
-    /// `task_link` and `thread` are parameters rather than the hardcoded
-    /// `Unlinked` / `None` delivery used, because they are the two facts only
-    /// the caller knows: which board card owns the request, and which
+    /// `task_link` and `thread` are parameters because they are the two facts
+    /// only the caller knows: which board card owns the request, and which
     /// conversation to raise it in.
     pub(crate) async fn park_and_journal(
         &self,
@@ -1067,115 +1041,23 @@ impl DeliveryParking {
         thread: Option<String>,
         turn: Option<String>,
     ) -> Result<ApprovalId, crate::error::OpenCompanyError> {
-        // Issue #1825 (P1, fifth follow-up — found by chatgpt-codex-connector):
-        // arm this card's continuation slot BEFORE anything below can make the
-        // approval visible to a concurrent resolver. `record_parked`'s
-        // synchronous in-memory insert — the write `approval_cycle` reads to
-        // route a resolution through the continuation batch — lands as soon as
-        // that call's synchronous portion runs, strictly before its own async
-        // durable append (below) returns; a resolve racing in on another tokio
-        // worker thread during that window used to see a turn whose only armed
-        // slot was `park_gated_calls`'s pre-loop synthetic hold — this card's
-        // own arm had not run yet, still gated behind the journal write below —
-        // consumed it, and released the batch before this card (or the rest of
-        // the node's batch) had finished parking. This card's own arm then
-        // still ran once the journal write returned, into a queue entry the
-        // premature decision had already removed: a fresh, orphaned slot no
-        // further decision would ever redeem, doubling the eventual dispatch.
-        // Arming here, before the approval gate has even minted an id, closes
-        // the window by construction — nothing below can make this card
-        // resolvable before its slot is already counted.
-        if let Some(turn) = turn.as_deref() {
-            self.continuations.arm(turn);
-        }
-        let approval_id = match self.approvals.park(company, effect.clone()).await {
-            Ok(id) => id,
-            Err(err) => {
-                // Nothing was ever parked, so no decision will ever come along
-                // to release the slot armed above — release it now instead of
-                // leaving the turn blocked on a card that will never exist.
-                if let Some(turn) = turn.as_deref() {
-                    self.continuations.decide(turn, None);
-                }
-                return Err(err);
-            }
-        };
-        if let Err(err) = self
-            .journal
-            .record_parked(
-                &approval_id,
-                &effect,
-                now_millis(),
-                task_link,
-                // A channel but no thread root (issue #435), for a reason one
-                // step upstream of #469's: a workflow node's request is not
-                // raised by a chat message, so there is no message for a
-                // continuation to hang under. The channel is the whole of the
-                // conversation identity here, exactly as before.
-                ApprovalConversation {
-                    thread,
-                    parent: None,
-                },
-                // The turn this park belongs to, when it belongs to one
-                // (issues #469, #978).
-                //
-                // `None` for a cold-recipient delivery and for an agent node's
-                // gated tool call: neither is raised by anything that holds a
-                // continuation, so each resolves and continues on its own,
-                // exactly as it always has.
-                //
-                // `Some` for a `requires_approval` gate, where issue #978 found
-                // the opposite: the N gates one run pauses on ARE a batch, and
-                // recording no key for them is what let every branch of a
-                // fan-out believe it was the last decision and re-dispatch the
-                // whole run. A run is a turn in precisely the sense #469 means —
-                // one unit of work, blocked on several decisions, owed exactly
-                // one continuation when the last of them lands.
-                turn.clone(),
-            )
-            .await
-        {
-            // Roll back to "never parked". Both steps deliberately swallow their
-            // own errors — `err` below is the one worth surfacing.
-            if let Err(rollback) = self
-                .approvals
-                .resolve(
-                    &approval_id,
-                    Verdict::Deny,
-                    Actor {
-                        kind: ActorKind::System,
-                        id: "workflow-delivery".to_string(),
+        let approval_id = self
+            .parker()
+            .park(
+                company,
+                effect.clone(),
+                crate::runtime::approval_park::ParkSite {
+                    task: task_link,
+                    // A workflow request is not raised by a chat message, so
+                    // there is no thread root to hang a continuation under.
+                    conversation: ApprovalConversation {
+                        thread,
+                        parent: None,
                     },
-                )
-                .await
-            {
-                tracing::error!(
-                    company = %company,
-                    error = %rollback,
-                    "workflow: a parked effect could not be journaled AND could not be \
-                     retracted from the approval gate; it may linger in the queue until restart"
-                );
-            }
-            // Clears the in-memory queue entry `record_parked` inserted before
-            // it failed to write. Its append will usually fail too — expected,
-            // and ignored: there is no `ApprovalParked` line on disk to pair
-            // with.
-            let _ = self.journal.record_resolved(&approval_id).await;
-            // Same as the park failure above: the card this slot was armed for
-            // was just retracted, so release it rather than leave the turn
-            // blocked forever on a decision that can never arrive.
-            if let Some(turn) = turn.as_deref() {
-                self.continuations.decide(turn, None);
-            }
-            return Err(err);
-        }
-        // Issue #978: arm the gate queue once the park is durable. `gates` is
-        // looked up by `approval_id` (minted above) rather than by turn alone,
-        // so — unlike `continuations`, moved ahead of this function's first
-        // await for the reason at the top — it has no visibility-before-count
-        // window of its own to close: nothing can look this approval's gate up
-        // before `approval_id` exists, which is true either way. `park_pending_gates`'
-        // dedupe skip never reaches here at all.
+                    turn: turn.clone(),
+                },
+            )
+            .await?;
         if let Some(turn) = turn {
             self.gates.arm(&turn, &approval_id, &effect);
         }
@@ -1376,93 +1258,9 @@ async fn recipient_is_established(
 /// is exactly the pattern-match-on-prose coupling issue #248 exists to avoid.
 async fn post_to_channel(
     delivery: &WorkflowDeliveryDeps,
-    record: &CompanyRecord,
     channel_id: &str,
     subject: &str,
     text: &str,
-) -> Result<(), (DeliveryReason, String)> {
-    // Since issue #1757 `operator` is a first-class, durable delivery channel
-    // (see `deliverable_channel_ids`), so a `channel` destination may name it
-    // like any desk — the post lands, journal-backed, in the standing Operator
-    // channel. No target is refused here by name any more; an id nobody wired is
-    // still caught below with the same sentence the console's picker pre-flight
-    // shows (issue #981).
-    send_to_channel_adapter(delivery, record, channel_id, subject, text, false).await
-}
-
-/// Posts an `owner` fallback report to the durable operator channel (issue
-/// #1757).
-///
-/// The landing spot for an `owner` report the company cannot email — no mailbox,
-/// or no admin with an address. A thin, named wrapper over
-/// [`send_to_channel_adapter`] so the owner arm reads for what it is: the runtime
-/// builder wires a
-/// [`DurableOperatorChannel`](crate::runtime::channel::DurableOperatorChannel)
-/// into the delivery adapter set under the `operator` id, so this finds a real,
-/// journal-backed write path; a build that wired none degrades to a plain
-/// "not wired" error and the caller reports the fallback as failed rather than
-/// silently discarding it.
-async fn post_to_operator(
-    delivery: &WorkflowDeliveryDeps,
-    record: &CompanyRecord,
-    subject: &str,
-    text: &str,
-) -> Result<(), (DeliveryReason, String)> {
-    // `admin_only: true` — this is precisely the report an unavailable mailbox
-    // would otherwise have sent only to active administrators
-    // (`owner_recipients` filters to `UserRole::Admin` + `UserStatus::Active`).
-    // The channel fallback must not widen that audience just because mail
-    // failed (issue #1781 review, Codex P1); see `OWNER_FALLBACK_REPORT_AUTHOR`.
-    send_to_channel_adapter(
-        delivery,
-        record,
-        crate::runtime::channel::OPERATOR_CHANNEL,
-        subject,
-        text,
-        true,
-    )
-    .await
-}
-
-/// The header prefixed to every report that lands in the operator channel
-/// (issue #1757).
-const OPERATOR_REPORT_HEADER: &str = "Workflow report";
-
-/// Formats a report for the operator channel with its source header, so the
-/// aggregated "what happened" feed reads as scannable reports (each named by its
-/// workflow and node) rather than a firehose of chat text (issue #1757).
-fn operator_report(subject: &str, text: &str) -> String {
-    format!("{OPERATOR_REPORT_HEADER} — {subject}\n\n{text}")
-}
-
-/// Finds the wired adapter with id `channel_id` and sends `subject`/`text` to
-/// it. The shared core of [`post_to_channel`] and [`post_to_operator`].
-///
-/// A report bound for the operator channel gets a source header
-/// ([`operator_report`]) so the aggregating surface stays scannable; every other
-/// channel gets the plain `subject`/`text` a desk or provider expects.
-///
-/// `admin_only` marks an owner-fallback report so the read path can restrict it
-/// to administrators (issue #1781 review, Codex P1) — see
-/// [`OWNER_FALLBACK_REPORT_AUTHOR`](crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR).
-/// Only `post_to_operator` ever sets it; `post_to_channel`'s explicit `channel`
-/// destination always passes `false`, unchanged.
-///
-/// `record` resolves the **journal** address for the operator channel via
-/// [`CompanyRecord::operator_feed_channel`] — ordinarily the same as
-/// `channel_id`, except for a company whose roster grandfathers a teammate at
-/// the literal `operator` id, where it diverts to a disjoint id so a report can
-/// never land on that teammate's own DM (issue #1781 review, CodeRabbit Major +
-/// Codex P2). `channel_id` itself still drives the **adapter lookup** below —
-/// `DurableOperatorChannel::channel_id()` is always the literal `operator`, in
-/// every company, so the lookup is unaffected by the divergence.
-async fn send_to_channel_adapter(
-    delivery: &WorkflowDeliveryDeps,
-    record: &CompanyRecord,
-    channel_id: &str,
-    subject: &str,
-    text: &str,
-    admin_only: bool,
 ) -> Result<(), (DeliveryReason, String)> {
     let Some(adapter) = delivery
         .channels
@@ -1482,54 +1280,14 @@ async fn send_to_channel_adapter(
             crate::runtime::channel::undeliverable_channel_message(channel_id, &wired),
         ));
     };
-    let is_operator = channel_id == crate::runtime::channel::OPERATOR_CHANNEL;
-    let body = if is_operator {
-        operator_report(subject, text)
-    } else {
-        format!("{subject}\n\n{text}")
-    };
-    let journal_channel = if is_operator {
-        let feed = record.operator_feed_channel();
-        // Issue #1781 review (CodeRabbit P2 follow-up, then a fresh P2 on the
-        // follow-up itself): `operator_feed_channel` diverts to
-        // `OPERATOR_CHANNEL_COLLISION_FALLBACK` without re-checking that
-        // address is itself free — a second grandfathered desk name can still
-        // shadow it (see `operator_feed_channel_fallback_shadowed`'s own doc
-        // for why no third address closes this). There is nowhere safe left to
-        // journal this report: sending it to `feed` anyway would silently mix
-        // it into that shadowing desk's own transcript while still reporting
-        // `Sent`. Refuse instead of guessing — the operator can rename the
-        // colliding desk and re-run, which a `Sent`-but-misrouted report would
-        // never have surfaced a reason to do.
-        if record.operator_feed_channel_fallback_shadowed() {
-            tracing::error!(
-                company = %record.id,
-                fallback = feed,
-                "operator feed collision-fallback channel is itself shadowed by a \
-                 grandfathered desk name; refusing this workflow report instead of \
-                 misrouting it into that desk's own transcript"
-            );
-            return Err((
-                DeliveryReason::ChannelCollisionShadowed,
-                format!(
-                    "the operator feed's collision-fallback address (`{feed}`) is itself \
-                     claimed by another desk's name, so this report has no safe address to \
-                     journal to — rename the colliding desk to clear this"
-                ),
-            ));
-        }
-        feed
-    } else {
-        channel_id
-    };
     adapter
         .send(OutboundMessage {
             message_id: None,
             task_id: None,
             outputs: Vec::new(),
-            channel: journal_channel.to_string(),
-            agent: admin_only.then(|| crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string()),
-            text: body,
+            channel: channel_id.to_string(),
+            agent: None,
+            text: format!("{subject}\n\n{text}"),
             steps: Vec::new(),
             reply_to: None,
             mentions: Vec::new(),
@@ -1543,6 +1301,140 @@ async fn send_to_channel_adapter(
                 format!("the channel refused the message: {err}"),
             )
         })
+}
+
+/// The header prefixed to every report addressed to the operator.
+const OPERATOR_REPORT_HEADER: &str = "Workflow report";
+
+/// Formats a report for the operator with its source header, so it reads as a
+/// report named by its workflow and node rather than as chat text.
+fn operator_report(subject: &str, text: &str) -> String {
+    format!("{OPERATOR_REPORT_HEADER} — {subject}\n\n{text}")
+}
+
+/// The DM a workflow's operator reports land in: that of the agent responsible
+/// for the workflow — its owning desk's lead, else the orchestrator — resolved
+/// by the same rule a parked blocker's sender is.
+pub(crate) fn report_dm(record: &CompanyRecord, workflow: &WorkflowFile) -> String {
+    let sender = crate::company::blocker_sender::resolve_sender(
+        record,
+        &crate::company::blocker_sender::BlockerSenderSignals {
+            started_by: None,
+            owner_desk: workflow.owner_desk.clone(),
+            assignee: None,
+        },
+    );
+    crate::company::blocker_sender::dm_thread(&sender)
+}
+
+/// Reports to the operator: the report is journaled into the responsible
+/// agent's DM ([`report_dm`]) and a notification pointing at it is filed.
+/// Returns the DM it landed in.
+///
+/// `admin_only` marks an `owner` fallback: the journaled row is authored as
+/// [`OWNER_FALLBACK_REPORT_AUTHOR`](crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR)
+/// so the read path shows it to administrators only, and the notification is
+/// addressed to the company's active admins — the audience the email branch
+/// would have reached.
+async fn report_to_operator(
+    delivery: &WorkflowDeliveryDeps,
+    record: &CompanyRecord,
+    workflow: &WorkflowFile,
+    subject: &str,
+    text: &str,
+    admin_only: bool,
+) -> Result<String, (DeliveryReason, String)> {
+    let dm = report_dm(record, workflow);
+    let author = if admin_only {
+        crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR
+    } else {
+        crate::runtime::channel::WORKFLOW_REPLY_AUTHOR
+    };
+    tracing::debug!(
+        company = %record.id,
+        workflow = %workflow.id,
+        dm = %dm,
+        admin_only,
+        "[workflow-delivery] reporting to the operator"
+    );
+    delivery
+        .events
+        .append(
+            &record.id,
+            CompanyEvent::AgentReply {
+                audience: Vec::new(),
+                episode: None,
+                chat_id: dm.clone(),
+                agent_id: author.to_string(),
+                text: operator_report(subject, text),
+                steps: Vec::new(),
+                task_id: None,
+                outputs: Vec::new(),
+                parent: None,
+                mentions: Vec::new(),
+                mention_depth: 0,
+            },
+        )
+        .await
+        .map_err(|err| {
+            (
+                DeliveryReason::ChannelRefused,
+                format!("the report could not be journaled to {dm}: {err}"),
+            )
+        })?;
+    if let Some(notifications) = &delivery.notifications {
+        let audience = if admin_only {
+            active_admin_ids(delivery.users.as_ref(), &record.id).await
+        } else {
+            None
+        };
+        let note = Notification {
+            id: generate_id(),
+            kind: "workflow_report".to_string(),
+            subject: Subject {
+                kind: SubjectKind::Workflow,
+                id: workflow.id.clone(),
+            },
+            created_at: now_millis(),
+            title: format!(
+                "{OPERATOR_REPORT_HEADER} — {}",
+                subject.replace(['\r', '\n'], " ")
+            ),
+            audience,
+            context: Some(dm.clone()),
+        };
+        if let Err(err) = notifications.append(&record.id, &note).await {
+            tracing::warn!(
+                company = %record.id,
+                workflow = %workflow.id,
+                error = %err,
+                "[workflow-delivery] the report landed but its notification could not be recorded"
+            );
+        }
+    }
+    Ok(dm)
+}
+
+/// The ids of the company's active admins, as a notification audience. `None`
+/// when there are none or the directory cannot be read, which addresses the
+/// whole company rather than nobody.
+async fn active_admin_ids(users: &dyn UserStore, company: &CompanyId) -> Option<Vec<String>> {
+    let ids: Vec<String> = users
+        .list_users(company)
+        .await
+        .map_err(|err| {
+            tracing::warn!(
+                company = %company,
+                error = %err,
+                "[workflow-delivery] could not list admins for a report notification"
+            );
+        })
+        .ok()?
+        .into_iter()
+        .filter(|user| user.role == UserRole::Admin && user.status == UserStatus::Active)
+        .map(|user| user.id)
+        .collect();
+    (!ids.is_empty()).then_some(ids)
 }
 
 /// Whether the run's output carries an entry for `node_id` — i.e. the engine

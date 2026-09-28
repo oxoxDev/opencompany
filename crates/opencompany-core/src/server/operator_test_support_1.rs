@@ -58,6 +58,7 @@ pub(super) async fn build_state_with_brain_and_manifest(
     use crate::ports::CompanyStore;
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
@@ -161,6 +162,7 @@ pub(super) async fn state_with_failing_runs(home: &std::path::Path) -> AppState 
     use crate::ports::CompanyStore;
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
@@ -245,6 +247,7 @@ pub(super) async fn state_with_roster(home: &std::path::Path) -> AppState {
     use crate::ports::CompanyStore;
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
@@ -356,6 +359,7 @@ pub(super) async fn state_with_memberless_desk(home: &std::path::Path) -> AppSta
     use crate::ports::CompanyStore;
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
@@ -399,6 +403,7 @@ pub(super) async fn state_with_dm_prefixed_desk(home: &std::path::Path) -> AppSt
     use crate::ports::CompanyStore;
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
@@ -545,6 +550,7 @@ pub(super) fn desk_manifest() -> CompanyManifest {
 /// A bare record carrying `manifest`, for resolvers that read nothing else.
 pub(super) fn record_with(manifest: CompanyManifest) -> CompanyRecord {
     CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
@@ -580,6 +586,7 @@ pub(super) async fn state_with_manifest(
     use crate::ports::CompanyStore;
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
@@ -616,7 +623,23 @@ pub(super) async fn state_with_manifest(
     state
 }
 
+/// `GET {scope}/desks`, after asserting its first entry is #general; returns
+/// the desks that follow it.
 pub(super) async fn get_desks(app: &axum::Router, cookie: &str) -> serde_json::Value {
+    let mut listed = get_desk_list(app, cookie).await;
+    let all = listed.as_array_mut().expect("a desk list");
+    let general = all.remove(0);
+    assert_eq!(
+        general["id"], "general",
+        "#general is listed first: {general}"
+    );
+    assert_eq!(general["kind"], "general");
+    assert_eq!(general["mutable"], false);
+    listed
+}
+
+/// `GET {scope}/desks`, verbatim.
+pub(super) async fn get_desk_list(app: &axum::Router, cookie: &str) -> serde_json::Value {
     let response = app
         .clone()
         .oneshot(

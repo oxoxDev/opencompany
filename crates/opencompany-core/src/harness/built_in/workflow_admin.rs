@@ -97,8 +97,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
-use openhuman_core as oh;
+use tinytools::{PermissionLevel, Tool, ToolResult};
 
 use crate::company::{
     RawWorkflow, WorkflowSpecProjection, delete_company_workflow, load_workflow_with_globals,
@@ -169,6 +168,9 @@ impl WorkflowAdmin {
 
     /// This company's runtime-authored graph bodies, or the agent-facing error
     /// to return when the record cannot be read.
+    // `ToolResult` grew past clippy's `Err` size threshold at the 1ecf1b0
+    // tinytools pin; the refusal IS the tool's answer, so it stays by value.
+    #[allow(clippy::result_large_err)]
     async fn overlays(&self) -> Result<Vec<OverlayWorkflow>, ToolResult> {
         Ok(self.overlays_and_globals().await?.0)
     }
@@ -179,6 +181,9 @@ impl WorkflowAdmin {
     /// Read from the same record load, because the two are read together: a
     /// union that saw the overlays but not the opt-out would answer with a
     /// global graph this company disabled.
+    // `ToolResult` grew past clippy's `Err` size threshold at the 1ecf1b0
+    // tinytools pin; the refusal IS the tool's answer, so it stays by value.
+    #[allow(clippy::result_large_err)]
     async fn overlays_and_globals(
         &self,
     ) -> Result<(Vec<OverlayWorkflow>, Vec<String>), ToolResult> {
@@ -193,6 +198,9 @@ impl WorkflowAdmin {
     }
 
     /// The revision store, or the refusal for a deployment without one.
+    // `ToolResult` grew past clippy's `Err` size threshold at the 1ecf1b0
+    // tinytools pin; the refusal IS the tool's answer, so it stays by value.
+    #[allow(clippy::result_large_err)]
     fn revisions(&self) -> Result<&Arc<dyn WorkflowRevisionStore>, ToolResult> {
         self.revisions.as_ref().ok_or_else(|| {
             ToolResult::error(

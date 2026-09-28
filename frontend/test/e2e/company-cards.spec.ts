@@ -94,6 +94,28 @@ async function mockApi(page: Page) {
     if (path === `/api/v1/companies/${COMPANY}`) return json(status);
     if (path.endsWith("/desks"))
       return json([{ id: "research", name: "Research", members: ["maya", "priya"] }]);
+    // GET .../desks/{id}/routing — `#/company/<deskId>` (issue #485) mounts
+    // `DeskRoutingPanel` under the focused desk, and it reads this on arrival.
+    // Falling through to the catch-all's `json([])` below resolves the read
+    // instead of rejecting it, so the panel destructures `effective` off an
+    // array and crashes the whole page — which takes the tree with it. Same
+    // stub as `org-tree.spec.ts`.
+    const routing = path.match(/\/desks\/([^/]+)\/routing$/);
+    if (routing && route.request().method() === "GET") {
+      return json({
+        deskId: routing[1],
+        source: "default",
+        declared: {},
+        effective: {
+          roundWidth: 1,
+          choiceOptionLimit: 5,
+          maxRounds: 8,
+          turnTimeoutSecs: 120,
+          router: "fallback",
+        },
+        candidates: [],
+      });
+    }
     if (path.endsWith("/tasks")) return json(TASKS);
     if (path.endsWith("/ledgers"))
       return json({

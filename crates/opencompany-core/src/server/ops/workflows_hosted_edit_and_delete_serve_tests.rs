@@ -50,6 +50,7 @@ async fn a_bodiless_enabled_id_is_listed_but_not_editable() {
     manifest.workflows.enabled.push("legacy".to_string());
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),

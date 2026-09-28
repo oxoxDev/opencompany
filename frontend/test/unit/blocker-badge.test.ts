@@ -36,8 +36,6 @@ describe("mentionCountsByChannel with blockers", () => {
   it("counts an unread parked blocker on its DM channel", () => {
     const counts = mentionCountsByChannel(
       [parked({ id: "a" }), parked({ id: "b", context: "dm:ceo" })],
-      undefined,
-      new Set(["dm:eng", "dm:ceo"]),
     );
     expect(counts).toEqual({ "dm:eng": 1, "dm:ceo": 1 });
   });
@@ -45,8 +43,6 @@ describe("mentionCountsByChannel with blockers", () => {
   it("ignores a blocker already read", () => {
     const counts = mentionCountsByChannel(
       [parked({ id: "a", readAt: 9 })],
-      undefined,
-      new Set(["dm:eng"]),
     );
     expect(counts["dm:eng"]).toBeUndefined();
   });
@@ -57,9 +53,6 @@ describe("mentionsToClear with blockers", () => {
     const cleared = mentionsToClear(
       [parked({ id: "a" })],
       "dm:eng",
-      undefined,
-      new Set(["dm:eng"]),
-      new Set(["dm:eng"]),
       new Map(),
       null,
       // A message set that does not contain the (approval) subject — a mention
@@ -73,9 +66,6 @@ describe("mentionsToClear with blockers", () => {
     const cleared = mentionsToClear(
       [parked({ id: "a", context: "dm:ceo" })],
       "dm:eng",
-      undefined,
-      new Set(["dm:eng"]),
-      new Set(["dm:eng", "dm:ceo"]),
     );
     expect(cleared).toEqual([]);
   });

@@ -316,8 +316,8 @@ impl Tracker for DeferredTracker {
 /// [`Envelope::props`] and [`Event::props`], which yield [`PropValue`]s and can
 /// therefore hold nothing but literals, counts, quantities and flags.
 ///
-/// **The credential is not here and cannot be.** It travels in two request
-/// headers, which is a straightforward improvement on the token Mixpanel wanted
+/// **The credential is not here and cannot be.** It travels in a request
+/// header, which is a straightforward improvement on the token Mixpanel wanted
 /// stamped into every event's property bag: there is no longer a path by which a
 /// captured body, a recorded event or a test fixture could carry it, so the one
 /// place the transport used to reach into a rendered payload is gone.

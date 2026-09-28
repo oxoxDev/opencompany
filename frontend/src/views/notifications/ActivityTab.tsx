@@ -75,7 +75,6 @@ function isAlarming(kind: string): boolean {
 export function ActivityTab({
   notifications,
   now,
-  channels,
   onDismiss,
   onDismissAll,
 }: {
@@ -91,8 +90,6 @@ export function ActivityTab({
   notifications: readonly NotificationDto[];
   /** The company clock the rest of the console renders relative times against. */
   now: number;
-  /** What `notificationHref` needs to resolve a `message` row's channel. */
-  channels: { rendered: ReadonlySet<string>; mainChannelId: string | undefined };
   /**
    * Mark exactly one row read. Never an empty list — see `NotificationsView`.
    *
@@ -178,7 +175,7 @@ export function ActivityTab({
       <ul className="flex flex-col gap-2">
         {rows.map((row) => {
           const Glyph = glyphFor(row.kind);
-          const href = notificationHref(row, channels);
+          const href = notificationHref(row);
           const alarming = isAlarming(row.kind);
           return (
             <li

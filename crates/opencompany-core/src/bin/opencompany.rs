@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use std::sync::Arc;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use opencompany::app::config::HostedDefault;
 use opencompany::company::Schedule;
 use opencompany::runtime::lifecycle_scheduler::load_or_create_cutoff_millis;
@@ -13,7 +13,6 @@ use opencompany::{
     AppConfig, AppState, CompanyId, CompanyManifest, Result,
     app::config::{ConfigFile, ProcessEnv, resolve},
     app::doctor,
-    openhuman::{LaunchMode, OpenHumanLaunch},
     runtime::RuntimeBuilder,
 };
 use tokio::sync::Notify;
@@ -228,32 +227,41 @@ enum Command {
         #[command(subcommand)]
         cmd: MemoryCmd,
     },
-    /// Launch a sibling OpenHuman checkout: the core binary (`--mode core`)
-    /// or the Tauri desktop host (`--mode desktop`). Desktop calls `cargo tauri`
-    /// directly and performs the preflight OpenHuman's own scripts do — install
-    /// the vendored CEF-aware `tauri-cli`, pin `CEF_PATH`, load `<root>/.env`,
-    /// and on macOS seed the Chromium keychain + signing identity (CEF on macOS,
-    /// `wry` on Linux/Windows; Tauri still drives the Vite dev server). Pass
-    /// `--dry-run` to preview.
-    OpenHuman {
-        /// OpenHuman checkout path.
-        #[arg(long, default_value = "vendor/openhuman")]
-        root: PathBuf,
-        /// Launch target.
-        #[arg(long, value_enum, default_value_t = ModeArg::Core)]
-        mode: ModeArg,
-        /// Build a release bundle instead of launching a dev session
-        /// (`cargo run --release` for core; `cargo tauri build` for desktop —
-        /// a signed `.app`/dmg on macOS, a deb/AppImage elsewhere).
+    /// Measure how a company's desks coordinated, from its journal alone
+    /// (plan hive-desks, Phase 8).
+    ///
+    /// Reads the company's event log through the env-selected storage
+    /// backend — no host needs to be running — and folds the hive frames
+    /// into the numbers the plan asks for: the peak of seat turns open at
+    /// once and how often they overlapped, same-agent overlaps (which must
+    /// be zero: one agent runs one turn at a time), episodes opened and
+    /// completed with their reason and rounds, cross-desk referrals,
+    /// broadcasts and dms with the distinct agent pairs they made, the
+    /// utterance-kind histogram, and each episode's time to complete.
+    ///
+    /// `scripts/measure-coordination.mjs` is the HTTP/SSE twin: the same
+    /// numbers from a live `/events` stream, with the same thresholds.
+    Measure {
+        /// The company id, as `serve` registers it.
         #[arg(long)]
-        release: bool,
-        /// Print the command without executing it.
+        company: String,
+        /// Data root the journal lives under. Falls back to
+        /// `OPENCOMPANY_DATA_DIR`, then `$HOME/.opencompany`.
+        #[arg(long = "data-dir", alias = "home", value_name = "DIR")]
+        data_dir: Option<PathBuf>,
+        /// Fold rows from this journal sequence on (inclusive); the whole
+        /// journal when omitted.
         #[arg(long)]
-        dry_run: bool,
-        /// Arguments passed after `--` to the OpenHuman core binary. Ignored
-        /// (and rejected) in desktop mode, which drives fixed pnpm scripts.
-        #[arg(last = true)]
-        args: Vec<String>,
+        since: Option<u64>,
+        /// Print the report as JSON instead of an aligned table.
+        #[arg(long)]
+        json: bool,
+        /// Exit non-zero when a threshold is missed: max concurrent turns of
+        /// at least 2, at least one cross-desk referral, at least one
+        /// dm/broadcast, at least two distinct pairs, no same-agent overlap,
+        /// every episode completed.
+        #[arg(long = "assert")]
+        assert_thresholds: bool,
     },
 }
 
@@ -311,21 +319,6 @@ impl std::fmt::Debug for MemoryCmd {
                 .field("dry_run", dry_run)
                 .field("resume_cursor", &resume_cursor.is_some())
                 .finish(),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum ModeArg {
-    Core,
-    Desktop,
-}
-
-impl From<ModeArg> for LaunchMode {
-    fn from(value: ModeArg) -> Self {
-        match value {
-            ModeArg::Core => LaunchMode::Core,
-            ModeArg::Desktop => LaunchMode::Desktop,
         }
     }
 }
@@ -584,7 +577,7 @@ fn company_builder(
 ) -> Result<RuntimeBuilder> {
     let mut builder = attach_tinyhumans_feedback(
         attach_harness(
-            attach_openhuman(RuntimeBuilder::new(home.to_path_buf(), manifest)),
+            RuntimeBuilder::new(home.to_path_buf(), manifest),
             state.config(),
         ),
         state.config(),
@@ -896,31 +889,6 @@ fn spawn_mailbox_poller(
     }
 }
 
-/// Attaches an OpenHuman JSON-RPC transport when the `openhuman-rpc` feature is
-/// enabled and `OPENCOMPANY_OPENHUMAN_URL` is set (the attach path).
-///
-/// Without the feature this is the identity function, so the default build
-/// stays network-free and degrades to built-in tools and the operator channel.
-#[cfg(not(feature = "openhuman-rpc"))]
-fn attach_openhuman(builder: RuntimeBuilder) -> RuntimeBuilder {
-    builder
-}
-
-#[cfg(feature = "openhuman-rpc")]
-fn attach_openhuman(builder: RuntimeBuilder) -> RuntimeBuilder {
-    use opencompany::openhuman::HttpOpenHumanRpc;
-    use opencompany::ports::SecretValue;
-
-    match std::env::var("OPENCOMPANY_OPENHUMAN_URL") {
-        Ok(url) if !url.trim().is_empty() => {
-            let bearer =
-                SecretValue(std::env::var("OPENCOMPANY_OPENHUMAN_TOKEN").unwrap_or_default());
-            builder.with_openhuman_rpc(Arc::new(HttpOpenHumanRpc::attach(url, bearer)))
-        }
-        _ => builder,
-    }
-}
-
 /// Attaches the embedded OpenHuman harness under the `openhuman` feature.
 ///
 /// One line, because the sequence itself lives in the library
@@ -943,16 +911,16 @@ fn attach_tinyhumans_feedback(builder: RuntimeBuilder, _config: &AppConfig) -> R
     builder
 }
 
-/// Wires the hub identity exchange, when this build can reach the hub.
+/// Wires the hub exchange behind the TinyHumans key grant, when this build can
+/// reach the hub.
 ///
 /// Rides the existing `tinyhumans` feature rather than earning one of its own:
 /// that flag already means "this instance talks to the hub about its
-/// credential's owner", and asking the hub whose sign-in token this is is the
-/// same conversation about the same owner.
+/// credential's owner", and asking the hub for a key is the same conversation.
 ///
-/// Unwired, `…/auth/hub` reports no providers and the console shows only the
-/// magic-link form — which is the right answer for a self-hosted host that has
-/// no ecosystem to sign in against.
+/// Unwired, the Connections Account page offers no "Connect TinyHumans" button
+/// — which is the right answer for a self-hosted host with no hub. Sign-in is
+/// never involved either way: a company's login is its own, not the hub's.
 #[cfg(not(feature = "tinyhumans"))]
 fn attach_hub_identity(state: AppState) -> AppState {
     state
@@ -1425,6 +1393,58 @@ async fn run_issue_password(
 /// wanted — a health check or a deploy script that wants the *answer* — and
 /// "the query ran and found three" is a success, not a failure. The findings
 /// are on stdout for a human and behind `--json` for anything else.
+/// `opencompany measure`: fold the company's journal into the coordination
+/// report and print it (see `opencompany::hive::measure`).
+///
+/// Storage resolves the way `export` resolves it — the env-selected backend
+/// over the data root — minus the memory overlay, which the journal does not
+/// live in. The filesystem store takes no root lock here: this is a read,
+/// and a `serve` that holds the lock is exactly the process whose run is
+/// worth measuring.
+async fn run_measure(
+    company: String,
+    data_dir: Option<PathBuf>,
+    since: Option<u64>,
+    json: bool,
+    assert_thresholds: bool,
+) -> Result<()> {
+    use opencompany::hive::measure::{Thresholds, measure};
+    use opencompany::ports::types::EventSeq;
+    use opencompany::store::{FsEventLog, StorageSettings, open_storage};
+
+    let home = resolve_home_migrated(data_dir)?;
+    let settings = StorageSettings::from_env()?;
+    let events: Arc<dyn opencompany::ports::EventLog> = match open_storage(&settings, &home).await?
+    {
+        Some(handles) => handles.events,
+        None => Arc::new(FsEventLog::new(home.clone())),
+    };
+    let id = CompanyId::new(company);
+    let report = measure(events.as_ref(), &id, EventSeq::new(since.unwrap_or(0))).await?;
+    let thresholds = Thresholds::default();
+    if json {
+        let failures = report.failures(&thresholds);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "thresholds": thresholds,
+                "summary": report,
+                "failures": failures,
+            }))
+            .expect("the report serializes")
+        );
+    } else {
+        print!("{}", report.to_table(&thresholds));
+    }
+    if assert_thresholds {
+        let failures = report.failures(&thresholds);
+        if !failures.is_empty() {
+            std::process::exit(i32::try_from(failures.len()).unwrap_or(i32::MAX));
+        }
+    }
+    Ok(())
+}
+
 async fn run_orphans(home: Option<PathBuf>, json: bool) -> Result<()> {
     run_orphans_from(home, json, &ProcessEnv).await
 }
@@ -1783,41 +1803,6 @@ async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
     ))
 }
 
-/// Handle the `openhuman` subcommand: build the launch request, reject
-/// passthrough args in Desktop mode via [`OpenHumanLaunch::validate`]
-/// (before the dry-run branch so `--dry-run -- --arg` reports the same error
-/// as a real launch instead of printing an unlaunchable command), then either
-/// print the preview or run to completion and exit with the child's code.
-async fn run_openhuman(
-    root: PathBuf,
-    mode: ModeArg,
-    release: bool,
-    dry_run: bool,
-    args: Vec<String>,
-) -> Result<()> {
-    let mut launch = match LaunchMode::from(mode) {
-        LaunchMode::Core => OpenHumanLaunch::core(root),
-        LaunchMode::Desktop => OpenHumanLaunch::desktop(root),
-    }
-    .with_args(args);
-    if release {
-        launch = launch.release();
-    }
-
-    // validate() rejects passthrough args in Desktop mode; run it before
-    // the dry-run branch so `--dry-run -- --arg` reports the same error
-    // as an actual launch instead of printing an unlaunchable command.
-    launch.validate()?;
-
-    if dry_run {
-        println!("{}", launch.dry_run_preview());
-        return Ok(());
-    }
-
-    let status = launch.run().await?;
-    std::process::exit(status.code().unwrap_or(1));
-}
-
 #[cfg(feature = "openhuman")]
 const WORKER_STACK_BYTES: usize = openhuman_core::core::runtime::AGENT_WORKER_STACK_BYTES;
 #[cfg(not(feature = "openhuman"))]
@@ -1956,8 +1941,9 @@ async fn async_main() -> Result<()> {
     // Bound to a NAMED local so the client lives as long as the process. A bare
     // `_` would drop it here and close the client while the process carried on
     // running, which reports nothing for the rest of its life and reads as a
-    // DSN that does not work. Silent by default: without
-    // `OPENCOMPANY_SENTRY_DSN` this resolves to `Silent` and installs nothing.
+    // DSN that does not work. Without `OPENCOMPANY_SENTRY_DSN` a hosted tenant
+    // reports to the compiled-in default project and every other deployment
+    // resolves to `Silent` and installs nothing.
     //
     // The decision is NOT printed here. `spec` and `doctor --json` write
     // machine-readable output to stdout, so a boot line at this point would be
@@ -2729,11 +2715,11 @@ async fn async_main() -> Result<()> {
             // The id still goes to stdout first — it is the one thing that
             // makes the failure investigable, since the event may well have
             // arrived and only the acknowledgement was late.
-            let drained = crash_guard.flush(std::time::Duration::from_secs(5));
+            let drained = crash_guard.flush(std::time::Duration::from_secs(15));
             println!("{event_id}");
             if !drained {
                 return Err(opencompany::error::OpenCompanyError::Config(
-                    "the crash-reporting queue did not drain within 5s, so delivery of this \
+                    "the crash-reporting queue did not drain within 15s, so delivery of this \
                      event is unconfirmed. Check network egress to the ingest endpoint. See \
                      docs/spec/runtime/crash-reporting.md."
                         .to_string(),
@@ -2761,13 +2747,13 @@ async fn async_main() -> Result<()> {
         }) => run_export(company, out, include_secrets, home).await,
         Some(Command::Import { path, home }) => run_import(path, home).await,
         Some(Command::Memory { cmd }) => run_memory_cmd(cmd).await,
-        Some(Command::OpenHuman {
-            root,
-            mode,
-            release,
-            dry_run,
-            args,
-        }) => run_openhuman(root, mode, release, dry_run, args).await,
+        Some(Command::Measure {
+            company,
+            data_dir,
+            since,
+            json,
+            assert_thresholds,
+        }) => run_measure(company, data_dir, since, json, assert_thresholds).await,
         None => {
             // The commit as well as the version: `0.1.0` has been thousands of
             // commits wide, so this line could not tell an operator which

@@ -99,6 +99,24 @@ export function WorkingIndicator({
   const reduced = usePrefersReducedMotion();
   const running = runningStepLabel(steps);
   const idle = label ?? (name ? `${name} is working…` : GENERIC_LABEL);
+  /**
+   * What the line says: **who**, and nothing else when who is known.
+   *
+   * One fact per surface. This line answers "is anything happening, and whose
+   * turn is it"; the steps row beneath answers "what has it done" and names
+   * the call in flight in its own summary. A step used to replace the name
+   * here, which meant the commonest state of a turn — a tool running — said
+   * what was happening and never who, and then said it a second time in the
+   * row below.
+   *
+   * A running step is still the line when nothing has named an agent: better
+   * the specific thing than the generic one.
+   *
+   * `label` stands alone ahead of both. It is a complete sentence for work a
+   * name cannot describe — a crossing is two seats talking, not one working —
+   * so prefixing it with a single teammate would contradict it.
+   */
+  const line = label ?? (name ? idle : (running ?? idle));
 
   return (
     <span
@@ -126,7 +144,7 @@ export function WorkingIndicator({
       />
       {/* `aria-hidden`, because the stable label below is what should be read. */}
       <span aria-hidden className="truncate">
-        {queued ? QUEUED_LABEL : (running ?? idle)}
+        {queued ? QUEUED_LABEL : line}
       </span>
       {/* CodeRabbit: the visible line already names the teammate (`idle`,
           above) once a step settles; the sr-only twin was still falling back
@@ -136,7 +154,7 @@ export function WorkingIndicator({
           this never announces "Amendments is working…" while the visible
           line (and the live step timeline beside it) is naming a step. */}
       <span className="sr-only">
-        {queued ? QUEUED_LABEL : !running && (name || label) ? idle : srLabel}
+        {queued ? QUEUED_LABEL : name || label ? line : srLabel}
       </span>
     </span>
   );

@@ -62,12 +62,38 @@ describe("the raw-turns renderer", () => {
     expect(session).toContain("if (!quiet) setLoad(\"loading\")");
   });
 
-  it("owns the detailed tool calls instead of duplicating them in chat", () => {
+  /**
+   * Narrowed, deliberately, from "chat renders no `<StepTimeline>` at all".
+   *
+   * What this guard protects is named in the header above: ONE renderer for
+   * "what the agent saw", because a claim that reads differently depending on
+   * which screen you are on is two claims. That claim is about a **stored**
+   * turn's rows — the durable record, which Raw turns owns and chat must not
+   * restate.
+   *
+   * A running turn's rows are not that claim. They exist only while the turn
+   * is open, they are replaced by the reply's own durable steps the instant it
+   * settles, and nothing else in the product can show them. Forbidding them
+   * outright left chat able to say a turn was running and never what it had
+   * done — including, until #411's states reached the live fold, that a call
+   * was parked on a sign-off the operator could have granted.
+   *
+   * So the ban keeps its teeth where they matter: no chat surface may render a
+   * **stored message's** steps. `MessageRow` is the surface that holds stored
+   * messages, and it stays forbidden outright.
+   */
+  it("owns a stored turn's detailed calls; chat may show only a running one's", () => {
     expect(raw).toContain('data-testid="agent-session-raw-steps"');
     expect(raw).toContain("row.steps.map");
+    // The surface that renders stored messages renders no timeline at all.
+    expect(messageRow).not.toContain("<StepTimeline");
+    // Nor may any chat surface reach for a message's own durable steps.
     for (const chatSurface of [messageRow, threadPanel, messageTimeline, liveReceipt]) {
-      expect(chatSurface).not.toContain("<StepTimeline");
+      expect(chatSurface).not.toContain("steps={message.steps}");
     }
+    // The live rows that ARE allowed come from the open turn, never a message.
+    expect(messageTimeline).toContain("<StepTimeline steps={steps} />");
+    expect(liveReceipt).toContain("<StepTimeline steps={steps} />");
   });
 
   /**
@@ -122,15 +148,20 @@ describe("the raw-turns renderer", () => {
   /**
    * Tool calls are unfolded, not named, and the collapses do not survive: a
    * referral rendered as "asked @copy · 2 msgs" is precisely the summary this
-   * view exists to open up.
+   * view exists to open up. An utterance chip becomes the episode and round
+   * it was committed in, spelled out — with a dm's recipients, since they are
+   * what narrowed its audience.
    */
-  it("unfolds steps and prints referral and aside lines in full", () => {
+  it("unfolds steps, prints referral lines in full, and spells out the episode", () => {
     expect(raw).toContain('data-testid="agent-session-raw-step"');
     expect(raw).toContain("{step.detail}");
     expect(raw).toContain("{step.result}");
     expect(raw).toContain("step.truncated");
     expect(raw).toMatch(/row\.referralConversation\?\.lines\.map/);
-    expect(raw).toMatch(/row\.asideConversation\?\.lines\.map/);
+    expect(raw).toContain('data-testid="agent-session-raw-episode"');
+    expect(raw).toContain("row.episode.kind");
+    expect(raw).toContain("row.episode.to");
+    expect(raw).not.toContain("asideConversation");
   });
 
   /**
@@ -207,9 +238,8 @@ describe("the raw-turns toggle in a DM", () => {
   });
 
   /**
-   * Only in a DM. A `#channel` has several agents and the Operator feed has
-   * none, so "the raw turns" would have to pick one for you — which is worse
-   * than not offering it. Same rule the member pane follows for that feed.
+   * Only in a DM. A `#channel` has several agents, so "the raw turns" would
+   * have to pick one for you — which is worse than not offering it.
    */
   it("is offered only where exactly one teammate is on the other end", () => {
     expect(room).toContain(

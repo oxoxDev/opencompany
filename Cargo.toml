@@ -66,8 +66,47 @@ tinymemory-api = { path = "vendor/openhuman/vendor/tinymemory/crates/tinymemory-
 # cargo resolves a second `tinyinference` beside the path copy openhuman and
 # this crate use, and the two `ChatModel`s are different types. Replicated from
 # openhuman's own Cargo.toml with the path rebased onto the vendored checkout.
+#
+# At the 1ecf1b0 pin `tinyinference` is a workspace of six crates
+# (`tinyinference-{core,embeddings,llm,local,providers,voice}`) and the single
+# `tinyinference` package no longer exists; the entries mirror openhuman's own
+# `[patch]` tables one for one. A patch path is resolved eagerly whatever the
+# feature set, so a stale entry here fails `cargo metadata --locked` outright.
 [patch."https://github.com/tinyhumansai/tinyinference"]
-tinyinference = { path = "vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference" }
+tinyinference-core = { path = "vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-core" }
+tinyinference-embeddings = { path = "vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-embeddings" }
+tinyinference-llm = { path = "vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-llm" }
+tinyinference-local = { path = "vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-local" }
+tinyinference-providers = { path = "vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-providers" }
+tinyinference-voice = { path = "vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-voice" }
+
+# `tinyhivemind-openhuman` (vendored at `vendor/tinyhivemind`) binds
+# `openhuman_embed::Agent` handles, and names `openhuman-embed` by git URL on
+# purpose (its workspace manifest explains why: a `[patch]` can redirect a git
+# source onto a path, but never a path source). This entry redirects that git
+# source onto OUR vendored checkout, so the `Agent` a hive binding holds is the
+# same type this crate builds on the one process-wide `Runtime`, and OpenHuman's
+# process-scoped state (keyring, event bus, `RUNTIME_LIVE`) exists once. Only
+# the root package of that git source needs an entry: once patched to a path,
+# its `path = "../openhuman-core"` edge resolves inside `vendor/openhuman`. The
+# `rev` tinyhivemind pins and the `vendor/openhuman` gitlink must agree, or the
+# lockfile records two OpenHuman trees; CI's "no duplicated OpenHuman-family
+# crates" step is the tripwire.
+[patch."https://github.com/tinyhumansai/openhuman"]
+openhuman-embed = { path = "vendor/openhuman/crates/openhuman-embed" }
+# The adapter binds the core crate too, not just the embed runtime: its
+# hosted runner builds an `OpenHumanSessionHost` and its raw runner boots a
+# `CoreContext`. Without this entry cargo resolves a second openhuman-core
+# from git beside the path copy, and the same type from each is a different
+# type to the checker.
+openhuman = { path = "vendor/openhuman/crates/openhuman-core" }
+
+# And the tool crates underneath it, for the same reason and one level down:
+# the adapter names `tinytools::Tool` and `tinytools_agent::dialect`, and the
+# git openhuman drags its own vendored copies along.
+[patch."https://github.com/tinyhumansai/tinytools"]
+tinytools = { path = "vendor/openhuman/vendor/tinyagents/vendor/tinytools/crates/tinytools" }
+tinytools-agent = { path = "vendor/openhuman/vendor/tinyagents/vendor/tinytools/crates/tinytools-agent" }
 
 [patch.crates-io]
 # No `tinyagents` entry: the crate no longer exists as a package (the workspace
@@ -81,6 +120,16 @@ tinyinference = { path = "vendor/openhuman/vendor/tinyagents/vendor/tinyinferenc
 # `openhuman` feature is on — so they leave the offline build unaffected.
 # tinyflows split into a workspace too; the package now lives in `crates/`.
 tinyflows = { path = "vendor/openhuman/vendor/tinyflows/crates/tinyflows" }
+# The six tinyinference crates by registry name as well (openhuman patches both
+# sources): `tinyagents-harness` names them with `version = "0.3.0"` beside the
+# path, and any crate reaching them by version alone must land on the same
+# vendored copy or `ChatModel` exists twice.
+tinyinference-core = { path = "vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-core" }
+tinyinference-embeddings = { path = "vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-embeddings" }
+tinyinference-llm = { path = "vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-llm" }
+tinyinference-local = { path = "vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-local" }
+tinyinference-providers = { path = "vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-providers" }
+tinyinference-voice = { path = "vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-voice" }
 # TinyCortex moved under TinyMemory at the openhuman pin: `vendor/tinycortex`
 # is no longer a submodule there, and the crate is reached through
 # `vendor/tinymemory/vendor/tinycortex` instead. A patch path is resolved

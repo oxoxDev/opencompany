@@ -68,69 +68,39 @@ fn chat_responder_resolves_a_desk_a_teammate_and_a_dm_key() {
     assert_eq!(chat_responder(&record, "dm:"), None);
 }
 
-/// The built-in `#general` channel resolves to **nobody**, so both callers
-/// answer as their own orchestrator (issue #1743).
-///
-/// The teammate is the point: `mint_agent_id` reserves `main` and
-/// `General`, but a manifest can declare one, and without the guard the
-/// roster arm hands it every unaddressed message — while
-/// `GET chat/history?desk=main` returns the folded General conversation
-/// rather than that teammate's transcript. The bare key is the line; the
-/// teammate keeps its DM.
+/// #general resolves to nobody, so both callers answer as their own
+/// orchestrator; a teammate called `general` keeps only its DM.
 #[test]
 fn chat_responder_leaves_the_general_line_to_the_caller() {
     let mut record = record();
-    for spelling in ["", "main", "Main", "MAIN", "general", "General"] {
-        assert_eq!(
-            chat_responder(&record, spelling),
-            None,
-            "the company's line resolves to nobody, addressed as {spelling:?}"
-        );
-    }
+    assert_eq!(chat_responder(&record, "general"), None);
 
     record
         .overlay_agents
         .push(crate::ports::types::OverlayAgent {
             provider: None,
-            id: "main".to_string(),
-            name: "Mainard".to_string(),
+            id: "general".to_string(),
+            name: "Gen".to_string(),
             role: "Analyst".to_string(),
             description: None,
             tools: None,
             model: None,
             harness: None,
         });
-    assert!(record.is_roster_agent("main"), "the roster arm would match");
+    assert!(
+        record.is_roster_agent("general"),
+        "the roster arm would match"
+    );
     assert_eq!(
-        chat_responder(&record, "main"),
+        chat_responder(&record, "general"),
         None,
-        "a teammate called `main` does not inherit the company's line"
+        "a teammate called `general` does not inherit #general"
     );
     assert_eq!(
-        chat_responder(&record, "dm:main").as_deref(),
-        Some("main"),
-        "and keeps its own DM, which is how the console addresses one"
+        chat_responder(&record, "dm:general").as_deref(),
+        Some("general"),
+        "and keeps its own DM"
     );
-
-    // An overlay desk squatting the key does not take it either — the
-    // resolver declines it (see `resolve_desk_id`).
-    record.overlay_desks.push(crate::ports::types::OverlayDesk {
-        id: "main".to_string(),
-        name: "Front office".to_string(),
-        description: None,
-        responder: Default::default(),
-        members: vec!["writer".to_string()],
-        hive: Default::default(),
-    });
-    assert_eq!(chat_responder(&record, "main"), None);
-
-    // A desk the *blueprint* declares still wins, as it always has.
-    let declared: crate::CompanyManifest = toml::from_str(
-        "[company]\nname = \"Acme\"\n\n[[agent]]\nid = \"writer\"\nrole = \"Writer\"\n\n[[group_chat]]\nid = \"main\"\nname = \"Front office\"\nmembers = [\"writer\"]\n",
-    )
-    .expect("valid manifest");
-    record.manifest.group_chats.extend(declared.group_chats);
-    assert_eq!(chat_responder(&record, "main").as_deref(), Some("writer"));
 }
 
 /// A `dm:` key names a teammate, even when a desk shares that id.
@@ -171,70 +141,6 @@ fn a_prefixed_dm_reaches_the_teammate_even_when_a_desk_shares_the_id() {
         Some("writer"),
         "the desk still answers its own id"
     );
-}
-
-/// ...and so does one that claims it by **id**, which is the other half.
-///
-/// A manifest may declare the General desk either way, and which half it
-/// uses is arbitrary. Re-asking under a fixed `DEFAULT_DESK` ("General")
-/// recognised only the display-name claimant, so for `id = "main", name =
-/// "Front office"` a turn addressed `main` reached its lead while the
-/// folded sibling `General` fell through to the orchestrator — one channel,
-/// two responders, decided by whichever accepted alias the caller used.
-#[test]
-fn chat_responder_folds_the_general_aliases_to_an_id_claimant() {
-    let mut record = record();
-    let declared: crate::CompanyManifest = toml::from_str(
-        "[company]\nname = \"Acme\"\n\n[[agent]]\nid = \"writer\"\nrole = \"Writer\"\n\n[[group_chat]]\nid = \"main\"\nname = \"Front office\"\nmembers = [\"writer\"]\n",
-    )
-    .expect("valid manifest");
-    record.manifest.group_chats.extend(declared.group_chats);
-
-    let direct = chat_responder(&record, "main");
-    assert!(direct.is_some(), "the desk answers under its own id");
-    // Every folded spelling reaches the same lead — one channel, one voice.
-    for alias in ["", "General", "general", "MAIN"] {
-        assert_eq!(
-            chat_responder(&record, alias),
-            direct,
-            "the folded alias {alias:?} must reach the same responder as `main`"
-        );
-    }
-}
-
-/// A desk that claims the line by **display name** answers every spelling
-/// folded into it, not just the one it is spelled with (issue #1743).
-///
-/// `id = "ops", name = "General"` answers to `General` but not to `main`,
-/// so asking for the raw key alone handed a `main` turn to the caller's
-/// orchestrator while an `ops` turn went to that desk's lead — two voices
-/// in the one channel the console renders for both. The General arm re-asks
-/// under `DEFAULT_DESK`, which is the same fold `everyone_desk` applies, so
-/// who answers and who `@everyone` names cannot disagree.
-#[test]
-fn chat_responder_folds_the_general_aliases_to_a_display_name_claimant() {
-    let plain = record();
-    let mut record = record();
-    let declared: crate::CompanyManifest = toml::from_str(
-        "[company]\nname = \"Acme\"\n\n[[agent]]\nid = \"writer\"\nrole = \"Writer\"\n\n[[group_chat]]\nid = \"ops\"\nname = \"General\"\nmembers = [\"writer\"]\n",
-    )
-    .expect("valid manifest");
-    record.manifest.group_chats.extend(declared.group_chats);
-
-    for spelling in ["", "main", "Main", "general", "General", "ops"] {
-        assert_eq!(
-            chat_responder(&record, spelling).as_deref(),
-            Some("writer"),
-            "one voice in the channel, addressed as {spelling:?}"
-        );
-    }
-    // The other desks are untouched, and a company with no claimant still
-    // leaves the line to the caller.
-    assert_eq!(
-        chat_responder(&record, "engineering").as_deref(),
-        Some("ceo")
-    );
-    assert_eq!(chat_responder(&plain, "main"), None);
 }
 
 #[test]

@@ -26,6 +26,10 @@ services:
       dockerfile: deploy/Dockerfile
       args:
         FEATURES: ${OPENCOMPANY_FEATURES:-}
+        # The console bundle defaults to the TinyHumans Sentry project when
+        # this is empty; a self-hosted Compose build stays silent unless you
+        # set your own DSN.
+        VITE_SENTRY_DSN: ${VITE_SENTRY_DSN:-off}
     image: opencompany:local
     environment:
       # Which module spins up.
@@ -35,9 +39,14 @@ services:
       # Blank = the small default build; the dev overlay reads it so a key has
       # a live brain to talk to.
       OPENCOMPANY_FEATURES: ${OPENCOMPANY_FEATURES:-}
+      # Standing first-user grant for email auth. Blank grants nobody. The
+      # local init helper pairs this with `issue-password` when no mail
+      # transport exists.
+      OPENCOMPANY_ADMIN_EMAIL: ${OPENCOMPANY_ADMIN_EMAIL:-}
       # Optional: unlocks live cognition. Blank = offline demo brain.
       TINYHUMANS_API_KEY: ${TINYHUMANS_API_KEY:-}
-      # Crash reporting. Blank — the default — means no client is constructed.
+      # Crash reporting. Blank — the default — means no client is constructed
+      # (the compiled-in TinyHumans DSN applies to hosted tenants only).
       # Needs `crash-reporting` in OPENCOMPANY_FEATURES above; without it the
       # host says so at boot rather than pretending to report.
       # See `docs/spec/runtime/crash-reporting.md`.
@@ -59,7 +68,7 @@ services:
       # them in `environment` below would have no effect at all. Changing one
       # needs `docker compose build console`, not a restart.
       args:
-        VITE_SENTRY_DSN: ${VITE_SENTRY_DSN:-}
+        VITE_SENTRY_DSN: ${VITE_SENTRY_DSN:-off}
         VITE_SENTRY_ENVIRONMENT: ${VITE_SENTRY_ENVIRONMENT:-}
         VITE_SENTRY_TRACES_SAMPLE_RATE: ${VITE_SENTRY_TRACES_SAMPLE_RATE:-}
         VITE_SENTRY_TRACE_PROPAGATION_TARGETS: ${VITE_SENTRY_TRACE_PROPAGATION_TARGETS:-}

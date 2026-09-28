@@ -336,8 +336,8 @@ async fn a_refused_invite_mails_nobody() {
         "a duplicate invite must not re-mail"
     );
 
-    // A malformed address never reaches a transport either.
-    let (status, _) = invite_as(&state, &admin, "not-an-email").await;
+    // A malformed login never reaches a transport either.
+    let (status, _) = invite_as(&state, &admin, "not a login").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
         sender.sent().len(),

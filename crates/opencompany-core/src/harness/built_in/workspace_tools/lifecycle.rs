@@ -66,7 +66,7 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use openhuman_core::tools::traits::{PermissionLevel, Tool, ToolResult};
+use tinytools::{PermissionLevel, Tool, ToolResult};
 
 use crate::company::artifact_mirror::published_record_for_node;
 use crate::company::workspace_names::kebab_name;
@@ -159,6 +159,9 @@ fn revision_arg(args: &Value) -> Option<u64> {
 /// questions (what is under this folder, is the target path free) after the
 /// node itself has resolved, and re-reading the tree for each would give two
 /// answers from two snapshots.
+// `ToolResult` grew past clippy's `Err` size threshold at the 1ecf1b0
+// tinytools pin; the refusal IS the tool's answer, so it stays by value.
+#[allow(clippy::result_large_err)]
 async fn resolve_in_index(
     workspace: &CompanyWorkspace,
     path: Option<&str>,

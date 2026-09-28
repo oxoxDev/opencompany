@@ -16,7 +16,7 @@ async fn two_crossings_to_one_person_each_fold_their_own_exchange() {
     let home = tempfile::tempdir().expect("tempdir");
     let runtime = runtime(home.path()).await;
     let id = CompanyId::new("acme");
-    let pair = crate::hivemind::referral::pair_conversation("software_engineer", "researcher");
+    let pair = crate::hive::referral::pair_conversation("software_engineer", "researcher");
 
     let ask = |text: &str| CompanyEvent::AgentReply {
         chat_id: "engineering".to_string(),
@@ -29,6 +29,7 @@ async fn two_crossings_to_one_person_each_fold_their_own_exchange() {
         mentions: Vec::new(),
         mention_depth: 0,
         audience: Vec::new(),
+        episode: None,
     };
     let pair_row = |who: &str, text: &str| CompanyEvent::AgentReply {
         chat_id: pair.clone(),
@@ -41,6 +42,7 @@ async fn two_crossings_to_one_person_each_fold_their_own_exchange() {
         mentions: Vec::new(),
         mention_depth: 0,
         audience: Vec::new(),
+        episode: None,
     };
     // The marker names the row its crossing folds onto, so each points at
     // its own ask rather than a constant.
@@ -56,6 +58,9 @@ async fn two_crossings_to_one_person_each_fold_their_own_exchange() {
         target: "researcher".to_string(),
         returning: false,
         rows: None,
+        episode_id: None,
+        to_episode_id: None,
+        hop: 0,
     };
 
     // Two crossings to the same person, each with its own two-row exchange.
@@ -165,6 +170,7 @@ async fn a_convened_desks_own_turns_are_the_folded_crossing() {
                 mentions: Vec::new(),
                 mention_depth: 0,
                 audience: Vec::new(),
+                episode: None,
             },
         )
         .await
@@ -185,6 +191,9 @@ async fn a_convened_desks_own_turns_are_the_folded_crossing() {
                 target: "product_designer".to_string(),
                 returning: false,
                 rows: None,
+                episode_id: None,
+                to_episode_id: None,
+                hop: 0,
             },
         )
         .await
@@ -197,11 +206,8 @@ async fn a_convened_desks_own_turns_are_the_folded_crossing() {
         .append(
             &id,
             CompanyEvent::OperatorMessage {
-                text: crate::hivemind::referral::referral_room_prompt(
-                    "software_engineer",
-                    "Engineering",
-                    "can the error messages be redone?",
-                ),
+                text: "@software_engineer on #Engineering asks: can the error messages be redone?"
+                    .to_string(),
                 by: Some(Actor {
                     kind: ActorKind::Agent,
                     id: "software_engineer".to_string(),
@@ -224,7 +230,9 @@ async fn a_convened_desks_own_turns_are_the_folded_crossing() {
             "!propose #copy they read like a copy task",
         ),
         ("researcher", "!support #copy ^1 and the tests agree"),
-        (crate::hivemind::HIVE_REPORT_AUTHOR, "The desk settled."),
+        // A legacy closing row (the trace-grammar hive's), never a line
+        // somebody said: dropped from the fold as it is from the transcript.
+        ("hive-report", "The desk settled."),
     ]
     .into_iter()
     .map(|(agent, text)| CompanyEvent::AgentReply {
@@ -238,6 +246,7 @@ async fn a_convened_desks_own_turns_are_the_folded_crossing() {
         mentions: Vec::new(),
         mention_depth: 0,
         audience: Vec::new(),
+        episode: None,
     })
     .collect();
     // **Concurrent traffic on the same desk, inside the same window.** A
@@ -255,6 +264,7 @@ async fn a_convened_desks_own_turns_are_the_folded_crossing() {
         mentions: Vec::new(),
         mention_depth: 0,
         audience: Vec::new(),
+        episode: None,
     });
     for event in events {
         runtime.events().append(&id, event).await.expect("journal");
@@ -273,11 +283,18 @@ async fn a_convened_desks_own_turns_are_the_folded_crossing() {
             target: "software_engineer".to_string(),
             returning: true,
             rows: None,
+            episode_id: None,
+            to_episode_id: None,
+            hop: 0,
         },
         CompanyEvent::AgentReply {
             chat_id: "engineering".to_string(),
-            agent_id: crate::hivemind::HIVE_REFERRAL_AUTHOR.to_string(),
-            text: crate::hivemind::referral::room_note("Design", "The desk settled."),
+            agent_id: crate::hive::referral::HIVE_REFERRAL_AUTHOR.to_string(),
+            text: crate::hive::referral::returned_note(
+                "product_designer",
+                "Design",
+                "The desk settled.",
+            ),
             steps: Vec::new(),
             task_id: None,
             outputs: Vec::new(),
@@ -285,6 +302,7 @@ async fn a_convened_desks_own_turns_are_the_folded_crossing() {
             mentions: Vec::new(),
             mention_depth: 0,
             audience: Vec::new(),
+            episode: None,
         },
         // The asker's own report, which the crossing folds onto.
         CompanyEvent::AgentReply {
@@ -298,6 +316,7 @@ async fn a_convened_desks_own_turns_are_the_folded_crossing() {
             mentions: Vec::new(),
             mention_depth: 0,
             audience: Vec::new(),
+            episode: None,
         },
     ] {
         runtime.events().append(&id, event).await.expect("journal");
@@ -390,6 +409,9 @@ async fn an_unrelated_pairs_marker_does_not_end_this_crossings_window() {
         target: target.to_string(),
         returning: false,
         rows: None,
+        episode_id: None,
+        to_episode_id: None,
+        hop: 0,
     };
     // This crossing: engineering asks design.
     runtime
@@ -429,6 +451,7 @@ async fn an_unrelated_pairs_marker_does_not_end_this_crossings_window() {
                 mentions: Vec::new(),
                 mention_depth: 0,
                 audience: Vec::new(),
+                episode: None,
             },
         )
         .await

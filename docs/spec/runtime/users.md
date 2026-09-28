@@ -20,10 +20,10 @@ no roster beyond its single implicit local owner.
 
 | Concern | Answer |
 |---|---|
-| Sign in | Magic link (256-bit token, 15-minute TTL, single use), **or** an optional password |
+| Sign in | A password, **or** a magic link (256-bit token, 15-minute TTL, single use) where the host can mail one |
 | Session | Opaque 256-bit token in an `HttpOnly; SameSite=Lax; Path=/` cookie, 14-day absolute TTL |
 | Access | **Invite-only.** An uninvited address cannot log in |
-| Bootstrap | The manifest's `[users] admins` list |
+| Bootstrap | The manifest's `[users] admins` list, `OPENCOMPANY_ADMIN_EMAIL`, or — on a company nobody has joined — whoever claims it first ([First admin](#first-admin)) |
 | Mode | `[users] mode` — `email` (default), `wallet`, or `none`. See [Sign-in modes](auth-modes.md) |
 | Roles | `admin` (may invite and administer) / `member` |
 | Profile | Name and icon, self-served through `PATCH …/auth/me` — see [avatars.md](avatars.md) |
@@ -154,11 +154,43 @@ variable on the instance and restart it. The workload reads it at boot, and
 eligibility is evaluated per login rather than cached, so the next link request
 from that address succeeds.
 
+### First admin
+
+Every path above makes an address *eligible*; none of them gives it a
+credential, and a self-hosted host — `docker compose up`, a laptop — usually
+has **no mail transport** to deliver one. So while a company has **no users at
+all**, its sign-in screen offers the first person in the admin account instead
+of a form nobody can pass:
+
+```text
+POST …/auth/claim  {email, password}   → session cookie + the user
+```
+
+The person picks the login and the password (the console generates one and
+shows it in the clear, editable), the host mints them as an `admin`, and they
+are signed in. `email` need not be a mailbox: on a host with no mail it is a
+username, and `admin` is a fine one. The route closes for good the moment the
+first user exists — it answers `409 already_claimed` from then on — so it
+admits exactly one person, after which the roster is the only way in. `GET
+…/auth/config` reports the state as `claimable`.
+
+Where the deployment already named its first admin — a manifest
+`[users].admins` entry or `OPENCOMPANY_ADMIN_EMAIL` — only that address may
+claim (`403 not_the_named_admin`). A stranger who reaches a provisioned tenant
+before its owner must not be able to take it. Where nothing names anybody, the
+first visitor chooses: that is the same first-run claim every self-hosted
+product with a login screen makes, and the alternative was a shell command
+nobody running `docker compose up` had been told about.
+
+The [first-run setup wizard](setup.md) does the same thing one step earlier:
+its "You" step asks for the login *and* a password, the apply creates the
+account, and the wizard signs the operator in with it.
+
 ### Recovery without a mailbox
 
-Every path above needs a magic link to arrive — and a hosted tenant may have
-**no mail transport at all**, or one that is failing. With no admin yet, no one
-can set a password from the console, so the address stays unreachable
+A company that already has users, on a host with **no mail transport at all**
+(or one that is failing), can still strand an address: with the claim closed
+and no admin reachable, no one can set a password from the console
 (issue #1718). For that case the host issues the first password directly:
 
 ```sh
@@ -188,12 +220,11 @@ addressing forms work: `/api/v1/companies/{id}/…` and `/api/v1/company/…`.
 
 | Route | Purpose |
 |---|---|
-| `GET …/auth/config` | The sign-in mode this company uses and the name it goes by, so the console knows which screen to draw and what to call it |
+| `GET …/auth/config` | The sign-in mode this company uses, the name it goes by, whether a link can be mailed and whether the first admin is still unclaimed — everything the console needs to pick a screen |
 | `POST …/auth/request` | Mail a magic link. Always `{"sent": true}` |
 | `POST …/auth/verify` | Redeem a link → session cookie |
-| `POST …/auth/login` | Email + password → session cookie |
-| `GET …/auth/hub` | The ecosystem sign-in buttons this host can offer. `{"providers": []}` when it can offer none |
-| `POST …/auth/hub` | A platform token from the hub → session cookie |
+| `POST …/auth/login` | Login + password → session cookie |
+| `POST …/auth/claim` | The first admin's login and password, on a company with no users → session cookie. See [First admin](#first-admin) |
 | `POST …/auth/password` | Set/replace your own password (needs a session) |
 | `POST …/auth/wallet/challenge` | Mint a nonce for a wallet to sign (`wallet` mode) |
 | `POST …/auth/wallet/verify` | Answer a challenge → session cookie (`wallet` mode) |
@@ -218,7 +249,9 @@ breach the rule below.
 `auth/request` always returns `{"sent": true}`. `auth/verify` and `auth/login`
 always fail with one `401 invalid_login` — for unknown address, uninvited
 address, expired code, spent code, wrong code, wrong password, no password set,
-and suspended user alike.
+and suspended user alike. `auth/claim` is the one exception, and only while the
+roster is empty: its refusals are specific because the single fact they
+disclose — that nobody has joined — is one `auth/config` already publishes.
 
 This is deliberate. Any difference turns these routes into a **membership
 oracle**: someone who can ask "is bob@acme.com a user of this company?" learns
@@ -228,51 +261,31 @@ the org chart, and every answer is a phishing target. It is also why
 
 Clients must not undo this. The console renders one vague message.
 
-## Ecosystem sign-in
+## No ecosystem sign-in
 
-A host wired to the TinyHumans hub can also offer Google, GitHub and X. The
-browser goes to the hub's OAuth start pointed back at this console; the hub
-returns a platform token in the URL; `POST …/auth/hub` asks the hub whose it is
-and then applies **this company's own roster** — the same
-`eligibility` → `upsert_from_eligibility` → `mint_session` path a magic link
-takes. The hub says who they are; it never says whether they may in, and the
-session minted is an ordinary human session, never the hosting layer's machine
-credential.
+A host wired to the TinyHumans hub **used to** offer Google, GitHub and X: the
+browser went to the hub's OAuth start, came back with a platform token, and
+`POST …/auth/hub` asked the hub whose it was. That is gone. A company's sign-in
+is its own — password, magic link, wallet, or none — and an ecosystem account is
+never a way into one. Sharing a login between two products meant the weaker of
+the two decided the security of both, it briefly handed every tenant a
+credential carrying the person's whole ecosystem account, and on every
+self-hosted host it drew three buttons that led to a refusal on return.
 
-`GET …/auth/hub` answers `{"providers": []}` — not a 404 — whenever this host
-cannot complete the flow, so the console has one code path and falls through to
-the magic-link form. One thing produces an empty list:
-
-- **No hub.** A self-hosted host has no exchange, so it could not check a token
-  that came back. Three buttons that send someone through Google to be turned
-  away on return are worse than none.
-
-Whether the **return origin** is acceptable is the hub's question, not this
-host's. The return URL is `{OPENCOMPANY_PUBLIC_URL}/?company={company_id}`, and
-the hub's `isAllowedFrontendRedirectUri` admits an RFC 8252 loopback `http://`
-URI **or** an origin that resolves to a provisioned tenant in its own registry
-(`<slug>.<base-domain>`, or a verified custom domain). A registry lookup is not
-something this crate can mirror, and a tenant de-provisioned mid-flow fails
-closed there rather than here.
-
-This host once kept a local copy of that rule (`hub_accepts_redirect_uri`) so a
-console would not render a button that could only reach a `400` — issue #512,
-back when the gate was loopback-only. `tinyhumansai/backend#1243` has since
-landed, and the copy went with it: by then the copy, not the hub, was what hid
-the buttons on every hosted console.
-
-Note the shape the gate accepts: **not** a bare origin. The `?company=` rides
-along, and in shared-single-DB mode the id is namespaced `<tenant>--<id>`, so it
-varies per tenant and over time. Only the origin component is stable, which is
-why the hub matches on origin and leaves the query free.
+The hub is still asked for one thing, a **key** (`src/server/ops/company_key.rs`
+and `src/server/hub_identity.rs`): the person approves that on the hub's own
+site, and this host never holds a credential belonging to them.
 
 ## Passwords
 
-Optional. A user may set one to skip the round trip through their mailbox; a
-user who never does is unaffected (`password_hash` is `None`).
+The ordinary sign-in on a host with no mail, and an optional shortcut past the
+mailbox on one with. A user who never sets one on a mailing host is unaffected
+(`password_hash` is `None`); the first admin always has one, because the claim
+and the setup wizard both create the account with it.
 
 There is **no password-reset credential**. "Forgot my password" is a magic-link
-login followed by setting a new one — reusing a path that already exists rather
+login followed by setting a new one where the host mails, and an admin-issued
+temporary password where it does not — reusing paths that already exist rather
 than adding a second emailed secret to get wrong.
 
 An admin may instead set a **temporary password**, which revokes the user's
@@ -341,7 +354,8 @@ half as a third-party cookie that some browsers keep and others discard, so
 whether logging out actually ended the session would vary by browser.
 
 Every browser login path routes through one `mint_session`, so all four —
-magic link, password, hub sign-in and wallet — support this identically.
+magic link, password, the first-admin claim and wallet — support this
+identically.
 
 Opting in this way is safe for the same reason the header carrier itself is: a
 cross-site HTML form cannot set a request header, and a cross-site `fetch` that
@@ -399,8 +413,12 @@ else's email.
 Login mail uses the host-level provider (`OPENCOMPANY_MAIL_*`, see
 [config.md](config.md)) — a login link is sent on the platform's behalf, not
 the company's. With no transport configured, `auth/request` returns the code in
-a `dev_code` field and logs a warning, so local development works; a host that
-can send mail never echoes it.
+a `dev_code` field and logs a warning, so scripted local development works; a
+host that can send mail never echoes it. The console does **not** use the echo:
+a host with no transport reports `magicLink: false` and draws the password form
+alone, because "email me a link" on a host that emails nothing was the most
+confusing thing the sign-in screen did. A login with no `@` — a username — has
+no mailbox, and a link asked for it goes nowhere on any host.
 
 **Invite mail** goes out over that same host-level provider, gated on the same
 "is a transport wired" predicate. Not the company's own `__smtp` secret, and

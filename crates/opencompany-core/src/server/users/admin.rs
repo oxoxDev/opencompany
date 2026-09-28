@@ -252,13 +252,17 @@ impl InviteBody {
                 ))
             }
             AuthMode::Email => {
-                let email = normalize_email(&self.email);
-                if email.is_empty() || !email.contains('@') {
+                // The same rule the manifest and the first-admin claim apply:
+                // not empty, no whitespace, and not the `wallet:`/`local:`
+                // scheme. No `@` is demanded — on a host with no mail the
+                // login is a username, and the admin conveys the password.
+                if !crate::ports::users::is_usable_admin_email(&self.email) {
                     return Err(OpenCompanyError::InvalidRequest(
-                        "that doesn't look like an email address".to_string(),
+                        "that is not a usable login — an email address or a single word"
+                            .to_string(),
                     ));
                 }
-                Ok(LoginIdentity::Email(email).key())
+                Ok(LoginIdentity::Email(normalize_email(&self.email)).key())
             }
             AuthMode::Wallet => {
                 let wallet = normalize_wallet(&self.wallet);

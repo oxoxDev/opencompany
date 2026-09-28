@@ -18,21 +18,8 @@ import { expect, type Locator, type Page } from "@playwright/test";
 /** The single-company alias the host answers on. */
 export const SCOPE = "/api/v1/company";
 
-/**
- * The main line's thread id, as both the console and the host spell it.
- *
- * It is **not** a channel in the `#/chat/<id>` workspace, and that is the trap
- * this constant exists to document: that view builds its channels from the
- * company's real desks (issue #368 deliberately removed the `"main"` literal
- * from it), so `#/chat/main` resolves to no channel and falls back to the first
- * desk — whose lead is an ordinary teammate with no delegation tools. A goal
- * sent there is answered politely and delegates nothing, which reads as the
- * orchestrator having ignored it.
- *
- * The orchestrator's thread is the **conversation** view's main line, which is
- * where {@link openMainLine} goes.
- */
-export const MAIN_LINE = "main";
+/** The company-wide `#general` channel's id, which is also its thread id. */
+export const MAIN_LINE = "general";
 
 /** The board, now that it is the `tasks` ledger rather than a screen of its own. */
 export const BOARD = "/#/company/work/tasks";
@@ -60,15 +47,14 @@ export async function silenceTour(page: Page) {
 }
 
 /**
- * Opens the company's main line — the channel the orchestrator answers on.
- *
- * Bare `#/chat` rather than a rail click: Room resolves an absent channel
- * segment through `generalChannelId`, so the address itself names the
- * company-wide line and no thread can be left unselected under a composer that
- * accepts a `fill` anyway.
+ * Opens `#general` — the channel the orchestrator answers an unmentioned
+ * message on — by address, since a bare `#/chat` restores the last channel.
  */
 export async function openMainLine(page: Page) {
-  await openChannel(page, "");
+  await openChannel(page, MAIN_LINE);
+  await expect(
+    page.getByRole("complementary").first().getByRole("button", { name: MAIN_LINE }),
+  ).toBeVisible();
 }
 
 /** Opens one desk channel by id in the chat workspace, and waits for the view. */

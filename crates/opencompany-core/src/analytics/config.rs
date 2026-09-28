@@ -11,16 +11,35 @@ use crate::app::deployment::Deployment;
 
 /// Operator override: `on` forces reporting, `off` forbids it.
 pub const ENABLE_ENV: &str = "OPENCOMPANY_ANALYTICS";
-/// The OpenPanel client id. Half of the pair; useless on its own.
+/// The OpenPanel client id — the whole of the collector credential.
+///
+/// There is no client secret. The operator's OpenPanel clients are configured
+/// with "ignore CORS and secret", so a write needs only the
+/// `openpanel-client-id` header; a secret would be one more value to provision
+/// and rotate for no additional check on the collector side.
 pub const CLIENT_ID_ENV: &str = "OPENCOMPANY_ANALYTICS_CLIENT_ID";
-/// The OpenPanel client secret. **Configuration, never a compiled-in constant**
-/// — a secret baked into a public binary is a secret everyone has, and this one
-/// grants write access to the operator's collector.
-pub const CLIENT_SECRET_ENV: &str = "OPENCOMPANY_ANALYTICS_CLIENT_SECRET";
-/// The collector URL. **Required, with no default**, because a self-hosted
-/// collector has no canonical address and guessing one means reporting to
-/// somebody else's — see [`resolve`].
+/// The collector URL. Defaults to [`DEFAULT_ENDPOINT`] for a hosted tenant
+/// only — see [`resolve`].
 pub const ENDPOINT_ENV: &str = "OPENCOMPANY_ANALYTICS_ENDPOINT";
+
+/// The TinyHumans OpenPanel client id a [`Deployment::HostedTenant`] reports
+/// as when `OPENCOMPANY_ANALYTICS_CLIENT_ID` is unset or blank. The same id the
+/// browser console ships in `frontend/public/openpanel-init.js`.
+pub const DEFAULT_CLIENT_ID: &str = "afe8ec4e-0a6a-427a-aa22-49cbbf137d0a";
+
+/// The TinyHumans OpenPanel ingestion URL a [`Deployment::HostedTenant`]
+/// reports to when `OPENCOMPANY_ANALYTICS_ENDPOINT` is unset or blank.
+///
+/// **Hosted tenants only, never any other deployment.** The `analytics`
+/// feature is compiled into the TinyHumans tenant image
+/// (`deploy-staging.yml` `TENANT_FEATURES`) and into no other official build —
+/// not the desktop app, not a default `cargo build` — but it is not
+/// *impossible* to compile elsewhere: a self-hoster can add it through
+/// `OPENCOMPANY_FEATURES` in `deploy/docker-compose.yml`. A self-hoster who
+/// then sets `OPENCOMPANY_ANALYTICS=on` has opted in to reporting to *their*
+/// collector, not to ours, so for them an absent endpoint or id is still
+/// silence with a reason.
+pub const DEFAULT_ENDPOINT: &str = "https://panel.tinyhumans.ai/api/track";
 /// The secret that makes a hosted tenant's analytics id unguessable.
 ///
 /// **Configuration, never a compiled-in constant**, and for a sharper reason
@@ -31,53 +50,45 @@ pub const ENDPOINT_ENV: &str = "OPENCOMPANY_ANALYTICS_ENDPOINT";
 /// [`TenantIdKey`](crate::analytics::types::TenantIdKey).
 pub const ID_KEY_ENV: &str = "OPENCOMPANY_ANALYTICS_ID_KEY";
 
-/// An OpenPanel write client: an id and a secret, which authenticate together.
+/// An OpenPanel write client, identified by its client id alone.
 ///
-/// OpenPanel takes both as request **headers** — `openpanel-client-id` and
-/// `openpanel-client-secret` — rather than as a field in the body, which is the
-/// one structural difference from the token this replaced. It is a difference
-/// worth having: a credential in a header never rides through the payload
-/// builder, so no test fixture, recorded event or captured body can carry it.
+/// OpenPanel takes the id as a request **header** — `openpanel-client-id` —
+/// rather than as a field in the body, which is the one structural difference
+/// from the token this replaced. It is a difference worth having: a credential
+/// in a header never rides through the payload builder, so no test fixture,
+/// recorded event or captured body can carry it.
 ///
-/// A newtype rather than two bare `String`s for one reason: neither half must be
+/// No secret: the operator's collector runs its clients with "ignore CORS and
+/// secret", so the id is sufficient to write. See [`CLIENT_ID_ENV`].
+///
+/// A newtype rather than a bare `String` for one reason: the id must not be
 /// printed, logged, or serialized by accident. It derives **neither** `Debug`
-/// nor `Serialize` — the hand-written `Debug` redacts both halves — because
+/// nor `Serialize` — the hand-written `Debug` redacts it — because
 /// `serde_json::to_value(&some_config)` is precisely how a credential reaches a
 /// payload (issue #1741, `SecretValue`). Nothing in this module ever serializes
-/// a config struct; the two values are read out explicitly, once, at the moment
-/// the request headers are set.
+/// a config struct; the value is read out explicitly, once, at the moment the
+/// request headers are set.
 ///
-/// **The id is redacted too**, although OpenPanel's own web SDK ships client ids
-/// to browsers and treats them as public. The reason is local rather than
-/// cryptographic: an id names the operator's project on the operator's
-/// collector, this repository is GPL-3.0 and its container logs are routinely
-/// pasted into public issues, and there is no line in the tree that is better
-/// for having it. Redacting the half that does not need it costs nothing;
-/// leaking the half that does costs everything, and a type with one printable
-/// field and one redacted one is a type someone eventually prints.
+/// **The id is redacted**, although OpenPanel's own web SDK ships client ids to
+/// browsers and treats them as public. The reason is local rather than
+/// cryptographic: with the secret check off, the id *is* the write credential
+/// for the operator's project, this repository is GPL-3.0 and its container
+/// logs are routinely pasted into public issues, and there is no line in the
+/// tree that is better for having it.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ClientCredentials {
     id: String,
-    secret: String,
 }
 
 impl ClientCredentials {
-    /// Wraps a client id and secret read from configuration.
-    pub fn new(id: impl Into<String>, secret: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            secret: secret.into(),
-        }
+    /// Wraps a client id read from configuration.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self { id: id.into() }
     }
 
     /// The client id, for the one caller that puts it in a header.
     pub fn expose_id(&self) -> &str {
         &self.id
-    }
-
-    /// The client secret, for the one caller that puts it in a header.
-    pub fn expose_secret(&self) -> &str {
-        &self.secret
     }
 }
 
@@ -95,28 +106,17 @@ pub enum Silence {
     OptedOut,
     /// Not a hosted tenant, and nobody opted in. **The default.**
     NotHosted,
-    /// Reporting was asked for, but neither half of the collector credential is
-    /// configured.
-    ///
-    /// Three reasons rather than one, because the three call for different
-    /// edits. OpenPanel authenticates a write client with an id **and** a
-    /// secret, so "no credential" and "half a credential" are different
-    /// mistakes: the second is what a half-finished secret rollout looks like,
-    /// and an operator staring at "no credential is configured" while
-    /// `OPENCOMPANY_ANALYTICS_CLIENT_ID` is plainly set in their env file has
-    /// been told something that reads as false.
-    NoCredentials,
-    /// A client secret is configured, but no client id.
+    /// Reporting was asked for by a deployment that is not a hosted tenant,
+    /// and no collector client id is configured. (A hosted tenant falls back
+    /// to [`DEFAULT_CLIENT_ID`].)
     NoClientId,
-    /// A client id is configured, but no client secret.
-    NoClientSecret,
-    /// A credential is configured that could not be put in an HTTP header.
+    /// A client id is configured that could not be put in an HTTP header.
     ///
     /// New with OpenPanel and worth its own reason. Mixpanel's token rode in
     /// the request **body**, where any string at all is legal JSON, so a
     /// mangled token was refused by the collector and that was the end of it.
-    /// These two ride in headers, and `reqwest` will not build a request whose
-    /// header value contains a control byte — so a secret that picked up a
+    /// The client id rides in a header, and `reqwest` will not build a request
+    /// whose header value contains a control byte — so an id that picked up a
     /// stray newline in the middle (a `kubectl create secret` on a wrapped
     /// file, most often) would otherwise install a tracker that fails to
     /// construct one single request, forever, behind a `debug!` nobody reads.
@@ -124,15 +124,15 @@ pub enum Silence {
     /// The reason never quotes the value, for the same reason
     /// [`Self::UnusableEndpoint`] does not.
     UnusableCredential,
-    /// Reporting was asked for, but no collector endpoint is configured.
+    /// Reporting was asked for by a deployment that is not a hosted tenant,
+    /// and no collector endpoint is configured.
     ///
-    /// **There is deliberately no default to fall back to.** OpenPanel is
-    /// self-hosted, so its address is whatever the operator runs it at, and
-    /// there is no address this crate could pick that is not somebody else's
-    /// collector. Defaulting would send a tenant's telemetry to a third party
-    /// nobody configured — the same failure [`Self::UnusableEndpoint`] exists to
-    /// prevent, arriving from the other direction. So an absent endpoint is
-    /// silence with its own reason, and the reason names the variable to set.
+    /// A hosted tenant falls back to [`DEFAULT_ENDPOINT`], the TinyHumans
+    /// collector. Nothing else does: a self-hoster who opts in with
+    /// `OPENCOMPANY_ANALYTICS=on` has asked to report to *their* collector, and
+    /// defaulting would send their telemetry to a third party they never named
+    /// — so for them an absent endpoint is silence, and the reason names the
+    /// variable to set.
     NoEndpoint,
     /// `OPENCOMPANY_ANALYTICS` was set to something this does not recognise.
     ///
@@ -157,17 +157,17 @@ pub enum Silence {
     /// `crate::analytics::boot`.
     UnusableEndpoint,
     /// `OPENCOMPANY_ANALYTICS_ENDPOINT` is a plain `http://` URL to a host that
-    /// is not loopback, so the client credential would cross a network in the
-    /// clear.
+    /// is not loopback, so the client id would cross a network in the clear.
     ///
     /// New with OpenPanel, and it exists because of *where* the credential
     /// travels now. Mixpanel's token rode in the request body to one fixed,
     /// TLS-only address that this crate chose; there was no configuration that
     /// could downgrade it. OpenPanel's address is whatever the operator types,
-    /// and its credential rides in a request **header** on every single
-    /// request — so `OPENCOMPANY_ANALYTICS_ENDPOINT=http://collector.internal/track`
-    /// puts a long-lived write secret on the wire, in cleartext, once per event,
-    /// for the life of the tenant (CWE-319). "Internal network" is not a defence
+    /// and its client id rides in a request **header** on every single request
+    /// — and with the collector's secret check off, that id is the whole write
+    /// credential — so `OPENCOMPANY_ANALYTICS_ENDPOINT=http://collector.internal/track`
+    /// puts a long-lived write credential on the wire, in cleartext, once per
+    /// event, for the life of the tenant (CWE-319). "Internal network" is not a defence
     /// a container can verify, and this module does not get to assume one.
     ///
     /// **Loopback is the documented exception.** `http://127.0.0.1:3000/track`,
@@ -179,7 +179,7 @@ pub enum Silence {
     ///
     /// Silence rather than a warning-and-send, for the reason
     /// [`Self::UnusableEndpoint`] gives one level down: the alternative is a
-    /// boot line nobody reads while the secret ships anyway, and a credential
+    /// boot line nobody reads while the credential ships anyway, and a credential
     /// disclosed is not a thing an operator can un-disclose after noticing. The
     /// fix is one character in one variable, and the reason names it.
     ///
@@ -193,15 +193,10 @@ impl Silence {
         match self {
             Self::OptedOut => "operator opted out",
             Self::NotHosted => "not a hosted tenant and no explicit opt-in",
-            Self::NoCredentials => {
-                "no collector credential is configured (OPENCOMPANY_ANALYTICS_CLIENT_ID \
-                 and OPENCOMPANY_ANALYTICS_CLIENT_SECRET)"
-            }
             Self::NoClientId => "OPENCOMPANY_ANALYTICS_CLIENT_ID is not configured",
-            Self::NoClientSecret => "OPENCOMPANY_ANALYTICS_CLIENT_SECRET is not configured",
             Self::UnusableCredential => {
-                "the configured collector credential contains bytes that cannot go in an \
-                 HTTP header"
+                "the configured OPENCOMPANY_ANALYTICS_CLIENT_ID contains bytes that cannot \
+                 go in an HTTP header"
             }
             Self::NoEndpoint => "OPENCOMPANY_ANALYTICS_ENDPOINT is not configured",
             Self::Unreadable => "the OPENCOMPANY_ANALYTICS value is not recognised",
@@ -210,7 +205,7 @@ impl Silence {
             }
             Self::InsecureEndpoint => {
                 "OPENCOMPANY_ANALYTICS_ENDPOINT is a plain http:// URL to a non-loopback \
-                 host, which would send the collector credential in the clear on every \
+                 host, which would send the collector client id in the clear on every \
                  request; use https, or a loopback address"
             }
         }
@@ -255,21 +250,19 @@ impl Decision {
 ///    when an operator explicitly sets `OPENCOMPANY_ANALYTICS=on`. Decision 1
 ///    of #1739: silence is the default and reporting is the exception, so a
 ///    self-hosted or desktop install that has said nothing sends nothing.
-/// 4. **Both halves of the client credential are required.** OpenPanel
-///    authenticates a write client with an id and a secret together, so one
-///    without the other is a misconfiguration rather than a partial
-///    configuration, and the reason says which half is missing — see
+/// 4. **A client id**, and it is the whole credential: the collector runs its
+///    clients with the secret check off. A hosted tenant without one uses
+///    [`DEFAULT_CLIENT_ID`]; any other deployment is silent — see
 ///    [`Silence::NoClientId`].
-/// 5. **An endpoint is required, and there is no default.** The collector is
-///    self-hosted; its address is whatever the operator runs it at. A default
-///    would be somebody else's collector, and quietly reporting to a third
-///    party nobody configured is the accident the endpoint check below already
-///    refuses to make in the other direction.
+/// 5. **An endpoint.** A hosted tenant without one uses [`DEFAULT_ENDPOINT`],
+///    the TinyHumans collector; any other deployment is silent, because a
+///    default would be somebody else's collector — see [`Silence::NoEndpoint`].
+///    Configuration always outranks both defaults.
 /// 6. And the endpoint has to be one a client could post to. A decision that
 ///    says [`Decision::Report`] is a promise the boot line then repeats out
 ///    loud, so an endpoint that cannot be sent to is silence with a reason,
 ///    not reporting — see [`is_usable_endpoint`].
-/// 7. **And one the credential can safely cross.** The client secret is a
+/// 7. **And one the credential can safely cross.** The client id is a
 ///    request header on every request, so a plain `http://` endpoint to a
 ///    non-loopback host puts it on the wire in cleartext once per event. That
 ///    is silence with its own reason too — see [`is_secure_endpoint`] and
@@ -312,22 +305,34 @@ pub fn resolve(deployment: Deployment, env: &dyn EnvSource) -> Decision {
         }
     }
 
-    // A non-Unicode half already fails closed on its own: `get` maps it to
-    // `None` and the match below reports it missing. Reporting *less* than was
-    // configured is always the safe direction for a credential.
-    let credentials = match (
-        non_blank(env, CLIENT_ID_ENV),
-        non_blank(env, CLIENT_SECRET_ENV),
-    ) {
-        (Some(id), Some(secret)) => {
-            if !is_header_safe(&id) || !is_header_safe(&secret) {
-                return Decision::Silent(Silence::UnusableCredential);
-            }
-            ClientCredentials::new(id, secret)
-        }
-        (None, None) => return Decision::Silent(Silence::NoCredentials),
-        (None, Some(_)) => return Decision::Silent(Silence::NoClientId),
-        (Some(_), None) => return Decision::Silent(Silence::NoClientSecret),
+    // Read through `get_os`, like the switch and the endpoint below: [`get`]
+    // maps a non-Unicode value to `None`, which here would read as "nobody
+    // configured a client id" and let a hosted tenant fall back to
+    // [`DEFAULT_CLIENT_ID`] — reporting under a credential the operator never
+    // set, the opposite of "less than was configured". A malformed id is
+    // reported as its own reason instead, exactly like a malformed switch or
+    // endpoint.
+    let hosted = deployment == Deployment::HostedTenant;
+    let default_client_id = || hosted.then(|| DEFAULT_CLIENT_ID.to_string());
+    let credentials = match env.get_os(CLIENT_ID_ENV) {
+        None => match default_client_id() {
+            Some(id) => ClientCredentials::new(id),
+            None => return Decision::Silent(Silence::NoClientId),
+        },
+        Some(raw) => match raw.into_string() {
+            Err(_) => return Decision::Silent(Silence::UnusableCredential),
+            Ok(value) => match value.trim() {
+                // Blank is absent, as it is for the switch and the endpoint.
+                "" => match default_client_id() {
+                    Some(id) => ClientCredentials::new(id),
+                    None => return Decision::Silent(Silence::NoClientId),
+                },
+                configured if !is_header_safe(configured) => {
+                    return Decision::Silent(Silence::UnusableCredential);
+                }
+                configured => ClientCredentials::new(configured.to_string()),
+            },
+        },
     };
 
     // Read through `get_os`, like the switch, so that bytes this process cannot
@@ -335,22 +340,33 @@ pub fn resolve(deployment: Deployment, env: &dyn EnvSource) -> Decision {
     // different reasons, and an operator who mistyped their proxy URL should be
     // told the value was unreadable rather than that they never set one.
     //
-    // There is no fallback in either arm. Reporting to a default collector an
-    // operator never named is worse than reporting nothing at all: it is
-    // telemetry leaving for an address nobody chose, and no amount of reading
-    // the boot line would reveal it, because the line would name a destination
-    // that is real.
+    // The only fallback is the hosted tenant's: a self-hoster's opt-in must
+    // not leave for an address nobody chose. A set-but-malformed value is
+    // never replaced by the default — it is reported.
+    let default_endpoint = || {
+        if hosted {
+            Some(DEFAULT_ENDPOINT.to_string())
+        } else {
+            None
+        }
+    };
     let endpoint = match env.get_os(ENDPOINT_ENV) {
-        None => return Decision::Silent(Silence::NoEndpoint),
+        None => match default_endpoint() {
+            Some(endpoint) => endpoint,
+            None => return Decision::Silent(Silence::NoEndpoint),
+        },
         Some(raw) => match raw.into_string() {
             Err(_) => return Decision::Silent(Silence::UnusableEndpoint),
             Ok(value) => match value.trim() {
                 // Blank is absent, as it is for the credential and the switch.
-                "" => return Decision::Silent(Silence::NoEndpoint),
+                "" => match default_endpoint() {
+                    Some(endpoint) => endpoint,
+                    None => return Decision::Silent(Silence::NoEndpoint),
+                },
                 // Shape before transport security, and the order matters for
                 // the reason an operator is given: a value that does not parse
                 // has no host to judge, and "this will not parse" sends them
-                // somewhere different from "this would leak the secret".
+                // somewhere different from "this would leak the credential".
                 configured if !is_usable_endpoint(configured) => {
                     return Decision::Silent(Silence::UnusableEndpoint);
                 }
@@ -429,14 +445,15 @@ fn is_usable_endpoint(raw: &str) -> bool {
 /// wire: `https`, or `http` to a loopback host.
 ///
 /// This asks a different question from [`is_usable_endpoint`] — that one is
-/// "can a client send here at all", this one is "may this client's secret go
+/// "can a client send here at all", this one is "may this client's id go
 /// there" — and they are kept apart because they resolve to different reasons
 /// and send an operator to different edits.
 ///
 /// The rule exists because of where the OpenPanel credential travels.
 /// Mixpanel's token rode in the body of a request to one fixed `https` address
 /// this crate chose; no configuration could downgrade it. OpenPanel's address
-/// is typed by the operator and its secret is a **request header on every
+/// is typed by the operator and its client id — the whole write credential,
+/// with the collector's secret check off — is a **request header on every
 /// request**, so `http://collector.internal/track` writes a long-lived write
 /// credential to the network in cleartext once per event, forever
 /// ([CWE-319](https://cwe.mitre.org/data/definitions/319.html)). A container
@@ -456,7 +473,7 @@ fn is_usable_endpoint(raw: &str) -> bool {
 /// `lo`. It does not weaken the exception, though — anything with that access on
 /// a tenant's host can already read the process environment the credential was
 /// loaded from, so the capture gains it nothing it did not have. The property
-/// this rests on is that the secret never crosses a network **between hosts**,
+/// this rests on is that the credential never crosses a network **between hosts**,
 /// which is what CWE-319 is about.
 ///
 /// `localhost` is matched **by exact name**, not by suffix. RFC 6761 reserves
@@ -464,8 +481,8 @@ fn is_usable_endpoint(raw: &str) -> bool {
 /// "may" is not a property this check can rest a credential on, and the strict
 /// subset is the safe direction: it can only refuse an endpoint that would have
 /// worked, loudly, with a named reason and a one-character fix. Widening it
-/// later costs nothing; narrowing it after a secret has shipped costs the
-/// secret.
+/// later costs nothing; narrowing it after a credential has shipped costs the
+/// credential.
 ///
 /// Matched on `Url::host()` rather than on the raw string, so that
 /// `http://127.0.0.1:3000/track`, `http://[::1]/track` and
@@ -508,7 +525,7 @@ pub(crate) fn is_secure_endpoint(raw: &str) -> bool {
 /// `HeaderValue::from_str` itself, so the two cannot drift apart silently.
 ///
 /// The cost of being strict is refusing a credential OpenPanel would have
-/// accepted. An OpenPanel client id and secret are generated opaque tokens —
+/// accepted. An OpenPanel client id is a generated UUID —
 /// this has never been observed to reject one — and the failure is loud, named
 /// and reversible, which is the direction to be wrong in.
 fn is_header_safe(raw: &str) -> bool {

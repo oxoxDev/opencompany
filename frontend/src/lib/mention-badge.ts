@@ -1,19 +1,5 @@
 import type { NotificationDto } from "@/api/types";
-import { MAIN_THREAD_ID, hostMessageId } from "@/lib/chat";
-
-/**
- * Mirrors the host's `is_general_chat` (`src/server/chat_history.rs`, issue
- * #65): the console addresses its default thread as `"main"`, an unaddressed
- * chat route stores the default desk `"General"`, and older events carry `""`.
- * All four spellings are one desk, and a notification context that names it has
- * to badge the *rendered* main channel — the rail is built from real desk ids,
- * none of which is `"General"`.
- */
-function isGeneralChat(context: string | null | undefined): boolean {
-  if (context === undefined || context === null) return false;
-  const folded = context.toLowerCase();
-  return context === "" || folded === MAIN_THREAD_ID || folded === "general";
-}
+import { hostMessageId } from "@/lib/chat";
 
 /**
  * The notification kinds that badge a channel on the rail: a mention (#65) and
@@ -26,29 +12,16 @@ export function isBadgingKind(kind: string): boolean {
 
 /**
  * The rendered channel a mention's `context` badges, or `undefined` when it has
- * nowhere to land.
- *
- * Shared by the badge placement in [`mentionCountsByChannel`] and the app
- * shell's "re-read the thread a mention's message is missing from" trigger, so
- * both resolve the same channel for the same row:
- *
- * - An exact rendered channel-id match wins outright: a real desk whose id
- *   happens to be `general` (or `main`, or — impossibly — `""`) is *that*
- *   channel, so a mention stored under the canonical id has to badge that
- *   desk, not the default thread the legacy spellings alias to (issue #65).
- * - Only a context that names no rendered channel falls back to the alias:
- *   a legacy general-chat spelling badges the rendered main channel, and one
- *   with no rendered main channel is dropped (the rail has no row to badge).
+ * none. The context is the channel id the host recorded, `#general` included,
+ * so it is the answer as it stands. Shared by the badge placement in
+ * [`mentionCountsByChannel`], the shell's "re-read the thread a mention's
+ * message is missing from" trigger and the notification links, so all three
+ * resolve the same channel for the same row.
  */
 export function renderedChannelIdForContext(
   context: string | null | undefined,
-  mainChannelId: string | undefined,
-  renderedChannelIds: ReadonlySet<string>,
 ): string | undefined {
-  if (context === undefined || context === null) return undefined;
-  if (renderedChannelIds.has(context)) return context;
-  if (isGeneralChat(context)) return mainChannelId;
-  return context;
+  return context ?? undefined;
 }
 
 /**
@@ -72,17 +45,6 @@ export function renderedChannelIdForContext(
  */
 export function mentionCountsByChannel(
   notifications: readonly NotificationDto[],
-  /**
-   * The id of the rendered channel that stands in for the legacy general
-   * thread. `undefined` means there is none yet — the desk list has not
-   * loaded, or a company has no desks at all — and a general-chat spelling
-   * then has nowhere to badge. It is dropped rather than placed under an id
-   * the rail never has, which would render nowhere and could never be cleared
-   * (tinysweeper). Direct desk/DM ids are unaffected: they badge from the
-   * `renderedChannelIds` arm regardless.
-   */
-  mainChannelId?: string,
-  renderedChannelIds: ReadonlySet<string> = new Set(),
 ): Record<string, number> {
   const out: Record<string, number> = {};
   // Defensive against a caller handing us something that is not a list. The
@@ -104,14 +66,7 @@ export function mentionCountsByChannel(
     if (n.context === undefined || n.context === null) continue;
     // The placement arm shared with the app shell's re-read trigger, so a
     // mention is badged and recovered from the same channel it is placed on.
-    const channelId = renderedChannelIdForContext(
-      n.context,
-      mainChannelId,
-      renderedChannelIds,
-    );
-    // A general-chat spelling with no rendered main channel (see the param
-    // doc) is dropped, not placed under a channel that can never render or
-    // clear.
+    const channelId = renderedChannelIdForContext(n.context);
     if (channelId === undefined) continue;
     out[channelId] = (out[channelId] ?? 0) + 1;
   }
@@ -128,16 +83,6 @@ export function mentionCountsByChannel(
 export function mentionsToClear(
   notifications: readonly NotificationDto[],
   channelId: string,
-  /**
-   * Same semantics as [`mentionCountsByChannel`]'s param: the rendered main
-   * channel, or `undefined` when none exists yet. A general-chat mention can
-   * then never match — `channelId === mainChannelId` is false for every real
-   * channel — which is exactly right, because the count arm never badged it
-   * in the first place.
-   */
-  mainChannelId?: string,
-  visibleThreadIds: ReadonlySet<string> = new Set([channelId]),
-  renderedChannelIds: ReadonlySet<string> = new Set(),
   /**
    * The loaded transcript's thread replies, keyed by the console id
    * (`h<seq>`) of the reply to the id of the parent it is folded under.
@@ -162,24 +107,7 @@ export function mentionsToClear(
       if (n.readAt !== undefined || !isBadgingKind(n.kind) || n.context === undefined) {
         return false;
       }
-      let inChannel: boolean;
-      if (renderedChannelIds.has(n.context)) {
-        // A real desk or DM channel id: only opening that exact channel clears
-        // it. `isGeneralChat` must not reroute a real desk named `general` onto
-        // the default thread — that is how a mention for the real General desk
-        // ends up silently cleared by opening a different channel.
-        inChannel = n.context === channelId;
-      } else if (n.context === channelId) {
-        // Clear only once the main channel's history is actually on screen —
-        // a mention is durable, and clearing it before the named message has
-        // loaded would lose the summons for good.
-        inChannel = channelId !== mainChannelId || visibleThreadIds.has(channelId);
-      } else {
-        // A general-chat spelling names the main channel: opening it clears
-        // those mentions too.
-        inChannel = channelId === mainChannelId && isGeneralChat(n.context);
-      }
-      if (!inChannel) return false;
+      if (n.context !== channelId) return false;
       // A parked blocker has no summoning chat message — its card renders from
       // the approvals feed, not the transcript — so opening the DM clears it
       // outright, without the message-loaded gates the mention path needs.
@@ -232,7 +160,6 @@ export function threadsToReReadForMentions(
   loadedByChannel: Readonly<Record<string, ReadonlySet<string>>>,
   /** The console's thread-id → channel-id map, as `AppShell` keeps it. */
   chatChannelByThread: Readonly<Record<string, string>>,
-  mainChannelId: string | undefined,
   seenSubjects: ReadonlySet<string>,
 ): { threadIds: string[]; subjects: string[] } {
   const threadIds = new Set<string>();
@@ -244,32 +171,17 @@ export function threadsToReReadForMentions(
     if (seenSubjects.has(subject)) continue;
     const context = n.context;
     if (context === undefined || context === null) continue;
-    const channelId = renderedChannelIdForContext(
-      context,
-      mainChannelId,
-      renderedChannelIds,
-    );
+    const channelId = renderedChannelIdForContext(context);
     if (channelId === undefined) continue;
     // The message is already on screen for this channel — nothing to recover.
     if (loadedByChannel[channelId]?.has(subject)) continue;
-    // The host thread to re-read, decided from the *context* rather than a
-    // channel→thread lookup. When the mention sits on the first desk, the map
-    // holds both `main -> <first desk>` and `<first desk> -> <first desk>`,
-    // with the alias inserted first — a naive lookup would win `main` and
-    // re-read the legacy General thread instead of the desk's own, so the
-    // mentioned message stays absent and the badge stays stuck (Codex P2).
-    const threadId = renderedChannelIds.has(context)
-      ? // A real rendered channel. A desk's channel id doubles as its thread
-        // id (self-mapping), which must win over the `main` alias. A DM
-        // channel has no self-mapping — the member id keys it — so the
-        // reverse lookup is unambiguous there.
-        chatChannelByThread[context] === context
+    // A desk's channel id doubles as its thread id; a DM's channel is keyed by
+    // the teammate's thread id, so that one is found by reverse lookup.
+    const threadId = !renderedChannelIds.has(context)
+      ? undefined
+      : chatChannelByThread[context] === context
         ? context
-        : Object.entries(chatChannelByThread).find(([, c]) => c === context)?.[0]
-      : isGeneralChat(context)
-        ? // A legacy general-chat spelling — the console's default thread.
-          MAIN_THREAD_ID
-        : undefined;
+        : Object.entries(chatChannelByThread).find(([, c]) => c === context)?.[0];
     if (threadId !== undefined) {
       threadIds.add(threadId);
       subjects.add(subject);

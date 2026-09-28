@@ -561,12 +561,17 @@ async fn chats_list_the_manifest_desks() {
     let app = router(state_with_rich_company(&home).await);
     let value = query(
         app,
-        r#"{"query":"{ company(id:\"acme\"){ chats { id name members } } }"}"#,
+        r#"{"query":"{ company(id:\"acme\"){ chats { id name kind members } } }"}"#,
     )
     .await;
     let chats = value["data"]["company"]["chats"].as_array().unwrap();
-    assert_eq!(chats.len(), 1);
+    assert_eq!(
+        chats.len(),
+        1,
+        "a legacy `general` desk folds into #general: {chats:?}"
+    );
     assert_eq!(chats[0]["id"], "general");
+    assert_eq!(chats[0]["kind"], "general");
     assert_eq!(chats[0]["members"][0], "maya");
 }
 
@@ -596,6 +601,7 @@ async fn chat_history_finds_agent_replies_under_general_and_main() {
                 agent_id: "maya".to_string(),
                 text: "canonical id".to_string(),
                 steps: Vec::new(),
+                episode: None,
             },
         )
         .await
@@ -615,6 +621,7 @@ async fn chat_history_finds_agent_replies_under_general_and_main() {
                 agent_id: "maya".to_string(),
                 text: "console default-thread id".to_string(),
                 steps: Vec::new(),
+                episode: None,
             },
         )
         .await
@@ -667,6 +674,7 @@ async fn chat_history_clamps_an_oversized_page_request() {
                     agent_id: "maya".to_string(),
                     text: format!("message {i}"),
                     steps: Vec::new(),
+                    episode: None,
                 },
             )
             .await

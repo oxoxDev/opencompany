@@ -92,7 +92,7 @@ impl CompanyGql {
         self.resolve_team().await
     }
 
-    /// The company's desks (group chats).
+    /// The company's chats: #general first, then its desks (group chats).
     async fn chats(&self) -> async_graphql::Result<Vec<ChatGql>> {
         Ok(self
             .desks()
@@ -102,13 +102,15 @@ impl CompanyGql {
             .collect())
     }
 
-    /// One desk by id, or null when unknown.
+    /// One desk by id, or null when unknown. A legacy spelling of #general
+    /// finds #general.
     async fn chat(&self, id: ID) -> async_graphql::Result<Option<ChatGql>> {
+        let id = crate::ports::general_channel::decode_general_chat_id(id.0);
         Ok(self
             .desks()
             .await?
             .into_iter()
-            .find(|desk| desk.id == id.as_str())
+            .find(|desk| desk.id == id)
             .map(|desk| ChatGql::new(self.runtime.clone(), desk)))
     }
 
@@ -380,21 +382,33 @@ impl CompanyGql {
         Ok(out)
     }
 
-    /// The company's desks from the manifest's group chats.
+    /// #general, then the company's desks from the manifest's group chats.
     async fn desks(&self) -> async_graphql::Result<Vec<Desk>> {
         let Some(record) = self.runtime.store().load(&self.id).await? else {
             return Ok(Vec::new());
         };
-        Ok(record
-            .manifest
-            .group_chats
-            .iter()
-            .map(|chat| Desk {
-                id: chat.id.clone(),
-                name: chat.name.clone(),
-                description: chat.description.clone(),
-                members: chat.members.clone(),
-            })
+        let general = Desk {
+            id: record.general_channel.id.clone(),
+            name: record.general_channel.name.clone(),
+            description: None,
+            members: record.general_channel.members.clone(),
+            general: true,
+        };
+        Ok(std::iter::once(general)
+            .chain(
+                record
+                    .manifest
+                    .group_chats
+                    .iter()
+                    .filter(|chat| !crate::ports::general_channel::is_general_spelling(&chat.id))
+                    .map(|chat| Desk {
+                        id: chat.id.clone(),
+                        name: chat.name.clone(),
+                        description: chat.description.clone(),
+                        members: chat.members.clone(),
+                        general: false,
+                    }),
+            )
             .collect())
     }
 }
@@ -506,6 +520,7 @@ struct Desk {
     name: String,
     description: Option<String>,
     members: Vec<String>,
+    general: bool,
 }
 
 /// A desk (group chat): metadata plus an append-only message history resolver.
@@ -535,6 +550,11 @@ impl ChatGql {
     /// An optional description.
     async fn description(&self) -> Option<String> {
         self.desk.description.clone()
+    }
+
+    /// `"general"` for the company-wide #general channel, `"desk"` otherwise.
+    async fn kind(&self) -> &'static str {
+        if self.desk.general { "general" } else { "desk" }
     }
 
     /// The teammate ids on this desk.

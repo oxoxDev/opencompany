@@ -174,12 +174,15 @@ pub struct ApprovalSummary {
     /// pre-#333 approval serializes as it always did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<TaskLink>,
-    /// The roster teammate whose blocked tool call this approval was parked for
-    /// (issue #372), mirroring [`Effect::agent`](crate::ports::types::Effect::agent).
+    /// The roster teammate to name as this card's asker: whose blocked tool
+    /// call it was parked for, mirroring
+    /// [`Effect::agent`](crate::ports::types::Effect::agent), or — for an
+    /// agent's own question — whoever asked it, read off the blocker payload
+    /// instead (see `blockers::asked_by`).
     ///
-    /// `Some(id)` is exactly "projected from a harness tool call" — the console
-    /// renders "Asked by <name>". `None` is a *native* effect the runtime
-    /// performs itself, or a park journaled before #243 stamped the field, and
+    /// `Some(id)` is what the console reads as "Asked by <name>". `None` is a
+    /// *native* effect the runtime performs itself, a blocker with no
+    /// particular asker, or a park journaled before this field existed, and
     /// the card names no asker rather than inventing one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
@@ -385,6 +388,21 @@ pub struct ApprovalSummary {
     /// step-specific claim can be made, so the generic wording applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocker_step_kind: Option<String>,
+    /// The hive episode seat waiting on this approval, when a seat raised it.
+    ///
+    /// Read off the turn key the seat parked under, so a console can draw the
+    /// card inside that episode and say whose turn is held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub episode: Option<ApprovalEpisode>,
+}
+
+/// The hive episode seat an approval belongs to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalEpisode {
+    /// The episode.
+    pub id: String,
+    /// The seat whose turn waits on the decision.
+    pub seat: String,
 }
 
 #[cfg(test)]

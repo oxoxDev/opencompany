@@ -202,6 +202,7 @@ fn cycle_thread_id_reads_an_addressed_message_inherits_a_resolution_and_refuses_
             steps: Vec::new(),
             task_id: None,
             outputs: Vec::new(),
+            episode: None,
         },
         // Issue #327: appended by the workspace store after the write it
         // describes. An agent that answers a message and touches the tree

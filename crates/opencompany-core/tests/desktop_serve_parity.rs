@@ -124,11 +124,6 @@ const DELIBERATE_DIFFERENCES: &[(&str, &str)] = &[
         "pairs with config.admin_email — a platform-injected standing invite",
     ),
     (
-        "builder.with_openhuman_rpc",
-        "the `openhuman-rpc` feature is not in the desktop's dependency \
-         features; the in-process harness is what a desktop company thinks with",
-    ),
-    (
         "builder.with_mail",
         "the injected per-tenant mailbox rides the `smtp` feature, which the \
          desktop does not compile",

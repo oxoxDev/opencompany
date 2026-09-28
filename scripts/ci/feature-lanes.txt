@@ -55,11 +55,10 @@ tinyplace      | tested       | tinyplace                       | Runs the whole
 # --- Partial: a lane exists, but filtered ----------------------------------
 
 sqlite         | partial      | sqlite                          | store::sqlite
-hivemind       | partial      | hivemind                        | runtime::hivemind
 mongodb        | partial      | mongodb                         | store::mongodb store::select
-acp            | partial      | acp,runner,tinymemory | server::acp harness::acp::run_turn
+acp            | partial      | acp,runner,tinymemory | server::acp harness::acp::run_turn harness::lanes
 runner         | partial      | acp,runner,tinymemory | runner
-mcp            | partial      | openhuman,mcp,media    | harness::built_in::build::tests app::types
+mcp            | partial      | openhuman,mcp,media    | harness::built_in::build::tests app::types hive::mcp_server hive::tools
 media          | partial      | openhuman,mcp,media    | harness::built_in::build::tests harness::built_in::toolbelt
 composio       | partial      | openhuman,chargebee,paypal,composio | composio
 export         | partial      | export                          | store::export
@@ -105,7 +104,6 @@ opencompany-tui/sqlite  | tested | sqlite  | The `rust` lane runs the TUI agains
 # files sit OUTSIDE the gated `mod http { … }`, so they already run at default
 # features.
 
-openhuman-rpc  | compile-only | - | Only `HttpOpenHumanRpc` is gated. The trait + offline mock + providers compile and test at default features; the gated module carries no test.
 github         | compile-only | - | Only `HttpGitHubClient` is gated. `GitHubClient`, its mock and the whole issue-filing flow test at default features (src/feedback/github.rs tests sit outside the gated `mod http`).
 tinyhumans     | compile-only | - | Only `HttpTinyHumansClient` / `HttpHubIdentityExchange` are gated. The trait, mock and routing decision test at default features.
 medulla        | compile-only | - | Only the HTTP/Socket.IO transport is gated. Wire types + `MockTransport` test at default features; the gated `http` module carries no test.

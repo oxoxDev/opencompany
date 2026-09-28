@@ -326,10 +326,7 @@ impl AcpRunTurn {
     /// reason it is not closed here.
     fn session_key(&self, company: &CompanyId, agent_id: &str, chat_id: Option<&str>) -> String {
         match chat_id {
-            // Folded through the same rule every other reader of a chat id
-            // uses, so the four spellings of the General desk are one
-            // conversation here too rather than four sessions.
-            Some(chat) if !crate::server::chat_history::is_general_chat(Some(chat)) => {
+            Some(chat) if chat != crate::ports::general_channel::GENERAL_CHANNEL_ID => {
                 // …and a named desk's two spellings likewise. The key was
                 // `(company, agent)` before #1890 H, where no selector could
                 // disagree with itself; adding the chat introduced the
@@ -380,10 +377,9 @@ impl AcpRunTurn {
             company: company.clone(),
             agent_id: agent_id.to_string(),
             route: LiveRoute::Chat {
-                chat_id: chat
-                    .chat_id
-                    .map(str::to_string)
-                    .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
+                chat_id: chat.chat_id.map(str::to_string).unwrap_or_else(|| {
+                    crate::server::ops::language::GENERAL_CHANNEL_ID.to_string()
+                }),
             },
             // Takes the whole `ChatTarget` rather than the id alone, so this
             // cannot go on answering with `None` while the caller holds the

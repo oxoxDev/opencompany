@@ -253,6 +253,7 @@ description = "Builds the product."
 
 pub(super) fn record() -> CompanyRecord {
     CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
@@ -291,6 +292,7 @@ pub(super) fn fixture() -> Fixture {
     let meter = Arc::new(RecordingMeter::default());
     Fixture {
         deps: HarnessDeps {
+            takeovers: Default::default(),
             emergency_gate: None,
             notifications: None,
             ledgers: None,
@@ -326,6 +328,7 @@ pub(super) fn fixture() -> Fixture {
             deep_trace: None,
             workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
+            approval_parker: None,
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -478,4 +481,13 @@ impl HarnessModel for ScriptedProvider {
     fn telemetry_provider_id(&self) -> String {
         "scripted".to_string()
     }
+}
+
+/// The process-wide OpenHuman runtime, for a fixture that builds a roster
+/// synchronously (plan hive-desks, Phase 2). Ephemeral workspace, no key.
+pub(super) fn test_runtime() -> Arc<openhuman_embed::Runtime> {
+    crate::harness::openhuman_runtime::global_blocking(
+        crate::harness::openhuman_runtime::RuntimeBoot::ephemeral(),
+    )
+    .expect("the OpenHuman runtime boots")
 }

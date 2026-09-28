@@ -327,8 +327,7 @@ for more than one turn can do", not "the model was slow".
 ## OpenHuman's own library front door
 
 Upstream's `openhuman-embed` crate (`vendor/openhuman/crates/openhuman-embed`)
-is the host-facing library API, and since the 2026-09-16 pin it is a
-**two-step** shape: one `Runtime` per process, then any number of `Agent`s on
+is the host-facing library API, and it is a **two-step** shape: one `Runtime` per process, then any number of `Agent`s on
 it, each fully described and independent of the others:
 
 ```rust
@@ -372,73 +371,49 @@ no resident session, so idle agents cost ~nothing and one agent can serve
 overlapping turns. `Harness` is the one-agent shorthand over the same two
 types; `Core` wraps a `CoreRuntime` the host built itself with `CoreBuilder`.
 
-### Why `built_in` does not use it (yet)
+### How `built_in` uses it
 
-The reason has changed. It used to be **one harness per process**: the keyring
-master key, RPC bearer, global event bus and `Once`-guarded domain subscribers
-are process-scoped, so a second `Harness` returned `AlreadyRunning`. That is
-still true of the *runtime* — `Runtime::builder().build()` refuses a second one
-— but agents are now the unit of multiplicity, which is exactly the shape a
-process running many companies × many teammates needs.
+`built_in` **is** this front door. `harness::openhuman_runtime::global` boots
+the one `Runtime` at `serve` (workspace `<data-dir>/openhuman`, the TinyHumans
+key as its credential, `TINYHUMANS_API_URL` as its backend), and
+`harness::build::agent_spec_for(record, agent, deps)` renders every manifest
+`[[agent]]` into an `AgentSpec`:
 
-What still keeps `built_in` on `oh::agent::AgentBuilder`
-(`src/harness/built_in/build.rs`) is that `AgentSpec` is **pure config**: a
-facade turn builds its agent with `Agent::from_config_with_definition` from
-the agent's `Config` + `AgentDefinition`, and there is no seam for what this
-crate injects at the builder —
+| what the company declares | where it lands on the spec |
+|---|---|
+| persona, bundle and context sections, team and tool briefs, skills catalogue, sandbox brief (`company/prompt.rs`, `skills.rs`, `toolbelt.rs`) | `.system_prompt(..)` |
+| the OpenHuman-native subset of its grants (`shell`, `file_*`, `web_fetch`, …) | `.definition(AgentDefinitionSpec::new().tools(ToolScopeSpec::Named(..)).disallow_tools(..).max_iterations(25))` |
+| `[inference]` / the agent's own `{provider, model}` pair (`company/inference.rs`), BYOK included | `.provider(Provider::openai_compatible(url, key).model(m))`, served through the loopback model bridge so usage is metered |
+| the approval policy | `.access(Access::full())` — OpenHuman's runtime-wide gate stays off; OpenCompany decides allow / deny / park in its own MCP handler |
+| every OpenCompany tool (ledger, tasks, pages, workspace, memory, composio, hosting, approvals) and the speech tools | `.mcp(McpServer::http("opencompany", url).auth(BearerToken).allow_tools(..))` — see [hive.md](hive.md#speaking) |
+| each `mcp:*` grant | one more `.mcp(..)` |
+| the company's skills, the company workspace | `.skills_dir(<home>/skills)`, `.action_dir(<workspace>)` |
 
-| `AgentBuilder` seam this crate uses | what it carries | `AgentSpec` equivalent |
-|---|---|---|
-| `.chat_model(HarnessModel)` | metered, per-company-credential inference with live `last_turn_usage` | `Provider` (route + model only, no metering hook) |
-| `.tools(...)` | the granted, capability-filtered belt: workspace/pages/desk/composio/search/ledger tools, checkpoint-wrapped | none — tools come from the config's domains and packs |
-| `.memory(OcMemory)` | the company's own `ContextStore` | `dedicated_memory` (a second upstream store, not ours) |
-| `.tool_policy(ApprovalPolicy)` | per-company consequence tiers, budgets, `readonly` brake | `Access` (three fixed tiers) |
-| `.prompt_builder(...)` | the role persona, skills catalogue, routed context | `system_prompt` / `system_prompt_suffix` (text only) |
-| `.payload_summarizer(PayloadExtractor)` | one-call extraction on the company's credential | none (upstream dispatches a sub-agent) |
-| `.event_context(session_key, channel)` | `{company}:{agent}` on the event bus for speech tools | agent id only |
-| `.tool_dispatcher(...)` | native vs attribute-tolerant XML by provider profile | none |
+`runtime.agent(spec)` mints the handle under
+`session_key::runtime_agent_id(company, agent)`; `HarnessPool.ensure` rebuilds
+the roster on the same fingerprints it always had, taking every old
+`turn_lock` first (bounded) and dropping the old handles before minting new
+ones, because an id stays reserved while any clone of it lives.
 
-Nothing about the MCP or skills surface is lost by staying one level down:
-MCP servers become an `McpServerRegistry` built from the company's
-`McpServerDecl`s and reach the prompt as bridge tools, and the skills
-catalogue is rendered into the persona body (`src/harness/built_in/skills.rs`).
+A turn is `agent.turn(message).session(openhuman_session_key).cwd(..)
+.on_progress(tx).send()` under the agent's `turn_lock`; `progress_pump.rs`
+maps `AgentProgress` onto `turn_stream::LiveFrame`s and reads cost from
+`ModelCallCompleted` / `TurnCostUpdated`. There is no resident session, no
+`Mutex<Agent>`, and no history seeding: OpenHuman owns the thread, and the
+company's delta is prepended to the message ([speech.md](speech.md)).
 
-### What adopting it would buy, and the path there
+What that buys, measured rather than argued: turns of **different** agents
+overlap — within a desk round and across desks — and a turn of one agent
+never overlaps another turn of the same agent. `opencompany measure` and
+`scripts/measure-coordination.mjs` report both numbers on
+`companies/hive_demo`; the second must be zero.
 
-The cost of staying on `AgentBuilder` is that this crate never establishes a
-`CoreContext`, so every vendored intrinsic that reads the ambient one resolves
-a **process-global** workspace instead — which is why `memory_tools.rs`,
-`mcp.rs`, `skills.rs`, `workflow_build/tools.rs` and `tool_posture.rs` each
-carry an oc-authored replacement or a process-wide workaround. And it is why
-`CompanyAgent` holds one long-lived `Mutex<Agent>` per teammate
-(`src/harness/built_in/mod.rs`): a vendored turn takes `&mut self`, so one
-teammate's turns serialise and every teammate keeps a resident session, tool
-belt and history, whether or not it is mid-turn. That is the opposite of the
-"many agents, low RAM, idle costs nothing" model upstream measured for the
-2 GB / 2 vCPU target (`vendor/openhuman/docs/library-benchmarking.md`).
-
-The path is upstream-first, then in this crate:
-
-1. **Upstream: a host-injection seam on `AgentSpec`** — accept a host-built
-   tool vector (or a tool factory), a `Memory`, a `ChatModel`, a `ToolPolicy`,
-   a `SystemPromptBuilder` and a payload summarizer, threaded through to
-   `Agent::from_config_with_definition` (or a sibling that takes an
-   `AgentBuilder` closure). Every row in the table above is then satisfiable
-   and the facade's per-agent `CoreContext` comes for free.
-2. **Here: build one `CoreRuntime` at `serve` boot** (`CoreBuilder::new(
-   HostKind::Library).workspace(<data-dir>/openhuman).domains(DomainSet::
-   harness() + skills + mcp).services(ServiceSet::none())`), and mint one
-   `Runtime::agent(spec)` per `(company, teammate)` in place of `build_agent`'s
-   `AgentBuilder`. `HarnessPool`'s roster then caches cheap `Agent` handles
-   instead of `Mutex<Agent>` sessions, turns on one teammate overlap, and the
-   ambient-context workarounds above become deletable one by one.
-3. **Measure**, with upstream's `library-fleet.sh` shape pointed at this
-   process, before deleting anything — the tokio tuning this crate already
-   shares (`AGENT_WORKER_STACK_BYTES`, `MAX_BLOCKING_THREADS`) is the floor,
-   not the ceiling.
-
-Until step 1 lands, `set_product_identity("opencompany")` and the shared tokio
-constants are the only pieces of the front door this crate uses.
+What is deliberately not on the spec: a host-built tool vector (OpenHuman has
+no seam for one, hence the MCP server), a host `Memory` (the company's
+`ContextStore` is reached as the `memory_*` MCP tools) and a host
+`ToolPolicy` (the approval decision is made where the tool is served). The
+legacy out-of-process JSON-RPC path (`src/openhuman/`, feature
+`openhuman-rpc`) is gone.
 
 ---
 
@@ -451,6 +426,10 @@ constants are the only pieces of the front door this crate uses.
 | per-agent dispatch | `src/harness/router.rs` |
 | building the lanes at boot, resolving `acp` engines | `src/harness/lanes.rs` |
 | the built-in engine | `src/harness/built_in/` |
+| the one process-wide `openhuman_embed::Runtime` | `src/harness/openhuman_runtime.rs` |
+| a manifest agent as an `AgentSpec` (`agent_spec_for`) | `src/harness/built_in/build.rs` |
+| `AgentProgress` → live frames and cost | `src/harness/built_in/progress_pump.rs` |
+| the `opencompany` MCP server the agents' tools are served on | `src/hive/mcp_server.rs` |
 | the `AcpAgent`/`AcpAgentFactory`/`AcpObserver` ports (ungated) | `src/ports/acp.rs` |
 | the ACP `RunTurn` (folds a port `AcpTurn` into `TurnStep`) | `src/harness/acp/run_turn.rs` |
 | live frames while an ACP turn runs (`live_frame_from`, `observer_for`) | `src/harness/acp/run_turn.rs` |

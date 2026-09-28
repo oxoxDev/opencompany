@@ -9,6 +9,16 @@ contracts indexed by [ports.md](ports.md).
 The cognition seam. The kernel never reimplements the cycle; it hands events
 to a `Brain` and services the brain's callbacks through a `CycleHost`.
 
+The `harness` path (`HarnessBrain`, feature `openhuman`) answers a chat cycle
+through `hive::dispatch`: a desk of two or more runs an episode of concurrent
+seat turns on its `OpenHumanHive`, and every other surface runs one turn on
+its one responder ([hive.md](hive.md#where-a-message-goes)). There is no
+company-wide serial lock on chat cycles and no per-chat slot; what serialises
+is one agent's own `turn_lock`, so cycles on different desks — and different
+agents in one round — run at the same time. A chat cycle's `CycleResult`
+carries no reply of its own: every utterance is journaled as it commits, so
+the console reads a round as it happens rather than when the cycle returns.
+
 ```rust
 // src/ports/brain.rs
 pub trait Brain: Send + Sync {
@@ -247,9 +257,10 @@ pub struct TurnStep {
 }
 ```
 
-Per-bubble ownership: the operator bubble carries the orchestrator's steps; a
-delegated desk bubble carries that desk lead's steps. **Zero steps is
-meaningful** — a memory-served or tool-less answer runs none, which is how the
+Per-bubble ownership: each seat's bubble carries that seat's own steps — on a
+desk, one bubble per committed utterance, each stamped with its `episode`
+([hive.md](hive.md#what-lands-in-the-journal)); off a desk, the one
+responder's. **Zero steps is meaningful** — a memory-served or tool-less answer runs none, which is how the
 console distinguishes it from a tool-backed one, and how a silently-failed MCP
 call becomes visible (surfaced as an `error` step on the operator bubble rather
 than a vague acknowledgement).

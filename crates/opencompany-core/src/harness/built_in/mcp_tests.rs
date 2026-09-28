@@ -1,6 +1,8 @@
 use super::*;
 
-fn decl(name: &str, endpoint: &str) -> McpServerDecl {
+/// Shared with [`super::blocked_tests`], which builds the same declarations and
+/// then attaches a policy to them.
+pub(super) fn decl(name: &str, endpoint: &str) -> McpServerDecl {
     McpServerDecl {
         name: name.to_string(),
         endpoint: endpoint.to_string(),
@@ -12,10 +14,12 @@ fn decl(name: &str, endpoint: &str) -> McpServerDecl {
         enabled: true,
         source: crate::company::mcp::McpSource::Runtime,
         auth: AuthMaterial::None,
+        tool_policies: Default::default(),
+        tool_inventory: Default::default(),
     }
 }
 
-fn grants(g: &[&str]) -> Vec<String> {
+pub(super) fn grants(g: &[&str]) -> Vec<String> {
     g.iter().map(|s| s.to_string()).collect()
 }
 
@@ -315,6 +319,7 @@ async fn oc_call_tool_scrubs_reflected_credential() {
         secrets,
         queue.clone(),
         McpMetering::off(),
+        Default::default(),
     );
 
     let result = tool
@@ -448,6 +453,7 @@ async fn a_completed_mcp_call_is_metered_and_a_failed_one_is_not() {
             agent: "ceo".to_string(),
             meter: Some(meter.clone()),
         },
+        Default::default(),
     );
 
     let ok = tool
@@ -684,4 +690,58 @@ fn get_on_a_store_that_fails_to_read_reports_store_error() {
         matches!(error, OpenCompanyError::Store(_)),
         "a failing store read must surface as Store, got: {error:?}"
     );
+}
+
+/// A declared server is inspected by name. No company agent is scoped to list
+/// the configured servers, so the brief must not send one looking for that tool.
+#[test]
+fn a_declared_only_agent_is_pointed_at_the_declared_enumeration_tools() {
+    let brief = capability_brief(true, false);
+    assert!(brief.contains("mcp_list_tools"), "{brief}");
+    assert!(
+        !brief.contains("mcp_registry_installed_list"),
+        "it holds no registry tool, so naming one sends it at a tool it cannot see: {brief}"
+    );
+}
+
+/// The registry family inspects through different tools, and an agent holding
+/// only that family used to be told nothing at all.
+#[test]
+fn a_registry_only_agent_is_pointed_at_the_registry_enumeration_tools() {
+    let brief = capability_brief(false, true);
+    assert!(
+        !brief.is_empty(),
+        "a registry-only agent still gets the brief"
+    );
+    assert!(brief.contains("mcp_registry_installed_list"), "{brief}");
+    assert!(brief.contains("mcp_registry_list_tools"), "{brief}");
+}
+
+/// Both families wired names both inspection paths.
+#[test]
+fn an_agent_holding_both_families_is_pointed_at_both() {
+    let brief = capability_brief(true, true);
+    assert!(brief.contains("mcp_list_tools"), "{brief}");
+    assert!(brief.contains("mcp_registry_installed_list"), "{brief}");
+}
+
+/// No MCP family wired means no brief, rather than one naming nothing.
+#[test]
+fn an_agent_with_no_mcp_family_gets_no_capability_brief() {
+    assert_eq!(capability_brief(false, false), "");
+}
+
+/// `mcp_list_servers` answers with each server's credentials and is kept out of
+/// every company agent's scope. Whichever families are wired, the brief must
+/// never send an agent to it — the one assertion that has to hold for all four
+/// combinations, so it is made for all four.
+#[test]
+fn no_wiring_combination_sends_an_agent_to_the_server_listing() {
+    for (declared, registry) in [(true, true), (true, false), (false, true), (false, false)] {
+        let brief = capability_brief(declared, registry);
+        assert!(
+            !brief.contains("mcp_list_servers"),
+            "declared={declared} registry={registry}: {brief}"
+        );
+    }
 }

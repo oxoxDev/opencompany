@@ -2,7 +2,7 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { clearHubResultFromUrl, clearMagicLinkFromUrl } from "@/App";
+import { clearMagicLinkFromUrl } from "@/App";
 import { resolveConfig } from "@/config";
 import { addConnection, resetConnections, restoreConnections } from "@/connections/registry";
 import { readProfiles } from "@/connections/profileStore";
@@ -107,17 +107,6 @@ describe("clearing a magic link", () => {
     land("?company=agentic-software-company", "#/overview");
 
     clearMagicLinkFromUrl();
-
-    expect(window.location.search).toBe("?company=agentic-software-company");
-    expect(window.location.hash).toBe("#/overview");
-  });
-});
-
-describe("clearing a hub sign-in result", () => {
-  it("takes the token out but keeps the scope and the hash", () => {
-    land("?company=agentic-software-company&token=jwt&key=auth", "#/overview");
-
-    clearHubResultFromUrl();
 
     expect(window.location.search).toBe("?company=agentic-software-company");
     expect(window.location.hash).toBe("#/overview");

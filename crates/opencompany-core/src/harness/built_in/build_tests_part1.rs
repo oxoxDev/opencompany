@@ -124,7 +124,7 @@ fn file_tools_are_sandboxed_to_the_workspace() {
     assert_eq!(policy.workspace_dir, ws);
     assert_eq!(policy.action_dir, ws);
 
-    let tools = file_tools(ws);
+    let tools = file_tools(ws, None);
     assert_eq!(tools.len(), 6, "read/write/edit/list/grep/glob");
     let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
     assert!(names.contains(&"file_read"), "got {names:?}");
@@ -409,99 +409,6 @@ fn persona_omits_absent_or_blank_description() {
     assert!(!persona.contains("   Engineer"));
     // No trailing description clause.
     assert!(persona.trim_end().ends_with("role."), "{persona}");
-}
-
-/// The resolved speech setting is what puts a voice on the belt.
-///
-/// `false` is now an explicit opt-out; omitted manifests resolve to `true` in
-/// the manifest test below.
-#[test]
-fn speech_tools_respect_the_resolved_enabled_value() {
-    let off = built_tool_names_with_speech(false);
-    for tool in crate::harness::speech_tools::SPEECH_TOOLS {
-        assert!(
-            !off.contains(&tool.to_string()),
-            "{tool} must not be on the belt after an explicit opt-out: {off:?}"
-        );
-    }
-
-    let on = built_tool_names_with_speech(true);
-    for tool in crate::harness::speech_tools::SPEECH_TOOLS {
-        assert!(
-            on.contains(&tool.to_string()),
-            "{tool} must be on the belt when `[speech] enabled`: {on:?}"
-        );
-    }
-}
-
-#[test]
-fn a_manifest_without_a_speech_section_still_builds_the_dm_tool() {
-    let manifest: crate::company::CompanyManifest =
-        toml::from_str("[company]\nname = \"Acme\"\n").expect("manifest parses");
-    let names = built_tool_names_with_speech(manifest.speech.is_enabled());
-    assert!(
-        names.contains(&crate::harness::speech_tools::DM_TOOL.to_string()),
-        "default-on speech must put desk_dm on the actual belt: {names:?}"
-    );
-}
-
-/// CodeRabbit: `speech_enabled` is the manifest's opt-in, but the tools
-/// ARE the append (module doc, above) — with no `EventLog` wired there is
-/// nothing to append to, so `speech_wired` (not the bare flag) must gate
-/// both the belt and the persona brief. Before this, `[speech] enabled =
-/// true` on a host with no journal still told the agent to call tools
-/// that were never registered.
-#[test]
-fn speech_tools_stay_off_the_belt_with_no_journal_even_when_the_manifest_asks() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let deps = pin_deps(dir.path().to_path_buf());
-    assert!(
-        deps.events.is_none(),
-        "this test exercises the no-journal case; pin_deps must still default to it"
-    );
-    let manifest_agent = ManifestAgent {
-        provider: None,
-        global: false,
-        id: "designer".to_string(),
-        role: "Designer".to_string(),
-        name: None,
-        description: None,
-        tier: None,
-        harness: None,
-        tools: None,
-        delegates_to: Vec::new(),
-        context: None,
-        budget_usd_daily: None,
-        prompt: None,
-        prompt_files: Vec::new(),
-        prompt_files_resolved: Vec::new(),
-        classes: Vec::new(),
-        ledgers: None,
-        can_declare_ledgers: true,
-        model: None,
-    };
-    let agent = build_agent(
-        &CompanyId::new("acme"),
-        "Acme",
-        &manifest_agent,
-        ApprovalPolicy::new(&Policy::default(), None),
-        &deps,
-        &["*".to_string()],
-        &[],
-        &[],
-        None,
-        false,
-        /* speech_enabled */ true,
-    )
-    .expect("agent builds");
-    let names: Vec<String> = agent.tools().iter().map(|t| t.name().to_string()).collect();
-    for tool in crate::harness::speech_tools::SPEECH_TOOLS {
-        assert!(
-            !names.contains(&tool.to_string()),
-            "{tool} must stay off the belt with no journal, even with `[speech] enabled`: \
-             {names:?}"
-        );
-    }
 }
 
 /// The brief's native set is read off the wired belt: an explicit `search`

@@ -711,9 +711,9 @@ async fn start_link(
 
     let started = state.hub_links().start(&OsTokens, runtime.id().as_ref());
 
-    // Where the hub returns to. `key=link` is this console's own marker, kept
-    // distinct from the `key=auth` the hub appends on a sign-in so the two
-    // return legs can never be mistaken for each other in `App.tsx`.
+    // Where the hub returns to. `key=link` is this console's own marker: a
+    // magic link carries no marker at all, so `App.tsx` can tell the two
+    // landings apart and never redeems a grant code as a sign-in.
     let callback_url = format!(
         "{}?company={}&key=link&state={}",
         callback_base(&state, &headers),
@@ -728,7 +728,7 @@ async fn start_link(
     // once, so an admin who pressed a button in their own console landed on a
     // Google account picker that named nobody and offered no other account.
     // The site page names the instance asking, says what will be created, and
-    // offers the same providers the sign-in screen does — then sends them to
+    // offers the hub's own providers — then sends them to
     // this very endpoint with the provider they picked. The parameters are
     // built once either way, so the two paths cannot disagree about the
     // challenge.

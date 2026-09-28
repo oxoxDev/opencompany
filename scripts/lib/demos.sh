@@ -20,3 +20,17 @@ resolve_demo_company() {
 demo_project_name() {
     printf 'opencompany-%s\n' "$(printf '%s' "$1" | tr '_' '-')"
 }
+
+# The development Compose overlay gives its build caches fixed external names
+# so every demo project can reuse them. Compose never creates external volumes,
+# so each entry point must ensure they exist before its first Compose command.
+ensure_demo_cache_volumes() {
+    for cache_volume in \
+        opencompany-cargo-registry \
+        opencompany-cargo-git \
+        opencompany-cargo-target \
+        opencompany-frontend-node-modules; do
+        docker volume inspect "$cache_volume" >/dev/null 2>&1 \
+            || docker volume create "$cache_volume" >/dev/null
+    done
+}

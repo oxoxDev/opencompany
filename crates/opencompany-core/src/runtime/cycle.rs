@@ -945,14 +945,7 @@ impl<'a> CycleRunner<'a> {
             if let Some(record) = &record
                 // Cheap exit before touching either store: no operator message,
                 // so no briefing has anywhere to land.
-                //
-                // Every operator message counts, addressed or not. `chat: None`
-                // is not "unaddressed" — `chat_and_emit` routes it to the
-                // General desk and every reader of the journal folds it there
-                // (`is_general_chat`), so requiring `Some` silently withheld
-                // both briefings from exactly the turns a bare REST or ACP
-                // caller sends: "did that ship?" answered blind, in the one
-                // conversation the console itself defaults to (codex on #1972).
+
                 && events
                     .iter()
                     .any(|e| matches!(e, CompanyEvent::OperatorMessage { .. }))
@@ -1459,39 +1452,14 @@ working on):\n{}\n]",
             // same whoever ran it. That is a different axis from the briefing
             // above, which is why this is a second pass rather than a wider
             // filter on the first.
-            //
-            // Both halves of the origin, since #1890 B: the channel through
-            // `same_conversation` (which folds General's four spellings), and
-            // the thread verbatim.
-            //
-            // **Both desk spellings**, like `chat_history::owns`. This filter
-            // originally compared the addressed selector verbatim, on the
-            // argument that both sides are the raw chat id stamped from this
-            // same field — which holds only while every caller spells the desk
-            // the same way. They do not: a card raised by a client addressing
-            // the desk by id, and a later "did that ship?" addressing it by
-            // name, are the same conversation and compared unequal, so the
-            // briefing went missing exactly when the operator was asking for it
-            // (codex on #1972).
+
             let mut done: Vec<&&TaskRecord> = settled
                 .iter()
                 .filter(|c| {
-                    // A recorded desk is required before any of this compares.
-                    // `same_conversation(None, "General")` is `true` — `None`
-                    // is one of General's four spellings *for a message* — but
-                    // a card with no origin was raised by no conversation at
-                    // all, and reading its absence as "General" briefs
-                    // board-only work into an unaddressed turn as work "raised
-                    // in this conversation". `chat_history::owns` already draws
-                    // that line for the terminal (`a_terminal_with_no_origin_
-                    // belongs_to_nobody_not_to_general`); this now draws the
-                    // same one (coderabbit on #1982).
                     let Some(origin) = c.origin_chat_id() else {
                         return false;
                     };
-                    (chat_history::same_conversation(Some(origin), Some(desk_id.as_str()))
-                        || chat_history::same_conversation(Some(origin), Some(desk_name.as_str())))
-                        && c.origin_parent() == thread
+                    (origin == desk_id || origin == desk_name) && c.origin_parent() == thread
                 })
                 .collect();
             if done.is_empty() {
@@ -2809,7 +2777,7 @@ async fn recipient_is_established(rt: &CompanyRuntime, to: &str) -> bool {
 /// prefix `dm-` so the result cannot lead with `-`, cannot be empty, cannot
 /// collide with a card id, and reads as "a conversation's branch" in `git log`.
 /// `None` when nothing usable survives.
-fn sanitize_work_segment(thread: &str) -> Option<String> {
+pub(crate) fn sanitize_work_segment(thread: &str) -> Option<String> {
     let cleaned: String = thread
         .chars()
         .map(|c| {
@@ -2999,7 +2967,22 @@ fn cycle_task_id(
             | CompanyEvent::DeskCreated { .. }
             | CompanyEvent::DeskDeleted { .. }
             | CompanyEvent::DeskMembersChanged { .. }
-            | CompanyEvent::DeskHiveConfigured { .. }
+            | CompanyEvent::DeskRoutingConfigured { .. }
+            | CompanyEvent::SkillChanged { .. }
+            // Plan hive-desks, Phase 4: the episode record — brackets around
+            // the `AgentReply` rows a room wrote, and the driver's checkpoint.
+            // Records of a round that already ran, not stimuli for a cycle.
+            | CompanyEvent::EpisodeOpened { .. }
+            | CompanyEvent::RoundStarted { .. }
+            | CompanyEvent::RoundCommitted { .. }
+            | CompanyEvent::BroadcastRouted { .. }
+            | CompanyEvent::DmDelivered { .. }
+            | CompanyEvent::EpisodeCompleted { .. }
+            | CompanyEvent::ConversationOpened { .. }
+            | CompanyEvent::ConversationConcluded { .. }
+            | CompanyEvent::EpisodeSeatParked { .. }
+            | CompanyEvent::EpisodeSeatResumed { .. }
+            | CompanyEvent::EpisodeStateSaved { .. }
             | CompanyEvent::WorkflowEnabledChanged { .. }
             | CompanyEvent::WorkflowRunFinished { .. }
             // Issue #371/#382: a run's start and its per-node start/finish
@@ -3038,6 +3021,7 @@ fn cycle_task_id(
             // either as a stimulus would make a turn re-trigger itself.
             | CompanyEvent::TurnStarted { .. }
             | CompanyEvent::TurnFailed { .. }
+            | CompanyEvent::TurnSettled { .. }
             // Issue #1015: an attempt row announcing its own move. The same
             // argument as `TaskCardChanged` directly above, and it matters more
             // here — the store appends it *after* the status write, and the
@@ -3239,7 +3223,22 @@ fn cycle_conversation(
             | CompanyEvent::DeskCreated { .. }
             | CompanyEvent::DeskDeleted { .. }
             | CompanyEvent::DeskMembersChanged { .. }
-            | CompanyEvent::DeskHiveConfigured { .. }
+            | CompanyEvent::DeskRoutingConfigured { .. }
+            | CompanyEvent::SkillChanged { .. }
+            // Plan hive-desks, Phase 4: the episode record — brackets around
+            // the `AgentReply` rows a room wrote, and the driver's checkpoint.
+            // Records of a round that already ran, not stimuli for a cycle.
+            | CompanyEvent::EpisodeOpened { .. }
+            | CompanyEvent::RoundStarted { .. }
+            | CompanyEvent::RoundCommitted { .. }
+            | CompanyEvent::BroadcastRouted { .. }
+            | CompanyEvent::DmDelivered { .. }
+            | CompanyEvent::EpisodeCompleted { .. }
+            | CompanyEvent::ConversationOpened { .. }
+            | CompanyEvent::ConversationConcluded { .. }
+            | CompanyEvent::EpisodeSeatParked { .. }
+            | CompanyEvent::EpisodeSeatResumed { .. }
+            | CompanyEvent::EpisodeStateSaved { .. }
             | CompanyEvent::WorkflowEnabledChanged { .. }
             | CompanyEvent::WorkflowRunFinished { .. }
             | CompanyEvent::WorkflowRunStarted { .. }
@@ -3270,6 +3269,7 @@ fn cycle_conversation(
             // either as a stimulus would make a turn re-trigger itself.
             | CompanyEvent::TurnStarted { .. }
             | CompanyEvent::TurnFailed { .. }
+            | CompanyEvent::TurnSettled { .. }
             // Issue #1015: an attempt row announcing its own move. The same
             // argument as `TaskCardChanged` directly above, and it matters more
             // here — the store appends it *after* the status write, and the
@@ -3459,6 +3459,17 @@ impl<'a> CycleHostImpl<'a> {
         }
     }
 
+    /// The runtime's park transaction, over this company's live handles.
+    fn parker(&self) -> crate::runtime::approval_park::ApprovalParker {
+        crate::runtime::approval_park::ApprovalParker::new(
+            self.rt.approvals.clone(),
+            self.rt.journal.clone(),
+            self.rt.grants.clone(),
+            self.rt.continuations.clone(),
+            self.rt.events.clone(),
+        )
+    }
+
     /// Parks `effect` on the approval gate, journals it durably, and records the
     /// id on this cycle's outcome.
     ///
@@ -3469,90 +3480,20 @@ impl<'a> CycleHostImpl<'a> {
     /// original [`ApprovalId`] regardless of who decided it.
     async fn park(&self, effect: Effect) -> Result<ApprovalId> {
         let approval_id = self
-            .rt
-            .approvals
-            .park(&self.company, effect.clone())
-            .await?;
-        self.rt
-            .journal
-            .record_parked(
-                &approval_id,
-                &effect,
-                now_millis(),
-                TaskLink::from_task_id(self.task_id.as_deref()),
-                // Which channel, and — issue #435 — where inside it, so the
-                // continuation can be threaded back under the same root rather
-                // than landing flat in the channel. Built as one value so the
-                // pair cannot be written down describing two different places.
-                ApprovalConversation {
-                    thread: self.thread_id.clone(),
-                    parent: self.thread_parent,
-                },
-                // Issue #469: which turn is blocked on this. Recorded here
-                // because this is the one write path into the approval queue, so
-                // the count the continuation queue keeps below cannot describe a
-                // different set of approvals from the one that is parked.
-                Some(self.cycle_id.clone()),
-            )
-            .await?;
-        // Issue #796: a parked approval mints no grant until it resolves, so
-        // until then neither grant map names this work unit. Mark it pending on
-        // the shared grant set so an unrelated turn's `sweep_orphans` treats the
-        // checkout this parked step is holding as live rather than orphaned. The
-        // key is derived exactly as `approval_work_key` derives the grant's
-        // `origin_task` (the card, else the sanitised thread), so the pending
-        // mark and the grant it becomes name one unit; cleared when the approval
-        // is settled or expires.
-        if let Some(work) = self
-            .task_id
-            .clone()
-            .or_else(|| self.thread_id.as_deref().and_then(sanitize_work_segment))
-        {
-            self.rt.grants.mark_pending(&approval_id, work);
-        }
-        // …and armed on the live counter in the same breath. A turn that parks
-        // four calls is blocked on four decisions; the runtime holds its
-        // continuation until the last of them lands and then runs it once.
-        // Strictly after the journal write, so a crash between the two replays
-        // as "still parked" and is re-armed by recovery rather than leaving a
-        // counter for an approval no record describes.
-        self.rt.continuations.arm(&self.cycle_id);
-        // Issue #379: tell every subscribed console a request just parked, so an
-        // inline card can appear in the conversation *as it happens* rather than
-        // on the next poll of the approvals feed.
-        //
-        // Strictly **after** the journal write, and best-effort — the same
-        // division `sweep_expired_approvals` draws. The journal is the binding
-        // record of what is parked; the event is an advisory nudge, and a failed
-        // log write must not undo a park that already happened (the queue would
-        // then hold an effect no record describes). A console that misses the
-        // frame still sees the approval on its next feed refresh.
-        //
-        // Deliberately **thin**: an id, a kind and a thread. The payload is not
-        // here because `pending_approvals()` is the single place #372's
-        // host-side redaction runs, and a payload-bearing durable event would
-        // open a second surface that has to redact — and eventually will not.
-        // The console reacts by refreshing the feed and renders from the
-        // redacted summary. One round trip, on purpose.
-        if let Err(err) = self
-            .rt
-            .events
-            .append(
+            .parker()
+            .park(
                 &self.company,
-                CompanyEvent::ApprovalParked {
-                    approval_id: approval_id.clone(),
-                    effect_kind: effect.kind.clone(),
-                    thread: self.thread_id.clone(),
+                effect.clone(),
+                crate::runtime::approval_park::ParkSite {
+                    task: TaskLink::from_task_id(self.task_id.as_deref()),
+                    conversation: ApprovalConversation {
+                        thread: self.thread_id.clone(),
+                        parent: self.thread_parent,
+                    },
+                    turn: Some(self.cycle_id.clone()),
                 },
             )
-            .await
-        {
-            tracing::warn!(
-                approval_id = %approval_id,
-                error = %err,
-                "approval parked and journaled, but its event-log entry failed",
-            );
-        }
+            .await?;
         self.parked
             .lock()
             .expect("parked poisoned")

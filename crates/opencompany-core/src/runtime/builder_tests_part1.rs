@@ -349,6 +349,7 @@ async fn a_reboot_still_grandfathers_an_already_registered_operator_agent_id() {
     let id = company_id_from_name("Acme");
     FsCompanyStore::new(home.path())
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             id: id.clone(),
             manifest: reserved.clone(),
             ledger: Vec::new(),

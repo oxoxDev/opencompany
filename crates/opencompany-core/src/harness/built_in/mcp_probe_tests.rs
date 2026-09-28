@@ -5,6 +5,23 @@ fn anyhow_str(msg: &str) -> anyhow::Error {
     anyhow::anyhow!("{msg}")
 }
 
+fn plain_decl(name: &str, endpoint: &str) -> McpServerDecl {
+    McpServerDecl {
+        name: name.to_string(),
+        endpoint: endpoint.to_string(),
+        description: None,
+        allowed_tools: Vec::new(),
+        disallowed_tools: Vec::new(),
+        read_only_tools: Vec::new(),
+        timeout_secs: 30,
+        enabled: true,
+        source: McpSource::Runtime,
+        auth: AuthMaterial::None,
+        tool_policies: Default::default(),
+        tool_inventory: Default::default(),
+    }
+}
+
 fn oauth_decl(name: &str, endpoint: &str, access_token: &str) -> McpServerDecl {
     McpServerDecl {
         name: name.to_string(),
@@ -24,6 +41,8 @@ fn oauth_decl(name: &str, endpoint: &str, access_token: &str) -> McpServerDecl {
             token_endpoint: "https://as.example/token".to_string(),
             expires_at: u64::MAX,
         },
+        tool_policies: Default::default(),
+        tool_inventory: Default::default(),
     }
 }
 
@@ -344,4 +363,83 @@ fn operator_message_is_actionable_and_scrubbed() {
     );
     assert!(msg.contains("browserbase"), "{msg}");
     assert!(msg.to_lowercase().contains("credential"), "{msg}");
+}
+
+// ---- discovery records an inventory alongside the health --------------
+
+use std::collections::HashMap as StdHashMap;
+use std::sync::Mutex as StdMutex;
+
+use crate::company::mcp_policy::{ToolTier, load_tool_inventory, tool_inventory_key};
+use crate::ports::SecretStore;
+use crate::ports::types::SecretValue;
+
+#[derive(Default)]
+struct RecordingSecrets {
+    map: StdMutex<StdHashMap<String, String>>,
+}
+
+#[async_trait::async_trait]
+impl SecretStore for RecordingSecrets {
+    async fn get(&self, _c: &CompanyId, key: &str) -> crate::Result<Option<SecretValue>> {
+        Ok(self
+            .map
+            .lock()
+            .unwrap()
+            .get(key)
+            .map(|v| SecretValue(v.clone())))
+    }
+    async fn set(&self, _c: &CompanyId, key: &str, value: SecretValue) -> crate::Result<()> {
+        self.map.lock().unwrap().insert(key.to_string(), value.0);
+        Ok(())
+    }
+}
+
+/// A probe that cannot reach the server records health but must leave any
+/// previous inventory alone: the tools it offered before an outage are the best
+/// answer during one, and clearing them would drop every tool a stored tier
+/// default reaches.
+#[tokio::test]
+async fn a_failed_probe_leaves_the_previous_inventory_standing() {
+    let company = CompanyId::new("acme");
+    let secrets = RecordingSecrets::default();
+    let key = tool_inventory_key("fixture");
+    secrets
+        .set(
+            &company,
+            &key,
+            SecretValue(
+                serde_json::json!({
+                    "tools": { "search_pages": "read_only" },
+                    "discoveredAtMillis": 5u64
+                })
+                .to_string(),
+            ),
+        )
+        .await
+        .unwrap();
+
+    // Nothing listens here, so the listing fails and returns no names.
+    let decl = plain_decl("fixture", "http://127.0.0.1:1/mcp");
+    let health = probe_and_record(&company, &decl, &secrets).await;
+    assert_ne!(health.status, McpStatus::Ok);
+
+    let kept = load_tool_inventory(&company, &secrets, &key).await;
+    assert_eq!(kept.suggested("search_pages"), Some(ToolTier::ReadOnly));
+    assert_eq!(kept.discovered_at_millis, 5);
+}
+
+/// A failed probe still persists its health, so the console reports the outage.
+#[tokio::test]
+async fn a_failed_probe_still_persists_its_health() {
+    let company = CompanyId::new("acme");
+    let secrets = RecordingSecrets::default();
+    let decl = plain_decl("fixture", "http://127.0.0.1:1/mcp");
+    let health = probe_and_record(&company, &decl, &secrets).await;
+
+    let stored = crate::company::mcp::load_health(&company, "fixture", &secrets)
+        .await
+        .unwrap()
+        .expect("health persisted");
+    assert_eq!(stored.status, health.status);
 }

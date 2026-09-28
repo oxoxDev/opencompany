@@ -283,6 +283,7 @@ async fn task_export_serves_a_readable_document_and_alters_nothing() {
             steps: Vec::new(),
             task_id: Some("t-1".into()),
             outputs: Vec::new(),
+            episode: None,
         },
     ] {
         runtime.events().append(&company, event).await.unwrap();
@@ -441,7 +442,7 @@ async fn task_timeline_scopes_approvals_to_the_run_window() {
         .collect();
     assert_eq!(
         kinds,
-        vec!["dispatched", "approval", "tool_failed", "completed"],
+        vec!["card", "dispatched", "approval", "tool_failed", "completed"],
         "exactly one approval — the one inside the run window"
     );
 

@@ -95,6 +95,7 @@ async fn put_credential_that_configures_inference_rebuilds_the_runtime_in_place(
     let id = CompanyId::new("fanrb");
     FsCompanyStore::new(home.clone())
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),

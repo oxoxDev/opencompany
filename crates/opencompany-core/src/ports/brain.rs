@@ -138,6 +138,18 @@ pub trait Brain: Send + Sync {
     fn titler(&self) -> Option<&dyn crate::ports::tasks::TitleSummariser> {
         None
     }
+
+    /// Carries on a hive episode that is not running in this process from
+    /// its last checkpoint, answering whether a resume is now under way.
+    ///
+    /// The runtime calls it when an operator decides an approval an episode
+    /// seat parked on and no running episode took the decision -- after a
+    /// restart, typically. The default is `false`: a brain that runs no
+    /// episodes has none to resume.
+    async fn resume_episode(&self, episode_id: &str) -> bool {
+        let _ = episode_id;
+        false
+    }
 }
 
 /// Callbacks the brain makes into the host mid-cycle.

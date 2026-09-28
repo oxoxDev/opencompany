@@ -11,6 +11,8 @@ import {
   EULER_COMPANY,
   FIRST_RUN,
   FIRST_RUN_COMPANY,
+  HIVE,
+  HIVE_COMPANY,
   LIVE_BRAIN,
   LIVE_LLM,
   LIVE_LLM_BIND,
@@ -108,6 +110,14 @@ const LIVE_LLM_SPEC = /orchestration-live\.spec\.ts$/;
 const EULER_SPEC = /euler-live\.spec\.ts$/;
 
 /**
+ * The one spec that watches a desk answer as a **room** — two seats working
+ * at once, a dm, the episode completing — and which therefore needs a host
+ * serving a company whose desks have more than one member
+ * (`companies/hive_demo`). See `HIVE` in `test/e2e/capabilities.ts`.
+ */
+const HIVE_SPEC = /desk-episode-live\.spec\.ts$/;
+
+/**
  * The one spec that compares **pixels** rather than named quantities, and which
  * therefore runs on its own so a page still settling cannot be attributed to it
  * — and so it never sits in the way of a merge. Same default-feature host as an
@@ -115,6 +125,14 @@ const EULER_SPEC = /euler-live\.spec\.ts$/;
  * host. See `VISUAL` in `test/e2e/capabilities.ts`.
  */
 const VISUAL_SPEC = /visual\.spec\.ts$/;
+
+/**
+ * The runtime-config spec runs once with the ordinary silent host and once
+ * with a hosted, explicitly opted-in host. The second run selects only this
+ * spec so unrelated E2E coverage never inherits analytics configuration.
+ */
+const ANALYTICS_SPEC = /opencompany-config\.spec\.ts$/;
+const ANALYTICS = process.env.PW_ANALYTICS === "1";
 
 const providedBaseURL = process.env.PW_BASE_URL;
 
@@ -157,10 +175,25 @@ const managesHost = MANAGED_HOST_HOME !== undefined;
 const repoRoot = resolve(here, "..");
 const derivedPort =
   8100 +
-  (parseInt(createHash("sha256").update(repoRoot).digest("hex").slice(0, 8), 16) %
+  (parseInt(
+    createHash("sha256").update(repoRoot).digest("hex").slice(0, 8),
+    16,
+  ) %
+    8800);
+const derivedAnalyticsPort =
+  16900 +
+  (parseInt(
+    createHash("sha256")
+      .update(`${repoRoot}:analytics`)
+      .digest("hex")
+      .slice(0, 8),
+    16,
+  ) %
     8800);
 
-const managedBind = process.env.PW_HOST_BIND || `127.0.0.1:${derivedPort}`;
+const managedBind = ANALYTICS
+  ? process.env.PW_ANALYTICS_HOST_BIND || `127.0.0.1:${derivedAnalyticsPort}`
+  : process.env.PW_HOST_BIND || `127.0.0.1:${derivedPort}`;
 
 const baseURL = providedBaseURL || `http://${managedBind}`;
 
@@ -183,7 +216,11 @@ const storageState =
           ? "../target/e2e/first-run-storage-state.json"
           : EULER
             ? "../target/e2e/euler-storage-state.json"
-            : "../target/e2e/storage-state.json",
+            : HIVE
+              ? "../target/e2e/hive-storage-state.json"
+              : ANALYTICS
+                ? "../target/e2e/analytics-storage-state.json"
+                : "../target/e2e/storage-state.json",
       )
     : undefined);
 
@@ -254,6 +291,25 @@ const composioEnv: Record<string, string> = managesComposio
   ? { TINYHUMANS_API_URL: `http://${COMPOSIO_FIXTURE_BIND}` }
   : {};
 
+/** Public browser analytics configuration exercised by its dedicated run. */
+const analyticsEnv: Record<string, string> =
+  managesHost && ANALYTICS
+    ? {
+        OPENCOMPANY_DEPLOYMENT: "hosted-tenant",
+        OPENCOMPANY_ANALYTICS: "on",
+        OPENCOMPANY_ANALYTICS_ENDPOINT: "https://collector.example/api/track",
+        // Hosted tenants are provisioned with the platform API base and refuse
+        // to boot without one. This spec never calls it; keep the fixture inert.
+        TINYHUMANS_API_URL: "https://api.example.invalid",
+      }
+    : {};
+
+/** Host-script inputs that isolate the opted-in run from the ordinary lane. */
+const analyticsHostEnv: Record<string, string> =
+  MANAGED_HOST_HOME !== undefined && ANALYTICS
+    ? { PW_HOST_DATA_DIR: MANAGED_HOST_HOME }
+    : {};
+
 /**
  * What a first-run run tells `test/e2e/host.sh` to serve.
  *
@@ -298,13 +354,36 @@ const eulerEnv: Record<string, string> =
       }
     : {};
 
-const passthrough = [...Object.keys(inferenceEnv), ...Object.keys(composioEnv)];
+/**
+ * What a hive run tells `test/e2e/host.sh` to serve: `companies/hive_demo`,
+ * whose two desks share the CEO, on a data root of its own so the episodes a
+ * previous run left cannot pass for this run's.
+ */
+const hiveEnv: Record<string, string> =
+  // See `firstRunEnv` for why this is not `managesHost`.
+  MANAGED_HOST_HOME !== undefined && HIVE
+    ? {
+        PW_HOST_COMPANY: resolve(here, "..", HIVE_COMPANY),
+        PW_HOST_DATA_DIR: MANAGED_HOST_HOME,
+      }
+    : {};
+
+const passthrough = [
+  ...Object.keys(inferenceEnv),
+  ...Object.keys(composioEnv),
+  ...Object.keys(analyticsEnv),
+];
 const hostEnv: Record<string, string> = {
   ...inferenceEnv,
   ...composioEnv,
+  ...analyticsEnv,
+  ...analyticsHostEnv,
   ...firstRunEnv,
   ...eulerEnv,
-  ...(passthrough.length > 0 ? { PW_HOST_PASSTHROUGH: passthrough.join(" ") } : {}),
+  ...hiveEnv,
+  ...(passthrough.length > 0
+    ? { PW_HOST_PASSTHROUGH: passthrough.join(" ") }
+    : {}),
 };
 
 /**
@@ -342,23 +421,23 @@ const fixtureServers = [
       ]
     : []),
   ...(managesFixtures
-  ? [
-      {
-        command: `node ./test/e2e/mock-brain.mjs --bind ${MOCK_BRAIN_BIND}`,
-        url: `http://${MOCK_BRAIN_BIND}/healthz`,
-        reuseExistingServer: !process.env.CI,
-        timeout: 30_000,
-        stdout: "pipe" as const,
-        stderr: "pipe" as const,
-      },
-      {
-        command: `node ./test/e2e/mcp-server.mjs --bind ${MCP_FIXTURE_BIND}`,
-        url: `http://${MCP_FIXTURE_BIND}/healthz`,
-        reuseExistingServer: !process.env.CI,
-        timeout: 30_000,
-        stdout: "pipe" as const,
-        stderr: "pipe" as const,
-      },
+    ? [
+        {
+          command: `node ./test/e2e/mock-brain.mjs --bind ${MOCK_BRAIN_BIND}`,
+          url: `http://${MOCK_BRAIN_BIND}/healthz`,
+          reuseExistingServer: !process.env.CI,
+          timeout: 30_000,
+          stdout: "pipe" as const,
+          stderr: "pipe" as const,
+        },
+        {
+          command: `node ./test/e2e/mcp-server.mjs --bind ${MCP_FIXTURE_BIND}`,
+          url: `http://${MCP_FIXTURE_BIND}/healthz`,
+          reuseExistingServer: !process.env.CI,
+          timeout: 30_000,
+          stdout: "pipe" as const,
+          stderr: "pipe" as const,
+        },
       ]
     : []),
 ];
@@ -383,21 +462,34 @@ export default defineConfig({
   //
   // Four disjoint selections now: the Project Euler lane is a live-LLM run
   // against a different company, so it is checked *before* `LIVE_LLM` — both
-  // flags are set for it, and the more specific lane wins.
+  // flags are set for it, and the more specific lane wins. The hive lane is
+  // the same shape one rung down: a live-brain run against `hive_demo`.
   //
-  // Five now: the visual lane is the fifth, and it is selected the same way for
-  // a different reason — its host is an ordinary one, but a run that mixed
-  // pixel comparison in with the rest would attribute a page still settling to
+  // Six now: the analytics lane is a second pass over one spec with an opted-in
+  // host. The visual lane remains separate because a run that mixed pixel
+  // comparison in with the rest would attribute a page still settling to
   // whichever spec happened to be next.
-  ...(FIRST_RUN
-    ? { testMatch: FIRST_RUN_SPEC }
-    : EULER
-      ? { testMatch: EULER_SPEC }
-      : LIVE_LLM
-        ? { testMatch: LIVE_LLM_SPEC }
-        : VISUAL
-          ? { testMatch: VISUAL_SPEC }
-          : { testIgnore: [FIRST_RUN_SPEC, LIVE_LLM_SPEC, EULER_SPEC, VISUAL_SPEC] }),
+  ...(ANALYTICS
+    ? { testMatch: ANALYTICS_SPEC }
+    : FIRST_RUN
+      ? { testMatch: FIRST_RUN_SPEC }
+      : EULER
+        ? { testMatch: EULER_SPEC }
+        : HIVE
+          ? { testMatch: HIVE_SPEC }
+          : LIVE_LLM
+            ? { testMatch: LIVE_LLM_SPEC }
+            : VISUAL
+              ? { testMatch: VISUAL_SPEC }
+              : {
+                  testIgnore: [
+                    FIRST_RUN_SPEC,
+                    LIVE_LLM_SPEC,
+                    EULER_SPEC,
+                    HIVE_SPEC,
+                    VISUAL_SPEC,
+                  ],
+                }),
   // UNCONDITIONAL, and it was not always (issue #1773). `global-setup.ts` runs
   // after every `webServer` above has resolved, which makes it the only hook
   // that sees the server Playwright *adopted* rather than the one it was
@@ -438,7 +530,11 @@ export default defineConfig({
     // (`KnowledgeGraph.tsx` has a `prefers-reduced-motion` block) so this is the
     // lever it was built to respond to.
     ...(VISUAL
-      ? { viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1, reducedMotion: "reduce" as const }
+      ? {
+          viewport: { width: 1280, height: 720 },
+          deviceScaleFactor: 1,
+          reducedMotion: "reduce" as const,
+        }
       : {}),
   },
   webServer: managesHost
@@ -449,9 +545,11 @@ export default defineConfig({
           url: `${baseURL}/healthz`,
           // A host already listening on the default bind is almost always the
           // one you are developing against, so drive it rather than fight it
-          // for the port. In CI that would mean silently testing something
-          // unknown.
-          reuseExistingServer: !process.env.CI,
+          // for the port. The analytics run is the exception: its assertion
+          // depends on this process receiving analyticsEnv, so adopting an
+          // ordinary host would test the wrong configuration. In CI any reuse
+          // would mean silently testing something unknown.
+          reuseExistingServer: !process.env.CI && !ANALYTICS,
           // Covers a cold `npm run build` for the console bundle plus the
           // host's own boot, with room to spare.
           timeout: 180_000,

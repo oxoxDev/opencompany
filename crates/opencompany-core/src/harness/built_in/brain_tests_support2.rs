@@ -1,8 +1,6 @@
 use super::*;
 use crate::ports::TaskStore;
-use tinyinference::Result as TaResult;
-use tinyinference::message::Message;
-use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
+use crate::ports::artifacts::ArtifactRecord;
 
 // -- issue #552: the write ordering, proven by failure injection ---------
 
@@ -171,6 +169,7 @@ members = ["engineer"]
     )
     .expect("valid manifest");
     CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
@@ -225,6 +224,7 @@ members = ["chief"]
     )
     .expect("valid manifest");
     CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
@@ -257,6 +257,7 @@ pub(super) fn brain_over(
 ) -> (HarnessBrain, Arc<FsOps>) {
     let tasks = Arc::new(FsOps::new(dir));
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -290,6 +291,7 @@ pub(super) fn brain_over(
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -383,124 +385,6 @@ pub(super) fn logs_from(body: impl FnOnce()) -> String {
 
 // ── Issue #186 part b: orchestrator lifecycle authority ────────────────
 
-// --- MCP failure drain --------------------------------------------------
-
-/// A two-member desk record, which is the smallest roster shape
-/// `desk_episode` opens as a hive room (a `deliberates(members.len())`
-/// floor of two, with no `hive` block needed to opt in).
-pub(super) fn record_with_hive_desk() -> CompanyRecord {
-    let manifest = toml::from_str(
-        r#"
-[company]
-name = "Acme"
-
-[[agent]]
-id = "engineer"
-role = "Engineer"
-
-[[agent]]
-id = "designer"
-role = "Designer"
-
-[[group_chat]]
-id = "eng_desk"
-name = "Engineering"
-members = ["engineer", "designer"]
-"#,
-    )
-    .expect("valid manifest");
-    CompanyRecord {
-        overlay_desk_hive: Vec::new(),
-        overlay_retired_agents: Vec::new(),
-        overlay_agent_edits: Vec::new(),
-        id: CompanyId::new("acme"),
-        manifest,
-        ledger: Vec::new(),
-        lifecycle: "running".to_string(),
-        overlay_agents: Vec::new(),
-        overlay_desk_members: Vec::new(),
-        overlay_desk_order: Vec::new(),
-        overlay_desks: Vec::new(),
-        overlay_workflows: Vec::new(),
-        overlay_budgets: Vec::new(),
-        overlay_policy: None,
-        overlay_tool_grants: None,
-        overlay_desk_tools: Default::default(),
-        disabled_workflows: Vec::new(),
-        template_provenance: None,
-        setup: None,
-        name_confirmed: false,
-        activation_completed_at: None,
-        created_at_millis: None,
-    }
-}
-
-/// Content-aware scripted model for
-/// `two_hive_desk_episodes_in_one_cycle_do_not_fold_into_each_other`.
-///
-/// Reads the rendered episode prompt exactly as the operator's model
-/// would: which seat is being asked (`You are @<id>`), whether the room
-/// is still deliberating or has already been told a topic carried
-/// (`commit_protocol`'s `carried \`#<topic>\`` line), and which of the
-/// two questions this desk was actually asked (`ALPHA_QUESTION` /
-/// `BETA_QUESTION`, planted in each operator message's own text so a
-/// prompt scan can tell episode A's transcript from episode B's without
-/// touching the journal directly).
-pub(super) struct HiveTopicProvider;
-
-/// The topic a `commit_protocol` block is telling this seat to record, if
-/// the prompt carries one — i.e. the room already reached quorum.
-pub(super) fn carried_topic(prompt: &str) -> Option<String> {
-    let marker = "carried `#";
-    let start = prompt.find(marker)? + marker.len();
-    let rest = &prompt[start..];
-    let end = rest.find('`')?;
-    Some(rest[..end].to_string())
-}
-
-#[async_trait]
-impl ChatModel<()> for HiveTopicProvider {
-    async fn invoke(&self, _state: &(), request: ModelRequest) -> TaResult<ModelResponse> {
-        let all_text: String = request
-            .messages
-            .iter()
-            .map(Message::text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !all_text.contains("You are @engineer") && !all_text.contains("You are @designer") {
-            return Ok(ModelResponse::assistant("(not a hive turn)".to_string()));
-        }
-        let line = if let Some(topic) = carried_topic(&all_text) {
-            format!("!commit #{topic} ^1 because the room already carried it.")
-        } else {
-            // The desk's own memory recall can surface a PAST episode's
-            // task and outcome as remembered context (by design — see
-            // `a_desk_reasons_with_what_it_stored_in_an_earlier_episode`),
-            // so the marker is read from the live transcript this turn
-            // was actually handed, not from the whole prompt: the recall
-            // block is prose about a prior episode, not this episode's
-            // own fold.
-            let transcript = all_text
-                .split("Shared attributed transcript:")
-                .nth(1)
-                .unwrap_or(all_text.as_str());
-            let topic = if transcript.contains("ALPHA_QUESTION") {
-                "alpha"
-            } else {
-                "beta"
-            };
-            format!("!propose #{topic} Because the marker says so.")
-        };
-        Ok(ModelResponse::assistant(line))
-    }
-}
-
-impl HarnessModel for HiveTopicProvider {
-    fn telemetry_provider_id(&self) -> String {
-        "hive-topic-mock".to_string()
-    }
-}
-
 // --- Approval parking (issue #172) --------------------------------------
 
 /// A brain over `dir` whose deps carry `requests` as the shared
@@ -511,6 +395,7 @@ pub(super) fn brain_with_approval_queue(
     requests: crate::harness::policy::ApprovalRequestQueue,
 ) -> HarnessBrain {
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -544,6 +429,7 @@ pub(super) fn brain_with_approval_queue(
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: requests,
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,

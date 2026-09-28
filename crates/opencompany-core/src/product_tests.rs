@@ -15,7 +15,7 @@ fn header_pairs_the_sdk_name_key_with_the_identity() {
 }
 
 /// The whole point of this module existing separately from
-/// `openhuman_core::api::product`: the two crates' header name AND the
+/// `openhuman_tinyhumans::backend::product`: the two crates' header name AND the
 /// fact that this crate's identity is NOT the embedded core's default
 /// must never be able to drift apart silently. If either assertion here
 /// ever fails, the embedded core changed its header contract (or its
@@ -27,12 +27,12 @@ fn header_pairs_the_sdk_name_key_with_the_identity() {
 fn stays_in_sync_with_the_embedded_core_and_diverges_from_its_default() {
     assert_eq!(
         PRODUCT_IDENTITY_HEADER,
-        openhuman_core::api::PRODUCT_IDENTITY_HEADER,
+        openhuman_tinyhumans::backend::PRODUCT_IDENTITY_HEADER,
         "this crate's header name must match the embedded core's exactly"
     );
     assert_ne!(
         PRODUCT_IDENTITY,
-        openhuman_core::api::DEFAULT_PRODUCT_IDENTITY,
+        openhuman_tinyhumans::backend::DEFAULT_PRODUCT_IDENTITY,
         "opencompany's identity must not silently become the openhuman default"
     );
 }

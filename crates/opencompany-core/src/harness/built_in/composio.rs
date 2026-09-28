@@ -590,8 +590,8 @@ mod live {
         ComposioAuthorizeResponse, ComposioConnectionsResponse, ComposioDeleteResponse,
         ComposioExecuteResponse, ComposioToolkitsResponse, ComposioToolsResponse,
     };
-    use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
     use openhuman_core as oh;
+    use tinytools::{PermissionLevel, Tool, ToolResult};
 
     use crate::harness::built_in::composio_direct::DirectComposio;
 
@@ -681,6 +681,7 @@ mod live {
             .map_err(|e| anyhow::anyhow!("resolving this company's Composio credential: {e}"))?
             .ok_or_else(|| anyhow::anyhow!("no Composio credential is configured"))?;
         let mut secrets = vec![secret.clone()];
+        crate::harness::backend_transport::ensure_installed();
         let client = match config.mode() {
             ComposioMode::Managed => LiveClient::Managed(ComposioClient::new(Arc::new(
                 IntegrationClient::new(config.backend_url.clone(), secret.clone()),
@@ -968,7 +969,7 @@ mod live {
                     .http1_only()
                     .timeout(std::time::Duration::from_secs(60))
                     .connect_timeout(std::time::Duration::from_secs(15))
-                    .default_headers(openhuman_core::api::product::product_identity_headers())
+                    .default_headers(openhuman_tinyhumans::backend::product_identity_headers())
                     .build()
                     .map_err(|error| format!("{error}"))
             })
@@ -985,7 +986,7 @@ mod live {
         use openhuman_core::core::observability::report_error_or_expected;
 
         const PATH: &str = "/agent-integrations/composio/execute";
-        let url = openhuman_core::api::config::api_url(&client.backend_url, PATH);
+        let url = openhuman_core::util::url::join_url(&client.backend_url, PATH);
         let response = http
             .post(&url)
             .bearer_auth(&client.auth_token)
@@ -1022,7 +1023,7 @@ mod live {
                 openhuman_core::core::bus::BUS.publish(
                     openhuman_core::core::events::DomainEvent::SessionExpired {
                         source: format!("integrations.POST:{PATH}"),
-                        reason: oh::inference::provider::ops::sanitize_api_error(&message),
+                        reason: tinyinference_core::sanitize::sanitize_api_error(&message),
                     },
                 );
                 message

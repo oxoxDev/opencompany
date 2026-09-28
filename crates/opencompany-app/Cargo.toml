@@ -187,8 +187,33 @@ tauri-build = { version = "2", features = [] }
 [patch."https://github.com/tinyhumansai/tinymemory"]
 tinymemory-api = { path = "../../vendor/openhuman/vendor/tinymemory/crates/tinymemory-api" }
 
+# At the 1ecf1b0 pin `tinyinference` is a workspace of six crates
+# (`tinyinference-{core,embeddings,llm,local,providers,voice}`) and the single
+# `tinyinference` package no longer exists; the entries mirror the root
+# manifest's own `[patch]` table one for one. A patch path is resolved eagerly
+# whatever the feature set, so a stale entry here fails `cargo metadata
+# --locked` outright — this is what broke the Desktop lane.
 [patch."https://github.com/tinyhumansai/tinyinference"]
-tinyinference = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference" }
+tinyinference-core = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-core" }
+tinyinference-embeddings = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-embeddings" }
+tinyinference-llm = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-llm" }
+tinyinference-local = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-local" }
+tinyinference-providers = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-providers" }
+tinyinference-voice = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-voice" }
+
+# `tinyhivemind-openhuman` names `openhuman-embed` by git URL; without this
+# entry Cargo resolves a second `openhuman_embed::Agent` beside the vendored
+# path copy this crate builds against, and `AgentBinding::new` (which takes
+# the git-sourced `Agent`) refuses the path-sourced one as a type mismatch.
+# Replicated from the root manifest's own `[patch."https://github.com/tinyhumansai/openhuman"]`
+# entry, path rebased the same `../../` as every other entry in this table.
+[patch."https://github.com/tinyhumansai/openhuman"]
+openhuman-embed = { path = "../../vendor/openhuman/crates/openhuman-embed" }
+openhuman = { path = "../../vendor/openhuman/crates/openhuman-core" }
+
+[patch."https://github.com/tinyhumansai/tinytools"]
+tinytools = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinytools/crates/tinytools" }
+tinytools-agent = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinytools/crates/tinytools-agent" }
 
 [patch.crates-io]
 tinyflows = { path = "../../vendor/openhuman/vendor/tinyflows/crates/tinyflows" }
@@ -200,6 +225,16 @@ tinycortex = { path = "../../vendor/openhuman/vendor/tinymemory/vendor/tinycorte
 tinycortex-api = { path = "../../vendor/openhuman/vendor/tinymemory/vendor/tinycortex/api" }
 tinychannels = { path = "../../vendor/openhuman/vendor/tinychannels" }
 motosan-ai-oauth = { path = "../../vendor/openhuman/vendor/motosan-ai-oauth" }
+# The six tinyinference crates by registry name as well, matching the root
+# manifest's `[patch.crates-io]` table: `tinyagents-harness` names them with
+# `version = "0.3.0"` beside the path, and any crate reaching them by version
+# alone must land on the same vendored copy or `ChatModel` exists twice.
+tinyinference-core = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-core" }
+tinyinference-embeddings = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-embeddings" }
+tinyinference-llm = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-llm" }
+tinyinference-local = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-local" }
+tinyinference-providers = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-providers" }
+tinyinference-voice = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-voice" }
 
 # This crate is its own Cargo world, so it needs the workspace's symbolication
 # policy explicitly.

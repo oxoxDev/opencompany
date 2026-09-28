@@ -9,6 +9,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_CONSOLE_SENTRY_DSN,
   REDACTED,
   resolveCrashReporting,
   sanitizeEvent,
@@ -44,11 +45,17 @@ function credentialShaped(prefix: string, bodyLength: number, fill = "A"): strin
 }
 
 describe("resolveCrashReporting", () => {
-  it("reports nothing when no DSN is configured", () => {
-    // The state every local checkout and every CI run is in.
-    expect(resolveCrashReporting({}, RELEASE)).toBeNull();
-    expect(resolveCrashReporting({ VITE_SENTRY_DSN: "" }, RELEASE)).toBeNull();
-    expect(resolveCrashReporting({ VITE_SENTRY_DSN: "   " }, RELEASE)).toBeNull();
+  it("falls back to the compiled-in console DSN in a production build", () => {
+    for (const env of [{}, { VITE_SENTRY_DSN: "" }, { VITE_SENTRY_DSN: "   " }]) {
+      expect(resolveCrashReporting(env, RELEASE)?.dsn).toBe(DEFAULT_CONSOLE_SENTRY_DSN);
+    }
+  });
+
+  it("reports nothing without a DSN under the dev server, or when switched off", () => {
+    expect(resolveCrashReporting({ DEV: true }, RELEASE)).toBeNull();
+    expect(resolveCrashReporting({ VITE_SENTRY_DSN: "", DEV: true }, RELEASE)).toBeNull();
+    expect(resolveCrashReporting({ VITE_SENTRY_DSN: "off" }, RELEASE)).toBeNull();
+    expect(resolveCrashReporting({ VITE_SENTRY_DSN: " OFF " }, RELEASE)).toBeNull();
   });
 
   it("reports when a DSN is configured", () => {

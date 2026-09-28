@@ -216,71 +216,23 @@ fn effective_grants_agent_tools_intersect_allow() {
     assert_eq!(effective_grants(&manifest), vec!["email.send".to_string()]);
 }
 
+/// A manifest that names the retired out-of-process OpenHuman daemon as its
+/// tool and channel provider builds like any other: the grant-enforcing
+/// built-in tools, and the operator channel alone. The daemon's JSON-RPC seam
+/// was deleted with the `openhuman-rpc` feature (plan hive-desks, Phase 7);
+/// the embedded harness serves tools in-process over MCP instead.
 #[tokio::test]
-async fn healthy_openhuman_wires_provider_and_channel() {
+async fn an_openhuman_provider_manifest_builds_on_builtins_alone() {
     let dir = tempfile::tempdir().unwrap();
-    let rpc = Arc::new(MockOpenHumanRpc::new().with_result(
-        "openhuman.tools_invoke",
-        serde_json::json!({ "ok": true, "output": {} }),
-    ));
     let runtime = RuntimeBuilder::new(dir.path(), openhuman_manifest())
-        .with_openhuman_rpc(rpc.clone())
         .build()
         .await
         .unwrap();
 
-    // Operator + the openhuman-backed email channel.
-    assert_eq!(runtime.channels.len(), 2);
-    assert!(runtime.channels.iter().any(|c| c.channel_id() == "email"));
-
-    // The accessor the console's channel picker reads (#813) names the
-    // openhuman-backed provider channel AND `operator`: since issue #1757 the
-    // operator channel is a durable delivery target, so it is offered like
-    // any other real channel.
-    let deliverable = runtime.deliverable_channel_ids();
-    assert!(
-        deliverable.contains(&"email".to_string()),
-        "{deliverable:?}"
-    );
-    assert!(
-        deliverable.contains(&"operator".to_string()),
-        "{deliverable:?}"
-    );
-    assert_eq!(deliverable.len(), 2, "{deliverable:?}");
-
-    // A granted call routes through the OpenHuman transport.
-    let result = runtime
-        .tools
-        .invoke(
-            runtime.id(),
-            ToolCall {
-                tool: "email.send".into(),
-                args: serde_json::Value::Null,
-            },
-        )
-        .await
-        .unwrap();
-    assert!(result.ok);
-    assert_eq!(rpc.call_count(), 1);
-}
-
-#[tokio::test]
-async fn unreachable_openhuman_degrades_to_builtins() {
-    let dir = tempfile::tempdir().unwrap();
-    let rpc = Arc::new(MockOpenHumanRpc::new().unhealthy());
-    let runtime = RuntimeBuilder::new(dir.path(), openhuman_manifest())
-        .with_openhuman_rpc(rpc.clone())
-        .build()
-        .await
-        .unwrap();
-
-    // No openhuman channel is added when the daemon is unreachable.
+    // The declared `openhuman` channel is skipped; only the operator surface
+    // is wired, and since issue #1757 it is a durable delivery target.
     assert_eq!(runtime.channels.len(), 1);
     assert_eq!(runtime.channels[0].channel_id(), "operator");
-    // The accessor the console's channel picker reads (#813): `operator` is
-    // the only wired adapter here, and since issue #1757 it is a durable
-    // delivery target — so an operator-only runtime can still deliver, to the
-    // standing Operator channel. The picker answers `["operator"]`.
     assert_eq!(
         runtime.deliverable_channel_ids(),
         vec!["operator".to_string()],
@@ -288,9 +240,8 @@ async fn unreachable_openhuman_degrades_to_builtins() {
         runtime.deliverable_channel_ids()
     );
 
-    // Tools degrade to the grant-enforcing built-in: ungranted rejected,
-    // granted returns a well-formed not-implemented result — and the RPC
-    // transport is never touched.
+    // Tools are the grant-enforcing built-in: ungranted rejected, granted
+    // returns a well-formed not-implemented result.
     let ungranted = runtime
         .tools
         .invoke(
@@ -319,8 +270,6 @@ async fn unreachable_openhuman_degrades_to_builtins() {
         .await
         .unwrap();
     assert!(!granted.ok);
-    // Only the boot-time `health()` probe touched the transport.
-    assert_eq!(rpc.call_count(), 0);
 }
 
 #[tokio::test]
@@ -342,6 +291,7 @@ async fn wires_manifest_and_overlay_desks_as_delivery_channels() {
     let id = CompanyId::new("acme");
     FsCompanyStore::new(dir.path())
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             overlay_desk_hive: Vec::new(),
@@ -456,6 +406,7 @@ async fn deliverable_channel_ids_dedupes_a_grandfathered_operator_desk() {
     let id = company_id_from_name("Acme");
     FsCompanyStore::new(dir.path())
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             id: id.clone(),
             manifest: manifest.clone(),
             ledger: Vec::new(),

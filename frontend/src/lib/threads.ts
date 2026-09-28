@@ -3,7 +3,7 @@
 // and gives the company side a consistent identity (a "desk" you're talking to).
 
 import type { DeskDto, TeamMemberDto } from "../api/types";
-import { MAIN_THREAD_ID, type ChatMessage } from "./chat";
+import { GENERAL_CHANNEL_ID, type ChatMessage } from "./chat";
 import { toneFor } from "./team";
 
 export interface ThreadContact {
@@ -26,20 +26,20 @@ export interface Thread {
 /** Avatar tones rotated across desk threads. */
 const DESK_TONES = ["sky", "violet", "amber", "emerald", "rose", "cyan"];
 
-/** The company's main line — the orchestrator you talk to for anything. */
-function mainThread(): Thread {
+/** The company-wide `#general` line — the orchestrator you talk to for anything. */
+function generalThread(): Thread {
   return {
-    id: MAIN_THREAD_ID,
+    id: GENERAL_CHANNEL_ID,
     contact: { name: "Your company", kind: "company" },
-    blurb: "The main line — ask for anything",
+    blurb: "The whole company — ask for anything",
     messages: [],
   };
 }
 
-/** The default chat list: the company's main line plus a few focused desks. */
+/** The default chat list: `#general` plus a few focused desks. */
 export function defaultThreads(): Thread[] {
   return [
-    mainThread(),
+    generalThread(),
     {
       id: "strategy",
       contact: { name: "Strategy desk", kind: "agent", tone: "sky" },
@@ -62,15 +62,12 @@ export function defaultThreads(): Thread[] {
 }
 
 /**
- * Build the chat list from the company's real desks (issue #53): the main line
- * (the orchestrator) first, then one thread per desk keyed by its id.
+ * Build the chat list from the company's real desks (issue #53), `#general`
+ * first. A host that lists `#general` among its desks supplies it; for one that
+ * does not, the line is still addressable and is added here.
  *
- * A company with no desks gets the main line and nothing else. It used to get
- * {@link defaultThreads} — Strategy desk, Creative studio, Front desk — which
- * put three threads in the list for desks the company had never declared and
- * the host could not route to. `defaultThreads` is now only for a host that
- * never answered at all (no `/desks` route, or a failed read): the shell's
- * `.catch` leg, not this one. An empty answer is an answer.
+ * {@link defaultThreads} is only for a host that never answered at all (no
+ * `/desks` route, or a failed read). An empty answer is an answer.
  */
 export function threadsFromDesks(desks: DeskDto[]): Thread[] {
   const deskThreads: Thread[] = desks.map((desk, i) => ({
@@ -83,7 +80,9 @@ export function threadsFromDesks(desks: DeskDto[]): Thread[] {
     blurb: desk.description ?? "A desk of your company",
     messages: [],
   }));
-  return [mainThread(), ...deskThreads];
+  const general = deskThreads.filter((t) => t.id === GENERAL_CHANNEL_ID);
+  const rest = deskThreads.filter((t) => t.id !== GENERAL_CHANNEL_ID);
+  return [...(general.length > 0 ? general : [generalThread()]), ...rest];
 }
 
 /**

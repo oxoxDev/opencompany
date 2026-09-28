@@ -30,6 +30,7 @@ async fn roster_builds_with_skill_surface_wired() {
     .unwrap();
 
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -65,6 +66,7 @@ async fn roster_builds_with_skill_surface_wired() {
         deep_trace: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -85,8 +87,8 @@ async fn roster_builds_with_skill_surface_wired() {
         workspace: None,
     };
 
-    let roster =
-        build_roster(&record(), &deps, &[], &HashMap::new()).expect("roster builds with skills");
+    let roster = build_roster(&test_runtime(), &record(), &deps, &[], &HashMap::new())
+        .expect("roster builds with skills");
     assert_eq!(roster.len(), 2);
     // The scratch skill tree was materialized for the first roster agent.
     assert!(
@@ -119,7 +121,8 @@ async fn overlay_agent_is_built_as_a_real_roster_agent() {
         harness: None,
     });
 
-    let roster = build_roster(&rec, &fx.deps, &[], &HashMap::new()).expect("roster builds");
+    let roster =
+        build_roster(&test_runtime(), &rec, &fx.deps, &[], &HashMap::new()).expect("roster builds");
     let ids: Vec<_> = roster.iter().map(|a| a.agent_id.as_str()).collect();
     assert_eq!(ids, vec!["ceo", "engineer", "growth"], "got {ids:?}");
     let overlay_agent = roster
@@ -143,7 +146,8 @@ async fn a_console_edit_of_a_manifest_teammate_reaches_the_built_roster() {
         ..Default::default()
     });
 
-    let roster = build_roster(&rec, &fx.deps, &[], &HashMap::new()).expect("roster builds");
+    let roster =
+        build_roster(&test_runtime(), &rec, &fx.deps, &[], &HashMap::new()).expect("roster builds");
     let ceo = roster
         .iter()
         .find(|a| a.agent_id == "ceo")
@@ -162,7 +166,8 @@ async fn a_retired_manifest_teammate_is_not_built() {
     let mut rec = record();
     rec.retire_agent("ceo");
 
-    let roster = build_roster(&rec, &fx.deps, &[], &HashMap::new()).expect("roster builds");
+    let roster =
+        build_roster(&test_runtime(), &rec, &fx.deps, &[], &HashMap::new()).expect("roster builds");
     let ids: Vec<_> = roster.iter().map(|a| a.agent_id.as_str()).collect();
     assert_eq!(ids, vec!["engineer"], "got {ids:?}");
     assert_eq!(
@@ -189,7 +194,8 @@ async fn overlay_agent_id_colliding_with_manifest_agent_is_skipped() {
         harness: None,
     });
 
-    let roster = build_roster(&rec, &fx.deps, &[], &HashMap::new()).expect("roster builds");
+    let roster =
+        build_roster(&test_runtime(), &rec, &fx.deps, &[], &HashMap::new()).expect("roster builds");
     let ids: Vec<_> = roster.iter().map(|a| a.agent_id.as_str()).collect();
     assert_eq!(
         ids,
@@ -214,7 +220,7 @@ async fn overlay_agent_id_colliding_with_manifest_agent_is_skipped() {
 /// — saved to the record, never materialised, no error anywhere.
 #[tokio::test]
 async fn a_tool_added_teammate_colliding_with_a_manifest_id_still_joins_the_roster() {
-    use openhuman_core::tools::Tool;
+    use tinytools::Tool;
 
     use crate::harness::orchestrator::unscoped_add_agent;
 
@@ -261,7 +267,8 @@ async fn a_tool_added_teammate_colliding_with_a_manifest_id_still_joins_the_rost
     let saved = store.load(&company).await.unwrap().expect("record");
     assert_eq!(saved.overlay_agents[0].id, "engineer_2");
 
-    let roster = build_roster(&saved, &fx.deps, &[], &HashMap::new()).expect("roster builds");
+    let roster = build_roster(&test_runtime(), &saved, &fx.deps, &[], &HashMap::new())
+        .expect("roster builds");
     let ids: Vec<_> = roster.iter().map(|a| a.agent_id.as_str()).collect();
     assert_eq!(
         ids,

@@ -129,7 +129,9 @@ describe("clearReceipt is generation-guarded (issue #1935 review)", () => {
     // Stamped onto the receipt it arms, and handed back to the caller so
     // `RoomView.send` can thread it through whichever terminal outcome fires.
     expect(appShell).toMatch(/\[threadId\]: \{ startedAt: now, lastFrameAt: now, gen \},/);
-    expect(appShell).toMatch(/return gen;\s*\n\s*\}, \[\]\);/);
+    // The deps are not the claim — `onSendStart` closes over the shared
+    // thread-clear helper since #2423 — so match any array rather than `[]`.
+    expect(appShell).toMatch(/return gen;\s*\n\s*\}, \[[^\]]*\]\);/);
   });
 });
 

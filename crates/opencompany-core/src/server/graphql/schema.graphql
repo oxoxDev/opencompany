@@ -38,6 +38,15 @@ type AgentRun {
 	"""
 	nodeId: ID
 	"""
+	The desk episode this attempt is a seat turn of (plan hive-desks), or
+	null for a card dispatch, a workflow node and an ordinary chat turn.
+	"""
+	episodeId: ID
+	"""
+	The round revision inside that episode (raw, 0-based).
+	"""
+	roundRevision: Int
+	"""
 	When the row was opened.
 	"""
 	createdAtMillis: Float!
@@ -180,6 +189,10 @@ type Chat {
 	"""
 	description: String
 	"""
+	`"general"` for the company-wide #general channel, `"desk"` otherwise.
+	"""
+	kind: String!
+	"""
 	The teammate ids on this desk.
 	"""
 	members: [ID!]!
@@ -229,11 +242,12 @@ type Company {
 	"""
 	team: [TeamMember!]!
 	"""
-	The company's desks (group chats).
+	The company's chats: #general first, then its desks (group chats).
 	"""
 	chats: [Chat!]!
 	"""
-	One desk by id, or null when unknown.
+	One desk by id, or null when unknown. A legacy spelling of #general
+	finds #general.
 	"""
 	chat(id: ID!): Chat
 	"""

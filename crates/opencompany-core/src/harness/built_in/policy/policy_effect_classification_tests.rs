@@ -76,49 +76,52 @@ fn parked_kind_is_the_tool_name() {
 /// readonly.
 #[tokio::test]
 async fn composio_reads_allowed_but_authorize_execute_park_or_deny() {
-    let supervised = policy("supervised", &[], None);
-    for tool in [
-        "composio_list_toolkits",
-        "composio_list_connections",
-        "composio_list_tools",
-    ] {
-        assert_eq!(
-            supervised
-                .check(&request(tool, serde_json::json!({})))
-                .await,
-            ToolPolicyDecision::Allow,
-            "{tool} is read-only and must be allowed"
-        );
-    }
-    for tool in ["composio_authorize", "composio_execute"] {
-        assert!(
-            matches!(
+    in_cycle(async {
+        let supervised = policy("supervised", &[], None);
+        for tool in [
+            "composio_list_toolkits",
+            "composio_list_connections",
+            "composio_list_tools",
+        ] {
+            assert_eq!(
                 supervised
                     .check(&request(tool, serde_json::json!({})))
                     .await,
-                ToolPolicyDecision::RequireApproval { .. }
-            ),
-            "{tool} must park under supervised"
-        );
-    }
+                ToolPolicyDecision::Allow,
+                "{tool} is read-only and must be allowed"
+            );
+        }
+        for tool in ["composio_authorize", "composio_execute"] {
+            assert!(
+                matches!(
+                    supervised
+                        .check(&request(tool, serde_json::json!({})))
+                        .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "{tool} must park under supervised"
+            );
+        }
 
-    let readonly = policy("readonly", &[], None);
-    // A read-only desk may still browse the Composio surface.
-    assert_eq!(
-        readonly
-            .check(&request("composio_list_connections", serde_json::json!({})))
-            .await,
-        ToolPolicyDecision::Allow
-    );
-    for tool in ["composio_authorize", "composio_execute"] {
-        assert!(
-            matches!(
-                readonly.check(&request(tool, serde_json::json!({}))).await,
-                ToolPolicyDecision::Deny { .. }
-            ),
-            "{tool} must be denied under readonly"
+        let readonly = policy("readonly", &[], None);
+        // A read-only desk may still browse the Composio surface.
+        assert_eq!(
+            readonly
+                .check(&request("composio_list_connections", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::Allow
         );
-    }
+        for tool in ["composio_authorize", "composio_execute"] {
+            assert!(
+                matches!(
+                    readonly.check(&request(tool, serde_json::json!({}))).await,
+                    ToolPolicyDecision::Deny { .. }
+                ),
+                "{tool} must be denied under readonly"
+            );
+        }
+    })
+    .await;
 }
 
 /// Composio effect groups (issue #110): authorize is an Identity effect,
@@ -230,82 +233,85 @@ async fn web_search_never_parks_under_supervised_but_is_denied_read_only() {
 /// across the gate unnoticed.
 #[tokio::test]
 async fn workspace_reads_are_allowed_but_writes_park_or_deny() {
-    let supervised = policy("supervised", &[], None);
-    for tool in ["workspace_list", "workspace_read"] {
-        assert_eq!(
-            supervised
-                .check(&request(tool, serde_json::json!({})))
-                .await,
-            ToolPolicyDecision::Allow,
-            "{tool} only reads this company's own workspace and must be allowed"
-        );
-    }
-    for tool in [
-        "workspace_write",
-        "workspace_create",
-        "workspace_delete",
-        "workspace_rename",
-    ] {
-        assert!(
-            matches!(
+    in_cycle(async {
+        let supervised = policy("supervised", &[], None);
+        for tool in ["workspace_list", "workspace_read"] {
+            assert_eq!(
                 supervised
                     .check(&request(tool, serde_json::json!({})))
                     .await,
-                ToolPolicyDecision::RequireApproval { .. }
-            ),
-            "{tool} must park under supervised"
-        );
-    }
+                ToolPolicyDecision::Allow,
+                "{tool} only reads this company's own workspace and must be allowed"
+            );
+        }
+        for tool in [
+            "workspace_write",
+            "workspace_create",
+            "workspace_delete",
+            "workspace_rename",
+        ] {
+            assert!(
+                matches!(
+                    supervised
+                        .check(&request(tool, serde_json::json!({})))
+                        .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "{tool} must park under supervised"
+            );
+        }
 
-    let readonly = policy("readonly", &[], None);
-    for tool in ["workspace_list", "workspace_read"] {
-        assert_eq!(
-            readonly.check(&request(tool, serde_json::json!({}))).await,
-            ToolPolicyDecision::Allow,
-            "{tool} must stay available to a read-only desk"
-        );
-    }
-    for tool in [
-        "workspace_write",
-        "workspace_create",
-        "workspace_delete",
-        "workspace_rename",
-    ] {
-        assert!(
-            matches!(
+        let readonly = policy("readonly", &[], None);
+        for tool in ["workspace_list", "workspace_read"] {
+            assert_eq!(
                 readonly.check(&request(tool, serde_json::json!({}))).await,
-                ToolPolicyDecision::Deny { .. }
-            ),
-            "{tool} must be denied under readonly"
-        );
-    }
+                ToolPolicyDecision::Allow,
+                "{tool} must stay available to a read-only desk"
+            );
+        }
+        for tool in [
+            "workspace_write",
+            "workspace_create",
+            "workspace_delete",
+            "workspace_rename",
+        ] {
+            assert!(
+                matches!(
+                    readonly.check(&request(tool, serde_json::json!({}))).await,
+                    ToolPolicyDecision::Deny { .. }
+                ),
+                "{tool} must be denied under readonly"
+            );
+        }
 
-    // Under `full` these still run. There IS a per-call gate now (issue
-    // #338), but writing the company's own note tree is not one of the acts
-    // it stops: it is internal, and the gate is scoped to what leaves the
-    // company or cannot be bounded. These tools keep their own safeguards:
-    // writes and deletes require an `expected_updated_at` compare-and-swap
-    // token, creates refuse paths that already resolve, deletes refuse
-    // folders that still hold anything, and renames refuse occupied
-    // destinations.
-    //
-    // This is the assertion that caught the first version of that gate,
-    // which stopped both: publishing runs through them, and thirteen
-    // `publish_turn_test` cases failed with "the model was never handed a
-    // publish receipt".
-    let full = policy("full", &[], None);
-    for tool in [
-        "workspace_write",
-        "workspace_create",
-        "workspace_delete",
-        "workspace_rename",
-    ] {
-        assert_eq!(
-            full.check(&request(tool, serde_json::json!({}))).await,
-            ToolPolicyDecision::Allow,
-            "{tool} under full mode"
-        );
-    }
+        // Under `full` these still run. There IS a per-call gate now (issue
+        // #338), but writing the company's own note tree is not one of the acts
+        // it stops: it is internal, and the gate is scoped to what leaves the
+        // company or cannot be bounded. These tools keep their own safeguards:
+        // writes and deletes require an `expected_updated_at` compare-and-swap
+        // token, creates refuse paths that already resolve, deletes refuse
+        // folders that still hold anything, and renames refuse occupied
+        // destinations.
+        //
+        // This is the assertion that caught the first version of that gate,
+        // which stopped both: publishing runs through them, and thirteen
+        // `publish_turn_test` cases failed with "the model was never handed a
+        // publish receipt".
+        let full = policy("full", &[], None);
+        for tool in [
+            "workspace_write",
+            "workspace_create",
+            "workspace_delete",
+            "workspace_rename",
+        ] {
+            assert_eq!(
+                full.check(&request(tool, serde_json::json!({}))).await,
+                ToolPolicyDecision::Allow,
+                "{tool} under full mode"
+            );
+        }
+    })
+    .await;
 }
 
 /// The policy asks whose node a workspace mutation targets, not merely
@@ -314,89 +320,92 @@ async fn workspace_reads_are_allowed_but_writes_park_or_deny() {
 /// a missing lookup, or an unfamiliar create path keeps the gate.
 #[tokio::test]
 async fn auto_allows_only_mutations_of_the_callers_own_workspace_work() {
-    let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
-    let company = CompanyId::new("acme");
-    let node = |id: &str, name: &str, origin: WorkspaceOrigin| WorkspaceNode {
-        id: id.to_string(),
-        name: name.to_string(),
-        kind: NodeKind::File,
-        parent_id: None,
-        updated_at_millis: 1,
-        created_by: origin.clone(),
-        updated_by: origin,
-        mime: None,
-        size: None,
-        sha256: None,
-        adopted: false,
-    };
-    let own = WorkspaceOrigin::Agent {
-        id: "ceo".to_string(),
-    };
-    store
-        .create(&company, &node("own", "own.md", own), Some("draft"))
-        .await
-        .unwrap();
-    store
-        .create(
-            &company,
-            &node("operator", "operator.md", WorkspaceOrigin::Operator),
-            Some("guidance"),
-        )
-        .await
-        .unwrap();
-    store
-        .create(
-            &company,
-            &node(
-                "teammate",
-                "teammate.md",
-                WorkspaceOrigin::Agent {
-                    id: "cmo".to_string(),
-                },
-            ),
-            Some("brief"),
-        )
-        .await
-        .unwrap();
+    in_cycle(async {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        let node = |id: &str, name: &str, origin: WorkspaceOrigin| WorkspaceNode {
+            id: id.to_string(),
+            name: name.to_string(),
+            kind: NodeKind::File,
+            parent_id: None,
+            updated_at_millis: 1,
+            created_by: origin.clone(),
+            updated_by: origin,
+            mime: None,
+            size: None,
+            sha256: None,
+            adopted: false,
+        };
+        let own = WorkspaceOrigin::Agent {
+            id: "ceo".to_string(),
+        };
+        store
+            .create(&company, &node("own", "own.md", own), Some("draft"))
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node("operator", "operator.md", WorkspaceOrigin::Operator),
+                Some("guidance"),
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node(
+                    "teammate",
+                    "teammate.md",
+                    WorkspaceOrigin::Agent {
+                        id: "cmo".to_string(),
+                    },
+                ),
+                Some("brief"),
+            )
+            .await
+            .unwrap();
 
-    let policy = policy("auto", &[], None)
-        .with_agent("ceo")
-        .with_workspace(store, company);
-    for (tool, args) in [
-        ("workspace_write", serde_json::json!({ "id": "own" })),
-        ("workspace_delete", serde_json::json!({ "id": "own" })),
-        ("workspace_rename", serde_json::json!({ "id": "own" })),
-        (
-            "workspace_create",
-            serde_json::json!({ "path": "agents/ceo/draft.md" }),
-        ),
-    ] {
-        assert_eq!(
-            policy.check(&request(tool, args)).await,
-            ToolPolicyDecision::Allow,
-            "{tool}"
-        );
-    }
-    for args in [
-        serde_json::json!({ "id": "operator" }),
-        serde_json::json!({ "id": "teammate" }),
-        serde_json::json!({ "id": "missing" }),
-    ] {
+        let policy = policy("auto", &[], None)
+            .with_agent("ceo")
+            .with_workspace(store, company);
+        for (tool, args) in [
+            ("workspace_write", serde_json::json!({ "id": "own" })),
+            ("workspace_delete", serde_json::json!({ "id": "own" })),
+            ("workspace_rename", serde_json::json!({ "id": "own" })),
+            (
+                "workspace_create",
+                serde_json::json!({ "path": "agents/ceo/draft.md" }),
+            ),
+        ] {
+            assert_eq!(
+                policy.check(&request(tool, args)).await,
+                ToolPolicyDecision::Allow,
+                "{tool}"
+            );
+        }
+        for args in [
+            serde_json::json!({ "id": "operator" }),
+            serde_json::json!({ "id": "teammate" }),
+            serde_json::json!({ "id": "missing" }),
+        ] {
+            assert!(matches!(
+                policy.check(&request("workspace_write", args)).await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ));
+        }
         assert!(matches!(
-            policy.check(&request("workspace_write", args)).await,
+            policy
+                .check(&request(
+                    "workspace_create",
+                    serde_json::json!({ "path": "standards/new.md" })
+                ))
+                .await,
             ToolPolicyDecision::RequireApproval { .. }
         ));
-    }
-    assert!(matches!(
-        policy
-            .check(&request(
-                "workspace_create",
-                serde_json::json!({ "path": "standards/new.md" })
-            ))
-            .await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
+    })
+    .await;
 }
 
 /// Authorship narrows the auto tier only. Even an agent's own note is a
@@ -457,14 +466,18 @@ async fn ownership_never_relaxes_supervised_or_readonly_workspace_mutations() {
 /// only the agent's own work still runs unattended.
 #[tokio::test]
 async fn auto_rename_of_a_folder_checks_every_descendants_authorship() {
-    let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
-    let company = CompanyId::new("acme");
-    let own = WorkspaceOrigin::Agent {
-        id: "ceo".to_string(),
-    };
-    let node =
-        |id: &str, name: &str, kind: NodeKind, parent: Option<&str>, origin: WorkspaceOrigin| {
+    in_cycle(async {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        let own = WorkspaceOrigin::Agent {
+            id: "ceo".to_string(),
+        };
+        let node = |id: &str,
+                    name: &str,
+                    kind: NodeKind,
+                    parent: Option<&str>,
+                    origin: WorkspaceOrigin| {
             WorkspaceNode {
                 id: id.to_string(),
                 name: name.to_string(),
@@ -479,72 +492,74 @@ async fn auto_rename_of_a_folder_checks_every_descendants_authorship() {
                 adopted: false,
             }
         };
-    store
-        .create(
-            &company,
-            &node("own", "own", NodeKind::Folder, None, own.clone()),
-            None,
-        )
-        .await
-        .unwrap();
-    store
-        .create(
-            &company,
-            &node("mixed", "mixed", NodeKind::Folder, None, own.clone()),
-            None,
-        )
-        .await
-        .unwrap();
-    store
-        .create(
-            &company,
-            &node(
-                "own-note",
-                "own-note.md",
-                NodeKind::File,
-                Some("own"),
-                own.clone(),
-            ),
-            Some("mine"),
-        )
-        .await
-        .unwrap();
-    store
-        .create(
-            &company,
-            &node(
-                "operator-note",
-                "operator-note.md",
-                NodeKind::File,
-                Some("mixed"),
-                WorkspaceOrigin::Operator,
-            ),
-            Some("theirs"),
-        )
-        .await
-        .unwrap();
+        store
+            .create(
+                &company,
+                &node("own", "own", NodeKind::Folder, None, own.clone()),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node("mixed", "mixed", NodeKind::Folder, None, own.clone()),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node(
+                    "own-note",
+                    "own-note.md",
+                    NodeKind::File,
+                    Some("own"),
+                    own.clone(),
+                ),
+                Some("mine"),
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node(
+                    "operator-note",
+                    "operator-note.md",
+                    NodeKind::File,
+                    Some("mixed"),
+                    WorkspaceOrigin::Operator,
+                ),
+                Some("theirs"),
+            )
+            .await
+            .unwrap();
 
-    let policy = policy("auto", &[], None)
-        .with_agent("ceo")
-        .with_workspace(store, company);
-    assert_eq!(
-        policy
-            .check(&request(
-                "workspace_rename",
-                serde_json::json!({ "id": "own" })
-            ))
-            .await,
-        ToolPolicyDecision::Allow
-    );
-    assert!(matches!(
-        policy
-            .check(&request(
-                "workspace_rename",
-                serde_json::json!({ "id": "mixed" })
-            ))
-            .await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
+        let policy = policy("auto", &[], None)
+            .with_agent("ceo")
+            .with_workspace(store, company);
+        assert_eq!(
+            policy
+                .check(&request(
+                    "workspace_rename",
+                    serde_json::json!({ "id": "own" })
+                ))
+                .await,
+            ToolPolicyDecision::Allow
+        );
+        assert!(matches!(
+            policy
+                .check(&request(
+                    "workspace_rename",
+                    serde_json::json!({ "id": "mixed" })
+                ))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+    })
+    .await;
 }
 
 /// A rename that *moves* a node has the same landing-zone rule
@@ -555,89 +570,92 @@ async fn auto_rename_of_a_folder_checks_every_descendants_authorship() {
 /// own space whatever its stored origin.
 #[tokio::test]
 async fn auto_rename_into_a_foreign_folder_inside_the_home_parks() {
-    let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
-    let company = CompanyId::new("acme");
-    let own = WorkspaceOrigin::Agent {
-        id: "ceo".to_string(),
-    };
-    let node =
-        |id: &str, name: &str, parent: Option<&str>, origin: WorkspaceOrigin| WorkspaceNode {
-            id: id.to_string(),
-            name: name.to_string(),
-            kind: if id.starts_with("n-") {
-                NodeKind::File
-            } else {
-                NodeKind::Folder
-            },
-            parent_id: parent.map(str::to_string),
-            updated_at_millis: 1,
-            created_by: origin.clone(),
-            updated_by: origin,
-            mime: None,
-            size: None,
-            sha256: None,
-            adopted: false,
+    in_cycle(async {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        let own = WorkspaceOrigin::Agent {
+            id: "ceo".to_string(),
         };
-    store
-        .create(&company, &node("agents", "agents", None, own.clone()), None)
-        .await
-        .unwrap();
-    store
-        .create(
-            &company,
-            &node("home", "ceo", Some("agents"), own.clone()),
-            None,
-        )
-        .await
-        .unwrap();
-    store
-        .create(
-            &company,
-            &node("inbox", "inbox", Some("home"), WorkspaceOrigin::Operator),
-            None,
-        )
-        .await
-        .unwrap();
-    store
-        .create(
-            &company,
-            &node("n-own", "own.md", Some("home"), own.clone()),
-            Some("mine"),
-        )
-        .await
-        .unwrap();
+        let node =
+            |id: &str, name: &str, parent: Option<&str>, origin: WorkspaceOrigin| WorkspaceNode {
+                id: id.to_string(),
+                name: name.to_string(),
+                kind: if id.starts_with("n-") {
+                    NodeKind::File
+                } else {
+                    NodeKind::Folder
+                },
+                parent_id: parent.map(str::to_string),
+                updated_at_millis: 1,
+                created_by: origin.clone(),
+                updated_by: origin,
+                mime: None,
+                size: None,
+                sha256: None,
+                adopted: false,
+            };
+        store
+            .create(&company, &node("agents", "agents", None, own.clone()), None)
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node("home", "ceo", Some("agents"), own.clone()),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node("inbox", "inbox", Some("home"), WorkspaceOrigin::Operator),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node("n-own", "own.md", Some("home"), own.clone()),
+                Some("mine"),
+            )
+            .await
+            .unwrap();
 
-    let policy = policy("auto", &[], None)
-        .with_agent("ceo")
-        .with_workspace(store, company);
+        let policy = policy("auto", &[], None)
+            .with_agent("ceo")
+            .with_workspace(store, company);
 
-    // Into the operator-authored folder: the approval gate comes back.
-    assert!(matches!(
-        policy
-            .check(&request(
-                "workspace_rename",
-                serde_json::json!({
-                    "path": "agents/ceo/own.md",
-                    "new_parent": "agents/ceo/inbox"
-                })
-            ))
-            .await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
-    // Into the home root: the agent's own space, no approval needed.
-    assert_eq!(
-        policy
-            .check(&request(
-                "workspace_rename",
-                serde_json::json!({
-                    "path": "agents/ceo/own.md",
-                    "new_parent": "agents/ceo"
-                })
-            ))
-            .await,
-        ToolPolicyDecision::Allow
-    );
+        // Into the operator-authored folder: the approval gate comes back.
+        assert!(matches!(
+            policy
+                .check(&request(
+                    "workspace_rename",
+                    serde_json::json!({
+                        "path": "agents/ceo/own.md",
+                        "new_parent": "agents/ceo/inbox"
+                    })
+                ))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+        // Into the home root: the agent's own space, no approval needed.
+        assert_eq!(
+            policy
+                .check(&request(
+                    "workspace_rename",
+                    serde_json::json!({
+                        "path": "agents/ceo/own.md",
+                        "new_parent": "agents/ceo"
+                    })
+                ))
+                .await,
+            ToolPolicyDecision::Allow
+        );
+    })
+    .await;
 }
 
 /// The operator's escape hatch: `always_approve` wins over every tier, so a
@@ -646,26 +664,29 @@ async fn auto_rename_into_a_foreign_folder_inside_the_home_parks() {
 /// "other", so the Approvals page says what is being approved.
 #[tokio::test]
 async fn an_operator_can_still_force_approval_on_each_search() {
-    let policy = policy("supervised", &["web_search"], None);
-    assert!(
-        matches!(
+    in_cycle(async {
+        let policy = policy("supervised", &["web_search"], None);
+        assert!(
+            matches!(
+                policy
+                    .check(&request(
+                        "web_search",
+                        serde_json::json!({ "query": "acme" })
+                    ))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "`always_approve` must override the metered-read carve-out"
+        );
+        assert_eq!(
             policy
-                .check(&request(
-                    "web_search",
-                    serde_json::json!({ "query": "acme" })
-                ))
-                .await,
-            ToolPolicyDecision::RequireApproval { .. }
-        ),
-        "`always_approve` must override the metered-read carve-out"
-    );
-    assert_eq!(
-        policy
-            .effect_for("web_search", &serde_json::json!({}))
-            .group,
-        EffectGroup::Spend,
-        "a paid call must not park as an unlabelled `Other`"
-    );
+                .effect_for("web_search", &serde_json::json!({}))
+                .group,
+            EffectGroup::Spend,
+            "a paid call must not park as an unlabelled `Other`"
+        );
+    })
+    .await;
 }
 
 #[test]

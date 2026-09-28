@@ -12,11 +12,10 @@ import { SetupWizard } from "@/views/setup/SetupWizard";
 /**
  * The console button's destination on completions that do not hand over a link.
  *
- * The sign-in hand-off navigates the whole document to a URL that already
- * carries the landing fragment (`#/company?from=setup`). The other three
- * outcomes — a host that asks nobody to sign in, a mailed link the operator
- * skips, and a link that could not be sent — all finish through the same
- * `setup-open-console` button. When that button's `onDone` hands off to a
+ * Every completion — a host that asks nobody to sign in, an operator the
+ * wizard signed in with the password they set, and a sign-in that could not be
+ * arranged — finishes through the same `setup-open-console` button. When that
+ * button's `onDone` hands off to a
  * fresh `AppShell` (the connection console's re-probe), it must write the same
  * fragment first, or the fresh shell lands on Overview with the tour free to
  * open over the roster setup just built — the exact miss the link path was
@@ -49,13 +48,17 @@ function status(over: Partial<SetupStatus> = {}): SetupStatus {
 
 /**
  * Routed by path: the wizard makes different calls through `post` (the roster
- * design, the sign-in request, and the apply), so a blanket override would
- * silently change what the other two see.
+ * design and the apply) and signs in through `postSignIn`, so a blanket
+ * override would silently change what the others see.
  */
-function clientWith(s: SetupStatus): OpenCompanyClient {
+function clientWith(s: SetupStatus, over: { login?: () => Promise<unknown> } = {}): OpenCompanyClient {
   return {
     scopeFor: (company: string | null) => `/api/v1/companies/${company}`,
     get: async () => s,
+    postSignIn: async () =>
+      over.login
+        ? over.login()
+        : { id: "u1", email: "ada@example.com", role: "admin", company: "acme" },
     post: async (path: string) => {
       if (path.endsWith("/setup/roster")) {
         return {
@@ -64,7 +67,6 @@ function clientWith(s: SetupStatus): OpenCompanyClient {
           source: "fallback",
         };
       }
-      if (path.endsWith("/auth/request")) return { sent: true };
       return {
         complete: true,
         config_path: s.config_path,
@@ -183,8 +185,8 @@ async function finishNoSignIn() {
   await settle();
 }
 
-/** An email-sign-in host that cannot send mail: the "anyway" escape. */
-async function finishUnmailable() {
+/** An email-sign-in host: the account step, with its password, then finish. */
+async function finishWithSignIn() {
   await skipConnect();
   await next(); // -> business
   await fill("setup-field-industry", "E-commerce — homeware");
@@ -211,8 +213,8 @@ describe("the console button after setup applies without a hand-off link", () =>
     await show(clientWith(status()), { expectsShellRemount: true });
     await finishNoSignIn();
 
-    // Nobody to invite, so there is no link to hand over — only the console.
-    expect(find("setup-handoff-link")).toBeNull();
+    // Nobody to invite, so there is nobody to sign in — only the console.
+    expect(find("setup-handoff-signed-in")).toBeNull();
     expect(find("setup-open-console")).toBeTruthy();
 
     await click("setup-open-console");
@@ -223,13 +225,29 @@ describe("the console button after setup applies without a hand-off link", () =>
     expect(calls).toBe(1);
   });
 
-  it("carries the same destination out of the unmailable escape", async () => {
-    await show(clientWith(status({ mail: { wired: false, echoes_code: false } })), {
-      expectsShellRemount: true,
-    });
-    await finishUnmailable();
+  it("carries the same destination out of a signed-in completion", async () => {
+    await show(clientWith(status()), { expectsShellRemount: true });
+    await finishWithSignIn();
 
-    expect(find("setup-handoff-unmailable")).toBeTruthy();
+    expect(find("setup-handoff-signed-in")).toBeTruthy();
+
+    await click("setup-open-console");
+
+    expect(window.location.hash).toBe(SETUP_HANDOFF_FRAGMENT);
+  });
+
+  it("carries the same destination out of the sign-in-failed escape", async () => {
+    await show(
+      clientWith(status(), {
+        login: async () => {
+          throw new Error("boom");
+        },
+      }),
+      { expectsShellRemount: true },
+    );
+    await finishWithSignIn();
+
+    expect(find("setup-handoff-password")).toBeTruthy();
     expect(find("setup-open-console")?.textContent).toContain("anyway");
 
     await click("setup-open-console");

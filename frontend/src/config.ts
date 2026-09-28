@@ -75,13 +75,7 @@ function fromQuery(): Partial<ConsoleConfig> {
   const token = q.get("token");
   if (api !== null) out.baseUrl = api;
   if (company !== null) out.company = company;
-  // `?token=` is ours ONLY when the hub did not put it there. The hub's OAuth
-  // callback returns `?token=<platform jwt>&key=auth`, and that token is a
-  // credential for the *hub*, not a platform token for this host. Reading it
-  // here would attach someone's ecosystem bearer to every API call the console
-  // makes — see `signInWithHubToken`, which hands it to the host once and lets
-  // it go. `key=auth` is the hub's own marker for that redirect.
-  if (token !== null && q.get("key") !== "auth") out.operatorToken = token;
+  if (token !== null) out.operatorToken = token;
   // `?hub` and `?hub=1` both mean yes; `?hub=0` and `?hub=false` mean no, so a
   // hub build can be turned *off* for a debugging session without editing the
   // deployment. Absent leaves it to the layers below rather than forcing false.

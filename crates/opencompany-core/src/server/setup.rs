@@ -179,10 +179,23 @@ pub struct SetupDto {
     /// bind, where it would mean an unauthenticated admin console.
     ///
     /// Which modes are *legal*, not which are convenient: `email` is listed on
-    /// a host with no mail transport too, because hub OAuth and passwords sign
-    /// people in there perfectly well. Read [`mail`](Self::mail) for what the
-    /// magic-link path specifically can do today.
+    /// a host with no mail transport too, because a password signs people in
+    /// there perfectly well. Read [`mail`](Self::mail) for what the magic-link
+    /// path specifically can do today.
     pub auth_modes: Vec<&'static str>,
+    /// The mode the wizard should preselect when `config.toml` names none.
+    ///
+    /// `none` on the packaged desktop app, which boots with that mode already
+    /// in force as a host-wide override on a loopback bind
+    /// (`crates/opencompany-app/src/embedded.rs`): one machine, one person, no
+    /// mailbox, so the sign-in question is already answered and asking it
+    /// again — and then asking for an address to go with the wrong answer — is
+    /// the first-run confusion this field removes. Reported by the host rather
+    /// than sniffed from the webview so the same console opened in a browser
+    /// tab against a desktop host gets the same default. Absent everywhere
+    /// else, where `email` stays the default it always was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_auth_mode: Option<&'static str>,
     /// Which optional surfaces this build has.
     pub build: BuildDto,
     /// Company ids already registered on this host. A non-empty list means the
@@ -311,6 +324,21 @@ pub struct SetupRequest {
     /// Ignored when the seeded manifest asks nobody to sign in — see
     /// [`SeedOverrides::admin_email`](crate::desktop::SeedOverrides::admin_email).
     pub admin_email: Option<String>,
+    /// The first admin's password, set on the account the moment the company
+    /// exists.
+    ///
+    /// Without it the wizard finished into a company whose only admin was
+    /// *eligible* and could not get in: the magic link needs a mail transport
+    /// the laptop it was just run on rarely has, and the fallback — the host
+    /// echoing the code back into the wizard — was a link the operator did not
+    /// know to expect. A password chosen (or generated) on the "You" step is a
+    /// credential the wizard can sign them in with the instant setup applies,
+    /// and the same one they use tomorrow.
+    ///
+    /// Applies to whichever admin address the apply seeds — the template
+    /// path's [`Self::admin_email`] or the designed company's own. Ignored when
+    /// the host has no sign-in. Write-only, like every other secret here.
+    pub admin_password: Option<String>,
     /// A company the wizard **designed**, from the operator's answers and the
     /// roster they reviewed.
     ///
@@ -729,6 +757,7 @@ fn snapshot(state: &AppState, env: &dyn EnvSource) -> Result<SetupDto, OpenCompa
         fields,
         templates: templates(),
         auth_modes: auth_modes(state),
+        default_auth_mode: default_auth_mode(state),
         // Asked through the login route's own predicates rather than re-read
         // from the environment here: a second spelling of "can this host mail"
         // is exactly how the wizard's copy and the route's behaviour drift into
@@ -772,6 +801,18 @@ fn auth_modes(state: &AppState) -> Vec<&'static str> {
         modes.push(AuthMode::None.as_str());
     }
     modes
+}
+
+/// The mode a fresh wizard preselects — see [`SetupDto::default_auth_mode`].
+///
+/// `none` only where it is both in force and legal: the live override says
+/// this host already runs without a sign-in, and the bind is loopback so
+/// `auth_modes` offers it. A routable host with the override set could not
+/// have booted (`is_local_only` gates it), so the second check is belt and
+/// braces against a config nobody should be able to reach.
+fn default_auth_mode(state: &AppState) -> Option<&'static str> {
+    (state.auth_mode_override() == Some(AuthMode::None) && state.config().is_local_only())
+        .then_some(AuthMode::None.as_str())
 }
 
 /// Which optional surfaces this build carries.
@@ -944,6 +985,26 @@ async fn apply_inner(
         _ => None,
     };
 
+    // The admin address the apply is about to make eligible, on either seed
+    // path, and the password that makes it usable. Validated here, before
+    // anything is written, for the same reason everything above is: a company
+    // seeded and a password refused afterwards is a half-applied setup.
+    let admin_email: Option<String> = req
+        .company
+        .as_ref()
+        .and_then(|company| company.admin_email.as_deref())
+        .or(req.admin_email.as_deref())
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+        .map(crate::ports::normalize_email);
+    let admin_password = req
+        .admin_password
+        .as_deref()
+        .filter(|password| !password.is_empty());
+    if let (Some(email), Some(password)) = (admin_email.as_deref(), admin_password) {
+        crate::server::users::password::validate(password, email)?;
+    }
+
     // Validate the model choice before writing setup state. The endpoint that
     // passed the probe is normalized once more at this trust boundary, then
     // stored on the company rather than forgotten after the green tick.
@@ -1114,6 +1175,43 @@ async fn apply_inner(
         }
         _ => None,
     };
+
+    // Make the admin real, not merely eligible. Seeding wrote the address into
+    // `[users].admins`, which is a standing invite; this turns it into an
+    // account with a password, so the console can sign the operator in with
+    // what they just typed rather than handing them a form they cannot pass.
+    // Skipped on a host with no sign-in — there is nobody to distinguish — and
+    // where no password was given, which keeps the older link hand-off working.
+    if let (Some(id), Some(email), Some(password)) =
+        (seeded.as_deref(), admin_email.as_deref(), admin_password)
+        && let Some(runtime) = state
+            .registry()
+            .get(&crate::ports::types::CompanyId::new(id))
+        && runtime.auth_mode().uses_email()
+    {
+        let standing =
+            crate::server::users::routes::bootstrap_admins(state.config(), &runtime).await?;
+        match crate::server::users::bootstrap::claim_first_admin(
+            runtime.users(),
+            runtime.id(),
+            &standing,
+            email,
+            password,
+        )
+        .await?
+        {
+            Ok(_) => tracing::info!(company = %runtime.id(), "first admin created by setup"),
+            // A company the wizard just seeded has no users, and the address
+            // was written into its manifest a moment ago, so neither refusal
+            // can happen on this path; if it somehow does, the standing invite
+            // is still there and the sign-in screen's own claim takes over.
+            Err(refusal) => tracing::warn!(
+                company = %runtime.id(),
+                ?refusal,
+                "setup could not create the first admin; the address stays eligible",
+            ),
+        }
+    }
 
     let credential_note = store_account_key(state, seeded.as_deref(), &req).await?;
     let provider_note = connect_drafted_provider(state, seeded.as_deref(), &req).await?;

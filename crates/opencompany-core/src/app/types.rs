@@ -577,9 +577,10 @@ pub struct AppState {
     /// Injected network seams for the credential surfaces (DNS resolver, mail
     /// sender). Empty by default so the build stays offline.
     connections: crate::server::ops::ConnectionsRuntime,
-    /// The hub exchange backing `…/auth/hub`. `None` (the default, and every
-    /// self-hosted host) means the console offers no ecosystem sign-in at all,
-    /// rather than offering a button that leads nowhere.
+    /// The hub exchange backing the TinyHumans key grant and billing read.
+    /// `None` (the default, and every self-hosted host) means the console
+    /// offers no "Connect TinyHumans" button at all, rather than one that leads
+    /// nowhere.
     hub_identity: Option<Arc<dyn crate::server::hub_identity::HubIdentityExchange>>,
     /// Key-grant flows started and not yet finished, keyed by the opaque
     /// `state` the browser carries. Holds the PKCE verifier, which is why it is
@@ -1089,11 +1090,10 @@ impl AppState {
         &self.connections
     }
 
-    /// Installs the hub identity exchange backing `…/auth/hub`.
+    /// Installs the hub exchange backing the TinyHumans key grant and billing read.
     ///
     /// An injected seam rather than a client built per request, so the route's
-    /// refusals — rejected token, unreachable hub, address not on this
-    /// company's roster — are testable offline against
+    /// refusals — rejected code, unreachable hub — are testable offline against
     /// [`MockHubIdentityExchange`](crate::server::hub_identity::MockHubIdentityExchange)
     /// in a build that links no HTTP crate at all.
     pub fn with_hub_identity(
@@ -1104,12 +1104,10 @@ impl AppState {
         self
     }
 
-    /// The hub identity exchange, when one is wired.
+    /// The hub exchange, when one is wired.
     ///
-    /// `None` means this host has no ecosystem to sign in against, which is the
-    /// correct default: a host that cannot ask the hub whose token it is
-    /// holding has no way to check one, and accepting it on trust would make an
-    /// unverifiable JWT a bearer credential for this company.
+    /// `None` means this host has no hub to redeem a key grant against, which
+    /// is the correct default for a self-hosted instance.
     pub fn hub_identity(
         &self,
     ) -> Option<&Arc<dyn crate::server::hub_identity::HubIdentityExchange>> {
@@ -1398,6 +1396,10 @@ impl AppState {
         // lowered two-way form asks an unaware host for a different action.
         #[cfg(feature = "openhuman")]
         out.push("blocker-verdict");
+        // Kept under its historical name: it once meant "hub sign-in is
+        // offered" and now means "a TinyHumans key grant can be completed",
+        // which is the only thing the exchange still does. A client reading
+        // it decides whether to draw the Connect button, nothing about login.
         if self.hub_identity.is_some() {
             out.push("hub-identity");
         }

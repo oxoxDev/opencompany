@@ -63,6 +63,7 @@ kind = "built_in"
     )
     .expect("valid manifest");
     CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
@@ -188,5 +189,144 @@ fn a_declared_or_default_coding_cli_is_not_synthesized_twice() {
     assert!(
         referenced_implicit_locals(&rec, &[], "claude").is_empty(),
         "the default is resolved by the default path, not synthesized here"
+    );
+}
+
+/// The adapter's own start-up error is a diagnostic: it can name a resolved
+/// binary path or the argv it was invoked with. The reason recorded here
+/// travels into the router's sentence and from there into company chat, so it
+/// must carry none of it.
+#[cfg(feature = "acp")]
+#[test]
+fn a_failing_adapter_keeps_its_own_error_out_of_the_reason() {
+    const LEAK: &str = "/Users/someone/.secrets/claude --api-key=sk-live-abcdef";
+
+    struct FailingFactory;
+    impl crate::ports::acp::AcpAgentFactory for FailingFactory {
+        fn build(
+            &self,
+            _agent: &str,
+            _model: Option<&str>,
+            _agent_models: &std::collections::HashMap<String, String>,
+            _workspace_root: &std::path::Path,
+        ) -> crate::Result<std::sync::Arc<dyn crate::ports::acp::AcpAgent>> {
+            Err(crate::OpenCompanyError::Harness(format!(
+                "could not start `{LEAK}`: No such file or directory"
+            )))
+        }
+    }
+
+    let harness = Harness::implicit_local("claude");
+    let reason = match resolve_acp_engine(
+        &harness,
+        Some(&FailingFactory),
+        std::path::Path::new("/tmp"),
+        &std::collections::HashMap::new(),
+        Vec::new(),
+    ) {
+        Ok(_) => panic!("the adapter was supposed to fail to start"),
+        Err(reason) => reason,
+    };
+
+    assert!(
+        !reason.contains(".secrets") && !reason.contains("sk-live"),
+        "the adapter's own error must not reach the recorded reason: {reason}"
+    );
+    assert!(
+        !reason.contains("No such file or directory"),
+        "nor any part of it: {reason}"
+    );
+    assert!(
+        reason.contains("claude"),
+        "the operator still learns which adapter failed: {reason}"
+    );
+}
+
+/// The same leak, asserted where an operator actually meets it.
+///
+/// The test above pins the reason at the point it is recorded. This one
+/// carries that reason the rest of the way — through the real
+/// [`HarnessRouter`](crate::harness::router::HarnessRouter), through a real
+/// turn on an agent bound to the failed harness, and through the classifier
+/// that turns the router's sentence into the notice company chat renders —
+/// and asserts the adapter's diagnostic, its resolved path and its argv are
+/// absent from the copy at the end of it.
+///
+/// Two links in that chain are the reason it is a separate test. `engine_for`
+/// composes the recorded reason into a larger sentence, and the classifier
+/// rewrites that sentence again; either could reintroduce a source error that
+/// `resolve_acp_engine` had already stripped, and neither is covered by
+/// asserting on the reason alone.
+#[cfg(feature = "acp")]
+#[tokio::test]
+async fn a_failing_adapter_keeps_its_own_error_out_of_the_operator_notice() {
+    const SECRET_PATH: &str = "/Users/someone/.secrets/claude";
+    const SECRET_ARGV: &str = "--api-key=sk-live-abcdef";
+
+    struct FailingFactory;
+    impl crate::ports::acp::AcpAgentFactory for FailingFactory {
+        fn build(
+            &self,
+            _agent: &str,
+            _model: Option<&str>,
+            _agent_models: &std::collections::HashMap<String, String>,
+            _workspace_root: &std::path::Path,
+        ) -> crate::Result<std::sync::Arc<dyn crate::ports::acp::AcpAgent>> {
+            Err(crate::OpenCompanyError::Harness(format!(
+                "could not start `{SECRET_PATH} {SECRET_ARGV}`: No such file or directory"
+            )))
+        }
+    }
+
+    let harness = Harness::implicit_local("claude");
+    let reason = match resolve_acp_engine(
+        &harness,
+        Some(&FailingFactory),
+        std::path::Path::new("/tmp"),
+        &std::collections::HashMap::new(),
+        Vec::new(),
+    ) {
+        Ok(_) => panic!("the adapter was supposed to fail to start"),
+        Err(reason) => reason,
+    };
+
+    let router = crate::harness::router::HarnessRouter::new("embedded")
+        .with_unavailable("claude", reason)
+        .bind("researcher", "claude");
+
+    let err = router
+        .run(
+            &CompanyId::new("acme"),
+            "researcher",
+            "ship it",
+            crate::runtime::delegation::ChatTarget::default(),
+        )
+        .await
+        .expect_err("a bound-but-unavailable harness must fail the turn");
+
+    let notice = crate::company::inference::copy::classify(&err.to_string())
+        .expect("the router's own sentence must classify");
+
+    for leaked in [
+        SECRET_PATH,
+        SECRET_ARGV,
+        "sk-live",
+        "No such file or directory",
+    ] {
+        assert!(
+            !notice.message.contains(leaked),
+            "`{leaked}` reached the operator notice: {}",
+            notice.message
+        );
+    }
+    assert!(
+        notice.message.contains("claude"),
+        "the operator still learns which adapter failed: {}",
+        notice.message
+    );
+    assert_eq!(
+        notice.pair_agent_id.as_deref(),
+        Some("researcher"),
+        "the console links its action button at this id"
     );
 }

@@ -67,7 +67,7 @@ describe("app-shell forwards responseTexts to ended() and renders what it releas
   function onSendEndBody(): string {
     const start = appShell.indexOf("const onSendEnd = useCallback(");
     expect(start, "onSendEnd's declaration").toBeGreaterThan(-1);
-    const end = appShell.indexOf("[clearReceipt, renderAgentReply],", start);
+    const end = appShell.indexOf("clearReceipt, renderAgentReply],", start);
     expect(end, "onSendEnd's dependency array").toBeGreaterThan(start);
     return appShell.slice(start, end);
   }

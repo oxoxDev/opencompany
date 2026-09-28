@@ -23,16 +23,40 @@ describe("a threaded query's rows have somewhere to render", () => {
    * `MessageTimeline` left such a turn with no render path — and, because its
    * frames now carry `messageSeq`, no per-thread fallback either.
    */
-  it("ThreadPanel takes the per-query map and hands it to every line", () => {
+  it("ThreadPanel takes the per-query map", () => {
     expect(threadPanel).toContain("liveStepsByMessage?: Record<string, TurnStep[]>;");
-    // Both the question at the top of the panel and each reply under it.
-    expect(threadPanel).toContain("liveSteps={liveStepsByMessage?.[parent.id]}");
-    expect(threadPanel).toContain("liveSteps={liveStepsByMessage?.[r.id]}");
   });
 
-  it("a panel line names live activity without exposing raw calls in chat", () => {
-    expect(threadPanel).toContain('<WorkingIndicator srLabel="Working…" steps={liveSteps} />');
-    expect(threadPanel).not.toContain("<StepTimeline");
+  /**
+   * …and resolves it to ONE row at the foot rather than one per line.
+   *
+   * Position in a transcript is chronology. A "happening now" row placed back
+   * at the asking message claims the work finished before every reply beneath
+   * it — false the moment anything is journaled in between, which in a thread
+   * is every follow-up. The panel also said the two things in two tenses at
+   * once: rows against the body lines, and a foot row that could only manage
+   * "Replying…" because it was handed no steps.
+   */
+  it("resolves the per-query map to one row at the foot, not one per line", () => {
+    expect(threadPanel).toContain("const openTurnSteps");
+    expect(threadPanel).toContain("steps={openTurnSteps}");
+    // No line in the body may carry live rows again.
+    expect(threadPanel).not.toContain("liveSteps={liveStepsByMessage");
+    expect(threadPanel).not.toContain("liveSteps?: readonly TurnStep[];");
+  });
+
+  it("names live activity, and shows the live rows behind it", () => {
+    expect(threadPanel).toContain("<WorkingIndicator");
+    // Narrowed on the same terms as `raw-turns-toggle`'s own ban, and for the
+    // same reason: what that rule protects is one renderer for a **stored**
+    // message's steps, which chat must not restate. A running turn's rows are
+    // not that claim — they exist only while the turn is open, and the reply's
+    // durable steps replace them the instant it settles. Banning them outright
+    // left the panel able to say a turn was running and never what it had done.
+    expect(threadPanel).toContain("<StepTimeline steps={[...openTurnSteps]}");
+    // What stays banned: the panel reaching for a message's own steps.
+    expect(threadPanel).not.toContain("message.steps");
+    expect(threadPanel).not.toContain("reply.steps");
   });
 
   it("RoomView supplies it, so the panel is never handed an empty map", () => {
@@ -88,5 +112,38 @@ describe("cleanup is addressed by the message that was answered", () => {
     // Inside the guard: a queued sibling still running owns its rows.
     const block = appShell.slice(guardAt, guardAt + 1600);
     expect(block).toContain("clearLiveRowsSettledBy(hydrated, hydrated.map((m) => m.id))");
+  });
+});
+
+describe("a thread's live agent retires with its rows", () => {
+  /**
+   * A thread key is reused by every turn a conversation ever runs, and
+   * `liveAgentByTurn` is keyed by it for any frame the host did not stamp with
+   * a `messageSeq`. Clearing the rows without the agent leaves the previous
+   * turn's teammate on the key, so the next turn's row names whoever answered
+   * last until a frame happens to carry a new id — and on a turn that never
+   * reports one, that is the whole turn (CodeRabbit on #2423).
+   *
+   * Pinned as one helper rather than as three call sites, because the failure
+   * mode is a *fourth* clear site added later that forgets the second half.
+   */
+  it("clears both halves through one helper", () => {
+    expect(appShell).toContain("const clearLiveThread = useCallback(");
+    const helper = appShell.slice(
+      appShell.indexOf("const clearLiveThread = useCallback("),
+      appShell.indexOf("const onSendStart = useCallback("),
+    );
+    expect(helper).toContain("setLiveStepsByThread(");
+    expect(helper).toContain("setLiveAgentByTurn(");
+  });
+
+  it("is what every thread-bucket clear goes through", () => {
+    // The three terminal paths: a send arming, a send settling, and a reply
+    // landing for a turn this console did not start.
+    expect(appShell).toContain("clearLiveThread(threadId, true)");
+    expect(appShell).toContain("clearLiveThread(threadId)");
+    expect(appShell).toContain("clearLiveThread(event.chatId)");
+    // And no path left writing the rows directly, which would skip the agent.
+    expect(appShell).not.toContain("setLiveStepsByThread((prev) => ({ ...prev, [threadId]: [] }))");
   });
 });

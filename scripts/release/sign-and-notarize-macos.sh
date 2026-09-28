@@ -16,15 +16,25 @@
 #   APPLE_CERTIFICATE_BASE64
 #   APPLE_CERTIFICATE_PASSWORD
 #   APPLE_SIGNING_IDENTITY
-#   APPLE_ID
-#   APPLE_PASSWORD          (app-specific password)
-#   APPLE_TEAM_ID
+#   APPLE_API_KEY           App Store Connect API key id (notarization)
+#   APPLE_API_ISSUER        App Store Connect issuer id
+#   APPLE_API_KEY_PATH      path to the decoded AuthKey_<id>.p8
+#
+# Optional:
+#   APPLE_TEAM_ID           when set, the signed bundle's TeamIdentifier must
+#                           match it — catches a certificate from the wrong team
+#                           before Apple's notary service does, minutes later.
+#
+# Notarization authenticates with an App Store Connect API key, not an Apple ID
+# and app-specific password. The variable names are the ones Tauri's own
+# bundler reads (`tauri-bundler` `notarize_auth`), so the same environment
+# would drive it if signing ever moves into `tauri build`.
 set -euo pipefail
 
 APP_PATH="${1:?Usage: sign-and-notarize-macos.sh <app_path> [entitlements_plist]}"
 ENTITLEMENTS="${2:-crates/opencompany-app/entitlements.plist}"
 
-for var in APPLE_CERTIFICATE_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+for var in APPLE_CERTIFICATE_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH; do
   if [ -z "${!var:-}" ]; then
     echo "[sign] ERROR: Missing required env var: $var"
     exit 1
@@ -39,6 +49,11 @@ if [ ! -f "$ENTITLEMENTS" ]; then
   echo "[sign] ERROR: entitlements plist not found at $ENTITLEMENTS" >&2
   exit 1
 fi
+if [ ! -s "$APPLE_API_KEY_PATH" ]; then
+  echo "[sign] ERROR: App Store Connect API key file not found at APPLE_API_KEY_PATH" >&2
+  exit 1
+fi
+NOTARY_AUTH=(--key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER")
 
 # ── Import signing certificate into a throwaway keychain ─────────────────────
 KEYCHAIN="resign-$$.keychain-db"
@@ -79,6 +94,13 @@ codesign --force --options runtime \
 # ── Verify ───────────────────────────────────────────────────────────────────
 echo "[sign] Verifying signatures"
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+if [ -n "${APPLE_TEAM_ID:-}" ]; then
+  SIGNED_TEAM="$(codesign -dv "$APP_PATH" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+  if [ "$SIGNED_TEAM" != "$APPLE_TEAM_ID" ]; then
+    echo "[sign] ERROR: bundle signed for team '$SIGNED_TEAM', expected APPLE_TEAM_ID" >&2
+    exit 1
+  fi
+fi
 
 # ── Notarize ─────────────────────────────────────────────────────────────────
 echo "[sign] Notarizing..."
@@ -88,9 +110,7 @@ ditto -c -k --keepParent "$APP_PATH" "$NOTARIZE_ZIP"
 SUBMIT_OUT="$(mktemp /tmp/notarize-submit-XXXXXX.json)"
 set +e
 xcrun notarytool submit "$NOTARIZE_ZIP" \
-  --apple-id "$APPLE_ID" \
-  --password "$APPLE_PASSWORD" \
-  --team-id "$APPLE_TEAM_ID" \
+  "${NOTARY_AUTH[@]}" \
   --output-format json \
   --wait > "$SUBMIT_OUT"
 SUBMIT_RC=$?
@@ -107,10 +127,7 @@ echo "[sign] notarytool exit=$SUBMIT_RC id=$SUBMISSION_ID status=$SUBMISSION_STA
 
 if [ -n "$SUBMISSION_ID" ]; then
   echo "[sign] Fetching notarytool developer log for $SUBMISSION_ID:"
-  xcrun notarytool log "$SUBMISSION_ID" \
-    --apple-id "$APPLE_ID" \
-    --password "$APPLE_PASSWORD" \
-    --team-id "$APPLE_TEAM_ID" || true
+  xcrun notarytool log "$SUBMISSION_ID" "${NOTARY_AUTH[@]}" || true
 fi
 
 if [ "$SUBMISSION_STATUS" != "Accepted" ] || [ "$SUBMIT_RC" -ne 0 ]; then

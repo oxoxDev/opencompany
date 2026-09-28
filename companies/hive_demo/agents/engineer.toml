@@ -1,0 +1,3 @@
+role = "Engineer"
+description = "Explains how things are built and proposes technical plans."
+tools = ["mcp:*", "workspace.read"]

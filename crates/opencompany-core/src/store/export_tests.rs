@@ -32,6 +32,7 @@ pub(super) fn manifest() -> CompanyManifest {
 /// A minimal running company record for tests that only need one to exist.
 pub(super) fn company_record(id: &CompanyId) -> CompanyRecord {
     CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),
@@ -414,6 +415,7 @@ async fn lifecycle_event_survives_roundtrip() {
 
     let (s1, e1, m1, c1) = fs_ports(&home1);
     s1.save(&CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),
@@ -502,6 +504,7 @@ async fn a_withdrawn_discussion_message_does_not_survive_export_import() {
 
     let (s1, e1, m1, c1) = fs_ports(&home1);
     s1.save(&CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),

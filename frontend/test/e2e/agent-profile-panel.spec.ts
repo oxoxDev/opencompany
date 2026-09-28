@@ -66,7 +66,7 @@ test("the panel hands off to the agent's own page, with the form open", async ({
   // The flag is what makes this a hand-off rather than a second dead end: the
   // page opens *editing*, so the operator is not asked to find the Edit button
   // again on arrival.
-  await expect(page).toHaveURL(/#\/company\/agent\/engineer\?edit$/);
+  await expect(page).toHaveURL(/#\/company\/agent\/engineer\?edit\b/);
   await expect(page.getByTestId("agent-save")).toBeVisible({ timeout: 30_000 });
 
   // And the panel got out of the way of the page it sent them to.

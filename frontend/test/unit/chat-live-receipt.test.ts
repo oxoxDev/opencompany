@@ -119,10 +119,18 @@ describe("ChatLiveReceipt", () => {
     expect(text()).not.toContain("a-ghost");
   });
 
-  it("shows the running step label when a step is in flight", async () => {
+  it("names the teammate while a step runs, leaving the step to the steps row", async () => {
     await render({
       receipt: { startedAt: BASE, lastFrameAt: BASE, agentId: "a-ada" },
       agentNames: { "a-ada": "Ada" },
+      steps: [runningStep("Searching the web")],
+    });
+    expect(text()).toContain("Picked up by Ada");
+  });
+
+  it("names the step alone when no agent has been reported", async () => {
+    await render({
+      receipt: { startedAt: BASE, lastFrameAt: BASE },
       steps: [runningStep("Searching the web")],
     });
     expect(text()).toContain("On step Searching the web");
@@ -236,11 +244,20 @@ describe("receiptStateLine", () => {
     expect(receiptStateLine(picked, [], { "a-ada": "Ada" }, ch, true)).toBe("Picked up by Ada");
   });
 
-  it("lets a running step outrank both the name and the queued base word", () => {
+  it("keeps saying who once a step is running, rather than being replaced by it", () => {
+    // A tool call runs for most of a turn, so a step that REPLACED the name
+    // meant the receipt stopped answering the one question it exists for.
+    // The step is not lost — `StepTimeline` names it in its own summary.
     const picked: ChatReceipt = { ...base, agentId: "a-ada" };
     expect(
       receiptStateLine(picked, [runningStep("Searching the web")], { "a-ada": "Ada" }, ch, true),
-    ).toBe("On step Searching the web");
+    ).toBe("Picked up by Ada");
+  });
+
+  it("falls back to the step alone when no agent is known yet", () => {
+    expect(receiptStateLine(base, [runningStep("Searching the web")], undefined, ch, true)).toBe(
+      "On step Searching the web",
+    );
   });
 });
 

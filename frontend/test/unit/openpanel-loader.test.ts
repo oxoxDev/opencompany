@@ -96,17 +96,23 @@ describe("OpenPanel console analytics", () => {
     expect(document.head.querySelector('script[src="https://openpanel.dev/op1.js"]')).not.toBeNull();
   });
 
-  it("stays silent when opt-in has no configured collector endpoint", () => {
+  it("defaults the collector to the TinyHumans OpenPanel API when opt-in names none", () => {
     runLoader(true);
 
-    expect(window.op).toBeUndefined();
-    expect(document.head.querySelector('script[src="https://openpanel.dev/op1.js"]')).toBeNull();
+    expect(window.op?.q).toContainEqual([
+      "init",
+      expect.objectContaining({ apiUrl: "https://panel.tinyhumans.ai/api" }),
+    ]);
+    expect(document.head.querySelector('script[src="https://openpanel.dev/op1.js"]')).not.toBeNull();
   });
 
   it("loads the configured browser client only after explicit opt-in", () => {
+    expect(indexHtml).toContain('src="/opencompany-config.js"');
     expect(indexHtml).toContain('src="/openpanel-init.js"');
     expect(loader).toContain('src = "https://openpanel.dev/op1.js"');
-    expect(loader).toContain("apiUrl: window.OPENCOMPANY_CONFIG.analyticsEndpoint");
+    expect(loader).toContain(
+      'apiUrl: window.OPENCOMPANY_CONFIG.analyticsEndpoint || "https://panel.tinyhumans.ai/api"',
+    );
     expect(loader).toContain('clientId: "afe8ec4e-0a6a-427a-aa22-49cbbf137d0a"');
     expect(loader).toContain("window.OPENCOMPANY_CONFIG?.analytics !== true");
     expect(loader).toContain("trackScreenViews: false");

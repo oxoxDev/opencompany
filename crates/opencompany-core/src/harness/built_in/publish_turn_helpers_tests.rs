@@ -145,6 +145,12 @@ pub(crate) async fn spawn_script(turns: Vec<Turn>) -> (String, Arc<Script>) {
 /// One assistant message carrying a native `tool_calls` array — the shape the
 /// provider's `tool_calling: true` profile puts the turn loop on.
 pub(crate) fn tool_call_message(tool: &str, args: &Value) -> Value {
+    // Plan hive-desks Phase 3: this crate's tools are served over the
+    // `opencompany` MCP server, so a scripted model reaches one exactly as a
+    // real one does — through `mcp_call_tool`. A native tool is unchanged.
+    let (tool, args) = crate::hive::tools::via_opencompany_mcp(tool, args.clone());
+    let tool = tool.as_str();
+    let args = &args;
     json!({
         "role": "assistant",
         "content": null,
@@ -172,6 +178,26 @@ pub(crate) fn advertised_tools(script: &Script) -> Vec<String> {
                 .map(str::to_string)
         })
         .collect();
+    // Plan hive-desks Phase 3: this crate's own tools reach the model as the
+    // `opencompany` MCP catalogue, named in the system prompt and called
+    // through `mcp_call_tool`, so "advertised" reads both halves.
+    names.extend(
+        script
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|body| body.get("messages").and_then(Value::as_array).cloned())
+            .flatten()
+            .filter(|message| message.get("role").and_then(Value::as_str) == Some("system"))
+            .filter_map(|message| {
+                message
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .flat_map(|prompt| crate::harness::build::tools_named_in_mcp_brief(&prompt)),
+    );
     names.sort();
     names.dedup();
     names
@@ -306,6 +332,7 @@ pub(crate) fn brain_with(
 ) -> (HarnessBrain, Arc<FsOps>) {
     let ops = Arc::new(FsOps::new(dir));
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -343,6 +370,7 @@ pub(crate) fn brain_with(
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -365,10 +393,11 @@ pub(crate) fn brain_with(
         deep_trace: None,
     };
     let record = CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
-        id: CompanyId::new("acme"),
+        id: crate::test_support::per_test_company_id("acme"),
         manifest: manifest(grants),
         ledger: Vec::new(),
         lifecycle: "running".to_string(),
@@ -410,7 +439,7 @@ pub(crate) async fn mint_run(ops: &Arc<FsOps>, run_id: &str, task_id: &str) {
 }
 
 pub(crate) fn company() -> CompanyId {
-    CompanyId::new("acme")
+    crate::test_support::per_test_company_id("acme")
 }
 
 /// A dispatched card, already in the column dispatch happens from.

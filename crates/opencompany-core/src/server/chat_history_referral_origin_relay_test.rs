@@ -33,7 +33,7 @@ async fn the_answering_desk_carries_the_question_it_was_asked() {
             CompanyEvent::AgentReply {
                 chat_id: "engineering".to_string(),
                 agent_id: "software_engineer".to_string(),
-                text: "!question @#design ^2 can the error messages be redone?".to_string(),
+                text: "@#design can the error messages be redone?".to_string(),
                 steps: Vec::new(),
                 task_id: None,
                 outputs: Vec::new(),
@@ -41,6 +41,7 @@ async fn the_answering_desk_carries_the_question_it_was_asked() {
                 mentions: Vec::new(),
                 mention_depth: 0,
                 audience: Vec::new(),
+                episode: None,
             },
         )
         .await
@@ -58,6 +59,9 @@ async fn the_answering_desk_carries_the_question_it_was_asked() {
             target: "product_designer".to_string(),
             returning: false,
             rows: None,
+            episode_id: None,
+            to_episode_id: None,
+            hop: 0,
         },
         // The far seat's turn, on its own desk and under its own id — the
         // only row this crossing leaves here.
@@ -72,6 +76,7 @@ async fn the_answering_desk_carries_the_question_it_was_asked() {
             mentions: Vec::new(),
             mention_depth: 0,
             audience: Vec::new(),
+            episode: None,
         },
     ] {
         runtime.events().append(&id, event).await.expect("journal");
@@ -128,7 +133,7 @@ async fn the_answering_desk_carries_the_question_it_was_asked() {
     );
     assert!(
         !question.text.starts_with('!'),
-        "a room's move grammar is addressed to the fold, not to a reader: {:?}",
+        "a seat speaks in prose; nothing is rewritten for a reader: {:?}",
         question.text
     );
 }
@@ -191,6 +196,7 @@ async fn a_marker_that_names_its_forward_pairs_beyond_the_scan_window() {
                     mentions: Vec::new(),
                     mention_depth: 0,
                     audience: Vec::new(),
+                    episode: None,
                 },
             )
             .await
@@ -223,6 +229,7 @@ async fn a_marker_that_names_its_forward_pairs_beyond_the_scan_window() {
                 mentions: Vec::new(),
                 mention_depth: 0,
                 audience: Vec::new(),
+                episode: None,
             },
         )
         .await

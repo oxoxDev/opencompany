@@ -62,7 +62,6 @@ export function NotificationsView({
   feed,
   sub,
   notifications,
-  channels,
   onNotificationsRead,
   forceApprovalsTab = false,
   onResolved,
@@ -77,7 +76,6 @@ export function NotificationsView({
   sub?: string | null;
   /** The shell's polled notification feed. Unread rows only, per the host. */
   notifications: readonly NotificationDto[];
-  channels: { rendered: ReadonlySet<string>; mainChannelId: string | undefined };
   /**
    * Mark rows read.
    *
@@ -219,7 +217,6 @@ export function NotificationsView({
             <ActivityTab
               notifications={notifications}
               now={feed.now}
-              channels={channels}
               onDismiss={dismiss}
               onDismissAll={dismissAll}
             />

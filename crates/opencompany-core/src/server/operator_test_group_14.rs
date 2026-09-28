@@ -31,6 +31,7 @@ async fn a_failed_revoke_append_still_removes_the_grant_from_the_live_set() {
         use crate::ports::store::CompanyStore;
         fs_store
             .save(&CompanyRecord {
+                general_channel: Default::default(),
                 overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),

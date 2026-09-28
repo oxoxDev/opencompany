@@ -11,13 +11,12 @@ const TEST_ENDPOINT: &str = "https://collector.invalid/track";
 
 /// A fully configured reporting environment, which `pairs` then overrides.
 ///
-/// It takes three variables where it used to take one, and that is the
-/// shape of the change: an OpenPanel deployment configures a client id, a
-/// client secret and the address of the collector it self-hosts.
+/// It takes two variables, and that is the whole tenant contract: an
+/// OpenPanel deployment configures a client id and the address of the
+/// collector it self-hosts. There is no client secret.
 fn configured(pairs: &[(&str, &str)]) -> MapEnv {
     let mut all = vec![
         (CLIENT_ID_ENV, "not-a-real-client-id"),
-        (CLIENT_SECRET_ENV, "not-a-real-client-secret"),
         (ENDPOINT_ENV, TEST_ENDPOINT),
     ];
     all.extend_from_slice(pairs);
@@ -147,7 +146,6 @@ fn a_non_unicode_endpoint_is_unusable_rather_than_absent() {
                     [b"https://collector.invalid/".as_slice(), &[0xff, 0xfe]].concat(),
                 )),
                 CLIENT_ID_ENV => Some(OsString::from("not-a-real-client-id")),
-                CLIENT_SECRET_ENV => Some(OsString::from("not-a-real-client-secret")),
                 _ => None,
             }
         }
@@ -238,7 +236,7 @@ fn the_endpoint_check_matches_what_the_transport_accepts() {
         // collector like any other, which #1739 makes a no-op on purpose.
         //
         // Sendable, but plain `http` to a host that is not loopback: the
-        // client secret is a header on every request, so these would put it
+        // client id is a header on every request, so these would put it
         // on the wire in the clear. Each was accepted before the
         // `InsecureEndpoint` rule.
         (
@@ -308,7 +306,8 @@ fn the_endpoint_check_matches_what_the_transport_accepts() {
 /// **A plain `http` endpoint to a non-loopback host is silence, not a
 /// credential in the clear.**
 ///
-/// The OpenPanel client secret is a request header on *every* request, so
+/// The OpenPanel client id — the whole write credential, with the
+/// collector's secret check off — is a request header on *every* request, so
 /// `OPENCOMPANY_ANALYTICS_ENDPOINT=http://collector.internal/track` writes a
 /// long-lived write credential to the network in cleartext once per event
 /// for the life of the tenant (CWE-319). Mixpanel had no equivalent
@@ -316,7 +315,7 @@ fn the_endpoint_check_matches_what_the_transport_accepts() {
 /// address this crate chose, and no configuration could downgrade it.
 ///
 /// Silence rather than a warning-and-send, because a warning is a line
-/// nobody reads while the secret ships anyway, and a disclosed credential
+/// nobody reads while the credential ships anyway, and a disclosed credential
 /// cannot be un-disclosed once noticed. The reason names the variable and
 /// the two ways out.
 #[test]
@@ -339,7 +338,7 @@ fn a_cleartext_endpoint_is_silence_rather_than_a_credential_on_the_wire() {
         assert_eq!(
             decision,
             Decision::Silent(Silence::InsecureEndpoint),
-            "{insecure:?} would send the client secret in the clear"
+            "{insecure:?} would send the client id in the clear"
         );
         assert!(!decision.reports(), "{insecure:?}");
     }
@@ -475,30 +474,25 @@ fn a_usable_endpoint_still_reports_to_exactly_itself() {
 /// The credential must not be printable by accident, because the accident is
 /// a `{:?}` in a log line nobody reviewed.
 ///
-/// **Both halves**, id included. OpenPanel's own web SDK treats a client id
-/// as public, but there is no line in this tree that is better for carrying
-/// it, and a type with one printable field and one redacted one is a type
-/// someone eventually prints in full.
+/// OpenPanel's own web SDK treats a client id as public, but with the
+/// collector's secret check off the id is the whole write credential, and
+/// there is no line in this tree that is better for carrying it.
 #[test]
-fn neither_half_of_the_credential_is_printable() {
-    let credentials = ClientCredentials::new("not-a-real-client-id", "not-a-real-client-secret");
+fn the_client_id_is_not_printable() {
+    let credentials = ClientCredentials::new("not-a-real-client-id");
     let printed = format!("{credentials:?}");
-    for half in ["not-a-real-client-id", "not-a-real-client-secret"] {
-        assert!(
-            !printed.contains(half),
-            "the Debug impl leaked {half}: {printed}"
-        );
-    }
+    assert!(
+        !printed.contains("not-a-real-client-id"),
+        "the Debug impl leaked the client id: {printed}"
+    );
 
     let decision = Decision::Report {
         endpoint: TEST_ENDPOINT.to_string(),
         credentials,
     };
     let printed = format!("{decision:?}");
-    for half in ["not-a-real-client-id", "not-a-real-client-secret"] {
-        assert!(
-            !printed.contains(half),
-            "the Debug impl leaked {half} through the decision: {printed}"
-        );
-    }
+    assert!(
+        !printed.contains("not-a-real-client-id"),
+        "the Debug impl leaked the client id through the decision: {printed}"
+    );
 }

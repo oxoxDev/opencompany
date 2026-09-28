@@ -7,6 +7,7 @@ import { App } from "./App";
 import { CrashFallback } from "@/components/crash-fallback";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
+import { applyStoredAccentPreset } from "@/lib/accent-presets";
 import { purgeStoredSmtpPasswords } from "@/lib/domain";
 import { installExternalLinkOpener } from "@/lib/external-links";
 import { startScrollActivity } from "@/lib/scroll-activity";
@@ -68,8 +69,10 @@ function mount(): void {
 
 // Crash reporting first, before anything else runs and well before the first
 // render — a crash during the first render is exactly the one worth reporting,
-// and a boundary armed after it would miss it. Silent unless
-// `VITE_SENTRY_DSN` is set: no console warning, no network, nothing to notice.
+// and a boundary armed after it would miss it. A production build reports to
+// `VITE_SENTRY_DSN` or the compiled-in console project; the dev server falls
+// back to neither, so it is silent unless `VITE_SENTRY_DSN` is explicitly
+// set, and a `VITE_SENTRY_DSN=off` build is always silent.
 // See `docs/spec/runtime/crash-reporting.md`.
 initSentry();
 
@@ -94,5 +97,14 @@ installExternalLinkOpener();
 // Settings again, and the credential has to be gone either way. A no-op on any
 // browser that never stored one.
 purgeStoredSmtpPasswords();
+
+// Synchronous, and before `mount()`, so the chosen accent preset is already on
+// `<html>` for React's first commit — see `accent-presets.ts` for why this
+// cannot be an inline `<script>` (client-rendered scripts are inert) or a
+// `next-themes`-style trick (this SPA has no server render for that trick to
+// run during). `next-themes` itself still applies `.dark` from an effect, one
+// commit later — a pre-existing flash this call does not fix (issue #2493,
+// `docs/issues/accent-theme-presets/open-questions.md` Q8).
+applyStoredAccentPreset();
 
 mount();

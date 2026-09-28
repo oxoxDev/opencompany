@@ -69,6 +69,14 @@ export interface ObservatoryRun {
   chatId: string | null;
   workflowRunId: string | null;
   nodeId: string | null;
+  /**
+   * The episode and round this attempt was a seat's turn in — `null` for a
+   * turn outside an episode. What lets the waterfall draw a round as one band
+   * across the seats that ran it, rather than as unrelated bars that happen
+   * to overlap.
+   */
+  episodeId: string | null;
+  roundRevision: number | null;
   createdAtMillis: number;
   startedAtMillis: number | null;
   finishedAtMillis: number | null;
@@ -102,7 +110,7 @@ export function isLive(run: ObservatoryRun): boolean {
  * list. Who may read it at all is decided server-side, beside the approval rule
  * (`approval_visibility.rs`); the console asks and the host answers.
  */
-function runFields(deep: boolean): string {
+function runFields(deep: boolean, episodes = true): string {
   return `
   id
   agentId
@@ -113,6 +121,7 @@ function runFields(deep: boolean): string {
   chatId
   workflowRunId
   nodeId
+  ${episodes ? "episodeId\n  roundRevision" : ""}
   createdAtMillis
   startedAtMillis
   finishedAtMillis
@@ -135,24 +144,51 @@ function runFields(deep: boolean): string {
 `;
 }
 
-const RUN_FIELDS = runFields(false);
-const RUN_FIELDS_WITH_DEEP = runFields(true);
-
-const RUNS_QUERY = `
+const runsQuery = (episodes: boolean) => `
   query ObservatoryRuns($company: ID!, $workflowRunId: ID, $taskId: ID, $limit: Int!) {
     company(id: $company) {
       agentRuns(workflowRunId: $workflowRunId, taskId: $taskId, limit: $limit) {
-        ${RUN_FIELDS}
+        ${runFields(false, episodes)}
       }
     }
   }
 `;
 
-const RUN_QUERY = `
+const runQueryDocument = (episodes: boolean) => `
   query ObservatoryRun($company: ID!, $id: ID!) {
-    company(id: $company) { agentRun(id: $id) { ${RUN_FIELDS_WITH_DEEP} } }
+    company(id: $company) { agentRun(id: $id) { ${runFields(true, episodes)} } }
   }
 `;
+
+/**
+ * Whether a refusal is the schema not knowing the episode fields — a host
+ * predating desk episodes. GraphQL validates the selection before resolving
+ * anything, so on such a host the whole query fails, not just two columns.
+ */
+function lacksEpisodeFields(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /episodeId|roundRevision/.test(message);
+}
+
+/**
+ * Runs the query with the episode fields, and once more without them when the
+ * host's schema has none. The retry is what keeps the Observatory readable on
+ * a host predating desk episodes: every row then carries `episodeId: null`,
+ * which is exactly what the fold does with a turn outside an episode.
+ */
+async function queryWithEpisodeFallback<T>(
+  client: OpenCompanyClient,
+  document: (episodes: boolean) => string,
+  variables: Record<string, unknown>,
+  company: string,
+): Promise<T> {
+  try {
+    return await runQuery<T>(client, document(true), variables, company);
+  } catch (error) {
+    if (!lacksEpisodeFields(error)) throw error;
+    return runQuery<T>(client, document(false), variables, company);
+  }
+}
 
 interface RunsResult {
   company: { agentRuns: ObservatoryRun[] } | null;
@@ -169,9 +205,9 @@ export async function fetchRunsForWorkflowRun(
   workflowRunId: string,
   limit = 50,
 ): Promise<ObservatoryRun[]> {
-  const data = await runQuery<RunsResult>(
+  const data = await queryWithEpisodeFallback<RunsResult>(
     client,
-    RUNS_QUERY,
+    runsQuery,
     { company, workflowRunId, taskId: null, limit },
     company,
   );
@@ -184,9 +220,9 @@ export async function fetchRecentRuns(
   company: string,
   limit = 50,
 ): Promise<ObservatoryRun[]> {
-  const data = await runQuery<RunsResult>(
+  const data = await queryWithEpisodeFallback<RunsResult>(
     client,
-    RUNS_QUERY,
+    runsQuery,
     { company, workflowRunId: null, taskId: null, limit },
     company,
   );
@@ -207,6 +243,11 @@ export async function fetchRun(
   company: string,
   id: string,
 ): Promise<ObservatoryRun | null> {
-  const data = await runQuery<RunResult>(client, RUN_QUERY, { company, id }, company);
+  const data = await queryWithEpisodeFallback<RunResult>(
+    client,
+    runQueryDocument,
+    { company, id },
+    company,
+  );
   return data.company?.agentRun ?? null;
 }

@@ -227,29 +227,43 @@ async fn concurrent_demotions_cannot_zero_out_the_admin_roster() {
     );
 }
 
-/// `identity()`'s bare `contains('@')` shape check, by name: a value with
-/// no `@` at all is refused rather than accepted as a to-be-normalized
-/// address.
+/// `identity()` applies the shared login rule: a value with whitespace inside
+/// it, or one that would parse as the `none`-mode owner's key, is refused
+/// rather than accepted as a to-be-normalized address.
 #[test]
-fn identity_refuses_a_malformed_email() {
+fn identity_refuses_a_malformed_login() {
+    for bad in ["Ada Lovelace", "local:owner"] {
+        let body = InviteBody {
+            email: bad.to_string(),
+            wallet: String::new(),
+            role: UserRole::Member,
+        };
+
+        let err = body
+            .identity(AuthMode::Email)
+            .expect_err("an unusable login must be refused");
+
+        assert!(
+            matches!(
+                err,
+                OpenCompanyError::InvalidRequest(ref msg)
+                    if msg == "that is not a usable login — an email address or a single word"
+            ),
+            "unexpected error for {bad:?}: {err:?}"
+        );
+    }
+}
+
+/// A plain username is a login: on a host with no mail there is no mailbox to
+/// demand, and the admin hands over a password instead.
+#[test]
+fn identity_accepts_a_plain_username() {
     let body = InviteBody {
-        email: "not-an-email".to_string(),
+        email: "Ops".to_string(),
         wallet: String::new(),
         role: UserRole::Member,
     };
-
-    let err = body
-        .identity(AuthMode::Email)
-        .expect_err("a value with no `@` must be refused");
-
-    assert!(
-        matches!(
-            err,
-            OpenCompanyError::InvalidRequest(ref msg)
-                if msg == "that doesn't look like an email address"
-        ),
-        "unexpected error: {err:?}"
-    );
+    assert_eq!(body.identity(AuthMode::Email).unwrap(), "ops");
 }
 
 /// The same branch on whitespace-only input — `normalize_email` trims it
@@ -270,7 +284,7 @@ fn identity_refuses_an_empty_email() {
         matches!(
             err,
             OpenCompanyError::InvalidRequest(ref msg)
-                if msg == "that doesn't look like an email address"
+                if msg == "that is not a usable login — an email address or a single word"
         ),
         "unexpected error: {err:?}"
     );

@@ -110,8 +110,8 @@ mod live {
     use crate::paypal::api;
     use crate::paypal::client::PaypalClient;
 
-    use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
     use openhuman_core as oh;
+    use tinytools::{PermissionLevel, Tool, ToolResult};
 
     /// Builds the per-company PayPal tools over a resolved connection.
     pub fn paypal_tools(config: &TenantPaypal) -> Vec<Box<dyn Tool>> {

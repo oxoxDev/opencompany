@@ -49,11 +49,11 @@ export interface CommsNode {
  * Edge kinds, in increasing order of how much they claim.
  *
  * `member` and `may-delegate` are **structure** — true because the manifest says
- * so. `handed-off` and `spawned` are **history** — true because the console
- * watched it happen. They are drawn differently for that reason: a company that
+ * so. `handed-off`, `spawned` and `spoke` are **history** — true because the
+ * console watched it happen. They are drawn differently for that reason: a company that
  * has never run should look connected but idle, not busy.
  */
-export type CommsEdgeKind = "member" | "may-delegate" | "handed-off" | "spawned";
+export type CommsEdgeKind = "member" | "may-delegate" | "handed-off" | "spawned" | "spoke";
 
 export interface CommsEdge {
   id: string;
@@ -107,7 +107,14 @@ export type CommsObservation =
       label?: string;
     }
   | { kind: "spawned"; by: string | null; agentId: string; atMillis: number }
-  | { kind: "speaking"; agentId: string };
+  | { kind: "speaking"; agentId: string }
+  /**
+   * One agent reached another inside an episode — a broadcast the router
+   * carried to a seat, a desk DM, or a referral to another desk. Folded from
+   * the episode frames by `lib/coordination.ts`. The most direct claim the
+   * graph makes: not "may reach", not "handed a card", but "spoke to".
+   */
+  | { kind: "spoke"; from: string; to: string; via: "broadcast" | "dm" | "referral"; atMillis: number };
 
 /** Build the structural graph — everything true before anybody does anything. */
 export function structuralGraph(
@@ -212,6 +219,33 @@ export function applyObservations(
         kind: "spawned",
         count: 1,
         lastAtMillis: ob.atMillis,
+      };
+      edges.push(edge);
+      edgeByKey.set(key, edge);
+      continue;
+    }
+
+    if (ob.kind === "spoke") {
+      const from = resolveNode(byId, ob.from);
+      const to = resolveNode(byId, ob.to);
+      if (from === to) continue;
+      const key = `spoke:${from}->${to}`;
+      const held = edgeByKey.get(key);
+      if (held) {
+        held.count += 1;
+        held.lastAtMillis = ob.atMillis;
+        held.label = ob.via;
+        continue;
+      }
+      const edge: CommsEdge = {
+        id: key,
+        from,
+        to,
+        kind: "spoke",
+        count: 1,
+        lastAtMillis: ob.atMillis,
+        label: ob.via,
+        provisional: !byId.has(to) || !byId.has(from),
       };
       edges.push(edge);
       edgeByKey.set(key, edge);

@@ -12,7 +12,7 @@
 //! * [`with_stop_hooks`](oh::agent::stop_hooks::with_stop_hooks) returns only
 //!   the future's value — the hook list rides a `tokio::task_local` and nothing
 //!   reads back out of it;
-//! * and [`Agent::last_turn_hit_cap`](oh::agent::Agent::last_turn_hit_cap) is
+//! * and `progress_pump::hit_iteration_cap` (read off the progress stream) is
 //!   `false`, because a hook-driven halt pauses *below* `max_tool_iterations`
 //!   so the iteration-cap predicate does not hold. #988 pins that distinction
 //!   deliberately, which is exactly why the #926 flag cannot be reused here.

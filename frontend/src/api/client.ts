@@ -42,8 +42,9 @@ import {
   type ConnectionState,
   type CreateDeskInput,
   type DeskDto,
-  type DeskHiveDto,
-  type DeskHiveDeclared,
+  type DeskRoutingDto,
+  type DeskRoutingDeclared,
+  type EpisodeDto,
   type EditAgentInput,
   type FeedbackInput,
   type FeedbackResponse,
@@ -54,7 +55,6 @@ import {
   type BudgetPauseMarker,
   type InboxDto,
   type InboxMessageDto,
-  type OperatorChannelDto,
   type PageManifestDto,
   type ProvisioningInfo,
   type ResolveReceipt,
@@ -719,11 +719,6 @@ export class OpenCompanyClient {
     return this.request<DeskDto[]>("GET", `${this.scope(company)}/desks`);
   }
 
-  /** The identity of the company's durable, read-only Operator feed. */
-  getOperatorChannel(company?: string | null): Promise<OperatorChannelDto> {
-    return this.request<OperatorChannelDto>("GET", `${this.scope(company)}/operator-channel`);
-  }
-
   /**
    * Add a teammate to a desk through the operator overlay (issue #72). The
    * teammate must be on the company roster; the desk must exist. Adding one
@@ -784,45 +779,65 @@ export class OpenCompanyClient {
    * deleted at runtime and returns a 409; an unknown id is a 404.
    */
   /**
-   * A desk's move grammar (`GET {scope}/desks/{id}/hive`).
+   * A desk's routing block (`GET {scope}/desks/{id}/routing`).
    *
    * Its own call rather than a field on `listDesks`, because the payload
-   * carries the whole seat table and the derived numbers — an N+1 the desk list
-   * has no reason to pay on every render.
+   * carries the candidate table and the resolved numbers — an N+1 the desk
+   * list has no reason to pay on every render. The list carries the compact
+   * `routing` summary instead.
    */
-  getDeskHive(deskId: string, company?: string | null): Promise<DeskHiveDto> {
-    return this.request<DeskHiveDto>(
+  getDeskRouting(deskId: string, company?: string | null): Promise<DeskRoutingDto> {
+    return this.request<DeskRoutingDto>(
       "GET",
-      `${this.scope(company)}/desks/${encodeURIComponent(deskId)}/hive`,
+      `${this.scope(company)}/desks/${encodeURIComponent(deskId)}/routing`,
     );
   }
 
   /**
-   * Install or replace a desk's move grammar, without rewriting `company.toml`.
+   * Install or replace a desk's routing block, without rewriting `company.toml`.
    *
-   * Returns the derived result of what was installed, so the caller renders the
-   * effective numbers without a second round trip. A refusal comes back as an
-   * `ApiError` carrying the host's own sentence — rendered verbatim, because the
-   * host is the authority on why a table is invalid.
+   * Returns the resolved result of what was installed, so the caller renders
+   * the effective numbers without a second round trip. A refusal comes back as
+   * an `ApiError` carrying the host's own sentence — rendered verbatim, because
+   * the host is the authority on why a block is invalid.
    */
-  putDeskHive(
+  putDeskRouting(
     deskId: string,
-    declared: DeskHiveDeclared,
+    declared: DeskRoutingDeclared,
     company?: string | null,
-  ): Promise<DeskHiveDto> {
-    return this.request<DeskHiveDto>(
+  ): Promise<DeskRoutingDto> {
+    return this.request<DeskRoutingDto>(
       "PUT",
-      `${this.scope(company)}/desks/${encodeURIComponent(deskId)}/hive`,
+      `${this.scope(company)}/desks/${encodeURIComponent(deskId)}/routing`,
       declared,
     );
   }
 
-  /** Drop the installed grammar and fall back to the manifest's own block. */
-  resetDeskHive(deskId: string, company?: string | null): Promise<DeskHiveDto> {
-    return this.request<DeskHiveDto>(
+  /** Drop the installed block and fall back to the manifest's own. */
+  resetDeskRouting(deskId: string, company?: string | null): Promise<DeskRoutingDto> {
+    return this.request<DeskRoutingDto>(
       "DELETE",
-      `${this.scope(company)}/desks/${encodeURIComponent(deskId)}/hive`,
+      `${this.scope(company)}/desks/${encodeURIComponent(deskId)}/routing`,
     );
+  }
+
+  /**
+   * The episodes a desk ran or is running (`GET {scope}/episodes`), newest
+   * first. `desk` narrows to one desk, `status` to `open` or `completed`, and
+   * `limit` bounds the page. The room does not read this — it folds episodes
+   * out of the transcript and the live frames — but the measurement script and
+   * a reloaded Observatory do.
+   */
+  listEpisodes(
+    query: { desk?: string; status?: "open" | "completed"; limit?: number } = {},
+    company?: string | null,
+  ): Promise<EpisodeDto[]> {
+    const params = new URLSearchParams();
+    if (query.desk) params.set("desk", query.desk);
+    if (query.status) params.set("status", query.status);
+    if (query.limit !== undefined) params.set("limit", String(query.limit));
+    const qs = params.size > 0 ? `?${params.toString()}` : "";
+    return this.request<EpisodeDto[]>("GET", `${this.scope(company)}/episodes${qs}`);
   }
 
   deleteDesk(deskId: string, company?: string | null): Promise<void> {

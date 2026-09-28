@@ -223,6 +223,10 @@ struct BundleMeta {
     /// as `false`: exactly the legacy state such a bundle actually has.
     #[serde(default)]
     activation_gate_seen: bool,
+    /// The company-wide `#general` channel. Absent on bundles written before
+    /// it was stored; the builder backfills it on the imported company's boot.
+    #[serde(default)]
+    general_channel: Option<crate::ports::types::GeneralChannel>,
 }
 
 /// One exported context chunk: its content address, label, and body.
@@ -317,6 +321,8 @@ struct BundleContents {
     /// otherwise `write_via_ports`'s save would stamp it seen on arrival and
     /// permanently block the grandfather back-fill for that company.
     activation_gate_seen: bool,
+    /// The company-wide `#general` channel, carried so export→import keeps it.
+    general_channel: Option<crate::ports::types::GeneralChannel>,
 }
 
 impl BundleContents {
@@ -414,6 +420,7 @@ impl BundleContents {
             name_confirmed: record.name_confirmed,
             activation_completed_at: record.activation_completed_at,
             activation_gate_seen,
+            general_channel: Some(record.general_channel),
         })
     }
 
@@ -507,6 +514,7 @@ impl BundleContents {
                     // `created_at_millis` field) — `None` here matches every
                     // other `CompanyRecord` this module constructs.
                     created_at_millis: None,
+                    general_channel: self.general_channel.clone().unwrap_or_default(),
                 },
                 self.activation_gate_seen,
             )
@@ -563,6 +571,7 @@ impl BundleContents {
             name_confirmed: self.name_confirmed,
             activation_completed_at: self.activation_completed_at,
             activation_gate_seen: self.activation_gate_seen,
+            general_channel: self.general_channel.clone(),
         };
         write_file(
             &dest.join(META_JSON),
@@ -737,6 +746,7 @@ impl BundleContents {
             name_confirmed: meta.name_confirmed,
             activation_completed_at: meta.activation_completed_at,
             activation_gate_seen: meta.activation_gate_seen,
+            general_channel: meta.general_channel,
         })
     }
 }

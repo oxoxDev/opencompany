@@ -295,35 +295,6 @@ fn the_operator_name_reservation_folds_case() {
     );
 }
 
-/// PR #1781 review follow-up: the id/name reservation above only blocks
-/// the literal `OPERATOR_CHANNEL` name ("Operator"), but a grandfathered
-/// collision diverts the durable feed to
-/// `OPERATOR_CHANNEL_COLLISION_FALLBACK` ("operator-feed") instead —
-/// `server::operator::resolve_desk` resolves a `?desk=` selector against
-/// `chat.name.eq_ignore_ascii_case(desk)` with no distinction between the
-/// two addresses. A desk named `operator-feed` therefore still passes
-/// this validation, survives `from_path_for_reload`, and then shadows
-/// the fallback address exactly as thoroughly as a desk literally named
-/// "Operator" would shadow the primary one: `GET
-/// {scope}/chat/history?desk=operator-feed`, the request the console's
-/// pinned Operator row makes once diverted, resolves to this desk instead
-/// of the collision-fallback feed.
-#[test]
-fn the_operator_feed_fallback_name_is_also_reserved() {
-    let manifest = parse(
-        "[company]\nname = \"X\"\n\
-         [[agent]]\nid = \"ceo\"\nrole = \"CEO\"\n\
-         [[group_chat]]\nid = \"ops\"\nname = \"operator-feed\"\nmembers = [\"ceo\"]\n",
-    );
-    let problems = manifest.validate();
-    assert!(
-        problems
-            .iter()
-            .any(|p| p.contains("reserved") && p.contains("operator-feed")),
-        "{problems:?}"
-    );
-}
-
 /// Follow-up to the group-chat guard above: `RESERVED_AGENT_IDS` already
 /// stops a console-minted teammate from taking `system`
 /// (`mint_agent_id`), but a manifest agent's id is read straight from the

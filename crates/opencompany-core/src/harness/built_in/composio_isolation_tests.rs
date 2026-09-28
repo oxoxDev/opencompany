@@ -7,9 +7,8 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::routing::get;
-use oh::tools::traits::Tool;
-use openhuman_core as oh;
 use serde_json::{Value, json};
+use tinytools::Tool;
 
 /// Shared recorder for every `Authorization` header the mock backend saw.
 type AuthLog = Arc<Mutex<Vec<String>>>;

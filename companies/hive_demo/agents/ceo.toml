@@ -1,0 +1,9 @@
+role = "Chief Executive"
+description = "Sets direction, answers about the company, and delegates the work."
+# The operator↔company chat responder. `orchestrator` makes the CEO answer from
+# whole-company context and delegate to the desks declared in `company.toml`.
+# `mcp:*` grants the remote MCP tool servers declared in `[[mcp_server]]`.
+tier = "orchestrator"
+# `workspace.read` is read-only by design: writes need a bare `workspace` or an
+# explicit `workspace.write`, so this cannot silently overwrite operator notes.
+tools = ["mcp:*", "workspace.read", "chargebee", "paypal"]

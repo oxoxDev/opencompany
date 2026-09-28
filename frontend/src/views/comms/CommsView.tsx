@@ -4,6 +4,7 @@ import { Loader2 } from "lucide-react";
 import type { OpenCompanyClient } from "@/api/client";
 import { PageHeader } from "@/components/page-header";
 import { listTasks } from "@/api/tasks";
+import { isGeneralDesk } from "@/lib/desks";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import { CommsGraphView } from "@/views/comms/CommsGraphView";
 import {
@@ -101,7 +102,9 @@ export function CommsView({
           })),
         );
         setDesks(
-          deskList.map((d) => ({ id: d.id, name: d.name, members: d.members })),
+          deskList
+            .filter((d) => !isGeneralDesk(d))
+            .map((d) => ({ id: d.id, name: d.name, members: d.members })),
         );
       })
       .catch((e: unknown) => {

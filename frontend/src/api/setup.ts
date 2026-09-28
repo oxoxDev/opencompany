@@ -90,6 +90,15 @@ export interface SetupStatus {
   templates: SetupTemplate[];
   /** Sign-in modes this host accepts. `none` is absent on a routable bind. */
   auth_modes: string[];
+  /**
+   * The mode the wizard should preselect when `config.toml` names none.
+   *
+   * `none` on the packaged desktop host, which already runs without a
+   * sign-in: one machine, one person, no mailbox. Reported by the host so a
+   * browser tab pointed at a desktop host gets the same answer as the webview.
+   * Absent everywhere else, and on a host too old to report it.
+   */
+  default_auth_mode?: string;
   /** Which optional surfaces this build has. */
   build: SetupBuild;
   /** Companies already registered. Non-empty means the seed step is skipped. */
@@ -104,9 +113,9 @@ export interface SetupStatus {
  * What this host can do with a mailbox.
  *
  * Separate from `auth_modes`, which says which modes are *legal*: `email` stays
- * on that list whatever mail the host has, because hub OAuth and passwords sign
- * people in without a transport. This says which sign-in can honestly be
- * offered today.
+ * on that list whatever mail the host has, because a password signs people in
+ * without a transport. This says whether a magic link can honestly be offered
+ * today.
  *
  * Required rather than optional, deliberately. An optional field would let a
  * host too old to report it fall through to whatever the UI treats `undefined`
@@ -299,6 +308,12 @@ export interface SetupInput {
    * level of this request is read field-for-field by the host.
    */
   admin_email?: string | null;
+  /**
+   * The first admin's password, set on the account the moment the company
+   * exists so the wizard can sign the operator straight in. Write-only.
+   * Ignored by a host with no sign-in, and by one too old to know the field.
+   */
+  admin_password?: string | null;
   /**
    * The TinyHumans account key the managed branch collected, stored against
    * the company this call seeds and fanned out from there.

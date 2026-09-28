@@ -46,10 +46,21 @@ async function measure(page: Page) {
   });
 }
 
-/** A signed-out page at `size`, parked on the sign-in screen. */
+/**
+ * A signed-out page at `size`, parked on the sign-in screen of a host that
+ * mails links.
+ *
+ * The harness host binds loopback with no mail transport, and such a host
+ * draws the password form alone. The heights walked below are the mailed-link
+ * screen's, so the host's answer is stubbed to say it mails; `auth/request`
+ * still answers the real host, which acknowledges a stranger like a member.
+ */
 async function signedOut(browser: Browser, size: { width: number; height: number }) {
   const context = await browser.newContext({ storageState: undefined, viewport: size });
   const page = await context.newPage();
+  await page.route("**/auth/config", (route) =>
+    route.fulfill({ json: { mode: "email", passwords: true, magicLink: true, claimable: false } }),
+  );
   await page.goto("/");
   return { context, page };
 }
@@ -149,7 +160,7 @@ for (const mode of ["wallet", "none"] as const) {
     try {
       const page = await context.newPage();
       await page.route("**/auth/config", (route) =>
-        route.fulfill({ json: { mode, passwords: false, magicLink: false } }),
+        route.fulfill({ json: { mode, passwords: false, magicLink: false, claimable: false } }),
       );
       await page.goto("/");
       await expect(page.getByText(marker)).toBeVisible();
@@ -173,8 +184,7 @@ test("a viewport too short for the card scrolls rather than clipping it", async 
   // item is what prevents it, and this is the test that says so.
   const { context, page } = await signedOut(browser, { width: 1440, height: 360 });
   try {
-    // The tallest variant a harness can reach: the "Check your email" state,
-    // which on a host with no mail transport also carries the dev-code panel.
+    // The tallest variant a harness can reach: the "Check your email" state.
     await page.getByLabel("Email").fill("centring-1332@example.test");
     await page.getByRole("button", { name: "Email me a link" }).click();
     await expect(page.getByText("Check your email")).toBeVisible();

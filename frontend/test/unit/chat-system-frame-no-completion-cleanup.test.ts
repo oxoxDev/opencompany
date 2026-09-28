@@ -56,12 +56,14 @@ describe("renderAgentReply never treats a system frame as turn completion", () =
       /if \(from !== "system" && !hasOtherOpenTurns\(room\.readRoom\(\)\.openTurns, event\.chatId\)\) \{/,
     );
     // The bug this pins: the guard existing anywhere in the file would not
-    // prove it protects the right call — confirm the specific cleanup call
-    // (the `setLiveStepsByThread` clear) is the one immediately gated by it.
+    // prove it protects the right call — confirm the specific cleanup call is
+    // the one immediately gated by it. Since #2423 that call is
+    // `clearLiveThread`, which retires the thread's rows and the agent they
+    // named together; `live-steps-cleanup.test.ts` pins what it does.
     const guardAt = body.indexOf(
       'if (from !== "system" && !hasOtherOpenTurns(room.readRoom().openTurns, event.chatId)) {',
     );
-    const cleanupAt = body.indexOf("setLiveStepsByThread((prev) =>", guardAt);
+    const cleanupAt = body.indexOf("clearLiveThread(event.chatId)", guardAt);
     expect(cleanupAt, "the live-steps clear inside the guarded block").toBeGreaterThan(guardAt);
   });
 });

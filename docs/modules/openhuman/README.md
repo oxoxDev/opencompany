@@ -1,27 +1,45 @@
 # OpenHuman Module
 
 OpenHuman is the tenant harness, embedded as a **library**. The
-`src/harness/` module links `openhuman_core` (`vendor/openhuman`) directly and,
-under `feature = "openhuman"`, builds one openhuman `Agent` per manifest
-`[[agent]]` through `AgentBuilder`. The default build links none of it and
-keeps its offline, echo-brained behaviour.
+`src/harness/` module links `openhuman_core` and `openhuman_embed`
+(`vendor/openhuman`) directly and, under `feature = "openhuman"`, runs **one
+process-wide `openhuman_embed::Runtime`** (`harness::openhuman_runtime`, on its
+own tokio executor) and instantiates **one `openhuman_embed::Agent` per manifest
+`[[agent]]`** from an `AgentSpec` (`harness::build::agent_spec_for`). The default
+build links none of it and keeps its offline, echo-brained behaviour.
 
-The builder seams are wired to OpenCompany's own ports:
+What each agent is built from (`harness::build::AgentBlueprint`):
 
-- **Persona** → each agent gets a system prompt framing it as its manifest
-  `role` at the company, built with `SystemPromptBuilder::for_subagent` and
-  `omit_identity` so it speaks as that role rather than openhuman's own
-  assistant identity.
-- **Memory** → `harness::memory::OcMemory`, an openhuman `Memory` over the
-  OpenCompany `ContextStore`.
-- **Inference provider** → `harness::provider::HostedProvider`, an
-  OpenAI-compatible client for the hosted TinyHumans brain (`chat()` sends the
-  full history and parses token/cost usage back out), with a `MockProvider`
-  for offline tests.
-- **Tool policy** → `harness::policy::ApprovalPolicy` still enforces hard
-  denials such as `readonly`, but policy-generated HITL is disabled. Approvals
-  are raised deliberately through the intrinsic `request_approval` tool.
-- **Tools / skills** → injected from the company's manifest grants.
+- **Persona** → the system prompt: manifest `role` at the company, the bundle,
+  team and tool briefs, the skills catalogue, the sandbox brief. Passed as the
+  spec's inline definition prompt and — because a hosted turn resolves its
+  agent by id through OpenHuman's definition registry — declared again as a
+  custom `AgentRegistryEntry` in the agent's own config.
+- **Inference** → `harness::provider::HostedProvider` / `TenantProvider` (the
+  company default or the agent's own `{provider, model}` pin), served to the
+  runtime over the loopback OpenAI-compatible **model bridge**
+  (`harness::model_bridge`): the runtime's inference client talks to
+  `127.0.0.1` with a per-agent bearer, the bridge forwards to the provider,
+  and taps every call's usage (with the backend-charged amount) so a turn is
+  metered from what the provider reported. A scripted test model is served the
+  same way. Managed search, Composio and media reach the TinyHumans backend
+  through the transport `harness::backend_transport` installs once per
+  process.
+- **Tools** → the OpenHuman-native subset of the manifest grants (`shell`,
+  `file_*`, `web_fetch`, …) is the spec's `ToolScopeSpec::Named`. This crate's
+  own tools (ledger, tasks, pages, workspace, composio, hosting, memory, speech,
+  approval) are assembled on the blueprint but **unattached**: OpenHuman has no
+  seam for a host-built tool, so they become the per-agent MCP catalogue in
+  plan hive-desks Phase 3. The workflow copilot's three tools run on the
+  host-side loop `harness::host_loop` instead.
+- **Session** → every conversational turn resumes the agent's one stable
+  session (`session_key::openhuman_session_key`), which OpenHuman owns; a turn
+  that names no chat (a card, a workflow node) runs on a fresh session of its
+  own. Turns of one agent are serialised by its `turn_lock`; different agents
+  run concurrently.
+- **Tool policy** → `harness::policy::ApprovalPolicy` is carried on the
+  blueprint for the Phase 3 tool handler; the runtime's own approval gate is
+  off (`Access::full()`).
 
 See [`docs/modules/runtime/README.md`](../runtime/README.md) for `HarnessPool`
 and [`docs/spec/integrations/openhuman.md`](../../spec/integrations/openhuman.md)
@@ -80,7 +98,7 @@ default model, most specific first:
 | key | `OPENCOMPANY_INFERENCE_KEY` | `TINYHUMANS_API_KEY` — **no key ⇒ echo brain** |
 | url | `OPENCOMPANY_INFERENCE_URL` | `{TINYHUMANS_API_URL}/agent-integrations/openrouter` |
 | model | `OPENCOMPANY_INFERENCE_MODEL` | `chat-v1` |
-| window | `OPENCOMPANY_CONTEXT_WINDOW` | `240000` — context window advertised on the managed profile; `off`/`0` disables compression and trimming. Lower it for a smaller model — see [history protection](../runtime/providers.md#history-protection) |
+| window | `OPENCOMPANY_CONTEXT_WINDOW` | `240000` — context window advertised on the managed profile; `off`/`0` disables compression and trimming. Lower it for a smaller model — see [history protection](../../spec/runtime/providers.md#history-protection) |
 
 The two key names keep a per-tenant override distinct from the platform-wide
 credential the hosting manager injects.
@@ -95,29 +113,30 @@ falls back to the env credential rather than 401ing.
 ## Cost metering
 
 `harness::cost` maps a completed turn's usage onto the ledger and the
-`UsageMeter`. `HarnessPool::run` reads the real per-turn token/cost totals from
-openhuman's public `Agent::last_turn_usage()` accessor
-(tinyhumansai/openhuman#4940), so metering is **live**. Gating differs by
+`UsageMeter`. `HarnessPool::run` reads the per-turn token/cost totals from the
+runtime's `AgentProgress::ModelCallCompleted` / `TurnCostUpdated` frames
+(`progress_pump.rs`), cross-checked against what the model bridge saw the
+provider charge, so metering is **live**. Gating differs by
 surface: a usage sample is recorded whenever tokens moved (the `/openai/v1`
 passthrough reports tokens but bills backend-side, echoing no USD), while a
 ledger `inference.spend` entry is written only when the turn actually cost USD —
 so a token-bearing zero-cost turn meters usage without a `$0.00` spend line. An
 offline provider that reports no usage yields a zero turn, which writes nothing.
 
-## `src/openhuman/` — legacy JSON-RPC path (behind `openhuman-rpc`)
+## Desks
 
-The former out-of-process seam is retained for one release and then removed.
-`src/openhuman/` still hosts the launcher (`opencompany open-human
-[--mode core|desktop] [--release] [--dry-run]` — Core shells out through Cargo
-to `openhuman-core`, Desktop calls `cargo tauri dev`/`build` directly and ports
-OpenHuman's `dev:app`/`dev:wry`/`macos:build:release`/`tauri:build:ui` preflight
-into Rust: vendored CEF-aware `tauri-cli` install, `CEF_PATH`, `.env` load
-(seeded from `.env.example` only in Desktop mode when absent), and macOS
-keychain + signing) and the JSON-RPC adapters —
-`rpc.rs` (the `OpenHumanRpc` transport trait + `MockOpenHumanRpc`),
-`http_client.rs` (the `reqwest` client behind `openhuman-rpc`), `tools.rs`
-(`OpenHumanToolProvider`, catalog filtered by manifest grants, ungranted calls
-rejected), and `channel.rs` (`OpenHumanChannelAdapter`). It degrades to
-built-in tools and the operator channel with a boot warning when OpenHuman is
-unreachable — never a boot failure. New work targets the embedded library, not
-this path.
+A `[[group_chat]]` of two or more is one `tinyhivemind_openhuman::OpenHumanHive`
+over these same agent handles (a shared agent is one handle bound into every
+hive that lists it), driven by `src/hive/` as completion episodes: concurrent
+rounds, speech over the `opencompany` MCP server, Jev routing, cross-desk
+referral. See [`docs/modules/hive/README.md`](../hive/README.md) and
+[`docs/spec/runtime/hive.md`](../../spec/runtime/hive.md).
+
+## The removed JSON-RPC path
+
+`src/openhuman/` — the `opencompany open-human` launcher, the `OpenHumanRpc`
+transport, `OpenHumanToolProvider` and `OpenHumanChannelAdapter`, behind the
+`openhuman-rpc` feature — is gone. A manifest naming `provider = "openhuman"`
+on `[tools]` or on a channel builds on the built-in tool provider and the
+operator channel with a boot warning; `OPENCOMPANY_OPENHUMAN_URL` attaches to
+nothing.

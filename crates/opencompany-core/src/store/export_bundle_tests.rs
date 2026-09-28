@@ -57,6 +57,7 @@ async fn a_console_tool_grant_survives_a_roundtrip_without_becoming_a_seed_grant
 
     let (s1, e1, m1, c1) = fs_ports(&home1);
     s1.save(&CompanyRecord {
+        general_channel: Default::default(),
         id: id.clone(),
         manifest: folded,
         ledger: Vec::new(),
@@ -157,6 +158,7 @@ async fn a_bundle_with_duplicate_budget_overrides_is_rejected() {
 
     let (s1, e1, m1, c1) = fs_ports(&home1);
     s1.save(&CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),
@@ -250,6 +252,7 @@ async fn a_bundle_with_duplicate_agent_edits_is_rejected() {
 
     let (s1, e1, m1, c1) = fs_ports(&home1);
     s1.save(&CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),

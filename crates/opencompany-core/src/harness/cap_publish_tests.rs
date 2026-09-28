@@ -85,9 +85,31 @@ struct Script {
 }
 
 impl Script {
+    /// Model calls the script answered from its turns — the reply
+    /// verification pass is not one (see [`is_close_verification`]).
     fn calls(&self) -> usize {
-        self.seen.lock().unwrap().len()
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|body| !is_close_verification(body))
+            .count()
     }
+}
+
+/// Whether a request is the embedded runtime's own close-verification pass —
+/// the ACCEPT/REJECT check it runs over a wrap-up reply at the iteration cap
+/// (`turn_checkpoint::close_verification_prompt`). It is not a turn of the
+/// conversation: the script answers it `ACCEPT` without spending a scripted
+/// turn on it, or the nudge turn would be answered with whatever the cap
+/// left next in the script.
+fn is_close_verification(body: &Value) -> bool {
+    body.get("messages")
+        .and_then(Value::as_array)
+        .and_then(|messages| messages.last())
+        .and_then(|last| last.get("content"))
+        .and_then(Value::as_str)
+        .is_some_and(|content| content.contains("Reply with the single word ACCEPT or REJECT"))
 }
 
 async fn spawn_script(turns: Vec<Turn>) -> (String, Arc<Script>) {
@@ -102,7 +124,9 @@ async fn spawn_script(turns: Vec<Turn>) -> (String, Arc<Script>) {
             let script = Arc::clone(&handle);
             async move {
                 script.seen.lock().unwrap().push(body.clone());
-                let next = {
+                let next = if is_close_verification(&body) {
+                    Some(Turn::Say("ACCEPT"))
+                } else {
                     let mut turns = script.turns.lock().unwrap();
                     if turns.is_empty() {
                         None
@@ -134,6 +158,12 @@ async fn spawn_script(turns: Vec<Turn>) -> (String, Arc<Script>) {
 }
 
 fn tool_call_message(tool: &str, args: &Value) -> Value {
+    // Plan hive-desks Phase 3: this crate's tools are served over the
+    // `opencompany` MCP server, so a scripted model reaches one exactly as a
+    // real one does — through `mcp_call_tool`. A native tool is unchanged.
+    let (tool, args) = crate::hive::tools::via_opencompany_mcp(tool, args.clone());
+    let tool = tool.as_str();
+    let args = &args;
     json!({
         "role": "assistant",
         "content": null,
@@ -236,7 +266,7 @@ impl CycleHost for NoopHost {
 }
 
 fn company() -> CompanyId {
-    CompanyId::new("acme")
+    crate::test_support::per_test_company_id("acme")
 }
 
 /// A one-agent company on `full` policy (an ordinary turn is not parked for
@@ -266,6 +296,7 @@ tier = "orchestrator"
 
 fn record() -> CompanyRecord {
     CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
@@ -298,6 +329,7 @@ fn record() -> CompanyRecord {
 fn deps_for(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<FsOps>) {
     let ops = Arc::new(FsOps::new(dir));
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -335,6 +367,7 @@ fn deps_for(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<FsOps>
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,

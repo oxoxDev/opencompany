@@ -51,6 +51,7 @@ fn record_with_agents(agent_ids: &[&str]) -> CompanyRecord {
     }
     let manifest: CompanyManifest = toml::from_str(&src).expect("manifest parses");
     CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),

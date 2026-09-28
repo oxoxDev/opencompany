@@ -298,58 +298,8 @@ pub fn desk_default_responder(record: &CompanyRecord, desk: &str) -> Option<Stri
 /// and runs before any brain — attributes its reply to the same teammate the
 /// turn it replaced would have been answered by.
 ///
-/// # The built-in `#general` channel answers to nobody here (issue #1743)
-///
-/// A General spelling that no desk claimed is the **company's own line**, and
-/// `None` is the right answer for it: both callers then resolve their own
-/// orchestrator, which is what has always answered an unaddressed message.
-///
-/// Without the guard the roster arm below claims it. `mint_agent_id` reserves
-/// `main` and `General`, but a manifest can still declare a teammate with one,
-/// and that teammate would then answer every unaddressed message — while
-/// `GET chat/history?desk=main` returned the *folded General conversation*
-/// rather than its transcript (`is_general_chat` has folded `""`, `main`,
-/// `General` and `general` into one since issue #65). The responder and the
-/// transcript named different conversations. The fold is a fact about the
-/// address, not about who was addressed.
-///
-/// Only the **bare** key. The teammate keeps its DM under `dm:<id>`, which the
-/// arm below still unwraps and resolves, and a desk that claims the key is
-/// matched first and still wins.
-///
-/// **A desk can claim the line by display name**, which the raw key misses: a
-/// blueprint declaring `id = "ops", name = "General"` answers to `General` but
-/// not to `main`, so asking for the raw key alone would hand a `main` turn to
-/// the orchestrator while an `ops` turn went to that desk's lead — two voices
-/// in one channel. The General arm therefore re-asks under
-/// [`DEFAULT_DESK`](crate::server::ops::language::DEFAULT_DESK), which is the
-/// same fold `HarnessBrain::everyone_desk` applies before expanding
-/// `@everyone`, so who answers and who a broadcast names cannot disagree. With
-/// no claimant it misses and the caller's orchestrator answers, as before.
-/// The blueprint desk that claims the company-wide line, by **either** spelling.
-///
-/// A manifest can declare a desk on any of the folded General spellings, and
-/// which half it uses is arbitrary: `id = "ops", name = "General"` claims the
-/// line by name, `id = "main", name = "Front office"` claims it by id. Asking
-/// for a fixed [`DEFAULT_DESK`](crate::server::ops::language::DEFAULT_DESK)
-/// recognised only the first, so for the second a turn addressed `main` reached
-/// its lead while the folded sibling `General` fell through to the orchestrator
-/// — one channel with two responders, decided by which alias the caller
-/// happened to use.
-///
-/// Only the manifest is searched. An overlay desk on a General key is refused
-/// by `resolve_desk_id` and unaddressable, so letting one claim the line here
-/// would hand `#general` to a desk nothing else routes to.
-pub(crate) fn general_claimant(record: &CompanyRecord) -> Option<String> {
-    let general = |s: &str| crate::server::chat_history::is_general_chat(Some(s));
-    record
-        .manifest
-        .group_chats
-        .iter()
-        .find(|c| general(&c.id) || general(&c.name))
-        .map(|c| c.id.clone())
-}
-
+/// #general answers to nobody here, so both callers resolve their own
+/// orchestrator for it.
 pub fn chat_responder(record: &CompanyRecord, chat: &str) -> Option<String> {
     // The desk arm asks [`desk_default_responder`], not [`desk_lead`]: for a
     // lead desk the two are identical, and for an `Auto` channel (issue #1835)
@@ -364,14 +314,8 @@ pub fn chat_responder(record: &CompanyRecord, chat: &str) -> Option<String> {
     if let Some(responder) = desk_default_responder(record, chat) {
         return Some(responder);
     }
-    // The General fold sits **between** the desk arm and the roster arm, and
-    // has to stay there: a teammate whose id is a General spelling must not
-    // inherit the company's line, and a blueprint desk that claims the line
-    // must answer every folded spelling of it (issue #1743). Resolved through
-    // `desk_default_responder` too, so an `auto` General desk answers the same
-    // way it would under its own id.
-    if crate::server::chat_history::is_general_chat(Some(chat)) {
-        return general_claimant(record).and_then(|desk| desk_default_responder(record, &desk));
+    if chat == crate::ports::general_channel::GENERAL_CHANNEL_ID {
+        return None;
     }
     if let Some(agent) = record.resolve_roster_agent_id(chat) {
         return Some(agent);
@@ -400,14 +344,6 @@ const LISTED_DESKS: usize = 12;
 /// is the set a delegation target is grounded against. Reads the same two
 /// sources [`CompanyRecord::resolve_desk_id`] searches, so "what ids exist" and
 /// "does this id resolve" cannot disagree.
-///
-/// That invariant is why the overlay walk skips a desk whose **id** is a
-/// General spelling (issue #1743): `resolve_desk_id` declines to match an
-/// overlay desk against one, so listing it here would ground the model on a
-/// target every `delegate_to_desk` call is then refused for. Only overlay
-/// desks, and only by id — a `[[group_chat]]` the blueprint declares still
-/// resolves under any spelling, and an overlay desk merely *named* `General`
-/// still resolves under its own id, so both stay listed.
 pub fn desk_ids(record: &CompanyRecord) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
     for chat in &record.manifest.group_chats {
@@ -416,7 +352,7 @@ pub fn desk_ids(record: &CompanyRecord) -> Vec<String> {
         }
     }
     for desk in &record.overlay_desks {
-        if !ids.contains(&desk.id) && !crate::server::chat_history::is_general_chat(Some(&desk.id))
+        if !ids.contains(&desk.id) && !crate::ports::general_channel::is_general_spelling(&desk.id)
         {
             ids.push(desk.id.clone());
         }

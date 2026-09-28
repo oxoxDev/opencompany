@@ -163,6 +163,28 @@ async function mockApi(page: Page) {
 
     const desk = (id: string) => desks.find((d) => d.id === id);
 
+    // GET .../desks/{id}/routing — `#/company/<deskId>` (issue #485) mounts
+    // `DeskRoutingPanel` under the focused desk, and it reads this on arrival.
+    // Falling through to the catch-all's `json([])` below resolves the read
+    // instead of rejecting it, so the panel destructures `effective` off an
+    // array and crashes the whole page — which is what took the tree with it.
+    const routing = path.match(/\/desks\/([^/]+)\/routing$/);
+    if (routing && method === "GET") {
+      return json({
+        deskId: routing[1],
+        source: "default",
+        declared: {},
+        effective: {
+          roundWidth: 1,
+          choiceOptionLimit: 5,
+          maxRounds: 8,
+          turnTimeoutSecs: 120,
+          router: "fallback",
+        },
+        candidates: [],
+      });
+    }
+
     // PUT .../desks/{id}/order — the operator's member order; index 0 is lead.
     const order = path.match(/\/desks\/([^/]+)\/order$/);
     if (order && method === "PUT") {

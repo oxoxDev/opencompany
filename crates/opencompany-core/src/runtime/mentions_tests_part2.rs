@@ -235,35 +235,18 @@ fn everyone_notifies_every_person_in_the_company() {
     );
 }
 
-/// `@everyone` on the built-in `#general` channel names the whole roster,
-/// under every spelling the host folds into it (issue #1743).
-///
-/// Before this it named **nobody**: `#general` is not a desk, so
-/// `resolve_desk_id` found nothing and the broadcast arm expanded against
-/// an empty membership. The one channel where "everyone" literally means
-/// everyone was the one channel where `@everyone` reached no one.
+/// `@everyone` on #general names the whole roster.
 #[test]
 fn everyone_on_the_general_channel_names_the_whole_roster() {
     let found = resolve_text("@everyone standup in five");
-    for spelling in ["general", "General", "main", "Main", ""] {
-        assert_eq!(
-            mentioned_agents(&acme(), spelling, &found, None),
-            vec!["engineer".to_string(), "ceo".to_string()],
-            "@everyone addressed as {spelling:?} must name the whole roster"
-        );
-    }
+    assert_eq!(
+        mentioned_agents(&acme(), "general", &found, None),
+        vec!["engineer".to_string(), "ceo".to_string()],
+    );
 }
 
-/// An **overlay** desk that took a General spelling before those were
-/// reserved must not narrow the company-wide broadcast (issue #1743).
-///
-/// `resolve_desk_id` matches a desk by id *or* by case-insensitive name, so
-/// a persisted `{id: "ops", name: "General"}` is selected when
-/// `HarnessBrain::everyone_desk` folds the built-in `main` thread to
-/// `General` — and `@everyone` on the one channel where everyone means
-/// everyone would reach only that desk's members. A desk the *blueprint*
-/// declares is the company's own General desk and still wins; this is only
-/// about state `create_desk` used to accept and now refuses.
+/// An overlay desk named "General" from before the name was reserved must
+/// not narrow the #general broadcast.
 #[test]
 fn an_overlay_desk_squatting_a_general_spelling_does_not_narrow_the_broadcast() {
     let mut record = acme();
@@ -276,13 +259,10 @@ fn an_overlay_desk_squatting_a_general_spelling_does_not_narrow_the_broadcast() 
         hive: Default::default(),
     });
     let found = resolve_text("@everyone standup in five");
-    for spelling in ["general", "General", "main", ""] {
-        assert_eq!(
-            mentioned_agents(&record, spelling, &found, None),
-            vec!["engineer".to_string(), "ceo".to_string()],
-            "@everyone addressed as {spelling:?} must still name the whole roster"
-        );
-    }
+    assert_eq!(
+        mentioned_agents(&record, "general", &found, None),
+        vec!["engineer".to_string(), "ceo".to_string()],
+    );
     // And the squatting desk keeps working as the desk it is, addressed by
     // its own id — this narrows the broadcast, nothing else.
     assert_eq!(

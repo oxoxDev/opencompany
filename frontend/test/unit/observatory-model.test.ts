@@ -5,6 +5,7 @@ import {
   byAgent,
   byNode,
   failureHistogram,
+  roundsFromRuns,
   runState,
   spansFromRuns,
   spansFromSteps,
@@ -42,6 +43,8 @@ function run(over: Partial<ObservatoryRun> = {}): ObservatoryRun {
     chatId: null,
     workflowRunId: "wr-1",
     nodeId: "solve",
+    episodeId: null,
+    roundRevision: null,
     createdAtMillis: 900,
     startedAtMillis: 1000,
     finishedAtMillis: 2000,
@@ -252,5 +255,25 @@ describe("failureHistogram", () => {
 
   it("is empty when nothing failed", () => {
     expect(failureHistogram([run()])).toEqual([]);
+  });
+});
+
+describe("roundsFromRuns", () => {
+  it("folds the seats of one round into one band, open while any seat is", () => {
+    const bands = roundsFromRuns([
+      run({ id: "a", agentId: "engineer", episodeId: "ep-1", roundRevision: 0, startedAtMillis: 1000, finishedAtMillis: 1500 }),
+      run({ id: "b", agentId: "ceo", episodeId: "ep-1", roundRevision: 0, startedAtMillis: 1100, finishedAtMillis: null, chatId: "engineering" }),
+      run({ id: "c", agentId: "engineer", episodeId: "ep-1", roundRevision: 1, startedAtMillis: 2000, finishedAtMillis: 2200 }),
+      run({ id: "d", agentId: "writer", episodeId: "ep-2", roundRevision: 0, startedAtMillis: 900, finishedAtMillis: 950, chatId: "content" }),
+    ]);
+    expect(bands.map((b) => `${b.key}:${b.startMs}-${b.endMs}:${b.agentIds.join("+")}:${b.chatId}`)).toEqual([
+      "ep-2:0:900-950:writer:content",
+      "ep-1:0:1000-null:engineer+ceo:engineering",
+      "ep-1:1:2000-2200:engineer:null",
+    ]);
+  });
+
+  it("draws no band for an attempt outside an episode", () => {
+    expect(roundsFromRuns([run(), run({ id: "x", episodeId: "ep", roundRevision: null })])).toEqual([]);
   });
 });

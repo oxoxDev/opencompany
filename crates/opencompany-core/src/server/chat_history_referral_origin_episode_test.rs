@@ -31,7 +31,7 @@ async fn an_episodes_turns_render_but_its_closing_row_does_not() {
             "!object >1 ^1 users bounce between sections",
         ),
         (
-            crate::hivemind::HIVE_REPORT_AUTHOR,
+            "hive-report",
             "The desk settled after 2 turns (#lazy-load, backed by software_engineer): defer each section",
         ),
     ] {
@@ -50,6 +50,7 @@ async fn an_episodes_turns_render_but_its_closing_row_does_not() {
                     mentions: Vec::new(),
                     mention_depth: 0,
                     audience: Vec::new(),
+                    episode: None,
                 },
             )
             .await
@@ -74,7 +75,7 @@ async fn an_episodes_turns_render_but_its_closing_row_does_not() {
         "every teammate's turn is on screen, the objection included: {voices:?}"
     );
     assert!(
-        !voices.contains(&crate::hivemind::HIVE_REPORT_AUTHOR),
+        !voices.contains(&"hive-report"),
         "and the room's own bookkeeping is not a participant in it: {voices:?}"
     );
 }
@@ -96,7 +97,7 @@ async fn a_suppressed_report_does_not_shorten_the_page() {
     for (agent, text) in [
         ("software_engineer", "first"),
         ("junior_engineer", "second"),
-        (crate::hivemind::HIVE_REPORT_AUTHOR, "The desk settled."),
+        ("hive-report", "The desk settled."),
         ("qa_engineer", "third"),
         ("software_engineer", "fourth"),
     ] {
@@ -115,6 +116,7 @@ async fn a_suppressed_report_does_not_shorten_the_page() {
                     mentions: Vec::new(),
                     mention_depth: 0,
                     audience: Vec::new(),
+                    episode: None,
                 },
             )
             .await
@@ -139,31 +141,28 @@ async fn a_suppressed_report_does_not_shorten_the_page() {
         "a page of four is four teammate turns, not three and a hole: {page:?}"
     );
     assert!(
-        page.iter()
-            .all(|m| m.channel != crate::hivemind::HIVE_REPORT_AUTHOR),
+        page.iter().all(|m| m.channel != "hive-report"),
         "and none of them is the room's bookkeeping: {page:?}"
     );
 }
 
-/// **A failed turn still shows.** The report restates a tally whose inputs
-/// are the visible turns, so hiding it costs nothing. A failure notice
-/// describes a turn that does not exist — there is no gap for a reader to
-/// notice — so hiding it would leave a transcript with an unaccounted hole.
+/// **Both legacy bookkeeping rows stay out of the room.** The trace-grammar
+/// hive wrote a closing report and a failure notice under reserved authors;
+/// nothing writes them now (a failed seat turn is a `turn_settled` frame and
+/// a run row), and a journal that still carries them must not start showing
+/// a teammate that never existed.
 #[tokio::test]
-async fn a_failed_turn_is_still_reported_to_the_room() {
+async fn legacy_report_and_failure_rows_stay_out_of_the_room() {
     let home = tempfile::tempdir().expect("tempdir");
     let runtime = runtime(home.path()).await;
     let id = CompanyId::new("acme");
 
     for (agent, text) in [
         (
-            crate::hivemind::HIVE_FAILURE_AUTHOR,
+            "hive-failure",
             "qa_engineer was asked and could not answer.",
         ),
-        (
-            crate::hivemind::HIVE_REPORT_AUTHOR,
-            "The desk settled after 2 turns.",
-        ),
+        ("hive-report", "The desk settled after 2 turns."),
     ] {
         runtime
             .events()
@@ -180,6 +179,7 @@ async fn a_failed_turn_is_still_reported_to_the_room() {
                     mentions: Vec::new(),
                     mention_depth: 0,
                     audience: Vec::new(),
+                    episode: None,
                 },
             )
             .await
@@ -200,12 +200,12 @@ async fn a_failed_turn_is_still_reported_to_the_room() {
     let voices: Vec<&str> = history.iter().map(|m| m.channel.as_str()).collect();
 
     assert!(
-        voices.contains(&crate::hivemind::HIVE_FAILURE_AUTHOR),
-        "a seat that could not answer is accounted for: {voices:?}"
+        !voices.contains(&"hive-failure"),
+        "a legacy failure notice is not a teammate: {voices:?}"
     );
     assert!(
-        !voices.contains(&crate::hivemind::HIVE_REPORT_AUTHOR),
-        "while the closing summary stays out of the room: {voices:?}"
+        !voices.contains(&"hive-report"),
+        "and neither is the closing summary: {voices:?}"
     );
 }
 
@@ -307,6 +307,7 @@ async fn the_asker_brings_the_answer_home_and_the_other_desk_stays_out_of_the_ro
         mentions: Vec::new(),
         mention_depth: 0,
         audience: Vec::new(),
+        episode: None,
     });
     for event in events {
         runtime.events().append(&id, event).await.expect("journal");

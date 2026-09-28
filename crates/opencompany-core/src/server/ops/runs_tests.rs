@@ -39,6 +39,7 @@ async fn state_with_company(home: &std::path::Path) -> (AppState, CompanyId) {
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
@@ -416,6 +417,7 @@ async fn add_second_company(state: &AppState, home: &std::path::Path) -> Company
     let id = CompanyId::new("beta");
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
@@ -655,4 +657,46 @@ fn the_agent_selector_becomes_a_store_predicate() {
         None,
         "no `?agent=` means every desk, not a desk named nothing"
     );
+}
+
+/// A seat turn's attempt names its episode and round on the wire (plan
+/// hive-desks, Phase 8) — `episodeId` and `roundRevision`, camelCase — and
+/// every other attempt omits both rather than writing `null`, so the
+/// Observatory's fold can tell "no round" from "round 0".
+#[tokio::test]
+async fn a_seat_turn_attempt_carries_its_episode_and_round() {
+    let dir = home();
+    let (state, id) = state_with_company(dir.path()).await;
+    let runs = runs_of(&state, &id);
+
+    runs.create_run(
+        &id,
+        NewRun::for_chat("seat-1", "engineering", "ceo")
+            .in_thread(Some(EventSeq::new(4)))
+            .in_episode("ep-1", 0),
+    )
+    .await
+    .expect("mint the seat turn");
+    mint(&runs, &id, "run-1", "card-a").await;
+
+    let response = router(state)
+        .oneshot(request("/api/v1/company/runs"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    let rows = body.as_array().expect("array");
+    let seat = rows
+        .iter()
+        .find(|row| row["id"] == "seat-1")
+        .expect("the seat turn");
+    assert_eq!(seat["episodeId"], "ep-1");
+    assert_eq!(seat["roundRevision"], 0);
+    assert_eq!(seat["threadRoot"], 4);
+    let card = rows
+        .iter()
+        .find(|row| row["id"] == "run-1")
+        .expect("the dispatch");
+    assert!(card.get("episodeId").is_none(), "{card}");
+    assert!(card.get("roundRevision").is_none(), "{card}");
 }

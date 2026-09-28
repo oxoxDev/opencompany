@@ -449,6 +449,80 @@ async fn a_template_seed_names_the_operator_as_its_admin() {
     );
 }
 
+/// The password typed on the "You" step is the account, not just a wish.
+///
+/// Seeding writes the address into `[users].admins`, which makes it
+/// *eligible*; on a laptop with no mail that is a standing invite nobody can
+/// redeem. With a password the apply mints the account there and then, so the
+/// wizard can sign the operator straight in and the same password works on
+/// every later visit.
+#[tokio::test]
+async fn a_seed_with_a_password_creates_a_usable_admin() {
+    let home_dir = home();
+    let state = fresh_state(home_dir.path());
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({
+            "fields": { "auth_mode": "email" },
+            "template": "law_firm",
+            "admin_email": "Ada@Example.com",
+            "admin_password": "correct horse battery staple",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/companies/agentic-law-firm/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "email": "ada@example.com",
+                        "password": "correct horse battery staple",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the password signs them in"
+    );
+    let me = body_json(response).await;
+    assert_eq!(me["role"], "admin");
+    assert_eq!(me["mustChangePassword"], false);
+}
+
+/// A password the policy refuses is refused before anything is written: no
+/// company is seeded and setup is not marked complete, the same all-or-nothing
+/// rule every other validation here follows.
+#[tokio::test]
+async fn a_weak_admin_password_refuses_the_whole_apply() {
+    let home_dir = home();
+    let state = fresh_state(home_dir.path());
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({
+            "fields": { "auth_mode": "email" },
+            "template": "law_firm",
+            "admin_email": "ada@example.com",
+            "admin_password": "short",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(state.registry().is_empty(), "nothing was seeded");
+    assert!(!state.setup_complete(), "setup did not complete");
+}
+
 /// A pasted paragraph is truncated, not turned into a directory nobody can
 /// write.
 ///

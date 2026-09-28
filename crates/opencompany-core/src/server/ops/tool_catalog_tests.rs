@@ -39,6 +39,7 @@ async fn state() -> (tempfile::TempDir, AppState) {
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),

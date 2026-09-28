@@ -129,7 +129,7 @@ test.describe("sidebar toggle reachability", () => {
     // dismiss that only fired for the sidebar's own rows would miss it (which is
     // what `room-rail.tsx`'s `dismiss` exists for). Picking one still closes the
     // sheet behind it, which is the pattern under test.
-    await sheet.getByRole("button", { name: "general", exact: true }).click();
+    await sheet.getByRole("button", { name: "engineering-desk", exact: true }).click();
     await expect(page).toHaveURL(/#\/chat\//);
     await expect(sheet).toBeHidden();
   });

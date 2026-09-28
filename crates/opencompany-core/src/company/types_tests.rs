@@ -175,26 +175,12 @@ fn tools_composio_section_parses_toolkits_and_defaults_empty() {
 }
 
 #[test]
-fn speech_is_on_by_default_and_can_be_opted_out() {
-    let defaulted: CompanyManifest =
-        toml::from_str("[company]\nname = \"Acme\"\n").expect("bare manifest parses");
-    assert!(
-        defaulted.speech.is_enabled(),
-        "an omitted [speech] section must wire the speech belt"
-    );
-
-    let legacy_false: CompanyManifest =
-        toml::from_str("[company]\nname = \"Acme\"\n[speech]\nenabled = false\n")
-            .expect("legacy speech setting parses");
-    assert!(
-        legacy_false.speech.is_enabled(),
-        "old hosts serialized false automatically; it must not become an opt-out"
-    );
-
-    let opted_out: CompanyManifest =
-        toml::from_str("[company]\nname = \"Acme\"\n[speech]\ndisabled = true\n")
-            .expect("speech opt-out parses");
-    assert!(!opted_out.speech.is_enabled());
+fn a_stale_speech_section_is_refused_with_a_hint() {
+    let text = "[company]\nname = \"Acme\"\n[speech]\ndisabled = true\n";
+    let problem = CompanyManifest::legacy_speech_block(text).expect("refused");
+    assert!(problem.contains("[speech]"), "{problem}");
+    assert!(problem.contains("opencompany"), "{problem}");
+    assert!(CompanyManifest::legacy_speech_block("[company]\nname = \"Acme\"\n").is_none());
 }
 
 // Guards the newly-added `Serialize` derive: a manifest with renamed

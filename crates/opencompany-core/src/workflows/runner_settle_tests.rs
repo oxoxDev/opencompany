@@ -22,12 +22,15 @@ fn deps_with_parking_over(
         users: Arc::new(crate::store::FsOps::new(dir)),
         bootstrap_admin: None,
         channels: Vec::new(),
+        notifications: None,
         parking: Some(super::super::delivery::DeliveryParking {
             approvals: gate,
             journal,
             continuations: Default::default(),
             gates: Default::default(),
             blocked_nodes: Default::default(),
+            grants: Default::default(),
+            events: Arc::new(crate::store::FsEventLog::new(dir)),
         }),
         events: Arc::new(crate::store::FsEventLog::new(dir)),
     }

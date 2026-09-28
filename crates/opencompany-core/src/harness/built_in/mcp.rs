@@ -28,9 +28,9 @@ use oh::config::{Config, McpAuthConfig, McpServerConfig};
 use oh::mcp::config_servers::{McpRegistrySource, McpServerRegistry};
 use oh::mcp::registry::types::{ConnStatus, InstalledServer, McpTool};
 use oh::security::{SecurityPolicy, ToolOperation};
-use oh::tools::traits::{PermissionLevel, Tool, ToolCallOptions, ToolResult};
+use tinytools::{PermissionLevel, Tool, ToolCallOptions, ToolResult};
 
-use crate::company::mcp::{AuthMaterial, McpServerDecl, stdio_install_refusal};
+use crate::company::mcp::{AuthMaterial, McpServerDecl};
 use crate::error::OpenCompanyError;
 use crate::harness::mcp_probe::{
     McpFailure, McpFailureQueue, classify_mcp_error, operator_message, scrub, strip_endpoint,
@@ -38,6 +38,12 @@ use crate::harness::mcp_probe::{
 use crate::ports::types::CompanyId;
 use crate::ports::usage::UsageMeter;
 use crate::runtime::tools::grants_cover_server;
+
+mod registry_list;
+mod registry_scoped;
+
+pub use registry_list::OcMcpRegistryInstalledListTool;
+pub use registry_scoped::OcMcpRegistryScopedTool;
 
 /// Builds a registry from a set of decls, keeping only the enabled ones.
 ///
@@ -108,13 +114,123 @@ pub fn granted_secrets(decls: &[McpServerDecl], grants: &[String]) -> Vec<String
         .collect()
 }
 
+/// The per-tool policies for the servers an agent's grants reach, narrowed the
+/// same way [`granted_secrets`] narrows credential substrings so the refusal and
+/// the toolbelt cannot disagree about which servers an agent can name.
+pub fn granted_policies(
+    decls: &[McpServerDecl],
+    grants: &[String],
+) -> crate::company::mcp_policy::McpToolPolicySet {
+    crate::company::mcp_policy::McpToolPolicySet::from_declarations(
+        decls
+            .iter()
+            .filter(|decl| grants_cover_server(grants, &decl.name)),
+    )
+}
+
 /// A persona brief appended when an agent is granted MCP tools: a stale-memory
 /// mitigation directing the agent to answer capability questions from a **live**
-/// `mcp_list_servers` / `mcp_list_tools` call, never from memory (the effective
-/// server set can change between turns — the MCP-freshness path). The root fix
-/// for stale answers lives in the Memory cell; this is the mitigation.
-pub fn capability_brief() -> String {
-    " When you are asked what tools, integrations, or MCP servers you have — or whether you can do something that would use one — ALWAYS call `mcp_list_servers` (and `mcp_list_tools` for a specific server) to check what is available right now. Never answer such questions from memory: your available servers and tools can change between turns.".to_string()
+/// enumeration call, never from memory (the effective server set can change
+/// between turns — the MCP-freshness path). The root fix for stale answers lives
+/// in the Memory cell; this is the mitigation.
+///
+/// Names no server itself. The server-family brief carries the names, and with
+/// them the tool and key that address each one; this says only what to call to
+/// see what a server currently offers.
+///
+/// The two families inspect through different tools, so the brief names only the
+/// ones the agent was actually wired. No company agent is scoped to list the
+/// configured servers — that tool answers with their credentials — so a declared
+/// server is inspected by name and never discovered. Empty when neither family is
+/// wired.
+pub fn capability_brief(declared: bool, registry: bool) -> String {
+    let enumerate = match (declared, registry) {
+        (true, true) => {
+            "`mcp_list_tools` with a server's name, and `mcp_registry_installed_list` (then \
+             `mcp_registry_list_tools` for a specific install)"
+        }
+        (true, false) => "`mcp_list_tools` with the server's name",
+        (false, true) => {
+            "`mcp_registry_installed_list` (and `mcp_registry_list_tools` for a specific install)"
+        }
+        (false, false) => return String::new(),
+    };
+    format!(
+        " When you are asked what tools, integrations, or MCP servers you have — or whether you \
+         can do something that would use one — ALWAYS call {enumerate} to check what is available \
+         right now. Never answer such questions from memory: your available servers and tools can \
+         change between turns."
+    )
+}
+
+/// The company's granted MCP servers, rendered as [`openhuman_embed::McpServer`]
+/// attachments an [`openhuman_embed::AgentSpec`] can carry directly (plan
+/// hive-desks, Phase 2 follow-up).
+///
+/// # Why this exists alongside [`registry_for_agent`]
+///
+/// [`host_loop`](crate::harness::host_loop)'s module doc says it plainly:
+/// "the company agents run on the embedded OpenHuman runtime, whose tool set
+/// is its own (plus MCP servers) — there is no seam for a `Tool` this crate
+/// built" for a company AGENT (as opposed to an in-process auxiliary pass).
+/// [`OcMcpCallTool`] and upstream's `McpListToolsTool` are exactly such
+/// tools — pushed onto
+/// [`AgentBlueprint::tools`](crate::harness::built_in::build::AgentBlueprint::tools)
+/// under the reserved names `mcp_call_tool` / `mcp_list_tools` so the OLD native-dispatch builder (`tool_dispatcher.rs`,
+/// removed when the runtime moved to the hosted pipeline) would run OC's
+/// decorator instead of OpenHuman's own implementation of those names.
+///
+/// That dispatch seam is gone. A name in
+/// [`OPENHUMAN_NATIVE_TOOLS`](crate::harness::built_in::build::OPENHUMAN_NATIVE_TOOLS)
+/// is now *always* OpenHuman's own implementation — reaching only whatever
+/// [`McpServer`](openhuman_embed::McpServer)s were attached to the spec via
+/// [`AgentSpec::mcp`](openhuman_embed::AgentSpec::mcp) — so `OcMcpCallTool`'s
+/// registry (built from these same `decls`/`grants`) was never being called at
+/// all: a company's own registered servers were unreachable, and
+/// `mcp_call_tool` only ever found the internal `opencompany` hive server
+/// (issue tracked alongside plan hive-desks Phase 3/4). This function is the
+/// other half of that fix: it hands the SAME granted servers to
+/// `agent_spec_for` so they reach the spec the way `AgentSpec::mcp` (plural —
+/// "call repeatedly to add several") is meant to be used, alongside the
+/// `opencompany` attachment.
+///
+/// **Known gap left open by this fix**: OpenHuman's own `mcp_call_tool` does
+/// not scrub credentials the way `OcMcpCallTool`'s `handle_failure` does (see
+/// this module's security note above) — a transport failure can surface a
+/// configured bearer/token verbatim to the agent for a directly-attached
+/// company server. `mcp_list_servers` is kept out of every company agent's
+/// tool scope for the same reason. Restoring that hardening needs a real
+/// seam into the hosted pipeline (a job for hive-desks Phase 4), not a
+/// band-aid here; it is called out rather than silently reintroduced.
+pub fn embed_servers_for_agent(
+    decls: &[McpServerDecl],
+    grants: &[String],
+) -> Vec<openhuman_embed::McpServer> {
+    decls
+        .iter()
+        .filter(|decl| decl.enabled && grants_cover_server(grants, &decl.name))
+        .map(|decl| {
+            // A blocked tool is denied here, not only in `OcMcpCallTool`: this
+            // attachment is the path a company agent actually takes, and the
+            // deny list is what the transport filters on. Deny outranks allow
+            // there, so a server with an allow list cannot re-admit one.
+            let mut denied = decl.disallowed_tools.clone();
+            for tool in crate::company::mcp_policy::blocked_tool_names(
+                &decl.tool_policies,
+                &decl.tool_inventory,
+            ) {
+                if !denied.contains(&tool) {
+                    denied.push(tool);
+                }
+            }
+            openhuman_embed::McpServer::http(decl.name.clone(), decl.endpoint.clone())
+                .auth(auth_config(&decl.auth))
+                .allow_tools(decl.allowed_tools.clone())
+                .deny_tools(denied)
+                .timeout_secs(decl.timeout_secs)
+                .description(decl.description.clone().unwrap_or_default())
+        })
+        .collect()
 }
 
 /// Projects a [`McpServerDecl`] onto an OpenHuman [`McpServerConfig`], mapping
@@ -362,6 +478,8 @@ pub struct OcMcpCallTool {
     /// Where a completed call is counted (issue #698). See
     /// [`McpMetering`].
     metering: McpMetering,
+    /// The granted servers' per-tool policies, consulted before dialling.
+    policies: crate::company::mcp_policy::McpToolPolicySet,
 }
 
 impl OcMcpCallTool {
@@ -374,6 +492,7 @@ impl OcMcpCallTool {
         secrets: Vec<String>,
         failures: McpFailureQueue,
         metering: McpMetering,
+        policies: crate::company::mcp_policy::McpToolPolicySet,
     ) -> Self {
         Self {
             registry,
@@ -381,6 +500,7 @@ impl OcMcpCallTool {
             secrets,
             failures,
             metering,
+            policies,
         }
     }
 
@@ -432,7 +552,7 @@ impl Tool for OcMcpCallTool {
             "properties": {
                 "server": {
                     "type": "string",
-                    "description": "Registered MCP server name from `mcp_list_servers`."
+                    "description": "Registered MCP server name, from the granted servers named in your persona brief."
                 },
                 "tool": {
                     "type": "string",
@@ -467,6 +587,14 @@ impl Tool for OcMcpCallTool {
 
         let server = required_string_arg(&args, "server")?;
         let tool = required_string_arg(&args, "tool")?;
+        // Gated on the cleaned names, which are the ones that would be
+        // dispatched. Placed here rather than on one of the other two entry
+        // points because both default to this one.
+        if self.policies.is_blocked(&server, &tool) {
+            return Ok(ToolResult::error(
+                crate::company::mcp_policy::blocked_refusal(&server, &tool),
+            ));
+        }
         let arguments = args
             .get("arguments")
             .cloned()
@@ -637,54 +765,6 @@ impl McpRuntime {
             .await
             .map(|outcome| outcome.value)
             .map_err(|e| OpenCompanyError::Harness(format!("mcp registry lookup failed: {e}")))
-    }
-
-    /// Installs a directory entry by qualified name and returns the resulting
-    /// record. Idempotent upstream: re-installing a server already present
-    /// refreshes its env/config onto the existing row rather than writing a
-    /// second one.
-    ///
-    /// **Refuses a stdio install.** Upstream's picker already prefers a hosted
-    /// HTTP connection over a local subprocess, so this only fires for an entry
-    /// that offers *nothing but* stdio — which this deployment cannot launch
-    /// (see [`stdio_install_refusal`]). The search filter above keeps such
-    /// entries off the operator's screen in the first place; this is the belt to
-    /// that braces, because a caller can POST a qualified name the search never
-    /// offered. A refused install that we ourselves created is rolled back; one
-    /// that was already on disk is left alone, since it is not ours to remove.
-    pub async fn install_from_directory(
-        &self,
-        qualified_name: String,
-        env: HashMap<String, String>,
-    ) -> crate::Result<InstalledServer> {
-        let outcome = oh::mcp::registry::ops::mcp_clients_install(
-            &self.directory_config(),
-            qualified_name.clone(),
-            env,
-            None,
-        )
-        .await
-        .map_err(|e| OpenCompanyError::Harness(format!("mcp install failed: {e}")))?;
-        let already_installed = outcome
-            .value
-            .get("already_installed")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let record = outcome.value.get("server").cloned().ok_or_else(|| {
-            OpenCompanyError::Harness("mcp install returned no server record".to_string())
-        })?;
-        let server: InstalledServer = serde_json::from_value(record).map_err(|e| {
-            OpenCompanyError::Harness(format!("mcp install record is unreadable: {e}"))
-        })?;
-        if server.transport.deployment_url().is_none() {
-            if !already_installed {
-                let _ = self.uninstall(&server.server_id).await;
-            }
-            return Err(OpenCompanyError::InvalidRequest(stdio_install_refusal(
-                &qualified_name,
-            )));
-        }
-        Ok(server)
     }
 
     /// Rotate an install's environment values (write-only, never read back).
@@ -865,3 +945,7 @@ fn harness_error(error: impl std::fmt::Display) -> OpenCompanyError {
 #[cfg(test)]
 #[path = "mcp_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mcp_blocked_tests.rs"]
+mod blocked_tests;

@@ -62,6 +62,19 @@
 //      emit the named call with the arguments the instruction dictates. The
 //      directive that produced the parked call has already been served, so
 //      without this arm no approval-gated tool can run in this lane at all.
+//   2b. a **hive turn** — the last user message opens with the host's seat
+//      sentinel `Hive turn: desk <deskId>, episode <episodeId>, round <n>.` and
+//      the belt offers `mcp_call_tool` — end the turn with exactly one speech
+//      act on the `opencompany` MCP server, chosen by how many turns this seat
+//      has already taken in the episode (`hiveStage`): `post` on its first,
+//      `broadcast` on its second (or `dm` to the agent a `__MOCK_DM__ <agent>`
+//      directive names), `complete_episode` from its third on. A
+//      `__MOCK_REFER__ [<agent>:]<desk>` directive makes the first post ask
+//      that desk (`@#<desk>`), which the host carries across as a referral. A
+//      tool output as the last message is that utterance recorded, and ends
+//      the turn. `desk-episode-live.spec.ts` and
+//      `scripts/measure-coordination.sh` drive a two-desk company to
+//      completion with it.
 //   3. a message carrying `__MOCK_PLAN__ [[{…},{…}],[…]]` — a whole scripted
 //      turn: several calls in one assistant message, and several steps across
 //      one turn's tool loop. `orchestration-simulation.spec.ts` drives a goal
@@ -275,6 +288,212 @@ const SPAWN_DIRECTIVE = "SPAWNONE";
  * stay two plans rather than sharing one cursor.
  */
 const PLAN_DIRECTIVE = "__MOCK_PLAN__";
+
+/**
+ * The host's seat sentinel — the first line of every turn a seat runs inside
+ * a desk episode (`src/hive/prompt.rs`). The three captures are what the arm
+ * keys its speech act on: the round decides the kind, the desk and episode
+ * make the message self-describing in a transcript.
+ *
+ * Matched anywhere in the last user message rather than only at its start,
+ * because a retry reminder may precede it — but on the LAST message only: an
+ * older sentinel is a turn already taken. Within a message the LAST match is
+ * the turn's own: the host's memory loop prepends a `## Relevant prior work`
+ * preamble quoting earlier prompts, sentinels included.
+ */
+const HIVE_TURN_PATTERN = /Hive turn: desk (\S+?), episode (\S+?), round (\d+)\./g;
+
+/**
+ * The last sentinel in `text`, or null.
+ *
+ * @param {string} text
+ * @returns {RegExpExecArray | null}
+ */
+function lastSentinel(text) {
+  let last = null;
+  for (const match of text.matchAll(HIVE_TURN_PATTERN)) last = match;
+  return last;
+}
+
+/**
+ * "DM this seat in round 1 instead of broadcasting", followed by an agent id
+ * — e.g. `__MOCK_DM__ ceo`. What lets a spec assert the dm chip and the
+ * audience narrowing without a model that might decide otherwise.
+ */
+const DM_DIRECTIVE = "__MOCK_DM__";
+
+/**
+ * "Ask this desk from your first post", followed by a desk id, optionally
+ * qualified by the one seat that should ask — `__MOCK_REFER__ content` or
+ * `__MOCK_REFER__ engineer:content`. The post then carries `@#<desk>`, which
+ * the host resolves as a desk mention and refers across (`src/hive/referral`).
+ * What lets the measurement count a cross-desk referral without a model that
+ * might decide otherwise.
+ */
+const REFER_DIRECTIVE = "__MOCK_REFER__";
+
+/** The MCP server slug the host mounts the speech tools on. */
+const HIVE_SERVER = "opencompany";
+
+/**
+ * The seat sentinel in the last message, or null.
+ *
+ * @param {any[]} messages
+ * @returns {{desk: string, episode: string, round: number} | null}
+ */
+function findHiveTurn(messages) {
+  // The last USER message: a tool output can sit after it in the same turn.
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message?.role !== "user" || isToolOutput(message)) continue;
+    const match = lastSentinel(textOf(message));
+    if (!match) return null;
+    const turn = { desk: match[1], episode: match[2], round: Number.parseInt(match[3], 10), speaker: null, stage: 0 };
+    // The last `You are @…`, for the reason the last sentinel is the turn's.
+    let speaker = null;
+    for (const match of textOf(message).matchAll(/You are @([a-z0-9_-]+)/gi)) speaker = match[1];
+    turn.speaker = speaker;
+    turn.stage = hiveStage(messages.slice(0, i), turn);
+    return turn;
+  }
+  return null;
+}
+
+/**
+ * Which of its turns in this episode the seat is on — 0 for its first, 1 for
+ * its second, and so on — read off the earlier sentinels in the transcript,
+ * which the host keeps per seat across every turn it runs.
+ *
+ * The sentinel's `round` is the driver's **revision**: the count of
+ * utterances the episode has committed, not a turn ordinal. On a desk of two
+ * seats a seat's second turn carries `round 2`, its third `round 4`, so a
+ * script keyed on the raw number would never broadcast at all. With earlier
+ * sentinels in hand the stage is the number of distinct earlier revisions
+ * below this one (a retry at the same revision is the same turn); on a fresh
+ * transcript, where nothing earlier can be read, the raw round stands in,
+ * capped at the completing stage.
+ *
+ * @param {any[]} earlier the messages before the sentinel's own
+ * @param {{episode: string, round: number}} turn
+ * @returns {number}
+ */
+function hiveStage(earlier, turn) {
+  const seen = new Set();
+  let any = false;
+  for (const message of earlier) {
+    if (message?.role !== "user" || isToolOutput(message)) continue;
+    const match = lastSentinel(textOf(message));
+    if (!match || match[2] !== turn.episode) continue;
+    any = true;
+    const revision = Number.parseInt(match[3], 10);
+    if (revision < turn.round) seen.add(revision);
+  }
+  return any ? seen.size : Math.min(turn.round, 2);
+}
+
+/**
+ * The desk a `__MOCK_REFER__` directive names, and the one seat it names to
+ * ask (or null for every seat), anywhere in the transcript — or null.
+ *
+ * @param {any[]} messages
+ * @returns {{desk: string, asker: string | null} | null}
+ */
+function findReferDirective(messages) {
+  for (const message of messages) {
+    const text = textOf(message);
+    const at = text.indexOf(REFER_DIRECTIVE);
+    if (at === -1) continue;
+    const word = text.slice(at + REFER_DIRECTIVE.length).trim().split(/\s+/)[0] ?? "";
+    const [head, tail] = word.includes(":") ? word.split(":", 2) : [null, word];
+    const desk = (tail ?? "").replace(/^#/, "").replace(/[^a-z0-9_-]/gi, "");
+    const asker = head ? head.replace(/^@/, "").replace(/[^a-z0-9_-]/gi, "") : null;
+    if (desk) return { desk, asker: asker || null };
+  }
+  return null;
+}
+
+/**
+ * The agent a `__MOCK_DM__` directive names, anywhere in the transcript, or
+ * null. The directive rides the operator's message, which reaches the seat
+ * inside the desk delta — so it is searched everywhere, not only last.
+ *
+ * @param {any[]} messages
+ * @returns {string | null}
+ */
+function findDmDirective(messages) {
+  for (const message of messages) {
+    const text = textOf(message);
+    const at = text.indexOf(DM_DIRECTIVE);
+    if (at === -1) continue;
+    const word = text.slice(at + DM_DIRECTIVE.length).trim().split(/\s+/)[0] ?? "";
+    const id = word.replace(/^@/, "").replace(/[^a-z0-9_-]/gi, "");
+    if (id) return id;
+  }
+  return null;
+}
+
+/**
+ * Whether a tool output reads as the host refusing the call — a dm to a seat
+ * that is not on the desk, a second speech act in one turn. The arm then
+ * falls back to the act that cannot be refused for the round, rather than
+ * ending the turn with nothing recorded.
+ *
+ * @param {any} message
+ * @returns {boolean}
+ */
+function isRefusedToolOutput(message) {
+  return /\b(error|refused|rejected|invalid|not a member|cannot)\b/i.test(toolOutputText(message));
+}
+
+/**
+ * The one speech act for a hive turn, as an OpenHuman `mcp_call_tool` call.
+ *
+ * @param {string} model
+ * @param {{desk: string, episode: string, round: number, speaker: string | null, stage: number}} hive
+ * @param {string | null} dm
+ * @param {boolean} refused whether the previous act in this turn was refused
+ * @param {{desk: string, asker: string | null} | null} [refer] a `__MOCK_REFER__` directive
+ * @returns {any}
+ */
+function hiveCompletion(model, hive, dm, refused, refer = null) {
+  const stamp = `${MARKER} desk ${hive.desk} episode ${hive.episode} round ${hive.round}`;
+  /** @type {{tool: string, arguments: Record<string, unknown>}} */
+  let act;
+  if (hive.stage === 0) {
+    // The first post asks the desk a `__MOCK_REFER__` names — from the seat
+    // it names, or from every seat — unless this already is that desk.
+    const asks = refer && refer.desk !== hive.desk && (!refer.asker || refer.asker === hive.speaker);
+    // `@#<desk>` is the desk-mention spelling the host's resolver reads.
+    const message = asks ? `${stamp}: opening post. Asking @#${refer.desk} for their half.` : `${stamp}: opening post.`;
+    act = { tool: "post", arguments: { message } };
+  } else if (hive.stage === 1) {
+    act =
+      dm && !refused
+        ? { tool: "dm", arguments: { to: [dm], message: `${stamp}: a word for @${dm}.` } }
+        : { tool: "broadcast", arguments: { message: `${stamp}: work for whoever is best placed.` } };
+  } else {
+    act = { tool: "complete_episode", arguments: { message: `${stamp}: done, nothing left open.` } };
+  }
+  process.stderr.write(`[mock brain] hive turn: ${act.tool} (${hive.desk}/${hive.episode}/r${hive.round} stage ${hive.stage})\n`);
+  return completion(
+    model,
+    {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        {
+          id: `mock-hive-${hive.episode}-${hive.round}`,
+          type: "function",
+          function: {
+            name: "mcp_call_tool",
+            arguments: JSON.stringify({ server: HIVE_SERVER, tool: act.tool, arguments: act.arguments }),
+          },
+        },
+      ],
+    },
+    "tool_calls",
+  );
+}
 
 /**
  * The host's own briefing blocks, appended to an operator message before it
@@ -631,6 +850,91 @@ function offeredTools(body) {
 }
 
 /**
+ * The heading `opencompany_mcp_brief` (`src/harness/built_in/build.rs`) opens
+ * with, ahead of the "Tools: " line this reads.
+ */
+const COMPANY_MCP_BRIEF_HEADING = "## Company tools (MCP server `opencompany`)";
+
+/**
+ * The names on THIS seat's own `opencompany` MCP catalogue — this crate's own
+ * tools (`spawn_task`, `review_task`, `composio_execute`, the hand-off trio,
+ * …), which plan hive-desks Phase 3 moved off the belt and behind
+ * `mcp_call_tool` (`crate::harness::built_in::mod::CompanyAgent::register`,
+ * `build::agent_spec_for`'s `opencompany_mcp_brief`).
+ *
+ * Read off the system prompt rather than off `body.tools`, because that is
+ * the ONLY place a served catalogue is named on the wire once it moved off
+ * the belt — the belt now advertises `mcp_call_tool`/`mcp_list_tools` and
+ * nothing more specific. Scoped per seat: a teammate's brief lists its own
+ * (narrower) catalogue, so this still falls through to prose for a plan step
+ * written for a tool the answering seat does not carry — the same "wrong
+ * recipient" signal a missing native tool always was.
+ *
+ * @param {any[]} messages
+ * @returns {Set<string>}
+ */
+function bridgedCompanyTools(messages) {
+  // The LAST brief on the wire, not the first: the system prompt's is pinned
+  // for the life of a resumed session, so a roster rebuilt under one (a
+  // Composio token set mid-conversation, say) re-announces the current
+  // catalogue on the turn text (`build::opencompany_mcp_rebrief`), as a user
+  // message that supersedes the prompt's list. A tool that arrived that way
+  // is served exactly like one the prompt named.
+  let tools = new Set();
+  for (const message of messages) {
+    const role = message?.role;
+    if (role !== "system" && role !== "user") continue;
+    const text = textOf(message);
+    const headingAt = text.indexOf(COMPANY_MCP_BRIEF_HEADING);
+    if (headingAt < 0) continue;
+    const toolsAt = text.indexOf("Tools: ", headingAt);
+    if (toolsAt < 0) continue;
+    const line = text.slice(toolsAt + "Tools: ".length).split("\n")[0];
+    tools = new Set(
+      line
+        .split(",")
+        .map((name) => name.trim())
+        .filter(Boolean),
+    );
+  }
+  return tools;
+}
+
+/**
+ * Resolves one scripted call — `{name, arguments}`, as every `__MOCK_PLAN__`
+ * step and `__MOCK_TOOL_CALL__` directive spells one — to the wire shape the
+ * answering seat's belt can actually serve, or `null` when it cannot serve it
+ * at all.
+ *
+ * A scripted call still names the tool the test is about (`spawn_task`,
+ * `composio_execute`, …), which is the readable half; the belt may or may not
+ * still offer that name directly. When it does (an OpenHuman-native tool, or
+ * a host that predates the MCP move), the call goes out as written. When it
+ * does not but the name is on THIS seat's own `opencompany` catalogue (see
+ * {@link bridgedCompanyTools}), it is wrapped in `mcp_call_tool` — exactly the
+ * indirection `mcp-agent.spec.ts`'s directive already spells out by hand for
+ * an external server. Anything else resolves to `null`, so the caller can
+ * report the gap honestly rather than send a call the belt has no way to
+ * answer.
+ *
+ * @param {{name?: string, arguments?: any}} call
+ * @param {Set<string>} offered
+ * @param {Set<string>} bridged
+ * @returns {{name: string, arguments: any} | null}
+ */
+function resolveCall(call, offered, bridged) {
+  if (typeof call?.name !== "string") return null;
+  if (offered.has(call.name)) return { name: call.name, arguments: call.arguments ?? {} };
+  if (offered.has("mcp_call_tool") && bridged.has(call.name)) {
+    return {
+      name: "mcp_call_tool",
+      arguments: { server: "opencompany", tool: call.name, arguments: call.arguments ?? {} },
+    };
+  }
+  return null;
+}
+
+/**
  * The host's re-issue instruction in the last message, or null.
  *
  * Only the last message is considered. An instruction further back was already
@@ -965,6 +1269,23 @@ function chatCompletion(body) {
     );
   }
 
+  // A seat's turn inside a desk episode. Ahead of the plan and directive arms
+  // because the sentinel says what this request IS: a turn that must end in
+  // exactly one speech act, whatever the operator's message carried. Only for
+  // a belt that can make the call — a seat handed no MCP bridge falls through
+  // to prose, which is what a real model does too.
+  const hive = findHiveTurn(messages);
+  if (hive && offeredTools(body).has("mcp_call_tool")) {
+    const last = messages[messages.length - 1];
+    if (isToolOutput(last) && !isRefusedToolOutput(last)) {
+      // The utterance was recorded; the turn is over. Prose here reaches
+      // nobody by the room's own rules, so it only carries the marker.
+      process.stderr.write("[mock brain] hive turn: utterance recorded, ending the turn\n");
+      return completion(model, { role: "assistant", content: `${MARKER} hive turn done.` }, "stop");
+    }
+    return hiveCompletion(model, hive, findDmDirective(messages), isToolOutput(last), findReferDirective(messages));
+  }
+
   // The scripted-turn arm, ahead of the single-call directives: a plan is the
   // whole turn, and a message carrying one carries nothing else.
   const plan = findPlan(messages);
@@ -974,7 +1295,11 @@ function chatCompletion(body) {
     const calls = Array.isArray(step) ? step : [];
     if (calls.length > 0) {
       const offered = offeredTools(body);
-      const missing = calls.map((call) => call?.name).filter((name) => !offered.has(name));
+      const bridged = bridgedCompanyTools(messages);
+      const resolved = calls.map((call) => resolveCall(call, offered, bridged));
+      const missing = calls
+        .map((call) => call?.name)
+        .filter((_, index) => !resolved[index]);
       if (missing.length > 0) {
         // NOT consumed: this is a teammate reading the operator's message
         // second-hand, not the orchestrator. Answering with prose is the same
@@ -984,7 +1309,8 @@ function chatCompletion(body) {
         // the same line otherwise, and they are opposite bugs.
         process.stderr.write(
           `[mock brain] plan step ${served} left unserved; this belt has no ` +
-            `${missing.join(", ")} — it carries [${[...offered].join(", ")}]\n`,
+            `${missing.join(", ")} — it carries [${[...offered].join(", ")}], bridges ` +
+            `[${[...bridged].join(", ")}]\n`,
         );
       } else {
         servedPlans.set(plan.id, served + 1);
@@ -996,12 +1322,12 @@ function chatCompletion(body) {
           {
             role: "assistant",
             content: null,
-            tool_calls: calls.map((call, index) => ({
+            tool_calls: resolved.map((call, index) => ({
               id: `mock-plan-${served}-${index}`,
               type: "function",
               function: {
                 name: call.name,
-                arguments: JSON.stringify(call.arguments ?? {}),
+                arguments: JSON.stringify(call.arguments),
               },
             })),
           },
@@ -1023,25 +1349,55 @@ function chatCompletion(body) {
     !servedDirectives.has(directive.id) &&
     !alreadyServed(messages, directive.index)
   ) {
-    servedDirectives.add(directive.id);
-    // The id, not just the name: when a directive fires more than once the
-    // question is always "which key differed", and this is the line that
-    // answers it from a CI log alone.
-    process.stderr.write(`[mock brain] tool call: ${directive.name} <${directive.id}>\n`);
-    return completion(model, {
-      role: "assistant",
-      content: null,
-      tool_calls: [
-        {
-          id: `mock-call-${directive.index}`,
-          type: "function",
-          function: {
-            name: directive.name,
-            arguments: JSON.stringify(directive.arguments),
+    const offered = offeredTools(body);
+    const bridged = bridgedCompanyTools(messages);
+    // A single directive predates the belt-fidelity check `resolveCall` does
+    // for `__MOCK_PLAN__` (that arm's own doc comment: "most arms do not
+    // read [tools]"), and most callers of a bare `__MOCK_TOOL_CALL__` /
+    // SPAWNONE directive — the unit suite in particular — never populate
+    // `body.tools` or an `opencompany` MCP brief at all, because the
+    // directive mechanics under test have nothing to do with belt
+    // resolution. Gating those on `resolveCall` the same way a plan step is
+    // gated would refuse every one of them (`offered` and `bridged` both
+    // empty), which is not "this belt cannot serve it" — it is "this caller
+    // never said what the belt is". Only apply the bridging refusal when the
+    // request actually supplied belt evidence; otherwise serve the directive
+    // exactly as named, the pre-bridging contract every other test here
+    // still relies on.
+    const resolved =
+      offered.size === 0 && bridged.size === 0
+        ? { name: directive.name, arguments: directive.arguments ?? {} }
+        : resolveCall(directive, offered, bridged);
+    if (resolved) {
+      servedDirectives.add(directive.id);
+      // The id, not just the name: when a directive fires more than once the
+      // question is always "which key differed", and this is the line that
+      // answers it from a CI log alone.
+      process.stderr.write(`[mock brain] tool call: ${directive.name} <${directive.id}>\n`);
+      return completion(model, {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: `mock-call-${directive.index}`,
+            type: "function",
+            function: {
+              name: resolved.name,
+              arguments: JSON.stringify(resolved.arguments),
+            },
           },
-        },
-      ],
-    }, "tool_calls");
+        ],
+      }, "tool_calls");
+    }
+    // NOT consumed, for the same reason an unservable plan step is not: a
+    // directive naming a tool this seat's belt has no way to reach (directly
+    // or through its own `opencompany` catalogue) reaches nobody by falling
+    // through to prose, exactly like a real model offered no such tool would.
+    process.stderr.write(
+      `[mock brain] directive ${directive.name} <${directive.id}> left unserved; this belt ` +
+        `has no ${directive.name} — it carries [${[...offered].join(", ")}], bridges ` +
+        `[${[...bridged].join(", ")}]\n`,
+    );
   }
 
   const last = messages[messages.length - 1];

@@ -9,7 +9,7 @@ services:
       - watch
       - --poll
       - --watch
-      - src
+      - crates/opencompany-core/src
       - --watch
       - companies
       - --watch
@@ -26,7 +26,10 @@ services:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
       interval: 3s
       timeout: 2s
-      start_period: 60s
+      # A first launch compiles the Rust dependency graph into the named cache
+      # volume. Two minutes is not enough on a cold machine, and marking the
+      # host unhealthy prevents Compose from ever starting the console.
+      start_period: 10m
       retries: 20
     volumes:
       - ..:/workspace
@@ -54,6 +57,14 @@ services:
 
 volumes:
   cargo-registry:
+    name: opencompany-cargo-registry
+    external: true
   cargo-git:
+    name: opencompany-cargo-git
+    external: true
   cargo-target:
+    name: opencompany-cargo-target
+    external: true
   frontend-node-modules:
+    name: opencompany-frontend-node-modules
+    external: true

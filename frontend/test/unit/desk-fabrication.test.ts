@@ -7,11 +7,10 @@ import { describe, expect, it } from "vitest";
 import type { ApprovalSummary } from "@/api/types";
 import { approvalThreadLink } from "@/components/approval-card";
 import type { DeskDto } from "@/api/types";
-import { GENERAL_CHANNEL } from "@/lib/desks";
-import { MAIN_THREAD_ID } from "@/lib/chat";
+import { GENERAL_CHANNEL_ID } from "@/lib/chat";
 import type { TeamMember } from "@/lib/team";
 import { threadsFromDesks } from "@/lib/threads";
-import { buildChannels } from "@/views/room/model";
+import { buildChannels, deskFromDto } from "@/views/room/model";
 
 /**
  * A company with no desks is shown as a company with no desks.
@@ -39,10 +38,10 @@ const FABRICATED = ["Strategy desk", "Creative studio", "Front desk"];
 const NO_MEMBERS: TeamMember[] = [];
 
 describe("a company with no desks (empty /desks answer)", () => {
-  it("gets the main line and nothing else in the chat list", () => {
+  it("gets #general and nothing else in the chat list", () => {
     const threads = threadsFromDesks([]);
 
-    expect(threads.map((t) => t.id)).toEqual([MAIN_THREAD_ID]);
+    expect(threads.map((t) => t.id)).toEqual([GENERAL_CHANNEL_ID]);
     for (const name of FABRICATED) {
       expect(threads.map((t) => t.contact.name)).not.toContain(name);
     }
@@ -59,34 +58,49 @@ describe("a company with no desks (empty /desks answer)", () => {
     ];
 
     expect(threadsFromDesks(desks).map((t) => t.id)).toEqual([
-      MAIN_THREAD_ID,
+      GENERAL_CHANNEL_ID,
       "engineering",
     ]);
   });
 
-  it("builds a rail of #general and nothing beside it", () => {
-    const channels = buildChannels(NO_MEMBERS, [], {}, true).flatMap(
-      (section) => section.channels,
-    );
+  it("lists #general once when the host supplies it", () => {
+    const desks: DeskDto[] = [
+      { id: "engineering", name: "Engineering desk", members: [] },
+      { id: "general", name: "General", kind: "general", members: [], mutable: false },
+    ];
 
-    expect(channels.map((c) => c.id)).toEqual([MAIN_THREAD_ID]);
+    expect(threadsFromDesks(desks).map((t) => t.id)).toEqual([
+      GENERAL_CHANNEL_ID,
+      "engineering",
+    ]);
   });
 
-  it("keeps #general resolvable for an approval raised on the main line", () => {
-    // The empty list is an answer, so the one channel every company has can be
-    // named. While `[]` also meant "the read failed" this label was withheld.
+  it("builds an empty channel rail — #general comes from the host, never from here", () => {
+    const channels = buildChannels(NO_MEMBERS, [], {}).flatMap((section) => section.channels);
+
+    expect(channels).toEqual([]);
+  });
+
+  it("labels an approval raised in #general", () => {
     const approval = {
       id: "a1",
       kind: "runtime.unlabelled_effect",
       amount_usd: null,
       at_millis: 0,
       agent: null,
-      thread: MAIN_THREAD_ID,
+      thread: GENERAL_CHANNEL_ID,
     } as ApprovalSummary;
+    const general = deskFromDto({
+      id: "general",
+      name: "General",
+      kind: "general",
+      members: [],
+      mutable: false,
+    });
 
-    expect(approvalThreadLink(approval, [], NO_MEMBERS)).toEqual({
-      channelId: MAIN_THREAD_ID,
-      label: `#${GENERAL_CHANNEL}`,
+    expect(approvalThreadLink(approval, [general], NO_MEMBERS)).toEqual({
+      channelId: GENERAL_CHANNEL_ID,
+      label: "#general",
     });
   });
 
@@ -100,7 +114,7 @@ describe("a company with no desks (empty /desks answer)", () => {
       amount_usd: null,
       at_millis: 0,
       agent: null,
-      thread: MAIN_THREAD_ID,
+      thread: GENERAL_CHANNEL_ID,
     } as ApprovalSummary;
 
     expect(approvalThreadLink(approval, null, NO_MEMBERS)).toBeNull();

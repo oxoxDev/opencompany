@@ -6,15 +6,16 @@
 # arg by default and CI resolves the file instead. So these and `frontend/.nvmrc`
 # are the pair to bump together; bumping only one means CI stops being evidence
 # for the thing that deploys.
-FROM node:22-slim AS build
+FROM docker.io/library/node:22-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
 # Crash reporting is a BUILD-time decision for the console: Vite substitutes
 # these into the bundle, so a variable set when the container runs arrives far
-# too late. Blank — the default — builds a bundle that never initializes the
-# SDK, which is what every build that does not pass them gets.
+# too late. A blank `VITE_SENTRY_DSN` builds a bundle that reports to the
+# compiled-in TinyHumans console project; `off` builds one that never
+# initializes the SDK (Compose passes `off` unless you set a DSN).
 # See `docs/spec/runtime/crash-reporting.md`.
 ARG VITE_SENTRY_DSN=
 ARG VITE_SENTRY_ENVIRONMENT=
@@ -37,7 +38,7 @@ RUN npm run build && npm run build:pages-sdk
 
 # ── local development ─────────────────────────────────────────────────────
 # Source is bind-mounted over /app; node_modules lives in a named volume.
-FROM node:22-slim AS development
+FROM docker.io/library/node:22-slim AS development
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -46,7 +47,7 @@ RUN npm ci
 # nginx serves the static bundle and proxies the API to the host. The upstream
 # is configurable so the same image works under Compose (service name),
 # single-task ECS (localhost), or any host:port.
-FROM nginx:1.27-alpine AS runtime
+FROM docker.io/library/nginx:1.27-alpine AS runtime
 ENV OC_UPSTREAM=opencompany:8080
 COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=build /app/dist /usr/share/nginx/html

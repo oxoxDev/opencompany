@@ -110,12 +110,15 @@ const SEARCH_GRANTED_COMPANIES: [&str; 21] = [
 /// a desk that could reach the web would answer about vending machines in general
 /// instead of about these eight. Withholding the network is what makes a decision
 /// there attributable to the fleet it was made about.
-const SEARCH_DENIED_COMPANIES: [&str; 7] = [
+const SEARCH_DENIED_COMPANIES: [&str; 8] = [
     "math_lab",
     "hive_math_lab",
     "e2e_harness",
     "e2e_setup",
     "openhuman_demo",
+    // `openhuman_demo` with the CEO shared across two desks — the hive-desks
+    // measurement fixture (plan hive-desks, Track B); same posture, same reason.
+    "hive_demo",
     "vending_machine_co",
     // Denied on exactly `vending_machine_co`'s argument. Every fact this bundle
     // reasons from — what is on the order, which variants are in stock, what the

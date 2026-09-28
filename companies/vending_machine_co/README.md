@@ -1,5 +1,14 @@
 # Northgate Vending
 
+> **Migration note.** The trace-grammar hive this bundle was written against
+> (`[group_chat.hive]`: quorum, turn budget, blind round, per-seat moves,
+> asides) has been replaced by completion-driven rooms — concurrent rounds,
+> speech as a tool call, Jev routing, referral — configured by
+> `[group_chat.routing]` ([`docs/spec/runtime/hive.md`](../../docs/spec/runtime/hive.md)).
+> A `[group_chat.hive]` block is refused at load with a migration hint; the
+> desks below keep their seats and their referral settings, and the grammar
+> paragraphs describe the design the bundle was tuned under, not what runs.
+
 A vending-machine operator: eight machines at five host sites, a finite
 warehouse behind them, and host contracts that renew whether or not anybody
 prepared for it. Three hive-mind desks run it.
@@ -40,7 +49,7 @@ Asides are auditable, **not confidential** — an operator and every person read
 one in full. They are on for this one desk and off everywhere else in the repo
 on purpose: upstream measured the mechanism and it *lost* on answer quality, so
 enabling it is a decision about this desk rather than a default anybody
-inherits. See [`hivemind-asides.md`](../../docs/spec/runtime/hivemind-asides.md).
+inherits. Asides are gone; a seat `dm`s the seats it names instead ([`hive.md`](../../docs/spec/runtime/hive.md#speaking)).
 
 One rule governs both seams, and it is what makes this sound rather than merely
 chatty: **what crosses a visibility boundary carries information, never
@@ -48,7 +57,7 @@ support.** A referred answer and a private line each add no supporter and move
 no option toward a decision — the asking desk still has to convince itself. A
 desk that could import a quorum from elsewhere, or assemble one where the room
 cannot see it, would be a desk that never had to be convinced. See
-[`hivemind-referral.md`](../../docs/spec/runtime/hivemind-referral.md).
+[`hive.md`](../../docs/spec/runtime/hive.md#referral).
 
 ## The three desks
 
@@ -63,7 +72,7 @@ restrictions carry the design:
 
 - On `ops` only the **route planner** may `!propose`. Three seats proposing
   three near-identical routes is a room that votes rather than deliberates —
-  the live failure `docs/spec/runtime/hivemind.md` records. The fleet
+  the live failure the trace-grammar hive spec recorded. The fleet
   technician and stock controller ground or `!refute` the plan from the two
   constraints that actually bind, and the **field realist** may never
   `!support` at all: a seat that both objects and supports drifts into being a

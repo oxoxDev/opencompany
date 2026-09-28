@@ -220,16 +220,11 @@ jobs:
     permissions:
       contents: write
     uses: ./.github/workflows/build-desktop.yml
+    # Only the repository-level Sentry token is passed. The APPLE_*,
+    # APP_STORE_CONNECT_* and TAURI_SIGNING_* secrets live in the `Production`
+    # environment, which the called workflow's own jobs declare — see its
+    # `secrets:` note.
     secrets:
-      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
     with:
       build_ref: ${{ needs.prepare-build.outputs.build_ref }}
@@ -286,7 +281,7 @@ jobs:
           file: deploy/Dockerfile
           push: false
           platforms: linux/amd64
-          tags: opencompany-tenant:${{ needs.prepare-build.outputs.tag }}
+          tags: opencompany:${{ needs.prepare-build.outputs.tag }}
           build-args: |
             FEATURES=${{ steps.features.outputs.value }}
             OPENCOMPANY_BUILD_COMMIT=${{ needs.prepare-build.outputs.sha }}

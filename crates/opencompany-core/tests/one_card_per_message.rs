@@ -40,6 +40,10 @@ use opencompany::runtime::RuntimeBuilder;
 use opencompany::server::platform_auth::{PlatformAuthConfig, StaticPlatformVerifier};
 
 const TOKEN: &str = "test-platform-token";
+/// The company id prefix. Each host mints `acme-<uuid>` (see [`spawn_host`]):
+/// every test in this binary runs on the one process-wide OpenHuman runtime,
+/// whose thread transcripts are keyed by `(company, agent)`, so two hosts both
+/// named `acme` would resume each other's transcripts mid-test.
 const COMPANY: &str = "acme";
 
 // ---------------------------------------------------------------------------
@@ -202,7 +206,7 @@ impl Ctx {
     /// continuation, which runs *before* the hand-off has opened its card.
     fn is_relay(&self) -> bool {
         self.user
-            .contains("Relay their answer back to the operator")
+            .contains("Pass their answer along to the operator")
     }
 }
 
@@ -229,7 +233,8 @@ struct Script {
     seen: Mutex<Vec<Value>>,
     /// The company's own base URL, registered once the host is up so an
     /// [`Effect`] can reach back into it mid-turn.
-    host: Mutex<Option<String>>,
+    /// `(base url, company id)` of the host this script may clear the board of.
+    host: Mutex<Option<(String, String)>>,
     /// How many cards each fired [`Effect::ClearBoard`] actually deleted.
     ///
     /// Recorded rather than asserted in place, because **a panic inside this
@@ -258,12 +263,12 @@ impl Script {
     /// many went — see [`Script::cleared`] for why it records rather than
     /// asserts.
     async fn clear_board(&self) {
-        let Some(base) = self.host.lock().expect("host").clone() else {
+        let Some((base, company)) = self.host.lock().expect("host").clone() else {
             return;
         };
         let client = reqwest::Client::new();
         let Ok(res) = client
-            .get(format!("{base}/api/v1/companies/{COMPANY}/tasks"))
+            .get(format!("{base}/api/v1/companies/{company}/tasks"))
             .bearer_auth(TOKEN)
             .send()
             .await
@@ -277,7 +282,7 @@ impl Script {
                 continue;
             };
             let deleted_ok = client
-                .delete(format!("{base}/api/v1/companies/{COMPANY}/tasks/{id}"))
+                .delete(format!("{base}/api/v1/companies/{company}/tasks/{id}"))
                 .bearer_auth(TOKEN)
                 .send()
                 .await
@@ -298,10 +303,14 @@ fn tool_call_message(calls: &[(String, Value)]) -> Value {
         .iter()
         .enumerate()
         .map(|(i, (tool, args))| {
+            // Plan hive-desks Phase 3: a company tool is reached through
+            // `mcp_call_tool` on the `opencompany` server, as a real model
+            // reaches it; a native one keeps its bare name.
+            let (name, args) = opencompany::hive::tools::via_opencompany_mcp(tool, args.clone());
             json!({
                 "id": format!("call_{i}"),
                 "type": "function",
-                "function": { "name": tool, "arguments": args.to_string() }
+                "function": { "name": name, "arguments": args.to_string() }
             })
         })
         .collect();
@@ -429,6 +438,7 @@ members = ["engineer"]
 struct Host {
     base: String,
     home: PathBuf,
+    company: String,
     _tmp: tempfile::TempDir,
 }
 
@@ -442,8 +452,9 @@ async fn spawn_host(model: String) -> Host {
     std::fs::write(company_dir.join("company.toml"), MANIFEST).expect("manifest");
     let manifest = CompanyManifest::from_path(&company_dir).expect("valid manifest");
 
+    let company = format!("{COMPANY}-{}", uuid::Uuid::new_v4().simple());
     let runtime = RuntimeBuilder::new(home.clone(), manifest)
-        .with_id(CompanyId::new(COMPANY))
+        .with_id(CompanyId::new(company.clone()))
         .with_harness(Arc::new(HarnessPool::new()))
         .with_harness_inference(
             HostedProviderConfig {
@@ -474,7 +485,7 @@ async fn spawn_host(model: String) -> Host {
     )));
     state
         .registry()
-        .insert(CompanyId::new(COMPANY), Arc::new(runtime));
+        .insert(CompanyId::new(company.clone()), Arc::new(runtime));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -487,6 +498,7 @@ async fn spawn_host(model: String) -> Host {
     Host {
         base: format!("http://{addr}"),
         home,
+        company,
         _tmp: tmp,
     }
 }
@@ -496,7 +508,7 @@ impl Host {
     fn agent_sandbox(&self, agent: &str) -> PathBuf {
         self.home
             .join("harness")
-            .join(COMPANY)
+            .join(&self.company)
             .join(agent)
             .join("workspace")
     }
@@ -514,7 +526,10 @@ impl Host {
             body["chat"] = json!(desk);
         }
         let res = reqwest::Client::new()
-            .post(format!("{}/api/v1/companies/{COMPANY}/chat", self.base))
+            .post(format!(
+                "{}/api/v1/companies/{}/chat",
+                self.base, self.company
+            ))
             .bearer_auth(TOKEN)
             .json(&body)
             .send()
@@ -529,7 +544,10 @@ impl Host {
     /// The board plus the card the reply linked to — the two facts #463 is about.
     async fn board(&self, reply: &Value) -> Board {
         let cards: Vec<Value> = reqwest::Client::new()
-            .get(format!("{}/api/v1/companies/{COMPANY}/tasks", self.base))
+            .get(format!(
+                "{}/api/v1/companies/{}/tasks",
+                self.base, self.company
+            ))
             .bearer_auth(TOKEN)
             .send()
             .await
@@ -547,8 +565,8 @@ impl Host {
     async fn artifacts(&self, task_id: &str) -> Vec<Value> {
         reqwest::Client::new()
             .get(format!(
-                "{}/api/v1/companies/{COMPANY}/tasks/{task_id}/artifacts",
-                self.base
+                "{}/api/v1/companies/{}/tasks/{task_id}/artifacts",
+                self.base, self.company
             ))
             .bearer_auth(TOKEN)
             .send()
@@ -763,7 +781,7 @@ async fn a_publish_onto_a_card_deleted_mid_turn_links_the_reply_to_the_replaceme
     ])
     .await;
     let host = spawn_host(model).await;
-    *script.host.lock().expect("host") = Some(host.base.clone());
+    *script.host.lock().expect("host") = Some((host.base.clone(), host.company.clone()));
     host.seed_file("writer", "memo.md", "# Q3 board memo\n");
 
     let reply = host.chat("assemble the Q3 board pack", None).await;

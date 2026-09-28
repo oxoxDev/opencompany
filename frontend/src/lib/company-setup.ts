@@ -223,42 +223,49 @@ export function buildOutLabel(created: number, total: number): string {
 }
 
 /**
- * Why this address cannot be a company admin, or `undefined` when it can.
+ * Why this login cannot be a company admin, or `undefined` when it can.
  *
  * ## Caught where it is typed, not where it fails
  *
- * The email step only checked for emptiness, so `as` walked through it. The
- * failure then surfaced from the **manifest validator on the last screen** —
- * after the roster had been designed and the apply attempted — as "that didn't
- * apply: `[users].admins` has an invalid entry". The operator was shown a
- * configuration error about a mistake they had made four steps earlier, in
- * language belonging to a file they have never seen.
+ * The email step only checked for emptiness, so `Ada Lovelace` walked through
+ * it. The failure then surfaced from the **manifest validator on the last
+ * screen** — after the roster had been designed and the apply attempted — as
+ * "that didn't apply: `[users].admins` has an invalid entry". The operator was
+ * shown a configuration error about a mistake they had made four steps
+ * earlier, in language belonging to a file they have never seen.
  *
  * ## Loose on purpose, and it must stay loose
  *
  * This mirrors `is_usable_admin_email` in `src/ports/users.rs`: trim, lowercase,
- * and demand an `@`. It is not a mail-server-grade check and must not become
- * one. The host's rule exists to stop an entry normalizing into something
- * `LoginIdentity::parse` reads as the local-owner identity rather than an email
- * admin — not to police what a mail server accepts. A console applying a
- * stricter regex would refuse addresses this host takes everywhere else, which
- * is the same bug pointing the other way.
+ * refuse whitespace inside, and refuse the two identity schemes an email must
+ * not collide with (`wallet:…`, `local:owner`). It does **not** demand an `@`:
+ * on a host with no mail transport the login is a username, not a mailbox,
+ * and there is nothing to send to. It is not a mail-server-grade check and
+ * must not become one — a console applying a stricter rule would refuse logins
+ * this host takes everywhere else, which is the same bug pointing the other
+ * way.
  *
  * `tests/fixtures/setup-admin-email.json` is read by this rule's test and by the
  * host's, which is what keeps the two re-implementations honest.
  *
- * @param required whether an address is needed at all — false on a host with no
+ * @param required whether a login is needed at all — false on a host with no
  * sign-in, where blank is a fine answer but a typo still is not.
  */
 export function adminEmailProblem(value: string, required: boolean): string | undefined {
   const normalized = value.trim().toLowerCase();
   if (!normalized) {
     return required
-      ? "We need an address, or nobody will be able to sign in to this company."
+      ? "We need a login, or nobody will be able to sign in to this company."
       : undefined;
   }
-  if (!normalized.includes("@")) {
-    return "That doesn't look like an email address — it needs an @.";
+  if (/\s/.test(normalized)) {
+    return "A login can't have spaces in it — use an email address or a single word.";
+  }
+  // The `none`-mode owner's own key. `wallet:<key>` would need a real base58
+  // public key after the prefix to collide, which nobody types by accident;
+  // this one is a plain word somebody might.
+  if (normalized === "local:owner") {
+    return "That login is reserved.";
   }
   return undefined;
 }

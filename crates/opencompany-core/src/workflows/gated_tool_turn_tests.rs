@@ -41,7 +41,7 @@ use crate::harness::policy::ApprovalRequestQueue;
 use crate::harness::provider::{HostedProvider, HostedProviderConfig};
 use crate::harness::{HarnessDeps, HarnessPool};
 use crate::ports::WorkflowRunContext;
-use crate::ports::types::{CompanyId, CompanyRecord};
+use crate::ports::types::CompanyRecord;
 use crate::runtime::journal::RuntimeJournal;
 use crate::store::{FsCompanyStore, FsContextStore, FsInboxStore, FsOps};
 use crate::workflows::delivery::{DeliveryParking, WorkflowDeliveryDeps};
@@ -79,7 +79,7 @@ to = "done"
 /// [`board_turn_tests`](crate::workflows::board_turn_tests) drives the same
 /// scripted-model harness rather than duplicating it (issue #661).
 #[derive(Clone, Debug)]
-pub(super) enum Turn {
+pub(crate) enum Turn {
     /// Emit a native tool call the policy will gate.
     Call {
         /// The tool the model asks for.
@@ -92,13 +92,13 @@ pub(super) enum Turn {
 }
 
 /// A scripted OpenAI-compatible `/chat/completions` endpoint.
-pub(super) struct Script {
+pub(crate) struct Script {
     turns: Mutex<Vec<Turn>>,
     /// Every request body the model was sent, in order (issue #453). The tool
     /// results of a turn come back to the model inside the *next* request, so
     /// this is where a test reads what a refused tool actually told it — and,
     /// since #881, what a node downstream of a blocked one was never sent.
-    pub(super) seen: Mutex<Vec<Value>>,
+    pub(crate) seen: Mutex<Vec<Value>>,
 }
 
 /// Serve the script on loopback and return its base URL, handing back the
@@ -108,7 +108,7 @@ pub(super) struct Script {
 /// means reading what the model was never asked, so the sibling
 /// [`blocked_node_tests`](crate::workflows::blocked_node_tests) needs the recorder
 /// rather than only the URL.
-pub(super) async fn spawn_script_recording(turns: Vec<Turn>) -> (String, Arc<Script>) {
+pub(crate) async fn spawn_script_recording(turns: Vec<Turn>) -> (String, Arc<Script>) {
     let script = Arc::new(Script {
         turns: Mutex::new(turns),
         seen: Mutex::new(Vec::new()),
@@ -132,15 +132,20 @@ pub(super) async fn spawn_script_recording(turns: Vec<Turn>) -> (String, Arc<Scr
                 // more times than expected; end the turn rather than hang.
                 let message = match next.unwrap_or(Turn::Say("done")) {
                     Turn::Say(text) => json!({ "role": "assistant", "content": text }),
-                    Turn::Call { tool, args } => json!({
-                        "role": "assistant",
-                        "content": null,
-                        "tool_calls": [{
-                            "id": format!("call-{tool}"),
-                            "type": "function",
-                            "function": { "name": tool, "arguments": args.to_string() }
-                        }]
-                    }),
+                    Turn::Call { tool, args } => {
+                        // Plan hive-desks Phase 3: a company tool is reached
+                        // through `mcp_call_tool` on the `opencompany` server.
+                        let (name, args) = crate::hive::tools::via_opencompany_mcp(tool, args);
+                        json!({
+                            "role": "assistant",
+                            "content": null,
+                            "tool_calls": [{
+                                "id": format!("call-{tool}"),
+                                "type": "function",
+                                "function": { "name": name, "arguments": args.to_string() }
+                            }]
+                        })
+                    }
                 };
                 Json(json!({
                     "choices": [{ "index": 0, "message": message }],
@@ -196,11 +201,12 @@ tier = "orchestrator"
 /// Deps with the production approvals wiring: a real gate over the manifest's
 /// `[policy]` and a real on-disk journal, both reachable through the same
 /// `delivery.parking` bundle the runtime builder wires.
-pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<RuntimeJournal>) {
+pub(crate) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<RuntimeJournal>) {
     let policy = toml::from_str("mode = \"full\"\n").expect("valid [policy] block");
     let gate = Arc::new(crate::policy::ManifestApprovalGate::new(policy));
     let journal = Arc::new(RuntimeJournal::new(dir.join("journal.jsonl")));
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -238,6 +244,7 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -258,6 +265,7 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
             users: Arc::new(FsOps::new(dir)),
             bootstrap_admin: None,
             channels: Vec::new(),
+            notifications: None,
             parking: Some(DeliveryParking {
                 approvals: gate,
                 journal: journal.clone(),
@@ -268,6 +276,8 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
                 continuations: Default::default(),
                 gates: Default::default(),
                 blocked_nodes: Default::default(),
+                grants: Default::default(),
+                events: Arc::new(crate::store::FsEventLog::new(dir)),
             }),
             events: Arc::new(crate::store::FsEventLog::new(dir)),
         }),
@@ -282,10 +292,11 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
 
 pub(super) fn record() -> CompanyRecord {
     CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
-        id: CompanyId::new("acme"),
+        id: crate::test_support::per_test_company_id("acme"),
         manifest: manifest(),
         ledger: Vec::new(),
         lifecycle: "running".to_string(),

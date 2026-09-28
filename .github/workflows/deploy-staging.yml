@@ -1,30 +1,43 @@
-# Build this repo's OWN image (the tenant workload) and put it in front of new
-# tenants on k3s staging.
+# Build this repo's OWN image (the tenant workload) on every push to main and
+# publish it to GitHub Container Registry as the STAGING tenant image.
 #
-# One repo, one image. This used to be built from the platform superproject
-# (tinyhumansai/opencompany-microservice), which meant a change here only shipped
-# when that repo's cron happened to notice the submodule pointer move. Now this
-# repo builds and publishes its own workload image, and the superproject builds
-# only the manager control plane.
+#   ghcr.io/tinyhumansai/opencompany:staging       moves with main
+#   ghcr.io/tinyhumansai/opencompany:sha-<short>   this exact build
 #
-# Required repository secrets:
-#   AWS_ROLE_ARN     — role assumed via OIDC to push to ECR. Its trust policy
-#                      must allow `repo:tinyhumansai/opencompany:*`.
-#   SSH_PRIVATE_KEY  — key trusted by root@ on the staging node.
-#   SSH_HOST         — staging node address.
+# That is ALL it does. Tenants are no longer run on a k3s node this workflow
+# reaches into: they are boat.dev sandboxes managed by
+# tinyhumansai/opencompany-sandbox-manager, which pulls the image itself and
+# keeps production tenants on the newest GitHub Release
+# (opencompany-sandbox-manager#6). So there is no AWS role, no ECR, no SSH key,
+# no kubectl and no tenant-image ConfigMap here any more — nothing in this
+# workflow can touch a running tenant. A staging sandbox that wants main's head
+# pulls `:staging`; one that wants a fixed build pins `:sha-<short>` (or the
+# digest the job summary records).
 #
-# No PAT is needed: this repo and every crate the build compiles
-# (openhuman and its nested vendor graph) are public, so the default
-# GITHUB_TOKEN clones them all.
+# RELEASE images are NOT built here. `release-production.yml` builds the tagged,
+# version-bumped tree and pushes `:v<version>` and `:latest` before the GitHub
+# Release goes public. A push to main is not a release, so this workflow never
+# moves `:latest`.
+#
+# The GHCR package must be PUBLIC for a sandbox to pull it anonymously — see the
+# note on the `publish-docker` job in `release-production.yml`.
+#
+# Credentials: only the run's GITHUB_TOKEN, widened to `packages: write` on the
+# one job that pushes, plus the repository-level SENTRY_AUTH_TOKEN for the
+# source-map / debug-symbol upload the image build performs. No PAT: this repo
+# and every crate the build compiles (openhuman and its nested vendor graph)
+# are public.
+#
+# `env.TENANT_FEATURES` below is the SINGLE SOURCE OF TRUTH for the hosted
+# tenant's feature set: `release-staging.yml` and `release-production.yml` read
+# it out of this file at build time rather than keeping copies.
 #
 # Issue #590. Every `uses:` below is a full commit SHA with the resolved version
 # in a trailing comment — `actions/*` included, no exemptions. The rationale is
-# at the top of `ci.yml`; it applies here with more force than there, because
-# this job assumes an AWS role that can push to ECR and loads an SSH key trusted
-# by root on the staging node. An action resolved from a moved tag would run
-# inside that step's environment. Bumps arrive as Dependabot PRs; re-resolve any
-# hand edit with `gh api repos/<owner>/<action>/commits/<tag> --jq .sha`.
-name: Deploy tenant image to staging
+# at the top of `ci.yml`; the `Actions pinned` job there enforces it. Bumps
+# arrive as Dependabot PRs; re-resolve any hand edit with
+# `gh api repos/<owner>/<action>/commits/<tag> --jq .sha`.
+name: Publish staging tenant image
 
 on:
   push:
@@ -47,29 +60,20 @@ on:
       - 'rust-toolchain.toml' # COPYed into the builder; it picks the compiler
       - 'vendor/**'
       - '.github/workflows/deploy-staging.yml'
-  workflow_dispatch:
-    inputs:
-      refresh_all_tenants:
-        description: 'Also restart already-running tenants onto the new image (disruptive: wakes idle tenants)'
-        type: boolean
-        default: false
+  # A manual rebuild of main's head (e.g. after a base-image fix). Refused from
+  # any other ref by the job's `if:` — see there.
+  workflow_dispatch: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
+# Read-only at workflow scope; the publishing job widens itself.
 permissions:
   contents: read
-  id-token: write # assume the AWS role via OIDC to push to ECR
 
 env:
-  AWS_REGION: us-east-1
-  ECR_REPOSITORY: tinyhumansai/opencompany-tenant
-  K8S_NAMESPACE: opencompany-system
-  MANAGER_DEPLOY: opencompany-manager
-  # Holds the fleet-default tenant image outside the manager's pod template, so
-  # publishing it does not roll the manager (opencompany-microservice#38).
-  TENANT_IMAGE_CM: opencompany-tenant-image
+  IMAGE: ghcr.io/tinyhumansai/opencompany
   # The feature set the hosted tenant ships with. Changing it changes what
   # every tenant can do, so treat edits here as a product change, not a CI
   # tweak. Full belt: adds mcp/media/composio (the credential/real-money tool
@@ -89,35 +93,48 @@ env:
   # of `openpanel::build`, installs a `NullTracker`, and reports nothing however
   # the deployment kind and credential are injected. It costs the image nothing
   # — `analytics = ["dep:reqwest"]`, and `reqwest` is already here via
-  # `openhuman` — and stays inert until the manager injects
-  # `OPENCOMPANY_ANALYTICS_CLIENT_ID`, `OPENCOMPANY_ANALYTICS_CLIENT_SECRET` and
-  # `OPENCOMPANY_ANALYTICS_ENDPOINT` (`docs/spec/runtime/analytics.md`).
+  # `openhuman`. A hosted tenant reports with compiled-in defaults (the
+  # TinyHumans OpenPanel client id and `https://panel.tinyhumans.ai/api/track`);
+  # `OPENCOMPANY_ANALYTICS_CLIENT_ID` / `OPENCOMPANY_ANALYTICS_ENDPOINT` override
+  # them and `OPENCOMPANY_ANALYTICS=off` silences it
+  # (`docs/spec/runtime/analytics.md`).
   #
   # `crash-reporting` is the Sentry client, and this list is the ONLY thing that
   # decides whether a tenant has one. The feature is the sole path that compiles
-  # it, so without this entry the manager can inject `OPENCOMPANY_SENTRY_DSN`
-  # into every container and every one of them resolves `Silence::NotCompiled`,
+  # it, so without this entry every container — even one given an
+  # `OPENCOMPANY_SENTRY_DSN` — resolves `Silence::NotCompiled`,
   # prints "off" at boot and reports nothing — the whole surface inert in
   # exactly the deployment that has no other way to be watched. Same shape as
   # the `analytics` note above, and the same reason it is spelled out: a feature
   # list is not self-documenting, and the symptom of an omission is silence.
   #
-  # It stays inert until a DSN is injected, and it is a second gate rather than
-  # the only one — see `docs/spec/runtime/crash-reporting.md`. The image cost is
+  # A hosted tenant reports to the compiled-in `opencompany-core` DSN unless
+  # `OPENCOMPANY_SENTRY_DSN` overrides it or `OPENCOMPANY_SENTRY=off` silences
+  # it — see `docs/spec/runtime/crash-reporting.md`. The image cost is
   # `sentry` plus a small `ureq` on the `rustls` already in the graph; no second
   # HTTP client and no native TLS (`cargo tree -d` is unchanged but for
   # `base64`).
-  TENANT_FEATURES: mongodb,openhuman,openhuman-rpc,tinyplace,github,smtp,dns,tinyhumans,webhooks,platform-jwt,export,mcp,media,composio,imap,medulla,sidecar,chargebee,paypal,tinymemory,analytics,crash-reporting
+  TENANT_FEATURES: mongodb,openhuman,tinyplace,github,smtp,dns,tinyhumans,webhooks,platform-jwt,export,mcp,media,composio,imap,medulla,sidecar,chargebee,paypal,tinymemory,analytics,crash-reporting
 
 jobs:
-  deploy:
+  publish:
+    name: Build and push staging tenant image
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Only main may move `:staging`. A dispatch from another branch would build
+    # branch-controlled Dockerfile/scripts while holding a `packages: write`
+    # token and SENTRY_AUTH_TOKEN, so it is refused before checkout.
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write # push the tenant image to GHCR under this repository's owner
 
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: false
+          persist-credentials: false
 
       # Path-limited on purpose. `--features openhuman` compiles the vendored
       # openhuman crate and its nested graph, and cargo must be able to read the
@@ -139,62 +156,62 @@ jobs:
           git submodule update --init vendor/openhuman vendor/tinyhivemind
           scripts/ci/init-vendored-submodules.sh
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Login to Amazon ECR
-        id: ecr-login
-        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
-
       - name: Set up Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Only the upload token is configuration; the Sentry URL, org and project
+      # slugs are hardcoded in the build-args below.
       - name: Validate Sentry artifact-upload settings
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_URL: ${{ vars.SENTRY_URL }}
-          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
-          SENTRY_PROJECT_REACT: ${{ vars.SENTRY_PROJECT_REACT }}
-          SENTRY_PROJECT_RUST: ${{ vars.SENTRY_PROJECT_RUST }}
         run: |
-          missing=0
-          for var in SENTRY_AUTH_TOKEN SENTRY_URL SENTRY_ORG SENTRY_PROJECT_REACT SENTRY_PROJECT_RUST; do
-            if [ -z "${!var}" ]; then
-              echo "::error::Required Sentry artifact-upload setting is missing: $var" >&2
-              missing=1
-            fi
-          done
-          [ "$missing" -eq 0 ] || exit 1
+          if [ -z "$SENTRY_AUTH_TOKEN" ]; then
+            echo "::error::Required Sentry artifact-upload setting is missing: SENTRY_AUTH_TOKEN" >&2
+            exit 1
+          fi
 
-      - name: Build and push image to ECR
+      # `sha-<short>` names this build; 12 hex characters, which is what
+      # `git rev-parse --short=12` would print and plenty to stay unique.
+      - name: Compute tags
+        id: meta
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          short="${SHA:0:12}"
+          {
+            echo 'tags<<TAGS_EOF'
+            echo "${IMAGE}:staging"
+            echo "${IMAGE}:sha-${short}"
+            echo 'TAGS_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image to GHCR
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: deploy/Dockerfile
+          platforms: linux/amd64
           # `deploy/Dockerfile.dockerignore` excludes `.git` and `GITHUB_SHA` does not cross
           # into a build context, so the build script has no way to work out
           # which revision it is compiling — every hosted tenant would report
           # `unknown` forever. `actions/checkout` checked out `github.sha`, so
           # this names the commit that was actually built.
           #
-          # `VITE_SENTRY_DSN` / `VITE_BUILD_COMMIT` are the console's half of
-          # crash reporting, and the host's runtime env cannot supply them: Vite
-          # inlines them into the bundle during this image build, so a DSN set
-          # on the StatefulSet afterwards arrives far too late and is a silent
-          # no-op (`docs/spec/runtime/crash-reporting.md`).
-          #
-          # The DSN is a repository VARIABLE, not a secret. A browser bundle's
-          # DSN is public by construction — anyone who opens the console can
-          # read it — so masking would buy nothing and would only stop this
-          # workflow from being able to report whether it is set.
-          #
-          # Empty when the variable is unset, which keeps the console silent
-          # rather than failing the build: the same "no DSN, no client" gate
-          # every local `npm run build` already takes.
+          # `VITE_SENTRY_DSN` is deliberately NOT passed: the console bundle
+          # defaults to the TinyHumans `opencompany-frontend` DSN in code
+          # (`frontend/src/lib/crash-reporting.ts`). `VITE_BUILD_COMMIT` and the
+          # rest are the console's build-time inputs: Vite inlines them into
+          # the bundle during this image build, so the runtime env cannot
+          # supply them (`docs/spec/runtime/crash-reporting.md`).
           #
           # `VITE_SENTRY_ENVIRONMENT` reads the SAME variable the manager injects
           # into the tenant as `OPENCOMPANY_SENTRY_ENVIRONMENT`, so one value
@@ -228,378 +245,32 @@ jobs:
           build-args: |
             FEATURES=${{ env.TENANT_FEATURES }}
             OPENCOMPANY_BUILD_COMMIT=${{ github.sha }}
-            VITE_SENTRY_DSN=${{ vars.OPENCOMPANY_REACT_SENTRY_DSN }}
             VITE_BUILD_COMMIT=${{ github.sha }}
             VITE_SENTRY_ENVIRONMENT=${{ vars.OPENCOMPANY_SENTRY_ENVIRONMENT || 'hosted-tenant' }}
             VITE_SENTRY_TRACES_SAMPLE_RATE=${{ vars.OPENCOMPANY_SENTRY_TRACES_SAMPLE_RATE }}
-            SENTRY_URL=${{ vars.SENTRY_URL }}
-            SENTRY_ORG=${{ vars.SENTRY_ORG }}
-            SENTRY_PROJECT_REACT=${{ vars.SENTRY_PROJECT_REACT }}
-            SENTRY_PROJECT_RUST=${{ vars.SENTRY_PROJECT_RUST }}
+            SENTRY_URL=https://sentry.tinyhumans.ai
+            SENTRY_ORG=tinyhumans
+            SENTRY_PROJECT_REACT=opencompany-frontend
+            SENTRY_PROJECT_RUST=opencompany-core
           secrets: |
             sentry_auth_token=${{ secrets.SENTRY_AUTH_TOKEN }}
           push: true
-          tags: |
-            ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:staging-${{ github.sha }}
-            ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:staging
+          tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Setup SSH
-        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-
-      - name: Add server to known hosts
+      - name: Summarize published image
         env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-        run: ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
-
-      - name: Point the manager at the new tenant image
-        env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          IMAGE: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:staging-${{ github.sha }}
-          K8S_NAMESPACE: ${{ env.K8S_NAMESPACE }}
-          MANAGER_DEPLOY: ${{ env.MANAGER_DEPLOY }}
-          TENANT_IMAGE_CM: ${{ env.TENANT_IMAGE_CM }}
-          REFRESH_ALL: ${{ inputs.refresh_all_tenants }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
-          REFRESH_ALL="${REFRESH_ALL:-false}"
-          IMAGE_B64=$(printf '%s' "$IMAGE" | base64 | tr -d '\n')
-          K8S_NAMESPACE_B64=$(printf '%s' "$K8S_NAMESPACE" | base64 | tr -d '\n')
-          MANAGER_DEPLOY_B64=$(printf '%s' "$MANAGER_DEPLOY" | base64 | tr -d '\n')
-          TENANT_IMAGE_CM_B64=$(printf '%s' "$TENANT_IMAGE_CM" | base64 | tr -d '\n')
-          REFRESH_ALL_B64=$(printf '%s' "$REFRESH_ALL" | base64 | tr -d '\n')
           {
-            printf 'IMAGE_B64=%s\n' "$IMAGE_B64"
-            printf 'K8S_NAMESPACE_B64=%s\n' "$K8S_NAMESPACE_B64"
-            printf 'MANAGER_DEPLOY_B64=%s\n' "$MANAGER_DEPLOY_B64"
-            printf 'TENANT_IMAGE_CM_B64=%s\n' "$TENANT_IMAGE_CM_B64"
-            printf 'REFRESH_ALL_B64=%s\n' "$REFRESH_ALL_B64"
-            cat <<'EOF'
-          set -euo pipefail
-          IMAGE=$(printf '%s' "$IMAGE_B64" | base64 -d)
-          K8S_NAMESPACE=$(printf '%s' "$K8S_NAMESPACE_B64" | base64 -d)
-          MANAGER_DEPLOY=$(printf '%s' "$MANAGER_DEPLOY_B64" | base64 -d)
-          TENANT_IMAGE_CM=$(printf '%s' "$TENANT_IMAGE_CM_B64" | base64 -d)
-          REFRESH_ALL=$(printf '%s' "$REFRESH_ALL_B64" | base64 -d)
-          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-
-          # The manager namespace's ecr-creds Secret expires after 12h and is
-          # refreshed every 6h by a systemd timer. Force a refresh so a deploy
-          # landing late in that window cannot fail on a stale token.
-          echo "Refreshing ECR pull secret..."
-          /usr/local/bin/ecr-refresh.sh
-
-          # Pre-pull the tenant image into the node's containerd.
-          #
-          # This is REQUIRED, not an optimisation. Tenant StatefulSets carry no
-          # imagePullSecrets, tenant namespaces have no ecr-creds, and there is no
-          # node-level registries.yaml — so a tenant pod pulling from ECR itself
-          # gets `403 Forbidden` and sits in ImagePullBackOff. containerd's image
-          # store is node-wide, so pulling here (with the credential the kubelet
-          # already holds) means every tenant's imagePullPolicy: IfNotPresent
-          # finds the image locally and never authenticates.
-          #
-          # This works because staging is a single node. The durable fix is for
-          # the manager to provision a per-tenant-namespace pull secret and set
-          # imagePullSecrets on the tenant pod spec; until that lands, this step
-          # is what makes a freshly pushed tenant image actually runnable.
-          echo "Pre-pulling ${IMAGE} into containerd..."
-          ECR_HOST="${IMAGE%%/*}"
-          PULL_USER=$(kubectl -n "${K8S_NAMESPACE}" get secret ecr-creds \
-            -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d \
-            | jq -r --arg r "${ECR_HOST}" '.auths[$r].username // "AWS"')
-          PULL_PW=$(kubectl -n "${K8S_NAMESPACE}" get secret ecr-creds \
-            -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d \
-            | jq -r --arg r "${ECR_HOST}" '.auths[$r].password')
-          if [ -z "${PULL_PW}" ] || [ "${PULL_PW}" = "null" ]; then
-            echo "ERROR: could not read an ECR credential for ${ECR_HOST} from ecr-creds" >&2
-            exit 1
-          fi
-          # Credential is passed as an argument to ctr only; never echoed.
-          # -n k8s.io is explicit on purpose: the kubelet only sees images in that
-          # containerd namespace. `k3s ctr` already defaults to it (unlike plain
-          # `ctr`, which defaults to `default`), but naming it means this does not
-          # silently break if that wrapper default ever changes.
-          k3s ctr -n k8s.io images pull --user "${PULL_USER}:${PULL_PW}" "${IMAGE}"
-
-          # Retry the check: `images ls` can lag a just-finished pull by a beat
-          # while containerd commits the record (observed failing 147ms after a
-          # successful pull, with layers still reporting `extracted`). The
-          # assertion is worth keeping — a silent pull failure would leave tenants
-          # unable to start — but it must not fail the deploy on that race.
-          present=no
-          for _ in 1 2 3 4 5 6 7 8 9 10; do
-            if k3s ctr -n k8s.io images ls -q | grep -Fqx "${IMAGE}"; then
-              present=yes
-              break
-            fi
-            sleep 2
-          done
-          [ "${present}" = yes ] \
-            || { echo "ERROR: ${IMAGE} is not in the k8s.io containerd namespace after pull" >&2; exit 1; }
-
-          # Tenant pods pin imagePullPolicy: IfNotPresent, so a moving tag is not
-          # re-pulled. The manager must be pointed at the immutable
-          # staging-<sha> tag, which a tag not already present locally always
-          # fetches. Never "deploy" by re-pushing :staging.
-          #
-          # Publish it through a ConfigMap rather than an env var on the manager
-          # Deployment. An env var is part of the pod template, so `set env`
-          # created a new ReplicaSet on EVERY tenant build — and the manager's
-          # strategy is Recreate (SQLite: never two writers), so the old pod
-          # stopped completely before the new one started. The manager proxies
-          # every hosted tenant, so each of those gaps took the whole fleet
-          # offline. On 2026-08-20 that happened nine times from this workflow
-          # alone (opencompany-microservice#38).
-          #
-          # Updating a ConfigMap does not touch the Deployment, so nothing rolls.
-          # Resolved once and reused by the closing report, so the two can never
-          # disagree about which source is actually governing provisioning.
-          MOUNT_PATH=$(kubectl -n "${K8S_NAMESPACE}" get deploy "${MANAGER_DEPLOY}" \
-            -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="OCM_TENANT_IMAGE_FILE")].value}')
-          if [ -n "${MOUNT_PATH}" ]; then
-            echo "Publishing OCM_TENANT_IMAGE=${IMAGE} via ConfigMap (no manager restart)"
-
-            # Captured BEFORE the write so a failed verification can put the
-            # cluster back as it was. `HAD_CM` distinguishes "no ConfigMap yet"
-            # from "ConfigMap with an empty value", which need different undos.
-            HAD_CM=no
-            PRIOR_IMAGE=
-            if kubectl -n "${K8S_NAMESPACE}" get configmap "${TENANT_IMAGE_CM}" >/dev/null 2>&1; then
-              HAD_CM=yes
-              PRIOR_IMAGE=$(kubectl -n "${K8S_NAMESPACE}" get configmap "${TENANT_IMAGE_CM}" \
-                -o jsonpath='{.data.image}' 2>/dev/null || true)
-            fi
-
-            kubectl -n "${K8S_NAMESPACE}" create configmap "${TENANT_IMAGE_CM}" \
-              --from-literal=image="${IMAGE}" --dry-run=client -o yaml \
-            | kubectl apply -f -
-
-            # The kubelet refreshes a ConfigMap mount lazily, typically within a
-            # minute. Confirm the manager actually SEES the new value rather than
-            # assuming the write reached it — a silent miss here would provision
-            # new tenants on the previous image with nothing to indicate it.
-            seen=no
-            for _ in $(seq 1 40); do
-              current=$(kubectl -n "${K8S_NAMESPACE}" exec "deploy/${MANAGER_DEPLOY}" \
-                -- cat "${MOUNT_PATH}" 2>/dev/null | tr -d '[:space:]' || true)
-              if [ "${current}" = "${IMAGE}" ]; then seen=yes; break; fi
-              sleep 5
-            done
-            if [ "${seen}" != yes ]; then
-              echo "ERROR: manager still does not see ${IMAGE} at ${MOUNT_PATH} after 200s" >&2
-              echo "       it currently reads: ${current:-<empty>}" >&2
-              # Put the ConfigMap back. Leaving the new value in place would mean
-              # a FAILED deploy still eventually governs provisioning, once the
-              # kubelet gets round to refreshing the mount -- new tenants coming
-              # up on an image this deploy explicitly could not verify. That is
-              # the silent miss the verification exists to prevent, arriving late
-              # instead of never.
-              if [ "${HAD_CM}" = yes ]; then
-                echo "       restoring previous value: ${PRIOR_IMAGE:-<empty>}" >&2
-                kubectl -n "${K8S_NAMESPACE}" create configmap "${TENANT_IMAGE_CM}" \
-                  --from-literal=image="${PRIOR_IMAGE}" --dry-run=client -o yaml \
-                | kubectl apply -f - >&2
-              else
-                echo "       removing the ConfigMap this deploy created" >&2
-                kubectl -n "${K8S_NAMESPACE}" delete configmap "${TENANT_IMAGE_CM}" --ignore-not-found >&2
-              fi
-              exit 1
-            fi
-            echo "Manager sees ${IMAGE}"
-          else
-            # A manager predating OCM_TENANT_IMAGE_FILE ignores the ConfigMap
-            # entirely, so falling through to the ConfigMap alone would silently
-            # leave new tenants on the old image. Keep the old path for it,
-            # restart and all, rather than failing the deploy.
-            echo "Manager has no OCM_TENANT_IMAGE_FILE; falling back to set env (this restarts it)"
-            kubectl -n "${K8S_NAMESPACE}" set env "deploy/${MANAGER_DEPLOY}" "OCM_TENANT_IMAGE=${IMAGE}"
-
-            if ! kubectl -n "${K8S_NAMESPACE}" rollout status "deploy/${MANAGER_DEPLOY}" --timeout=300s; then
-              echo "ERROR: manager did not roll out; events and logs follow" >&2
-              kubectl -n "${K8S_NAMESPACE}" describe "deploy/${MANAGER_DEPLOY}" | tail -30 >&2
-              kubectl -n "${K8S_NAMESPACE}" logs "deploy/${MANAGER_DEPLOY}" --tail=100 >&2 || true
-              echo "Rolling back..." >&2
-              kubectl -n "${K8S_NAMESPACE}" rollout undo "deploy/${MANAGER_DEPLOY}"
-              kubectl -n "${K8S_NAMESPACE}" rollout status "deploy/${MANAGER_DEPLOY}" --timeout=180s >&2 || true
-              exit 1
-            fi
-          fi
-
-          # OCM_TENANT_IMAGE only reaches a tenant when the manager PROVISIONS
-          # it — `ensure_running` calls `provision()` only when the StatefulSet is
-          # missing, and the reconciler does not re-apply manifests. So an
-          # existing tenant keeps its original image indefinitely, across
-          # scale-to-zero and wake alike; only a brand-new tenant picks this up.
-          #
-          # A `rollout restart` therefore does NOT move a tenant to a new image:
-          # it recreates the pod from the same spec. Refreshing means patching the
-          # image on the StatefulSet itself.
-
-          # One enumeration, shared by the patch loop and the report below so
-          # the two can never disagree about the fleet. The fourth column says
-          # whether the StatefulSet actually runs a container named
-          # `opencompany`: a tenant namespace also holds manager-provisioned
-          # sidecars (cortexdb) that carry the same object label but run an
-          # image this pipeline neither builds nor pushes. Readiness applies to
-          # all of them; image identity applies only to the app.
-          enumerate_tenant_statefulsets() {
-            tenant_rows=$(kubectl get statefulset -A -l app=opencompany -o json | jq -r '
-              .items[]
-              | [ .metadata.namespace,
-                  .metadata.name,
-                  ((.spec.replicas // 0) | tostring),
-                  (if any(.spec.template.spec.containers[]?; .name == "opencompany")
-                   then "yes" else "no" end)
-                ] | @tsv')
-            # `grep -c` exits 1 on no match, which `pipefail` would turn into a
-            # failed deploy on an empty fleet.
-            app_statefulsets=$(awk -F'\t' '$4 == "yes"' <<< "${tenant_rows}" | wc -l | tr -d ' ')
-          }
-
-          enumerate_tenant_statefulsets
-
-          refresh_tenant_images() {
-            # `has_app` is a switch that turns checks OFF, so it must not be
-            # able to turn them all off quietly. If a container rename ever
-            # makes every row `no`, this patches nothing and the image check
-            # below asserts nothing, and the deploy is green on neither.
-            if [ -n "${tenant_rows}" ] && [ "${app_statefulsets}" = 0 ]; then
-              echo "ERROR: refresh_all_tenants=true but no tenant StatefulSet has a container named opencompany" >&2
-              echo "       nothing would be patched and the image check below would assert nothing" >&2
-              exit 1
-            fi
-            # `kubectl set image` has no -A/--all-namespaces (only `get` does), so
-            # enumerate first and patch each in its own namespace.
-            while IFS=$'\t' read -r ns name _ has_app; do
-              [ -n "${ns}" ] || continue
-              if [ "${has_app}" != yes ]; then
-                echo "  ${ns}/${name} -> skipped (no opencompany container)"
-                continue
-              fi
-              echo "  ${ns}/${name} -> ${IMAGE}"
-              kubectl -n "${ns}" set image "statefulset/${name}" "opencompany=${IMAGE}"
-            done <<< "${tenant_rows}"
-          }
-
-          if [ "${REFRESH_ALL}" = "true" ]; then
-            echo "Moving all tenants onto ${IMAGE} (requested)..."
-            refresh_tenant_images
-          else
-            echo "Running tenants keep their current image; re-run with refresh_all_tenants=true to move them."
-          fi
-
-          # Report the image a pod actually landed on rather than the desired
-          # StatefulSet template. An idle tenant deliberately has no pod, so it
-          # is reported without asking rollout status to wait forever. A tenant
-          # with replicas must either become ready or make this deploy fail.
-          report_tenant_landed_state() {
-            echo "Tenant landed-state report (pod status, not StatefulSet spec):"
-            printf '%-24s %-24s %-8s %-90s %s\n' NS NAME STATE IMAGE DETAIL
-            tenant_failed=no
-            append_failure_detail() {
-              if [ -n "${failure_detail}" ]; then
-                failure_detail="${failure_detail}; "
-              fi
-              failure_detail="${failure_detail}$1"
-            }
-            while IFS=$'\t' read -r ns name replicas has_app; do
-              [ -n "${ns}" ] || continue
-
-              if [ "${replicas}" = "0" ]; then
-                printf '%-24s %-24s %-8s %-90s %s\n' "${ns}" "${name}" idle - 'scaled to zero'
-                continue
-              fi
-
-              rollout_error=''
-              if ! rollout_output=$(kubectl -n "${ns}" rollout status "statefulset/${name}" --timeout=180s 2>&1); then
-                rollout_error=$(printf '%s' "${rollout_output}" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g')
-              fi
-
-              # Unselected on purpose. `app=opencompany` labels the StatefulSet
-              # OBJECT; Kubernetes does not copy it onto the pod template, and a
-              # manager-provisioned sidecar (cortexdb) carries it on the object
-              # while its pods do not. Attribution is the jq ownerReferences
-              # filter below, which is exact.
-              if ! pod_json=$(kubectl -n "${ns}" get pod -o json 2>&1); then
-                printf '%-24s %-24s %-8s %-90s %s\n' \
-                  "${ns}" "${name}" failed - "could not read pod status: ${pod_json}"
-                tenant_failed=yes
-                continue
-              fi
-
-              pod_status=$(printf '%s' "${pod_json}" | jq -r --arg statefulset "${name}" '
-                [.items[]
-                 | select(any(.metadata.ownerReferences[]?;
-                     .kind == "StatefulSet" and .name == $statefulset))]
-                | if length == 0 then
-                    "-\u001f-\u001f-\u001fno pod"
-                  else
-                    . as $pods
-                    | [
-                        ($pods | map(.metadata.name) | join(",")),
-                        ($pods | map(.status.phase // "Unknown") | unique | join(",")),
-                        ([ $pods[] | .status.containerStatuses[]?
-                           | select(.name == "opencompany") | .image ] | unique | join(",")),
-                        ([ $pods[] | (
-                             .status.containerStatuses[]?.state.waiting.reason,
-                             .status.containerStatuses[]?.state.terminated.reason,
-                             .status.initContainerStatuses[]?.state.waiting.reason,
-                             .status.initContainerStatuses[]?.state.terminated.reason
-                           ) ]
-                         | map(select(. != null and . != "")) | unique | join(","))
-                      ] | join("\u001f")
-                  end')
-              IFS=$'\037' read -r pod_name pod_phase pod_image pod_reason <<< "${pod_status}"
-
-              failure_detail=''
-              if [ -n "${rollout_error}" ]; then
-                append_failure_detail "rollout timed out or failed: ${rollout_error}"
-              fi
-              if [ "${pod_name}" = - ]; then
-                append_failure_detail 'no pod belongs to this StatefulSet'
-              else
-                if [ "${pod_phase}" != Running ]; then
-                  append_failure_detail "pod ${pod_name} phase ${pod_phase}"
-                fi
-                if [ -n "${pod_reason}" ]; then
-                  append_failure_detail "pod ${pod_name}: ${pod_reason}"
-                fi
-                if [ "${REFRESH_ALL}" = true ] && [ "${has_app}" = yes ] && [ "${pod_image}" != "${IMAGE}" ]; then
-                  append_failure_detail 'pod did not land on the requested image'
-                fi
-              fi
-
-              if [ -n "${failure_detail}" ]; then
-                printf '%-24s %-24s %-8s %-90s %s\n' \
-                  "${ns}" "${name}" failed "${pod_image:--}" "${failure_detail}"
-                tenant_failed=yes
-              else
-                printf '%-24s %-24s %-8s %-90s %s\n' \
-                  "${ns}" "${name}" ok "${pod_image:--}" "pod ${pod_name} is Running"
-              fi
-            done <<< "${tenant_rows}"
-
-            [ "${tenant_failed}" = no ] || {
-              echo 'ERROR: one or more non-idle tenants did not land successfully.' >&2
-              exit 1
-            }
-          }
-
-          report_tenant_landed_state
-
-          # Exactly one source, chosen by the same capability check that decided
-          # where the value was written. Keying this on ConfigMap EXISTENCE
-          # instead would print a stale ConfigMap left by an earlier deploy
-          # alongside the env var, with nothing to say which one a tenant would
-          # actually get.
-          if [ -n "${MOUNT_PATH}" ]; then
-            echo "fleet tenant image (ConfigMap, authoritative): $(kubectl -n "${K8S_NAMESPACE}" get configmap "${TENANT_IMAGE_CM}" -o jsonpath='{.data.image}' 2>/dev/null)"
-          else
-            kubectl -n "${K8S_NAMESPACE}" get deploy "${MANAGER_DEPLOY}" \
-              -o jsonpath='{range .spec.template.spec.containers[0].env[?(@.name=="OCM_TENANT_IMAGE")]}fleet tenant image (env, authoritative)={.value}{"\n"}{end}'
-          fi
-          EOF
-          } | ssh root@"${SSH_HOST}" bash -s
+            echo '## Staging tenant image published to GHCR'
+            echo
+            echo "Digest: \`${DIGEST}\`"
+            echo
+            echo 'Tags:'
+            echo '```'
+            printf '%s\n' "${TAGS}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

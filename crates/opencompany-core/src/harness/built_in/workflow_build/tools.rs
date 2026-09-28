@@ -30,10 +30,9 @@
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
-use openhuman_core as oh;
 use serde_json::{Value, json};
 
-use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
+use tinytools::{PermissionLevel, Tool, ToolResult};
 
 use crate::company::{
     WorkflowGraphSpec, courtesy_validate_draft, raw_workflow_from_spec, workflow_graph_from_spec,

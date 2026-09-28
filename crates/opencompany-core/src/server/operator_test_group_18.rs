@@ -38,6 +38,7 @@ fn projects_agent_reply_omits_empty_steps() {
         agent_id: "ceo".into(),
         text: "hi".into(),
         steps: Vec::new(),
+        episode: None,
     }))
     .expect("agent_reply is an attention signal");
     // A tool-less reply keeps the legacy wire shape — no `steps` key.
@@ -62,6 +63,9 @@ fn a_direct_crossing_names_both_sides_of_the_exchange() {
         target: "amendments".into(),
         returning: false,
         rows: None,
+        episode_id: None,
+        to_episode_id: None,
+        hop: 0,
     }))
     .expect("a direct crossing is projected");
 

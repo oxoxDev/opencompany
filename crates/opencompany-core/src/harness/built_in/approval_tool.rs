@@ -7,15 +7,20 @@
 //! advertise that their own call stages a concrete approval.
 
 use async_trait::async_trait;
-use openhuman_core::tools::traits::{PermissionLevel, Tool, ToolResult};
 use serde_json::{Value, json};
+use tinytools::{PermissionLevel, Tool, ToolResult};
 
-use crate::harness::policy::{ApprovalRequest, ApprovalRequestQueue};
+use crate::harness::policy::{ApprovalPush, ApprovalRequest, ApprovalRequestQueue};
 use crate::ports::types::{Effect, EffectGroup, REQUEST_APPROVAL_EFFECT_KIND};
 
 /// The stable tool/effect name used from the model call through the approval
 /// journal and back into the continuation turn.
 pub const REQUEST_APPROVAL_TOOL: &str = REQUEST_APPROVAL_EFFECT_KIND;
+
+/// What an agent is told when its request could not be recorded.
+pub(crate) const NOT_RECORDED: &str = "This request was not recorded, so nobody was asked. \
+     Do not tell anyone you asked; carry on without the approval or say plainly that you could \
+     not ask for it.";
 
 /// A tool an agent calls when it deliberately wants an operator decision.
 pub struct RequestApprovalTool {
@@ -74,7 +79,7 @@ impl Tool for RequestApprovalTool {
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
         let title = required_text(&args, "title")?.to_string();
         let question = required_text(&args, "question")?.to_string();
-        self.requests.push(ApprovalRequest {
+        let pushed = self.requests.push(ApprovalRequest {
             tool: REQUEST_APPROVAL_TOOL.to_string(),
             reason: question,
             effect: Effect {
@@ -88,6 +93,9 @@ impl Tool for RequestApprovalTool {
                 run_id: None,
             },
         });
+        if pushed == ApprovalPush::Unclaimed {
+            return Ok(ToolResult::error(NOT_RECORDED.to_string()));
+        }
 
         Ok(ToolResult::success(format!(
             "Approval requested: {title}. Stop now and wait for the operator's decision; do not \

@@ -29,6 +29,7 @@ async fn a_top_level_budget_pause_parks_the_ambient_redeem_context() {
     let mut rec = record();
     rec.id = company.clone();
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -71,6 +72,7 @@ async fn a_top_level_budget_pause_parks_the_ambient_redeem_context() {
         deep_trace: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -171,6 +173,7 @@ async fn a_turn_that_finishes_normally_reports_no_budget_pause_and_parks_no_mark
     let mut rec = record();
     rec.id = company.clone();
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -208,6 +211,7 @@ async fn a_turn_that_finishes_normally_reports_no_budget_pause_and_parks_no_mark
         deep_trace: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -270,6 +274,7 @@ async fn ensure_rebuilds_when_a_runtime_mcp_server_is_added() {
     let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
     let dir = tempfile::tempdir().unwrap();
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -305,6 +310,7 @@ async fn ensure_rebuilds_when_a_runtime_mcp_server_is_added() {
         deep_trace: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: Some(secrets.clone()),
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,

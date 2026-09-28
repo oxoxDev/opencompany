@@ -9,19 +9,20 @@ import type { SetupStatus } from "@/api/setup";
 import { SetupWizard } from "@/views/setup/SetupWizard";
 
 /**
- * What the wizard says about mail, when it cannot send any.
+ * What the wizard says about mail, when it cannot send any — and how it gets
+ * the operator in regardless.
  *
- * `email` sign-in and a working mailbox are two different questions — hub OAuth
- * and passwords sign people in with no transport at all — so the flow must
- * neither hide the mode nor promise a link it cannot deliver. The host answers
- * both halves in `mail`: `wired` is "a link is genuinely sent", `echoes_code` is
- * "the code comes back in the response instead", and only a host with neither
- * is one where a link goes nowhere.
+ * `email` sign-in and a working mailbox are two different questions — a
+ * password signs people in with no transport at all — so the flow must
+ * neither hide the mode nor promise a link it cannot deliver. The host says
+ * whether a link is genuinely sent (`mail.wired`).
  *
- * The hand-off at the end used to infer all of this from whether `requestCode`
- * echoed a `dev_code`, which is only ever true on a loopback bind — so a
- * routable host with no SMTP finished setup by telling its operator to check an
- * inbox that would stay empty forever. That is the bug these tests hold shut.
+ * The hand-off at the end no longer depends on mail at all: the "You" step
+ * collects a password, the apply creates the account with it, and the wizard
+ * signs the operator in with the same password. It used to be a magic-link
+ * request whose outcome was inferred from an echoed `dev_code`, so a routable
+ * host with no SMTP finished setup by telling its operator to check an inbox
+ * that would stay empty forever. That is the bug these tests hold shut.
  */
 
 function status(over: Partial<SetupStatus> = {}): SetupStatus {
@@ -46,17 +47,22 @@ function status(over: Partial<SetupStatus> = {}): SetupStatus {
 }
 
 /**
- * Routed by path: the wizard makes four different calls through `post`, and the
- * one under test here is the last of them.
+ * Routed by path: the wizard makes several calls through `post`, and the
+ * sign-in goes through `postSignIn`. Records what the apply and the sign-in
+ * were sent.
  */
 function clientWith(
   s: SetupStatus,
-  over: { requestCode?: () => Promise<unknown> } = {},
-): OpenCompanyClient {
+  over: { login?: (body: unknown) => Promise<unknown> } = {},
+): OpenCompanyClient & { applied: unknown[]; logins: unknown[] } {
+  const applied: unknown[] = [];
+  const logins: unknown[] = [];
   return {
+    applied,
+    logins,
     scopeFor: (company: string | null) => `/api/v1/companies/${company}`,
     get: async () => s,
-    post: async (path: string) => {
+    post: async (path: string, body: unknown) => {
       if (path.endsWith("/setup/roster")) {
         return {
           agents: [{ name: "Ada", role: "Operations", description: "Runs the desk." }],
@@ -64,9 +70,7 @@ function clientWith(
           source: "fallback",
         };
       }
-      if (path.endsWith("/auth/request")) {
-        return over.requestCode ? await over.requestCode() : { sent: true };
-      }
+      applied.push(body);
       return {
         complete: true,
         config_path: s.config_path,
@@ -74,7 +78,13 @@ function clientWith(
         seeded_company: "acme",
       };
     },
-  } as unknown as OpenCompanyClient;
+    postSignIn: async (path: string, body: unknown) => {
+      expect(path).toBe("/api/v1/companies/acme/auth/login");
+      logins.push(body);
+      if (over.login) return over.login(body);
+      return { id: "u1", email: "ada@example.com", role: "admin", company: "acme" };
+    },
+  } as unknown as OpenCompanyClient & { applied: unknown[]; logins: unknown[] };
 }
 
 let container: HTMLDivElement;
@@ -178,34 +188,26 @@ async function finish() {
 }
 
 describe("the sign-in step, on a host that cannot send mail", () => {
-  it("says the link is handed over here when the host echoes the code", async () => {
-    await show(clientWith(status({ mail: { wired: false, echoes_code: true } })));
-    await skipConnect();
-    await next();
-    await fill("setup-field-industry", "Homeware");
-    await next(); // -> sign-in
+  it("says people sign in with a password, whether the host echoes a code or not", async () => {
+    for (const echoes_code of [true, false]) {
+      await show(clientWith(status({ mail: { wired: false, echoes_code } })));
+      await skipConnect();
+      await next();
+      await fill("setup-field-industry", "Homeware");
+      await next(); // -> sign-in
 
-    const note = find("setup-mail-note");
-    expect(note?.textContent).toContain("browser");
-    // Still an offer, not a warning off it: the card is the control, and the
-    // note sits beside it.
-    expect((find("auth-mode-email") as HTMLButtonElement).disabled).toBe(false);
-  });
-
-  it("says a link would arrive nowhere on a routable host with no transport", async () => {
-    await show(clientWith(status({ mail: { wired: false, echoes_code: false } })));
-    await skipConnect();
-    await next();
-    await fill("setup-field-industry", "Homeware");
-    await next(); // -> sign-in
-
-    const note = find("setup-mail-note");
-    expect(note?.textContent).toMatch(/no.*mail|won't arrive|nothing will arrive/i);
-    // Email sign-in is not broken here — hub buttons and passwords work without
-    // a transport — so the mode must stay offered rather than be hidden from an
-    // operator who may wire SMTP ten minutes later.
-    expect(find("auth-mode-email")).toBeTruthy();
-    expect((find("auth-mode-email") as HTMLButtonElement).disabled).toBe(false);
+      const note = find("setup-mail-note");
+      expect(note?.textContent).toMatch(/password/i);
+      expect(note?.textContent).not.toMatch(/browser|handed/i);
+      // Email sign-in is not broken here — a password works without a
+      // transport — so the mode must stay offered rather than be hidden from
+      // an operator who may wire SMTP ten minutes later. The card is the
+      // control, and the note sits beside it.
+      expect(find("auth-mode-email")).toBeTruthy();
+      expect((find("auth-mode-email") as HTMLButtonElement).disabled).toBe(false);
+      await act(async () => root.unmount());
+      root = createRoot(container);
+    }
   });
 
   it("says nothing when the host has a mail transport", async () => {
@@ -220,39 +222,106 @@ describe("the sign-in step, on a host that cannot send mail", () => {
 });
 
 describe("the hand-off after setup applies", () => {
-  it("hands over the link when the host returned the code", async () => {
-    await show(
-      clientWith(status({ mail: { wired: false, echoes_code: true } }), {
-        requestCode: async () => ({ sent: true, dev_code: "abc123" }),
-      }),
-    );
-    await finish();
+  it("asks for a password on the account step and sends it with the apply", async () => {
+    const client = clientWith(status());
+    await show(client);
+    await skipConnect();
+    await next(); // -> business
+    await fill("setup-field-industry", "E-commerce — homeware");
+    await next(); // -> sign-in
+    await next(); // -> account
 
-    expect(find("setup-handoff-link")).toBeTruthy();
-    expect(find("setup-signin")?.getAttribute("data-handoff-url")).toBe(
-      "/login?company=acme&code=abc123#/company?from=setup",
-    );
+    // Generated up front, in the clear: the person has to *see* the password
+    // they are about to be signed in with, or the next visit is a lockout.
+    const generated = (find("new-password") as HTMLInputElement).value;
+    expect(generated.length).toBeGreaterThanOrEqual(12);
+
+    await fill("setup-field-email", "ada@example.com");
+    await fill("new-password", "correct horse battery staple");
+    await next(); // -> review
+    await settle();
+    await click("setup-finish");
+    await settle();
+
+    expect(client.applied).toHaveLength(1);
+    expect(client.applied[0]).toMatchObject({
+      admin_email: "ada@example.com",
+      admin_password: "correct horse battery staple",
+    });
   });
 
-  it("points at the inbox only when the host can actually send", async () => {
-    await show(clientWith(status({ mail: { wired: true, echoes_code: false } })));
-    await finish();
+  it("refuses to leave the account step on a password that is too short", async () => {
+    const client = clientWith(status());
+    await show(client);
+    await skipConnect();
+    await next(); // -> business
+    await fill("setup-field-industry", "E-commerce — homeware");
+    await next(); // -> sign-in
+    await next(); // -> account
+    await fill("setup-field-email", "ada@example.com");
+    await fill("new-password", "short");
+    await next();
 
-    expect(find("setup-handoff-mailed")?.textContent).toContain("ada@example.com");
+    expect(find("new-password"), "still on the account step").toBeTruthy();
+    expect(find("new-password-problem")?.textContent).toMatch(/12/);
   });
 
   /**
-   * The bug this file exists for. No `dev_code` used to be read as "mailed",
-   * and on a routable host with no transport that is a link nobody will ever
-   * receive — announced as if it were on its way.
+   * The bug this file exists for, in its new shape: whatever the host's mail,
+   * the operator is signed in with the password they set. No inbox is named,
+   * because none is involved.
    */
-  it("says no link was sent when the host has no way to send one", async () => {
-    await show(clientWith(status({ mail: { wired: false, echoes_code: false } })));
+  it("signs the operator in with that password, whatever the host's mail", async () => {
+    for (const mail of [
+      { wired: true, echoes_code: false },
+      { wired: false, echoes_code: true },
+      { wired: false, echoes_code: false },
+    ]) {
+      const client = clientWith(status({ mail }));
+      await show(client);
+      await finish();
+
+      expect(client.logins).toHaveLength(1);
+      expect(client.logins[0]).toMatchObject({ email: "ada@example.com" });
+      expect(find("setup-handoff-signed-in")?.textContent).toContain("ada@example.com");
+      expect(container.textContent).not.toMatch(/check your email|inbox/i);
+      expect(find("setup-open-console")).toBeTruthy();
+      await act(async () => root.unmount());
+      root = createRoot(container);
+    }
+  });
+
+  it("says the account exists when the sign-in itself fails", async () => {
+    // The apply landed — the account is there with the password they saw —
+    // so the honest answer names the way in rather than announcing a failure.
+    const client = clientWith(status(), {
+      login: async () => {
+        throw new Error("boom");
+      },
+    });
+    await show(client);
     await finish();
 
-    expect(find("setup-handoff-mailed")).toBeNull();
-    expect(find("setup-handoff-unmailable")).toBeTruthy();
-    // And a way in regardless: the console still opens.
+    expect(find("setup-handoff-signed-in")).toBeNull();
+    expect(find("setup-handoff-password")?.textContent).toMatch(/password/i);
+    expect(find("setup-open-console")?.textContent).toMatch(/anyway/i);
+  });
+
+  it("arranges nothing on a host with no sign-in", async () => {
+    const client = clientWith(status({ auth_modes: ["email", "none"] }));
+    await show(client);
+    await skipConnect();
+    await next(); // -> business
+    await fill("setup-field-industry", "E-commerce — homeware");
+    await next(); // -> sign-in
+    await click("auth-mode-none");
+    await next(); // -> review (the account step is gone)
+    await settle();
+    await click("setup-finish");
+    await settle();
+
+    expect(client.logins).toHaveLength(0);
+    expect(client.applied[0]).toMatchObject({ admin_password: null });
     expect(find("setup-open-console")).toBeTruthy();
   });
 });

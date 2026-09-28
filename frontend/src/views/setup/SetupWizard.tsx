@@ -26,7 +26,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ExternalLink, Loader2, Lock, RotateCw } from "lucide-react";
 
-import { requestCode } from "@/api/auth";
+import { loginWithPassword, type SignIn } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import type { AddProviderInput } from "@/api/inference";
 import { SETUP_HANDOFF_FRAGMENT } from "@/setup/state";
@@ -50,6 +50,8 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { useOptionalHosts } from "@/connections/HostsContext";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { NewPasswordField } from "@/components/new-password-field";
+import { generatePassword, passwordProblem } from "@/lib/generate-password";
 import { Textarea } from "@/components/ui/textarea";
 import { clampToSetupCompanyNameLimit } from "@/lib/company-name";
 import { TEAM_TONES, initials, toneFor } from "@/lib/team";
@@ -222,8 +224,14 @@ const AUTH_MODE_COPY: Record<string, { label: string; hint: string }> = {
 
 interface Props {
   client: OpenCompanyClient;
-  /** Called once setup has been applied, so the caller can re-enter the console. */
-  onDone: () => void;
+  /**
+   * Called once setup has been applied, so the caller can re-enter the console.
+   *
+   * Handed the sign-in the wizard arranged, when it arranged one: a
+   * cross-origin console (the desktop) receives the session in the body
+   * rather than as a cookie, and the caller is where a credential is stored.
+   */
+  onDone: (signIn?: SignIn) => void;
   /**
    * Whether the operator can leave without finishing. False on a genuine first
    * run, where there is no console to go back to.
@@ -379,6 +387,13 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
   const [rosterEdited, setRosterEdited] = useState(false);
   /** The address that will be able to sign in. */
   const [email, setEmail] = useState("");
+  /**
+   * The first admin's password, generated up front and editable on the "You"
+   * step. It is what signs the operator in the moment setup applies — and
+   * the same one they use tomorrow — so the finish line no longer depends on
+   * a mailbox this laptop probably does not have.
+   */
+  const [adminPassword, setAdminPassword] = useState(() => generatePassword());
   /** Whether the operator has been shown a problem on the current step yet. */
   const [touched, setTouched] = useState(false);
   /**
@@ -444,16 +459,23 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
    * Without this the flow forgot them at the finish line: they typed an address
    * on step four, and the console then handed them an **empty** email box with
    * no explanation — on a laptop with no mail configured, waiting for a link
-   * that was never going to arrive. The wizard already knows who they are and
-   * can ask the host itself.
+   * that was never going to arrive. The wizard knows who they are and the
+   * password they just set, so it signs them in itself.
+   *
+   * - `signed-in` — done; the button opens the console as them.
+   * - `password` — the apply landed but the sign-in did not (a store hiccup, a
+   *   host that answered the apply and then not the login). The account
+   *   exists with the password they saw; say so, and the sign-in screen takes
+   *   it.
+   * - `open` — nothing to arrange: a host with no sign-in, or one that already
+   *   had a company and asked for no address.
    */
   /** Guards the hand-off against re-running; see the effect below. */
   const arranged = useRef(false);
   const [handoff, setHandoff] = useState<
     | { kind: "arranging" }
-    | { kind: "link"; url: string }
-    | { kind: "mailed" }
-    | { kind: "unmailable" }
+    | { kind: "signed-in"; signIn: SignIn }
+    | { kind: "password" }
     | { kind: "open" }
     | null
   >(null);
@@ -488,10 +510,15 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
         // operator into a choice the apply refuses. And only when the file names
         // nothing: an operator re-running setup is editing their own
         // configuration, not being told what it should have been.
+        //
+        // The host says so itself when it can (`default_auth_mode`, reported
+        // by a desktop host whatever is drawing this console — a browser tab
+        // pointed at it included); the webview sniff stays for a host too old
+        // to report it.
         if (
           seeded.auth_mode === undefined &&
-          isDesktopRuntime() &&
-          s.auth_modes.includes("none")
+          s.auth_modes.includes("none") &&
+          (s.default_auth_mode === "none" || isDesktopRuntime())
         ) {
           seeded.auth_mode = "none";
         }
@@ -565,27 +592,16 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
   /**
    * Arrange the operator's way in, the moment the company exists.
    *
-   * Four outcomes, and each is said plainly rather than left to be discovered:
+   * The apply created the admin account with the password from the "You"
+   * step, so this is an ordinary password sign-in against the company that
+   * was just seeded — no mailbox, no echoed code, no link to hand over. It
+   * used to be a magic-link request whose outcome depended on the host's mail
+   * (mailed, echoed back, or undeliverable), each with its own explanation;
+   * a laptop with no transport ended setup by pointing at an inbox that
+   * would stay empty forever.
    *
-   * - **No sign-in on this host** — nothing to arrange; the console is open.
-   * - **A link we can hand over** — a loopback host with no mail transport
-   *   returns the code in the response rather than mailing it, so the honest
-   *   thing is to give them the link instead of pointing at an inbox that will
-   *   stay empty. This is the laptop case, and it was the broken one.
-   * - **Mailed** — say which address, so they know where to look and that we
-   *   used the one they typed.
-   * - **Unmailable** — a routable host with no transport. Nothing was sent and
-   *   nothing is coming, so say so rather than name an inbox.
-   *
-   * Which of the last two applies is the host's own answer (`status.mail`), not
-   * an inference from the echoed code. It used to be that inference, which is
-   * only sound on a loopback bind — echoing requires one — so a routable host
-   * with no transport ended setup by telling its operator to check a mailbox
-   * that would stay empty forever. The code still *sources* the link; it no
-   * longer decides which of these is true.
-   *
-   * Failure is not fatal: the sign-in form still works, and the button below
-   * still opens the console.
+   * Failure is not fatal: the account exists, and the sign-in screen takes
+   * the same password.
    */
   useEffect(() => {
     // Guarded by a ref, not by `handoff`.
@@ -608,28 +624,10 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
     }
 
     setHandoff({ kind: "arranging" });
-    requestCode(client, company, address, SETUP_HANDOFF_FRAGMENT)
-      .then((result) => {
-        if (result.dev_code) {
-          // The only branch holding the code, and so the only one that can hand
-          // over a link rather than describe one. The same fragment is passed to
-          // the host above, so a *mailed* link (this host never echoes) carries
-          // the same destination; the magic-link landing preserves the router
-          // hash while it strips the single-use code, so sign-in reaches the
-          // roster setup just created rather than the stale Overview graph.
-          setHandoff({
-            kind: "link",
-            url: `/login?company=${encodeURIComponent(company)}&code=${encodeURIComponent(result.dev_code)}${SETUP_HANDOFF_FRAGMENT}`,
-          });
-        } else {
-          setHandoff(status.mail.wired ? { kind: "mailed" } : { kind: "unmailable" });
-        }
-      })
-      .catch(() => {
-        // The sign-in form still works; the button below still opens it.
-        setHandoff({ kind: "open" });
-      });
-  }, [applied, email, client, status, values]);
+    loginWithPassword(client, company, address, adminPassword)
+      .then((signIn) => setHandoff({ kind: "signed-in", signIn }))
+      .catch(() => setHandoff({ kind: "password" }));
+  }, [applied, email, adminPassword, client, status, values]);
 
   // See `changedFields`: unchanged fields are omitted, env-owned ones are never
   // sent (the host refuses them and an apply is all-or-nothing), and a secret
@@ -937,6 +935,11 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
         // a sign-in finishes setup into a company the operator cannot
         // administer.
         admin_email: email.trim() || null,
+        // The password that makes that address an *account* rather than a
+        // standing invite, so the hand-off below can sign them straight in.
+        // Only where somebody will sign in: a `none`-mode host has nobody to
+        // distinguish and the host ignores it there anyway.
+        admin_password: requiresSignIn(status, values) ? adminPassword : null,
         // Deferred to here rather than sent from the step that collected it:
         // the fan-out writes a company's slots, and the company is what this
         // request creates. Carried past the template/designed fork because the
@@ -1112,58 +1115,28 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
             </p>
           )}
 
-          {handoff?.kind === "mailed" && (
-            <Alert data-testid="setup-handoff-mailed">
-              <AlertTitle>Check your email</AlertTitle>
+          {handoff?.kind === "signed-in" && (
+            <Alert data-testid="setup-handoff-signed-in">
+              <AlertTitle>You&apos;re signed in</AlertTitle>
               <AlertDescription>
-                We sent a sign-in link to{" "}
-                <strong className="text-foreground">{email.trim()}</strong>. It is the only
-                address that can administer this company.
+                As <strong className="text-foreground">{email.trim()}</strong>, with the
+                password from the previous step. Use it to sign in next time.
               </AlertDescription>
             </Alert>
           )}
 
-          {handoff?.kind === "unmailable" && (
-            <Alert data-testid="setup-handoff-unmailable">
+          {handoff?.kind === "password" && (
+            <Alert data-testid="setup-handoff-password">
               <AlertTriangle />
-              <AlertTitle>No sign-in link was sent</AlertTitle>
+              <AlertTitle>Your account is ready, but we couldn&apos;t sign you in</AlertTitle>
               <AlertDescription>
-                <span className="block">
-                  This host has no mail transport, so a link to{" "}
-                  <strong className="text-foreground">{email.trim()}</strong> would have gone
-                  nowhere. There is nothing on its way and nothing to wait for.
-                </span>
-                <span className="mt-2 block">
-                  That address still administers this company. Sign in with one of the
-                  ecosystem buttons on the sign-in screen, or configure mail on this host and
-                  ask for a link then.
-                </span>
+                Sign in as <strong className="text-foreground">{email.trim()}</strong> with
+                the password you set on the previous step.
               </AlertDescription>
             </Alert>
           )}
 
-          {handoff?.kind === "link" && (
-            <Alert data-testid="setup-handoff-link">
-              <AlertTitle>You&apos;re ready to go in</AlertTitle>
-              <AlertDescription>
-                This host doesn&apos;t send mail, so there is no link to wait for — use the
-                button below. You&apos;ll be signed in as{" "}
-                <strong className="text-foreground">{email.trim()}</strong>.
-              </AlertDescription>
-            </Alert>
-          )}
-
-          {handoff?.kind === "link" ? (
-            <Button
-              data-testid="setup-signin"
-              data-handoff-url={handoff.url}
-              onClick={() => {
-                window.location.href = handoff.url;
-              }}
-            >
-              Sign in and open my company
-            </Button>
-          ) : (
+          {(
             <Button
               onClick={() => {
                 // The link branch above carries the landing fragment inside its
@@ -1184,14 +1157,15 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
                 if (expectsShellRemount && window.location.hash !== SETUP_HANDOFF_FRAGMENT) {
                   window.location.hash = SETUP_HANDOFF_FRAGMENT;
                 }
-                onDone();
+                onDone(handoff?.kind === "signed-in" ? handoff.signIn : undefined);
               }}
+              disabled={handoff?.kind === "arranging"}
               data-testid="setup-open-console"
             >
               {/* "Anyway" wherever something is genuinely outstanding — a
                   staged setting, or a sign-in we could not arrange. That word is
                   the only thing saying this button does not finish the job. */}
-              {applied.restart_required.length > 0 || handoff?.kind === "unmailable"
+              {applied.restart_required.length > 0 || handoff?.kind === "password"
                 ? "Open the console anyway"
                 : "Open the console"}
             </Button>
@@ -1253,6 +1227,10 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
       // has never seen.
       const problem = adminEmailProblem(email, requiresSignIn(status, values));
       if (problem) return problem;
+      if (requiresSignIn(status, values)) {
+        const weak = passwordProblem(adminPassword);
+        if (weak) return weak;
+      }
     }
     return undefined;
   };
@@ -1391,8 +1369,12 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
           <AccountStep
             value={email}
             onChange={setEmail}
+            password={adminPassword}
+            onPasswordChange={setAdminPassword}
+            passwordProblem={touched ? passwordProblem(adminPassword) : undefined}
             onEnter={advance}
             required={needsCompany && requiresSignIn(status, values)}
+            mailed={status.mail.wired}
           />
         )}
 
@@ -1599,17 +1581,17 @@ function SignInStep({
         })}
       </div>
 
-      {/* What choosing email actually gets you on *this* host.
-          Not a reason to hide the mode or grey the card out: hub OAuth and a
-          password sign people in with no transport anywhere in sight, so "no
-          mail" means the magic link is undeliverable, not that email sign-in is
-          broken. Hiding it would refuse a mode the operator may wire mail up
-          for ten minutes from now. */}
+      {/* What choosing email actually gets you on *this* host. Not a reason
+          to hide the mode or grey the card out: a password signs people in
+          with no transport anywhere in sight, so "no mail" means the magic
+          link is off the table, not that email sign-in is broken. Hiding it
+          would refuse a mode the operator may wire mail up for ten minutes
+          from now. */}
       {status.auth_modes.includes("email") && !status.mail.wired && (
         <p className="mt-3 text-xs text-muted-foreground" data-testid="setup-mail-note">
-          {status.mail.echoes_code
-            ? "This host sends no mail and doesn't need to: it only listens on this machine, so a sign-in link is handed straight back to your browser instead of arriving in an inbox."
-            : "This host has no mail transport, so a sign-in link would arrive nowhere. The ecosystem buttons and a password still work — configure mail before inviting anyone who would need a link."}
+          This host has no mail transport, so nobody gets a sign-in link here — you and
+          anyone you invite sign in with a password instead. Configure mail on the host
+          to offer links as well.
         </p>
       )}
 
@@ -1698,46 +1680,75 @@ function LayerLock() {
 function AccountStep({
   value,
   onChange,
+  password,
+  onPasswordChange,
+  passwordProblem: problem,
   onEnter,
   required,
+  mailed,
 }: {
   value: string;
   onChange: (v: string) => void;
+  password: string;
+  onPasswordChange: (v: string) => void;
+  passwordProblem?: string;
   onEnter: () => void;
   required: boolean;
+  /** Whether this host mails: decides whether the login is asked for as a mailbox. */
+  mailed: boolean;
 }) {
   return (
-    <div>
-      {/* Same rhythm as every other question: the heading and its hint are one
-          sentence, and the gap belongs before the field. */}
-      <Label
-        htmlFor="setup-email"
-        className="text-base font-medium leading-snug"
-        data-testid="setup-question"
-      >
-        What&apos;s your email?
-      </Label>
-      <p className="text-xs leading-snug text-muted-foreground">
-        {required
-          ? "This is how you sign back in, and the only address that can administer the company."
-          : // Not the no-sign-in case: that host does not render this step at
-            // all. What is left is a host that already serves a company, where
-            // the roster it has can already administer it.
-            "Optional on this host — it already serves a company, so this is only how you get back in."}
-      </p>
-      <Input
-        id="setup-email"
-        autoFocus
-        type="email"
-        value={value}
-        placeholder="you@example.com"
-        data-testid="setup-field-email"
-        className="mt-2.5"
-        onChange={(e) => onChange(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") onEnter();
-        }}
-      />
+    <div className="space-y-5">
+      <div>
+        {/* Same rhythm as every other question: the heading and its hint are one
+            sentence, and the gap belongs before the field. */}
+        <Label
+          htmlFor="setup-email"
+          className="text-base font-medium leading-snug"
+          data-testid="setup-question"
+        >
+          {mailed ? "What's your email?" : "How will you sign in?"}
+        </Label>
+        <p className="text-xs leading-snug text-muted-foreground">
+          {required
+            ? mailed
+              ? "This is how you sign back in, and the only address that can administer the company."
+              : "An email address or a username — this host sends no mail, so it only has to be something you'll remember. It's the only login that can administer the company."
+            : // Not the no-sign-in case: that host does not render this step at
+              // all. What is left is a host that already serves a company, where
+              // the roster it has can already administer it.
+              "Optional on this host — it already serves a company, so this is only how you get back in."}
+        </p>
+        <Input
+          id="setup-email"
+          autoFocus
+          type={mailed ? "email" : "text"}
+          autoComplete="username"
+          value={value}
+          placeholder={mailed ? "you@example.com" : "you@example.com or admin"}
+          data-testid="setup-field-email"
+          className="mt-2.5"
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") onEnter();
+          }}
+        />
+      </div>
+
+      {/* Asked here, with the login, because it is the other half of the same
+          answer: without it the address is a standing invite the host may have
+          no way to deliver, and setup finished by pointing at a mailbox. With
+          it the apply creates the account and the finish line signs them in. */}
+      {required && (
+        <NewPasswordField
+          id="setup-field-password"
+          label="Password"
+          value={password}
+          onChange={onPasswordChange}
+          onEnter={onEnter}
+          problem={problem}
+        />
+      )}
     </div>
   );
 }

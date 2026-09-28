@@ -7,7 +7,7 @@ fn desk(id: &str, tools: &[&str]) -> GroupChat {
         description: None,
         members: Vec::new(),
         tools: tools.iter().map(|t| t.to_string()).collect(),
-        hive: crate::hivemind::HiveConfig::default(),
+        hive: crate::hive::routing::RoutingConfig::default(),
     }
 }
 

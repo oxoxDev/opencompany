@@ -395,6 +395,7 @@ async fn call_handler_none_mode_owner_is_unreachable_once_a_second_company_exist
     let globex = CompanyId::new("globex");
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: globex.clone(),

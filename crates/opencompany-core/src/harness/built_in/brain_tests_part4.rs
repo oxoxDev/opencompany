@@ -1,4 +1,5 @@
 use super::*;
+use crate::ports::TaskOrigin;
 
 /// The reported bug. A card assigned to "Shane" — nobody this company has —
 /// used to dispatch to the orchestrator anyway, keeping `assignee = "Shane"`
@@ -529,88 +530,16 @@ fn everyone_names_the_desk_without_choosing_a_responder() {
     );
 }
 
-/// `@everyone` from the console's default thread (`chat: "main"`) expands
-/// against the General desk, not no desk at all. The console-only alias is
-/// not a desk key `resolve_desk_id` knows, so the brain folds it — and the
-/// other General-desk spellings — to the General desk id before expanding.
 #[test]
-fn everyone_desk_folds_the_main_thread_alias_to_general() {
-    let record = record_with_desk();
-    assert_eq!(HarnessBrain::everyone_desk(&record, None), "General");
-    assert_eq!(HarnessBrain::everyone_desk(&record, Some("")), "General");
-    assert_eq!(
-        HarnessBrain::everyone_desk(&record, Some("main")),
-        "General"
-    );
-    assert_eq!(
-        HarnessBrain::everyone_desk(&record, Some("General")),
-        "General"
-    );
-    assert_eq!(
-        HarnessBrain::everyone_desk(&record, Some("eng_desk")),
-        "eng_desk"
-    );
+fn everyone_desk_is_the_addressed_chat_or_general() {
+    assert_eq!(HarnessBrain::everyone_desk(None), "general");
+    assert_eq!(HarnessBrain::everyone_desk(Some("general")), "general");
+    assert_eq!(HarnessBrain::everyone_desk(Some("eng_desk")), "eng_desk");
 }
 
-/// A blueprint that declares a desk under one of the General spellings is
-/// grandfathered by this host — `is_general_channel` is guarded on
-/// `!desk_exists`, the desk keeps its members, and `responder_for` routes
-/// to its lead. The fold must not run over it: asking `resolve_desk_id`
-/// for the *name* `General` misses a desk called anything else, and
-/// `@everyone` would then expand to the whole roster instead of the two
-/// people actually on the line — a broadcast escaping the scope of the one
-/// case the fold exists to preserve.
 #[test]
-fn a_grandfathered_general_desk_keeps_its_own_membership() {
-    let manifest: CompanyManifest = toml::from_str(
-        r#"
-[company]
-name = "Acme"
-
-[[agent]]
-id = "ceo"
-role = "Chief Executive"
-
-[[agent]]
-id = "chief"
-role = "Chief of Staff"
-tier = "orchestrator"
-
-[[agent]]
-id = "engineer"
-role = "Engineer"
-
-[[group_chat]]
-id = "main"
-name = "Front office"
-members = ["ceo", "engineer"]
-"#,
-    )
-    .expect("valid manifest");
-    let mut record = record_with_desk();
-    record.manifest.group_chats = manifest.group_chats;
-
-    // The raw key, not the General fold: this desk answers to it.
-    assert_eq!(HarnessBrain::everyone_desk(&record, Some("main")), "main");
-
-    // Every folded alias names the same membership as the raw key. A desk
-    // that claims the line by *id* is missed by `resolve_desk_id("General")`,
-    // so the alias used to fall through to a `General` desk that does not
-    // exist — scoping `@everyone` to the whole roster in a channel whose
-    // own lead answers (issue #1743).
-    for alias in ["", "General", "general", "MAIN"] {
-        assert_eq!(
-            HarnessBrain::everyone_desk(&record, Some(alias)),
-            "main",
-            "the alias {alias:?} must scope @everyone to the claiming desk"
-        );
-    }
-    // And with no such desk, the fold still applies as before.
-    assert_eq!(
-        HarnessBrain::everyone_desk(&record_with_desk(), Some("main")),
-        "General"
-    );
-
+fn everyone_in_general_reaches_the_whole_roster() {
+    let record = record_with_desk();
     let mentions = [crate::ports::types::Mention {
         target: crate::ports::types::MentionTarget::Everyone,
         text: "@everyone".to_string(),
@@ -619,17 +548,14 @@ members = ["ceo", "engineer"]
     }];
     let expanded = crate::runtime::mentions::mentioned_agents(
         &record,
-        &HarnessBrain::everyone_desk(&record, Some("main")),
+        &HarnessBrain::everyone_desk(None),
         &mentions,
         None,
     );
-    assert_eq!(
-        expanded,
-        vec!["ceo".to_string(), "engineer".to_string()],
-        "a broadcast stays inside the desk that was addressed"
-    );
-    assert!(
-        !expanded.contains(&"chief".to_string()),
-        "and does not reach a teammate who is not on it: {expanded:?}"
-    );
+    for id in ["ceo", "engineer"] {
+        assert!(
+            expanded.contains(&id.to_string()),
+            "{id} missing from {expanded:?}"
+        );
+    }
 }

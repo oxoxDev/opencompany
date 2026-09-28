@@ -41,16 +41,11 @@ fn mint_agent_id_never_returns_a_reserved_id() {
     assert_eq!(record.mint_agent_id("Agents"), "agents_2");
     assert_eq!(record.mint_agent_id("desks"), "desks_2");
     assert_eq!(record.mint_agent_id("System"), "system_2");
-    // Issue #1743: both spellings of the built-in `#general` channel. A
-    // teammate minted onto one becomes the answer to every unaddressed
-    // message on the company-wide line — `responder_for` checks roster ids
-    // before falling back to the orchestrator — and the console renders
-    // that line's transcript as the teammate's DM.
     assert_eq!(record.mint_agent_id("Main"), "main_2");
     assert_eq!(record.mint_agent_id("General"), "general_2");
     assert_eq!(
         RESERVED_AGENT_IDS,
-        ["operator", "agents", "desks", "system", "main", "General"]
+        ["operator", "agents", "desks", "system", "main", "general"]
     );
 }
 

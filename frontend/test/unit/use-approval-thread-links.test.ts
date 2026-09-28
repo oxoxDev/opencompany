@@ -12,7 +12,10 @@ const T0 = new Date("2026-08-20T20:00:00Z").getTime();
 
 function fakeClient(): OpenCompanyClient {
   return {
-    listDesks: vi.fn(async () => [{ id: "engineering", name: "Engineering", members: [] }]),
+    listDesks: vi.fn(async () => [
+      { id: "general", name: "General", kind: "general", mutable: false, members: [] },
+      { id: "engineering", name: "Engineering", members: [] },
+    ]),
     listTeam: vi.fn(async () => []),
   } as unknown as OpenCompanyClient;
 }
@@ -100,68 +103,41 @@ describe("useApprovalThreadLinks", () => {
     expect(lastLinks?.has("a1")).toBe(false);
   });
 
-  it("links an approval raised on the main line to #general on a real company", async () => {
-    // The built-in `#general` is in no desk list, so the desk scan cannot name
-    // it — and this is the ordinary case, not an edge one: every company with
-    // real desks reached it. `channelIdForThread` resolved `main` to a channel
-    // and the label lookup then found nothing, so the card read "Origin
-    // unavailable" for the one channel every company has.
+  it("links an approval raised in #general to #general", async () => {
+    const client = fakeClient();
+    await render(client, [approval("a1", "general")]);
+
+    expect(lastLinks?.get("a1")).toEqual({ channelId: "general", label: "#general" });
+  });
+
+  it("leaves an approval under a legacy `main` thread unlinked", async () => {
     const client = fakeClient();
     await render(client, [approval("a1", "main")]);
 
-    expect(lastLinks?.get("a1")).toEqual({ channelId: "main", label: "#general" });
+    expect(lastLinks?.has("a1")).toBe(false);
   });
 
-  it("labels an alias with the grandfathered desk that owns the line", async () => {
-    // The approval was raised under `main`; the line renders as the blueprint's
-    // own `#ops-lead` desk. Looking the desk up by the raw thread id found
-    // nothing and the card read "Origin unavailable" — for a conversation whose
-    // transcript is on screen. The lookup follows the resolved channel instead.
-    const client = {
-      listDesks: vi.fn(async () => [{ id: "general", name: "Ops lead", members: [] }]),
-      listTeam: vi.fn(async () => []),
-    } as unknown as OpenCompanyClient;
-    await render(client, [approval("a1", "main")]);
-
-    expect(lastLinks?.get("a1")).toEqual({ channelId: "general", label: "#ops-lead" });
-  });
-
-  it("lets a blueprint desk that authored a general id keep its own label", async () => {
-    const client = {
-      listDesks: vi.fn(async () => [{ id: "general", name: "Ops lead", members: [] }]),
-      listTeam: vi.fn(async () => []),
-    } as unknown as OpenCompanyClient;
-    await render(client, [approval("a1", "general")]);
-
-    expect(lastLinks?.get("a1")).toEqual({ channelId: "general", label: "#ops-lead" });
-  });
-
-  it("falls back to the default desks when /desks comes back empty", async () => {
-    // A company with no declared `[[group_chat]]` entries gets `[]` from
-    // /desks, yet RoomView and AppShell still show the default desks, and
-    // `#general` above them. An approval raised on the main line must resolve
-    // here too, or its "Asked in" link would silently disappear — and this is
-    // the case that tells an empty *response* apart from a failed read below.
+  it("links nothing to #general when the host does not list it", async () => {
     const client = {
       listDesks: vi.fn(async () => []),
       listTeam: vi.fn(async () => []),
     } as unknown as OpenCompanyClient;
-    await render(client, [approval("a1", "main")]);
+    await render(client, [approval("a1", "general")]);
 
-    expect(lastLinks?.get("a1")).toEqual({ channelId: "main", label: "#general" });
+    expect(lastLinks?.has("a1")).toBe(false);
   });
 
   it("does not guess desks when the desks read fails", async () => {
     // A failed read is not an empty response: RoomView surfaces the error rather
     // than inventing desks, and the hook's contract is that an unresolved thread
-    // must not be guessed. The `main` thread stays unlinked.
+    // must not be guessed. The `general` thread stays unlinked.
     const client = {
       listDesks: vi.fn(async () => {
         throw new Error("offline");
       }),
       listTeam: vi.fn(async () => []),
     } as unknown as OpenCompanyClient;
-    await render(client, [approval("a1", "main")]);
+    await render(client, [approval("a1", "general")]);
 
     expect(lastLinks?.has("a1")).toBe(false);
   });

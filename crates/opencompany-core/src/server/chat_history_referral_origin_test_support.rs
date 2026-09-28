@@ -70,6 +70,9 @@ pub(super) fn referral_leg_answering(
             to_desk: to_desk.to_string(),
             target: target.to_string(),
             returning,
+            episode_id: None,
+            to_episode_id: None,
+            hop: 0,
         },
         CompanyEvent::OperatorMessage {
             text: text.to_string(),

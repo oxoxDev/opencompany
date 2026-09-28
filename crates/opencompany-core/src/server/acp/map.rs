@@ -132,7 +132,7 @@ pub fn from_company_event(event: &CompanyEvent, chat: &str) -> Option<SessionUpd
         // desk is bound to.
         CompanyEvent::OperatorMessage { chat: c, text, .. }
             if c.as_deref()
-                .unwrap_or(crate::server::ops::language::DEFAULT_DESK)
+                .unwrap_or(crate::server::ops::language::GENERAL_CHANNEL_ID)
                 == chat =>
         {
             Some(json!({

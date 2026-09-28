@@ -832,6 +832,7 @@ impl CompanyStore for SqliteStore {
             name_confirmed: overlay.name_confirmed,
             activation_completed_at: overlay.activation_completed_at,
             created_at_millis: overlay.created_at_millis,
+            general_channel: overlay.general_channel.unwrap_or_default(),
         }))
     }
 
@@ -2739,6 +2740,8 @@ impl crate::ports::runs::RunStore for SqliteStore {
             agent_id: spec.agent_id,
             chat_id: spec.chat_id,
             thread_root: spec.thread_root,
+            episode_id: spec.episode_id,
+            round_revision: spec.round_revision,
             workflow_run_id: spec.workflow_run_id,
             node_id: spec.node_id,
             attempt: attempt as u32,

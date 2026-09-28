@@ -10,9 +10,10 @@
 use serde_json::{Value, json};
 
 use crate::ports::now_millis;
+use crate::ports::skills_state::SkillTier;
 use crate::ports::types::{
     Attachment, ChunkAddr, CompanyEvent, ContextChunk, ContextOp, ContextOpResult, Effect,
-    EffectGroup, LedgerEntry, OnboardingStep, OutboundMessage, Verdict,
+    EffectGroup, LedgerEntry, OnboardingStep, OutboundMessage, SkillChange, Verdict,
 };
 
 use super::wire::{EffectFrame, Role, WireEvent};
@@ -374,6 +375,14 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             format!("Turn {turn_id} did not finish"),
             "turn.failed",
         ),
+        CompanyEvent::TurnSettled {
+            turn_id, agent_id, ..
+        } => (
+            Role::System,
+            agent_id.clone().unwrap_or_else(|| "operator".to_string()),
+            format!("Turn {turn_id} finished"),
+            "turn.settled",
+        ),
         // Issue #1015. Structural only, like every arm here: a minted run id and
         // two fixed-vocabulary statuses. `error` is deliberately not copied —
         // it is tenant-scoped, the same reason `TurnFailed` above carries only
@@ -534,15 +543,166 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             },
             "desk.members_changed",
         ),
-        CompanyEvent::DeskHiveConfigured { desk_id, reset, .. } => (
+        CompanyEvent::DeskRoutingConfigured { desk_id, reset, .. } => (
             Role::System,
             "company".to_string(),
             if *reset {
-                format!("Restored desk {desk_id}'s declared move grammar")
+                format!("Restored desk {desk_id}'s declared routing block")
             } else {
-                format!("Installed a move grammar on desk {desk_id}")
+                format!("Installed a routing block on desk {desk_id}")
             },
-            "desk.hive_configured",
+            "desk.routing_configured",
+        ),
+        CompanyEvent::SkillChanged {
+            slug, change, tier, ..
+        } => (
+            Role::System,
+            "company".to_string(),
+            format!(
+                "{} {slug} ({})",
+                skill_change_word(*change),
+                tier_word(*tier)
+            ),
+            "skill.changed",
+        ),
+        // Plan hive-desks, Phase 4: the episode record. Structural only, like
+        // every arm here — ids, seats and the closed-vocabulary reason; the
+        // utterances themselves ride on the `AgentReply` rows they bracket.
+        CompanyEvent::EpisodeOpened {
+            chat_id,
+            episode_id,
+            participants,
+            ..
+        } => (
+            Role::System,
+            "hive".to_string(),
+            format!(
+                "Episode {episode_id} opened on desk {chat_id} with {}",
+                participants.join(", ")
+            ),
+            "episode.opened",
+        ),
+        CompanyEvent::RoundStarted {
+            episode_id,
+            revision,
+            agent_ids,
+            ..
+        } => (
+            Role::System,
+            "hive".to_string(),
+            format!(
+                "Episode {episode_id} round {revision} started: {}",
+                agent_ids.join(", ")
+            ),
+            "episode.round_started",
+        ),
+        CompanyEvent::RoundCommitted {
+            episode_id,
+            revision,
+            utterances,
+            ..
+        } => (
+            Role::System,
+            "hive".to_string(),
+            format!(
+                "Episode {episode_id} round {revision} committed {} utterances",
+                utterances.len()
+            ),
+            "episode.round_committed",
+        ),
+        CompanyEvent::BroadcastRouted {
+            episode_id,
+            agent_id,
+            plan,
+            ..
+        } => (
+            Role::System,
+            "hive".to_string(),
+            format!(
+                "Episode {episode_id}: {agent_id} broadcast to {}",
+                plan.agent_ids().join(", ")
+            ),
+            "episode.broadcast_routed",
+        ),
+        CompanyEvent::DmDelivered {
+            episode_id,
+            from,
+            to,
+            ..
+        } => (
+            Role::System,
+            "hive".to_string(),
+            format!("Episode {episode_id}: {from} messaged {}", to.join(", ")),
+            "episode.dm_delivered",
+        ),
+        CompanyEvent::ConversationOpened {
+            episode_id,
+            asker,
+            askee,
+            ..
+        } => (
+            Role::System,
+            "hive".to_string(),
+            format!("Episode {episode_id}: @{asker} asked @{askee}"),
+            "episode.conversation.opened",
+        ),
+        CompanyEvent::ConversationConcluded {
+            episode_id,
+            asker,
+            askee,
+            forced,
+            ..
+        } => (
+            Role::System,
+            "hive".to_string(),
+            format!(
+                "Episode {episode_id}: @{asker} and @{askee} concluded{}",
+                if *forced { " without an answer" } else { "" }
+            ),
+            "episode.conversation.concluded",
+        ),
+        CompanyEvent::EpisodeSeatParked {
+            episode_id, seat, ..
+        } => (
+            Role::System,
+            "hive".to_string(),
+            format!("Episode {episode_id}: @{seat} is waiting on the operator"),
+            "episode.seat.parked",
+        ),
+        CompanyEvent::EpisodeSeatResumed {
+            episode_id, seat, ..
+        } => (
+            Role::System,
+            "hive".to_string(),
+            format!("Episode {episode_id}: @{seat} resumed"),
+            "episode.seat.resumed",
+        ),
+        CompanyEvent::EpisodeCompleted {
+            episode_id,
+            reason,
+            rounds,
+            ..
+        } => (
+            Role::System,
+            "hive".to_string(),
+            format!(
+                "Episode {episode_id} completed after {rounds} rounds ({})",
+                serde_json::to_value(reason)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_string))
+                    .unwrap_or_default()
+            ),
+            "episode.completed",
+        ),
+        CompanyEvent::EpisodeStateSaved {
+            episode_id,
+            revision,
+            ..
+        } => (
+            Role::System,
+            "hive".to_string(),
+            format!("Episode {episode_id} checkpointed at revision {revision}"),
+            "episode.state_saved",
         ),
         CompanyEvent::WorkflowDeleted {
             workflow_id, name, ..
@@ -765,6 +925,25 @@ pub(crate) fn verdict_word(verdict: Verdict) -> &'static str {
     match verdict {
         Verdict::Approve => "approved",
         Verdict::Deny => "denied",
+    }
+}
+
+/// The lowercase wire word for what happened to a skill.
+fn skill_change_word(change: SkillChange) -> &'static str {
+    match change {
+        SkillChange::Installed => "installed",
+        SkillChange::Updated => "updated",
+        SkillChange::Removed => "removed",
+    }
+}
+
+/// The lowercase wire word for a skill's trust tier.
+fn tier_word(tier: SkillTier) -> &'static str {
+    match tier {
+        SkillTier::Builtin => "builtin",
+        SkillTier::Company => "company",
+        SkillTier::Registry => "registry",
+        SkillTier::Custom => "custom",
     }
 }
 

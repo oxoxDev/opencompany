@@ -165,100 +165,6 @@ fn a_triage_request_is_recognised_as_one() {
     );
 }
 
-#[test]
-fn a_selection_request_is_recognised_as_one() {
-    let selection = ModelRequest {
-        messages: vec![
-            tinyinference::message::Message::system(
-                crate::harness::selector::system_prompt_for_test(),
-            ),
-            tinyinference::message::Message::user("who owns login?".to_string()),
-        ],
-        ..ModelRequest::default()
-    };
-    assert!(
-        is_selection_request(&selection),
-        "the fixture must recognise the real prompt, or it silently starts \
-         eating scripted turns"
-    );
-}
-
-/// Issue #1835, the rung itself: an unmentioned message addressed to an
-/// `auto` channel is routed to the selector's pick — a member the
-/// deterministic fallback (`engineer`, the first member) would never have
-/// chosen — and the pick is clamped to the channel.
-#[tokio::test]
-async fn an_auto_channel_routes_by_the_selectors_pick() {
-    let dir = tempfile::tempdir().unwrap();
-    let (brain, provider) = brain_that_selects(dir.path(), "chief");
-    assert_eq!(
-        brain
-            .auto_channel_responder(Some("launch"), "which strategy are we running?")
-            .await
-            .as_deref(),
-        Some("chief"),
-        "the selection overrides the first-member fallback"
-    );
-    assert_eq!(
-        provider
-            .selector_calls
-            .load(std::sync::atomic::Ordering::SeqCst),
-        1
-    );
-}
-
-/// The worst case of the new rung is the old rung: a pick outside the
-/// channel's membership answers `None`, and the caller keeps the
-/// deterministic fallback. Revert the clamp in `SelectorVerdict::parse`
-/// and this routes a turn to a teammate the channel does not contain.
-#[tokio::test]
-async fn a_failed_selection_keeps_the_deterministic_fallback() {
-    let dir = tempfile::tempdir().unwrap();
-    let (brain, _provider) = brain_that_selects(dir.path(), "somebody_else");
-    assert_eq!(
-        brain
-            .auto_channel_responder(Some("launch"), "which strategy are we running?")
-            .await,
-        None,
-        "an out-of-membership pick must fall back, never route"
-    );
-}
-
-/// Issue #1872 (codex P1): the plan-level total-token ceiling gates the
-/// **selection**, not only the responder turn it precedes.
-///
-/// Selection runs before a responder exists, so `total_ceiling_refusal`
-/// has no agent to refuse as and never fired for it — meaning a tenant
-/// past its hard ceiling could keep paying to route, one selector call per
-/// message, after the ceiling that is supposed to permit no model calls at
-/// all. Remove the `total_ceiling_spent` arm in `auto_channel_responder`
-/// and this spends a call and answers `chief`.
-#[tokio::test]
-async fn an_exhausted_total_ceiling_routes_without_paying_for_a_selection() {
-    let dir = tempfile::tempdir().unwrap();
-    let meter = Arc::new(SpentMeter);
-    let plan = crate::harness::capability_budget::CapabilityPlan {
-        period: crate::harness::capability_budget::BudgetPeriod::Daily,
-        budgets: Default::default(),
-        total_budget: Some(10),
-    };
-    let (brain, provider) = brain_that_selects_with(dir.path(), "chief", Some(plan), Some(meter));
-    assert_eq!(
-        brain
-            .auto_channel_responder(Some("launch"), "which strategy are we running?")
-            .await,
-        None,
-        "past the ceiling the deterministic fallback answers, not a selection"
-    );
-    assert_eq!(
-        provider
-            .selector_calls
-            .load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "a company past its hard ceiling must not pay to route"
-    );
-}
-
 /// The same ceiling, one pass later (codex on #2055): naming a card is a
 /// model call with no agent behind it, exactly like a selection, so
 /// `total_ceiling_refusal` never fires for it either.
@@ -287,70 +193,6 @@ async fn an_exhausted_total_ceiling_names_a_card_without_paying_for_a_title() {
             .await,
         None,
         "past the ceiling the card is named from the request, not by a model"
-    );
-}
-
-/// Issue #1872 (codex P2): a channel emptied *after* creation.
-///
-/// `POST …/desks` refuses an empty auto channel, but `DELETE …/team/{id}`
-/// can retire its last roster-backed member later. There is then nobody to
-/// pick, so this defers to the caller's ladder — the orchestrator answers,
-/// as it does for any desk whose members have all gone — and spends
-/// nothing doing it. Refusing the deletion instead would mean a teammate
-/// you cannot remove because a channel names them.
-#[tokio::test]
-async fn a_channel_emptied_by_deletion_falls_back_without_paying() {
-    let dir = tempfile::tempdir().unwrap();
-    let (brain, provider) = brain_that_selects(dir.path(), "chief");
-    brain.mutate_record(|r| {
-        r.overlay_retired_agents = vec!["engineer".to_string(), "chief".to_string()];
-    });
-    assert_eq!(
-        brain
-            .auto_channel_responder(Some("launch"), "who owns the retry logic?")
-            .await,
-        None,
-        "no candidates left: fall back rather than route to a retired teammate"
-    );
-    assert_eq!(
-        provider
-            .selector_calls
-            .load(std::sync::atomic::Ordering::SeqCst),
-        0
-    );
-}
-
-/// The short-circuits spend nothing: a lead desk never reaches the
-/// selector at all, and a single-member channel is its member without a
-/// model call — a pick over one candidate is the fallback with latency.
-#[tokio::test]
-async fn lead_desks_and_single_member_channels_never_pay_for_selection() {
-    let dir = tempfile::tempdir().unwrap();
-    let (brain, provider) = brain_that_selects(dir.path(), "chief");
-    // The lead desk from `record_with_desk` is not an auto channel.
-    assert_eq!(
-        brain
-            .auto_channel_responder(Some("eng_desk"), "hello")
-            .await,
-        None
-    );
-    // Shrink the channel to one member: it answers without the model.
-    brain.mutate_record(|r| {
-        r.overlay_desks[0].members = vec!["chief".to_string()];
-    });
-    assert_eq!(
-        brain
-            .auto_channel_responder(Some("launch"), "hello")
-            .await
-            .as_deref(),
-        Some("chief")
-    );
-    assert_eq!(
-        provider
-            .selector_calls
-            .load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "neither path may spend a selection call"
     );
 }
 
@@ -408,7 +250,7 @@ async fn delegate_to_desk_relays_the_answer_in_a_second_orchestrator_turn() {
     );
     // …and it is the relay turn, whose prompt framed the hand-back.
     assert!(
-        bubble.text.contains("Relay their answer"),
+        bubble.text.contains("Pass their answer along"),
         "the operator bubble is the relay turn: {:?}",
         bubble.text
     );

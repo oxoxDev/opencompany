@@ -33,6 +33,9 @@ fn completed(call_id: &str, tool: &str) -> AgentProgress {
         elapsed_ms: 42,
         iteration: 1,
         failure: None,
+        display_label: None,
+        display_detail: None,
+        structured: None,
     }
 }
 
@@ -187,6 +190,8 @@ async fn a_store_failure_never_reaches_the_turn() {
                 step_count: 0,
                 workflow_run_id: None,
                 node_id: None,
+                episode_id: None,
+                round_revision: None,
             })
         }
         async fn get_run(

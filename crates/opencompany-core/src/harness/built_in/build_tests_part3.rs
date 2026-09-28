@@ -46,14 +46,13 @@ async fn workspace_git_enabled_checkpoints_a_tool_write() {
         &company,
         "Acme",
         &manifest_agent,
-        policy,
+        std::sync::Arc::new(policy),
         &deps,
         &grants,
         &[],
         &[],
         None,
         false,
-        /* speech_enabled */ false,
     )
     .expect("agent builds");
 
@@ -175,18 +174,16 @@ fn the_tool_iteration_cap_is_uniform_and_not_manifest_configurable() {
             &CompanyId::new("acme"),
             "Acme",
             &manifest_agent,
-            ApprovalPolicy::new(&Policy::default(), None),
+            std::sync::Arc::new(ApprovalPolicy::new(&Policy::default(), None)),
             &deps,
             &["*".to_string()],
             &[],
             &[],
             None,
             is_orchestrator,
-            /* speech_enabled */ false,
         )
         .expect("agent builds")
-        .agent_config()
-        .max_tool_iterations
+        .max_tool_iterations()
     };
 
     for (label, got) in [
@@ -201,4 +198,133 @@ fn the_tool_iteration_cap_is_uniform_and_not_manifest_configurable() {
             "`{label}` must run on the one stated ceiling, not its own"
         );
     }
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn an_agent_granted_a_company_server_is_never_scoped_to_list_servers() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut deps = pin_deps(dir.path().to_path_buf());
+    deps.mcp_servers = vec![crate::company::mcp::McpServerDecl {
+        name: "notes".to_string(),
+        endpoint: "https://mcp.example.test/notes".to_string(),
+        description: None,
+        allowed_tools: Vec::new(),
+        disallowed_tools: Vec::new(),
+        read_only_tools: Vec::new(),
+        timeout_secs: 30,
+        enabled: true,
+        source: crate::company::mcp::McpSource::Runtime,
+        auth: crate::company::mcp::AuthMaterial::Bearer("sk-notes-secret".to_string()),
+        tool_policies: Default::default(),
+        tool_inventory: Default::default(),
+    }];
+    let policy = ApprovalPolicy::new(&Policy::default(), None);
+    let blueprint = build_agent(
+        &CompanyId::new("acme"),
+        "Acme",
+        &manifest_agent("Desk Lead", None),
+        std::sync::Arc::new(policy),
+        &deps,
+        &["mcp:notes".to_string()],
+        &[],
+        &[],
+        None,
+        false,
+    )
+    .expect("agent builds");
+
+    for attached in [false, true] {
+        let scope = scope_tool_names(&blueprint, None, attached);
+        assert!(
+            scope.iter().any(|name| name == "mcp_list_tools"),
+            "a granted server must still be reachable: {scope:?}"
+        );
+        assert!(
+            !scope.iter().any(|name| name == "mcp_list_servers"),
+            "`mcp_list_servers` answers with each server's credentials: {scope:?}"
+        );
+    }
+    assert!(
+        !blueprint
+            .tool_names()
+            .iter()
+            .any(|name| name == "mcp_list_servers"),
+        "{:?}",
+        blueprint.tool_names()
+    );
+    assert!(
+        blueprint
+            .system_prompt
+            .contains("- `notes` — `mcp_call_tool` with `\"server\": \"notes\"`"),
+        "the family brief must reach the prompt naming the server, the tool that \
+         dispatches to it and the key it is addressed by: {}",
+        blueprint.system_prompt
+    );
+    assert!(
+        blueprint.system_prompt.contains("mcp_list_tools"),
+        "a declared server is inspected by name, so the brief has to say so"
+    );
+    assert!(!blueprint.system_prompt.contains("mcp_list_servers"));
+    assert!(!blueprint.system_prompt.contains("mcp.example.test"));
+    assert!(!blueprint.system_prompt.contains("sk-notes-secret"));
+}
+
+/// The wiring gate, from the prompt's side: an agent granted no MCP server must
+/// not be handed a section naming servers, nor told to enumerate through tools it
+/// does not hold. Asserted on the built prompt rather than on the renderer, so a
+/// call site that appended the brief unconditionally would fail here even with
+/// every renderer test green.
+#[test]
+fn an_agent_granted_no_mcp_server_gets_no_server_family_section() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let deps = pin_deps(dir.path().to_path_buf());
+    let policy = ApprovalPolicy::new(&Policy::default(), None);
+    let blueprint = build_agent(
+        &CompanyId::new("acme"),
+        "Acme",
+        &manifest_agent("Desk Lead", None),
+        std::sync::Arc::new(policy),
+        &deps,
+        &["file_read".to_string()],
+        &[],
+        &[],
+        None,
+        false,
+    )
+    .expect("agent builds");
+
+    assert!(
+        !blueprint
+            .system_prompt
+            .contains("MCP servers connected to this company"),
+        "{}",
+        blueprint.system_prompt
+    );
+    assert!(
+        !blueprint.system_prompt.contains("mcp_call_tool"),
+        "{}",
+        blueprint.system_prompt
+    );
+}
+
+#[test]
+fn a_company_agent_config_seeds_no_openhuman_docs_server() {
+    let mut config = openhuman_core::config::Config::default();
+    config.mcp_client.enabled = true;
+    let seeded = |config: &openhuman_core::config::Config| {
+        openhuman_core::mcp::host::client_config(config)
+            .servers
+            .iter()
+            .any(|server| server.name == openhuman_core::mcp::host::GITBOOKS_SERVER_NAME)
+    };
+    assert!(
+        seeded(&config),
+        "the premise: OpenHuman's default config seeds its docs server"
+    );
+
+    withhold_openhuman_docs(&mut config);
+
+    assert!(!config.gitbooks.enabled);
+    assert!(!seeded(&config));
 }

@@ -878,7 +878,7 @@ export function TaskDetailView({
                   empty={
                     <EmptyState
                       title="Nothing has happened yet"
-                      body="Dispatch this task from the board to start its timeline."
+                      body="Board updates, replies, and runs will show up here as this card is worked."
                     />
                   }
                   entries={detail.timeline}

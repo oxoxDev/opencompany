@@ -45,8 +45,9 @@ const PADDING = 24;
  * edge runs agent → desk — so left-to-right *is* the direction of the arrow, and
  * a reader does not have to follow an arrowhead to know which way work moved.
  *
- * A `spawned` edge runs agent → agent and so stays inside the left column; it is
- * drawn as a curve rather than a straight line for exactly that reason.
+ * A `spawned` or `spoke` edge can run agent → agent and so stays inside the
+ * left column; it is drawn as a curve rather than a straight line for exactly
+ * that reason.
  */
 export function layoutComms(graph: CommsGraph): Layout {
   const agents = graph.nodes

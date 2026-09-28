@@ -384,6 +384,7 @@ async fn one_store_serves_every_port_through_arc() {
     let id = CompanyId::new("acme");
     company
             .save(&CompanyRecord {
+                       general_channel: Default::default(),
                        overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 id: id.clone(),

@@ -17,8 +17,9 @@ use tinyflows::error::{EngineError, Result as TfResult};
 
 use oh::config::HttpRequestConfig;
 use oh::security::SecurityPolicy;
-use oh::tools::{HttpRequestTool, Tool, ToolResult};
+use oh::tools::HttpRequestTool;
 use openhuman_core as oh;
+use tinytools::{Tool, ToolResult};
 
 /// A tinyflows [`HttpClient`] backed by OpenHuman's SSRF-guarded
 /// [`HttpRequestTool`].

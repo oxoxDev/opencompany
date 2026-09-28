@@ -58,6 +58,8 @@ fn run(id: &str, task_id: &str, status: RunStatus, cost: f64) -> RunRecord {
         step_count: 0,
         workflow_run_id: None,
         node_id: None,
+        episode_id: None,
+        round_revision: None,
     }
 }
 

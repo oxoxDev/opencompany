@@ -148,7 +148,7 @@ use oh::agent::tool_policy::{ToolCallContext, ToolPolicy, ToolPolicyDecision, To
 use openhuman_core as oh;
 
 use crate::company::Policy;
-use crate::harness::policy::{ApprovalPolicy, ApprovalRequestQueue};
+use crate::harness::policy::{ApprovalPolicy, ApprovalRequestQueue, ApprovalScope};
 use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::runtime::grants::GrantSet;
 
@@ -344,10 +344,22 @@ pub(crate) async fn policy_gates(
     let policy = ApprovalPolicy::new(company_policy, None)
         .for_authored_workflow_nodes()
         .with_workflow(workflow_id);
-    let policy = match grants {
-        Some(grants) => policy.with_requests(ApprovalRequestQueue::with_grants(grants.clone())),
-        None => policy,
+    let requests = match grants {
+        Some(grants) => ApprovalRequestQueue::with_grants(grants.clone()),
+        None => ApprovalRequestQueue::default(),
     };
+    let policy = policy.with_requests(requests.clone());
+    let claim = requests.claim(ApprovalScope::Run(format!("{run_id}::gate")));
+    Box::pin(claim.scoped(judge_nodes(graph, &policy, company, workflow_id, run_id))).await
+}
+
+async fn judge_nodes(
+    graph: &WorkflowGraph,
+    policy: &ApprovalPolicy,
+    company: &CompanyId,
+    workflow_id: &str,
+    run_id: &str,
+) -> Vec<GatedCall> {
     let mut gated = Vec::new();
 
     for node in &graph.nodes {

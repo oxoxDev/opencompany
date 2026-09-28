@@ -1,0 +1,89 @@
+# The smallest company whose desks answer as rooms.
+#
+# Two desks of two seats each, sharing the CEO: every message on either desk
+# opens an episode on that desk's hive, its seats run **concurrently** in rounds
+# of two, and a seat may refer a question across to the other desk. The CEO is
+# the shared seat — one agent bound into both hives — so a measurement run on
+# this company exercises the one guarantee the runtime makes about sharing: two
+# desks' rounds overlap, and one agent's turns never do.
+#
+# `scripts/measure-coordination.sh` boots it behind the mock brain and asserts
+# the coordination thresholds; `frontend/test/e2e/desk-episode-live.spec.ts`
+# watches it from the console. Run it live with an inference credential:
+#
+#   TINYHUMANS_API_KEY=<jwt> \
+#   cargo run --features openhuman,mcp --bin opencompany -- \
+#     serve --company companies/hive_demo
+#
+# Without a credential the same company still boots on the offline echo brain,
+# which runs no rounds.
+
+[company]
+name = "Hive Demo Co"
+output = "Decisions and short drafts, reached by desks answering together"
+human_role = "Asking the desks questions and answering explicit approval requests"
+
+[users]
+# Standing admin invite: this address may redeem a magic link and administer
+# the company. It is the identity `frontend/test/e2e/desk-episode-live.spec.ts`
+# and `scripts/measure-coordination.mjs` sign in as — the same one
+# `companies/e2e_harness` grants, so the two share a bootstrap.
+admins = ["harness-e2e@tinyhumans.ai"]
+
+[policy]
+# Policy-generated HITL is disabled. `readonly` remains a hard brake on
+# mutations; other modes do not create approval prompts. Agents ask explicitly
+# with `request_approval` when they need an operator decision.
+mode = "full"
+
+[tools]
+# The company's own note tree — the same one the console's Workspace tab reads
+# and writes. Both spellings are needed: bare `workspace` covers an agent
+# asking for `workspace`, `workspace.*` covers the sub-grants. `mcp:*` is what
+# reaches the speech tools (`post`, `broadcast`, `dm`, `complete_episode`,
+# `read`) the host serves every seat on its own MCP server.
+allow = ["mcp:*", "workspace", "workspace.*", "chargebee", "paypal"]
+
+# The engineering desk: the engineer leads, the CEO sits in.
+[[group_chat]]
+id = "engineering"
+name = "Engineering desk"
+description = "How things are built and technical plans."
+members = ["engineer", "ceo"]
+
+# Rounds of two: both seats run at once on every round. Referral on, one hop,
+# with the answer returned to this desk — so a build question that needs copy
+# can cross to the content desk and come back.
+[group_chat.routing]
+round_width = 2
+
+[group_chat.routing.referral]
+enabled = true
+max_hops = 1
+returns = true
+
+# The content desk: the writer leads, the same CEO sits in.
+[[group_chat]]
+id = "content"
+name = "Content desk"
+description = "Written drafts and copy."
+members = ["writer", "ceo"]
+
+[group_chat.routing]
+round_width = 2
+
+[group_chat.routing.referral]
+enabled = true
+max_hops = 1
+returns = true
+
+# Bring-Your-Own-Key inference. Uncomment to route this company's agents
+# through your own provider instead of the managed TinyHumans brain. The
+# credential is NEVER written here — set it write-only from the console's
+# Connections tab, or name a secret-store key with `api_key_secret`.
+#
+# [inference]
+# provider = "openrouter"          # managed | openrouter | openai_compatible | ollama
+#
+# [inference.models]               # abstract tier → concrete provider model id
+# "chat-v1" = "deepseek/deepseek-chat"

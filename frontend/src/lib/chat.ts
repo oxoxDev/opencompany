@@ -7,134 +7,42 @@ import type {
 } from "@/api/types";
 import { toTurnFailure, type TurnFailure } from "./turn-failure";
 
-/**
- * The company's main line, by thread id.
- *
- * Mirrors the host's `MAIN_THREAD_ID` (`src/server/chat_history.rs`), whose
- * `is_general_chat` folds this id, `"General"` and the **empty string** into a
- * single conversation. Named rather than spelled inline because
- * {@link dispatchMarkerPlacement} has to resolve an empty origin to *this*
- * thread rather than to nothing — see the rules on that function.
- */
-export const MAIN_THREAD_ID = "main";
+/** The company-wide `#general` channel's id, which is also its chat thread id. */
+export const GENERAL_CHANNEL_ID = "general";
 
-/**
- * The name of the company-wide channel, rendered after the `#`.
- *
- * Mirrors the host's `GENERAL_CHANNEL` (`src/server/ops/language.rs`), the same
- * way {@link MAIN_THREAD_ID} mirrors its `MAIN_THREAD_ID`.
- */
-export const GENERAL_CHANNEL = "general";
-
-/**
- * Does this id name the built-in `#general` channel?
- *
- * Mirrors the host's `is_general_chat` (`src/server/chat_history.rs`), which
- * has folded four spellings into one conversation since issue #65: the empty
- * string, `main` (what this console addresses the line as), `General` (the
- * name the host attributes an unaddressed turn to), and `general`. The host
- * reserves every one of them — a desk cannot be created with any of them as
- * its id — so this is a closed set, not a guess.
- *
- * **Case-folded and nothing else.** The host compares with
- * `eq_ignore_ascii_case` against the string exactly as journaled, so it does
- * not trim — and neither may this, or the two disagree about the same id.
- * Trimming here was strictly worse than being strict: an API client posting
- * `chat: "  Main  "` has that spelling journaled verbatim, so the console
- * rendered the live reply in `#general` while `chat/history?desk=main` did not
- * return it, and the message vanished on the next reload. A live frame that
- * never lands is a message the operator has not seen; one that lands and then
- * disappears reads as data loss.
- *
- * Lives here rather than in `lib/desks.ts` — where it used to — because it is a
- * fact about chat *addressing*, like {@link MAIN_THREAD_ID} beside it, and
- * because `dispatchMarkerPlacement` below has to apply it. `lib/desks.ts`
- * re-exports it, so nothing that reads it had to move.
- */
+/** Does this id name the `#general` channel? */
 export function isGeneralChannel(id: string): boolean {
-  const key = id.toLowerCase();
-  return key === "" || key === MAIN_THREAD_ID || key === GENERAL_CHANNEL;
+  return id === GENERAL_CHANNEL_ID;
 }
 
 /**
- * The channel that renders `threadId`, given the shell's thread → channel map.
+ * The current id for a channel id stored or linked before `#general` had one:
+ * `main` and any casing of `general` become {@link GENERAL_CHANNEL_ID}, every
+ * other id comes back unchanged.
+ */
+export function migrateLegacyGeneralId(id: string): string {
+  const key = id.toLowerCase();
+  return key === "main" || key === GENERAL_CHANNEL_ID ? GENERAL_CHANNEL_ID : id;
+}
+
+/**
+ * The channel that renders `threadId`, given the shell's thread → channel map,
+ * or `null` when the map does not know the thread.
  *
- * A plain `map[threadId]` is not enough for the General line and never was: the
- * map is seeded with four literal spellings, while the host accepts **any
- * casing** of them and echoes back the one the caller addressed. So a live
- * frame from an API client that posted `MAIN` matched nothing, and its reply
- * and working indicator appeared only once polling recovered the durable
- * history (issue #1743).
- *
- * `null` when the map does not know the thread — never a fall back to whatever
- * the operator has open, which is issue #368's bug.
- *
- * Also resolves a `dm:`-prefixed **channel** id standing in for its thread:
- * the map is keyed on the bare teammate id (`dmThreadId`), so an origin
- * recorded in the console-local channel form (a direct API caller rather than
- * the host) missed it on an exact match even though that
- * teammate's DM is reachable. Folded case-insensitively, the same way the
- * host's own `resolve_roster_agent_id` resolves a `dm:`-addressed teammate —
- * an origin stamped from a caller's differently-cased address (`dm:DESIGNER`
- * against a roster id of `designer`) is the same teammate, not a miss.
+ * Also resolves a `dm:`-prefixed channel id standing in for its thread: the map
+ * is keyed on the bare teammate id (`dmThreadId`), matched case-insensitively
+ * the way the host's `resolve_roster_agent_id` matches it.
  */
 export function generalAwareChannel(
   map: Readonly<Record<string, string>>,
   threadId: string,
 ): string | null {
   if (map[threadId]) return map[threadId];
-  if (isGeneralChannel(threadId)) return map[MAIN_THREAD_ID] ?? null;
   const bareId = threadId.startsWith("dm:") ? threadId.slice("dm:".length) : null;
   if (!bareId) return null;
   if (map[bareId]) return map[bareId];
   const key = Object.keys(map).find((k) => k.toLowerCase() === bareId.toLowerCase());
   return key ? map[key] : null;
-}
-
-/**
- * The key a live turn frame's rows are filed under, from the thread id the
- * frame carries.
- *
- * The console's live-state maps — `liveStepsByThread`, `receiptByThread` — are
- * keyed in the **host-thread** namespace: `RoomView` reads them by
- * `dmThreadId(member)` and `onSendStart` arms them under that same id. So the
- * default is to pass the frame's own id through untouched, and only General
- * spellings are resolved.
- *
- * # Why General is the exception
- *
- * The host folds the company-wide line under whatever casing the caller
- * addressed and echoes that spelling back, so an API client posting to
- * `General` has its frames emitted under `General` while the console armed
- * these maps at the built-in channel's id — `MAIN_THREAD_ID`, since
- * `generalChannel` is `{ id: MAIN_THREAD_ID, name: GENERAL_CHANNEL }`. Rows
- * written under a spelling no reader looks at are rows the operator never sees
- * (issue #1743).
- *
- * # Why nothing else is
- *
- * {@link generalAwareChannel} answers a bare member id with the DM *channel*
- * id, `dm:<id>` — but `dmThreadId` stays the bare id for any teammate whose own
- * id is not a General spelling, so routing every id through the map moves DM
- * live state to a key nothing reads (PR #2068 review).
- *
- * # Why the fallback is `MAIN_THREAD_ID` and not the raw alias
- *
- * The map is built from the desk list, so it is empty until that loads. Falling
- * back to the alias made this resolver *unstable across a turn*: a `tool_call`
- * arriving before the desks landed keyed `General`, its `tool_result` after
- * keyed `main`, and since a result whose call is not in its bucket is dropped,
- * the call row stayed `running` for good in a bucket nothing renders (CodeRabbit
- * on #2068). `MAIN_THREAD_ID` is the built-in General channel's own id, so it is
- * both the stable answer and the one the map itself returns for an ordinary
- * company — the two agree, and the transition stops mattering.
- */
-export function liveFrameThreadKey(
-  map: Readonly<Record<string, string>>,
-  frameThreadId: string,
-): string {
-  if (!isGeneralChannel(frameThreadId)) return frameThreadId;
-  return generalAwareChannel(map, frameThreadId) ?? MAIN_THREAD_ID;
 }
 
 /**
@@ -185,16 +93,11 @@ export interface ChatMessage {
   text: string;
   /**
    * **The body as the model wrote it**, when the host sent one — `text` before
-   * `readable_moves` rewrote the room's grammar into operator-facing prose.
+   * the host rewrote it for a person to read (a referral's cue line).
    *
-   * Equal to {@link text} on every row that carries no move, which is every
-   * reply on every desk that does not deliberate, and absent from a host that
-   * predates the field.
-   *
-   * Read it wherever the *grammar* is the point rather than the prose: the
-   * episode fold counts `!propose`/`!support`/`^N`, and reading {@link text}
-   * there makes the deliberation panel depend on the host not having tidied
-   * the bubble.
+   * Equal to {@link text} on every row the rewrite did not touch, and absent
+   * from a host that predates the field. Only the raw view reads it, because
+   * only the raw view claims to show the string the model received.
    */
   cueText?: string;
   /** Wall-clock the line was added, for timestamps and grouping. */
@@ -242,14 +145,24 @@ export interface ChatMessage {
   referredFrom?: import("@/api/types").ReferredFromDto;
   /** The crossing this report brought home, rendered as one collapsed line. */
   referralConversation?: import("@/api/types").ReferralConversationDto;
+  /** The agent-to-agent exchanges this row reported, oldest first. */
+  agentConversations?: import("@/api/types").AgentConversationDto[];
   /**
-   * The private aside behind this line, rendered as one collapsed line.
-   *
-   * Carried the same way `referralConversation` is, and for the same reason:
-   * only the host knows an aside produced this message, so it rides the message
-   * rather than being inferred from the text here.
+   * What this line was inside the episode that produced it — its round, its
+   * speech act (`post` / `broadcast` / `dm` / `complete_episode`) and a `dm`'s
+   * recipients. Carried the same way `referralConversation` is, and for the
+   * same reason: only the host knows which round committed a reply, so it
+   * rides the message rather than being inferred from the text here. Absent
+   * for every reply outside an episode, which is what keeps a DM, `#general`
+   * and a single-responder desk rendering exactly as they always have.
    */
-  asideConversation?: import("@/api/types").AsideConversationDto;
+  episode?: import("@/api/types").MessageEpisodeDto;
+  /**
+   * Who may read this line, by agent id, when the host narrowed it — a desk
+   * `dm`. Absent means the whole desk. The operator reads every line either
+   * way; this is what the row's "→ @x" addressing is drawn from.
+   */
+  audience?: string[];
   /**
    * Who reacted to this line with what — one row per person per emoji, not a
    * count (issue #364).
@@ -482,9 +395,13 @@ export function makeMessage(
     /**
      * The body as the model wrote it, when the frame carried one — see
      * {@link ChatMessage.cueText}. Passed through untouched so a live row and
-     * the same row after a reload feed the episode fold identically.
+     * the same row after a reload read identically in the raw view.
      */
     cueText?: string;
+    /** The episode this reply was committed into — see {@link ChatMessage.episode}. */
+    episode?: import("@/api/types").MessageEpisodeDto;
+    /** Who may read it — see {@link ChatMessage.audience}. */
+    audience?: string[];
     /** The fail-closed reason (KR-L2-03), already narrowed by `toTurnFailure`. */
     turnFailure?: TurnFailure;
   } = {},
@@ -497,6 +414,8 @@ export function makeMessage(
     at: opts.at ?? Date.now(),
     channel: opts.channel,
     parentId: opts.parentId,
+    episode: opts.episode,
+    audience: opts.audience?.length ? opts.audience : undefined,
     steps: opts.steps,
     taskId: opts.taskId,
     turnFailure: opts.turnFailure,
@@ -547,17 +466,9 @@ export interface DispatchMarkerPlacement {
  *   one. The host already declines to file such a card into any desk's history;
  *   this is the live half of the same rule, and the two must agree or a marker
  *   would appear live and vanish on reload.
- * - **An empty `chatId` is the General thread, not an absent one.** The host
- *   folds `""` into General (`is_general_chat` treats an empty id, `"main"` and
- *   `"General"` as one conversation), and the chat route takes `chat` straight
- *   off the request body without normalising it — so a client posting
- *   `chat: ""` stores `origin_chat_id: Some("")` and the projection emits
- *   `chatId: ""`. Treating that as absent would drop the live marker while
- *   `chat/history` still served the rehydrated twin: the marker would appear
- *   only after a reload, which is the live-vs-history split the whole
- *   identity-dedupe exists to prevent. Absent means `undefined`, and only
- *   `undefined`. (The REST create path already normalises a blank field away
- *   for the same reason — issue #246.)
+ * - **An empty `chatId` is `#general`, not an absent origin.** An unaddressed
+ *   message lands in `#general`, so a card raised from one belongs there.
+ *   Absent means `undefined`, and only `undefined`.
  * - **`channelId: null` when the thread matches no channel** — never a fall
  *   back to whatever channel the operator has open. The shell's `noteInChannel`
  *   does fall back, deliberately, because an approval decision has to be seen;
@@ -580,15 +491,9 @@ export function dispatchMarkerPlacement(
   chatChannelByThread: Record<string, string>,
 ): DispatchMarkerPlacement | null {
   if (event.chatId === undefined) return null;
-  // `""` is the General thread spelled empty, not a missing origin — see above.
-  const threadId = event.chatId === "" ? MAIN_THREAD_ID : event.chatId;
+  const threadId = event.chatId === "" ? GENERAL_CHANNEL_ID : event.chatId;
   return {
     threadId,
-    // Resolved the same way every other live frame is (issue #1743): the map
-    // carries four literal General spellings, while the host accepts any casing
-    // and echoes back the one the caller addressed. A bare index dropped the
-    // marker for `MAIN` or `GENERAL`, so a dispatch settled with nothing to
-    // show for it until a reload.
     channelId: generalAwareChannel(chatChannelByThread, threadId),
     message: makeMessage("system", dispatchMarkerText(event.column), {
       taskId: event.taskId,
@@ -682,7 +587,7 @@ export function fromHistory(entries: ChatHistoryMessageDto[]): ChatMessage[] {
       from,
       text: entry.text,
       // Straight through, like `byPerson`: the host is the only layer that
-      // still has the pre-rewrite body, and the episode fold needs it.
+      // still has the pre-rewrite body, and the raw view shows it.
       cueText: entry.cueText,
       at: entry.atMillis,
       // Straight through, never derived: see the field's own note, and
@@ -696,7 +601,13 @@ export function fromHistory(entries: ChatHistoryMessageDto[]): ChatMessage[] {
       // caused this line, and nothing here may infer it.
       referredFrom: entry.referredFrom,
       referralConversation: entry.referralConversation,
-      asideConversation: entry.asideConversation,
+      // And the a2a exchange, on the same terms: the rows are in the pair
+      // channel, so only the host can say this row reported one.
+      agentConversations: entry.agentConversations,
+      // The round and speech act behind a reply, and who may read it. Same
+      // rule again: only the host knows which round committed a line.
+      episode: entry.episode,
+      audience: entry.audience?.length ? entry.audience : undefined,
       // Reactions come through whoever the host said reacted; nothing is
       // inferred here, `mine` included.
       reactions: entry.reactions?.length ? entry.reactions : undefined,

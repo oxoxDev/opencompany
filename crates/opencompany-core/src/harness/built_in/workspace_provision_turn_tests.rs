@@ -227,6 +227,7 @@ fn company() -> CompanyId {
 
 fn record(overlays: Vec<OverlayAgent>) -> CompanyRecord {
     CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
@@ -260,6 +261,7 @@ fn build_brain(
 ) -> (HarnessBrain, Arc<FsOps>) {
     let ops = Arc::new(FsOps::new(dir));
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -299,6 +301,7 @@ fn build_brain(
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -517,8 +520,8 @@ async fn a_workspace_removed_under_a_live_host_is_repaired_before_the_next_write
 }
 
 /// Provisioning is not a licence: the same freshly-provisioned agent still
-/// cannot reach outside its sandbox. A `..` traversal is refused, and the
-/// refusal reaches the model rather than silently succeeding.
+/// cannot reach outside its sandbox. A `..` traversal is refused, the refusal
+/// ends the turn, and the card says why rather than silently succeeding.
 #[tokio::test]
 async fn a_traversal_from_a_provisioned_workspace_is_still_refused() {
     let dir = tempfile::tempdir().unwrap();
@@ -533,18 +536,25 @@ async fn a_traversal_from_a_provisioned_workspace_is_still_refused() {
         .await
         .expect("cycle runs");
 
-    let results = tool_results(&script);
+    let note = TaskStore::list(&*ops, &company())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|card| card.id == "t-1")
+        .and_then(|card| card.note)
+        .unwrap_or_default();
     assert!(
-        results
-            .iter()
-            .any(|r| r.contains("Path not allowed by security policy")),
-        "a traversal must be refused: {results:?}"
+        note.contains("Path not allowed by security policy"),
+        "a traversal must be refused: {note}"
     );
-    // The refusal reads nothing like the missing-workspace one, because it is
-    // caught by the string-level check before any path is resolved.
     assert!(
-        !results.iter().any(|r| r.contains(ESCAPE_REFUSAL)),
-        "a `..` traversal must not be reported as a resolved-parent escape: {results:?}"
+        !note.contains(ESCAPE_REFUSAL),
+        "a `..` traversal must not be reported as a resolved-parent escape: {note}"
+    );
+    assert_eq!(
+        tool_results(&script),
+        Vec::<String>::new(),
+        "a policy refusal ends the turn before the model is asked again"
     );
     assert!(
         !dir.path().join("loot.md").exists(),

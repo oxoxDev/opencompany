@@ -1,48 +1,27 @@
-//! Learning which ecosystem address is behind a platform token.
+//! The TinyHumans hub, scoped to the two things this host asks of it: a key
+//! grant, and the billing standing of the key it was granted.
 //!
-//! Sign-in happens **here**, on the company's own console. The browser is sent
-//! to the hub's OAuth start pointed back at this origin, the hub completes the
-//! provider dance and redirects back carrying a platform JWT, and this module
-//! turns that JWT into one address.
+//! ## What is deliberately not here
 //!
-//! ## Why this tenant does not verify the token
-//!
-//! It cannot. The signing secret belongs to the hub, and handing it to every
-//! tenant so each could check a signature would also let every tenant *mint* a
-//! token for any user in the ecosystem — the plainest possible way to lose the
-//! isolation the hosting layer exists to provide.
-//!
-//! So the tenant does not verify the token; it *uses* it. It presents the token
-//! to the hub's own `GET /auth/me`, exactly as the dashboard would. If the hub
-//! answers with an identity, that **is** the proof: only the hub can say who a
-//! token it signed belongs to, and a forged or expired one gets a 401 there.
-//! No shared secret, no minted code, no second round trip to invent.
-//!
-//! ## What this costs, stated plainly
-//!
-//! The tenant briefly holds a hub credential belonging to the person signing
-//! in — one that carries their ecosystem privileges, not merely their identity.
-//! That is a real delegation of trust to the tenant, and it is strictly more
-//! than a single-use, slug-bound code would have handed over. It is accepted
-//! here because the console *is* the company: a person signing in to their own
-//! company's host is already trusting that host with everything the company
-//! holds. What this module owes in return is discipline — the token is used
-//! once, for one request, and is never persisted, never logged, and never
-//! echoed back in an error.
-//!
-//! Authorization is emphatically **not** delegated. The hub says who they are;
-//! this company's own roster says whether they may in — the same
-//! `eligibility` → `upsert_from_eligibility` → `mint_session` path a magic link
-//! answers to.
+//! This module once also turned a hub sign-in into a session on the company:
+//! the browser was sent to the hub's OAuth start, came back carrying a platform
+//! JWT, and `POST …/auth/hub` asked the hub whose it was. That is gone. A
+//! company's sign-in is its own — magic link, password, wallet, or none — and
+//! an ecosystem account is never a way into one. Sharing a login between two
+//! products meant the weaker of the two decided the security of both, and it
+//! meant a sign-in screen with three buttons that led, on every self-hosted
+//! host, to a refusal on return. The hub is now only ever asked for a **key**,
+//! which the person approves on the hub's own site, and never hands this host
+//! a credential belonging to them.
 //!
 //! ## Shape
 //!
 //! The [`HubIdentityExchange`] trait and its offline [`MockHubIdentityExchange`]
-//! compile in the default build, so the whole route — eligibility, session
-//! minting, every refusal — is exercised without linking a network crate. Only
+//! compile in the default build, so every route that uses them — the key grant
+//! and the billing read — is exercised without linking a network crate. Only
 //! [`HttpHubIdentityExchange`] is gated behind the existing `tinyhumans`
-//! feature, which is already what "this instance talks to the hub about its
-//! credential's owner" means. It does not earn a feature flag of its own.
+//! feature, which is already what "this instance talks to the hub" means. It
+//! does not earn a feature flag of its own.
 
 use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
@@ -51,86 +30,15 @@ use async_trait::async_trait;
 
 use crate::Result;
 
-/// An identity provider the hub can complete a sign-in with.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct HubProvider {
-    /// The hub's provider slug, as it appears in `GET /auth/{id}/login`.
-    pub id: &'static str,
-    /// What the console calls it on the button.
-    pub label: &'static str,
-}
-
-/// The providers offered on the console's sign-in screen, in OpenHuman's order.
-///
-/// Deliberately the same three, in the same sequence, as OpenHuman's welcome
-/// screen. Someone who signs in to the desktop app with GitHub should not have
-/// to hunt for it here, and an ecosystem that offers a different identity set
-/// per surface teaches people that the account is per-surface too.
-///
-/// Discord is registered at the hub and supports login, but OpenHuman hides it
-/// on welcome (`showOnWelcome: false`), so it stays hidden here too.
-pub const HUB_PROVIDERS: &[HubProvider] = &[
-    HubProvider {
-        id: "google",
-        label: "Google",
-    },
-    HubProvider {
-        id: "github",
-        label: "GitHub",
-    },
-    HubProvider {
-        id: "twitter",
-        label: "X",
-    },
-];
-
-/// Builds the hub URL that starts a sign-in and comes back to `redirect_uri`.
-///
-/// `redirect_uri` is round-tripped by the hub verbatim, with `token=…&key=auth`
-/// appended, so it must arrive percent-encoded as a single query value —
-/// unescaped it would end at the console origin's own `?` and the hub would
-/// read the console's `company=` as one of its own parameters.
-///
-/// ## Which origins the hub accepts
-///
-/// The hub decides, and it is the only party that can: `isAllowedFrontendRedirectUri`
-/// admits a loopback `http://` URI **or** an origin that resolves to a
-/// provisioned tenant in its own registry (`<slug>.<base-domain>`, or a
-/// verified custom domain). A registry lookup is not something this crate can
-/// mirror, and a de-provisioned tenant stops being accepted there with no
-/// redeploy here.
-///
-/// So this builds the URL and lets the hub answer. The origin comes from
-/// [`AppConfig::host_base_url`](crate::AppConfig::host_base_url), which means a
-/// hosted console is `OPENCOMPANY_PUBLIC_URL=https://…` and no code change.
-///
-/// This once carried a local `hub_accepts_redirect_uri` copy of the hub's
-/// then-loopback-only rule, so a console would not render a button that could
-/// only 400 (issue #512). `tinyhumansai/backend#1243` has since landed and the
-/// copy went with it — it had become the thing hiding the buttons on every
-/// hosted console, which is the failure it existed to prevent, one level up.
-pub fn login_start_url(api_url: &str, provider: &str, redirect_uri: &str) -> String {
-    format!(
-        "{}/auth/{}/login?redirectUri={}",
-        api_url.trim_end_matches('/'),
-        provider,
-        percent_encode(redirect_uri),
-    )
-}
-
 /// Builds the hub URL that starts a **key grant** and comes back to `callback_url`.
 ///
-/// The sign-in flow above proves who someone is. This one asks the hub to mint
-/// this company a key, and it is deliberately a different exchange rather than a
-/// reuse of the sign-in token.
-///
-/// The difference is what the tenant ends up holding. A sign-in hands this
-/// tenant a platform JWT carrying the person's whole ecosystem account, used for
-/// one request and dropped ([`HubIdentityExchange::identify`]). A key grant
-/// hands it a one-time code that redeems to exactly one scoped API key, and the
-/// secret that unlocks the code (`verifier`) never leaves this host — only its
-/// SHA-256 goes out, as `challenge`. So a code captured anywhere along the
-/// browser's path — history, a `Referer`, a shoulder — redeems nothing.
+/// This asks the hub to mint this company a key. What the tenant ends up
+/// holding is a one-time code that redeems to exactly one scoped API key, and
+/// the secret that unlocks the code (`verifier`) never leaves this host — only
+/// its SHA-256 goes out, as `challenge`. So a code captured anywhere along the
+/// browser's path — history, a `Referer`, a shoulder — redeems nothing, and
+/// this host never holds a credential belonging to the person who approved
+/// the grant.
 ///
 /// Shaped after OpenRouter's PKCE key exchange, which solves the same problem:
 /// give an application a key without a human copying one between two sites.
@@ -198,25 +106,13 @@ fn percent_encode(value: &str) -> String {
     out
 }
 
-/// Who a platform token stands for.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HubIdentity {
-    /// The ecosystem address the hub resolved the token to. Not normalized
-    /// here — the route does that before it goes anywhere near a user lookup.
-    pub email: String,
-}
-
-/// The hub, scoped to the one question this tenant may ask it: whose token is
-/// this?
+/// The hub, scoped to the two things this tenant may ask of it: redeem a key
+/// grant, and read the standing of the key it holds.
+///
+/// The name predates the removal of the hub sign-in and is kept so the
+/// `AppState` seam (`with_hub_identity`) and every caller stay put.
 #[async_trait]
 pub trait HubIdentityExchange: Send + Sync {
-    /// Resolves `token` to the address that holds it.
-    ///
-    /// Implementations must treat `token` as a live credential: never log it,
-    /// never store it, and never include it in an error. It is the caller's
-    /// only proof of identity and would be replayable by anyone who read it.
-    async fn identify(&self, token: &str) -> Result<HubIdentity>;
-
     /// Trades a one-time grant `code` and its `verifier` for a TinyHumans key.
     ///
     /// The other half of [`key_grant_url`]. Returns the plaintext key, which the
@@ -267,19 +163,13 @@ pub struct BillingSummary {
 }
 
 /// An in-memory [`HubIdentityExchange`] for offline tests and local demos.
-///
-/// Non-destructive, unlike a single-use code: a platform token is a bearer
-/// credential with a lifetime, so presenting it twice legitimately succeeds
-/// twice. A mock that expired it on first use would make the route look
-/// stricter than it is.
 #[derive(Debug, Default)]
 pub struct MockHubIdentityExchange {
-    tokens: StdMutex<HashMap<String, String>>,
     /// Grant codes and the `(verifier, key)` each redeems to.
     ///
-    /// Single-use, unlike [`Self::tokens`]: a grant code really is spent on
-    /// redemption at the hub, and a mock that let one be redeemed twice would
-    /// make the route look safe to retry when it is not.
+    /// Single-use: a grant code really is spent on redemption at the hub, and
+    /// a mock that let one be redeemed twice would make the route look safe to
+    /// retry when it is not.
     grants: StdMutex<HashMap<String, (String, String)>>,
     /// A forced transport failure, standing in for "the hub is not answering".
     unreachable: bool,
@@ -288,18 +178,9 @@ pub struct MockHubIdentityExchange {
 }
 
 impl MockHubIdentityExchange {
-    /// An exchange that knows no tokens; every lookup is rejected.
+    /// An exchange that knows no grants; every redemption is rejected.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Seeds one live token and the address it resolves to.
-    pub fn with_token(self, token: &str, email: &str) -> Self {
-        self.tokens
-            .lock()
-            .expect("mock poisoned")
-            .insert(token.to_string(), email.to_string());
-        self
     }
 
     /// Seeds the billing standing one key reads back.
@@ -322,10 +203,10 @@ impl MockHubIdentityExchange {
 
     /// An exchange whose hub cannot be reached at all.
     ///
-    /// Distinct from an unknown token on purpose: one is a dead credential the
-    /// caller should re-earn by signing in again, the other is an outage the
-    /// caller can do nothing about, and the route must not tell someone to
-    /// click again when clicking again cannot work.
+    /// Distinct from an unknown code on purpose: one is a dead credential the
+    /// caller should re-earn by going through the grant again, the other is an
+    /// outage the caller can do nothing about, and the route must not tell
+    /// someone to click again when clicking again cannot work.
     pub fn unreachable() -> Self {
         Self {
             unreachable: true,
@@ -334,37 +215,21 @@ impl MockHubIdentityExchange {
     }
 }
 
-/// The error the hub returns for a token that is forged, expired, or revoked.
+/// The error the hub returns for a code or key that is forged, expired, or
+/// revoked.
 ///
-/// One shape for all three, mirroring the hub: `GET /auth/me` answers 401 for
-/// every one of them, and inventing a finer distinction here would be this
-/// tenant guessing at a fact only the hub holds.
+/// One shape for all three, mirroring the hub, which answers 401 for every one
+/// of them; inventing a finer distinction here would be this tenant guessing
+/// at a fact only the hub holds.
 fn rejected() -> crate::error::OpenCompanyError {
     crate::error::OpenCompanyError::TinyHumans {
         code: "http_401".to_string(),
-        message: "The hub did not recognize that sign-in".to_string(),
+        message: "The hub did not recognize that credential".to_string(),
     }
 }
 
 #[async_trait]
 impl HubIdentityExchange for MockHubIdentityExchange {
-    async fn identify(&self, token: &str) -> Result<HubIdentity> {
-        if self.unreachable {
-            return Err(crate::error::OpenCompanyError::TinyHumans {
-                code: "unreachable".to_string(),
-                message: "connection refused".to_string(),
-            });
-        }
-        self.tokens
-            .lock()
-            .expect("mock poisoned")
-            .get(token)
-            .map(|email| HubIdentity {
-                email: email.clone(),
-            })
-            .ok_or_else(rejected)
-    }
-
     async fn redeem_key_grant(&self, code: &str, verifier: &str) -> Result<String> {
         if self.unreachable {
             return Err(crate::error::OpenCompanyError::TinyHumans {
@@ -388,8 +253,8 @@ impl HubIdentityExchange for MockHubIdentityExchange {
                 message: "connection refused".to_string(),
             });
         }
-        // Non-destructive, like `identify` and unlike a grant code: reading a
-        // balance twice is the same read twice.
+        // Non-destructive, unlike a grant code: reading a balance twice is the
+        // same read twice.
         self.billing
             .lock()
             .expect("mock poisoned")
@@ -409,22 +274,11 @@ pub use http::HttpHubIdentityExchange;
 
 #[cfg(feature = "tinyhumans")]
 mod http {
-    use super::{BillingSummary, HubIdentity, HubIdentityExchange};
+    use super::{BillingSummary, HubIdentityExchange};
     use crate::Result;
     use crate::error::OpenCompanyError;
     use async_trait::async_trait;
     use serde::Deserialize;
-
-    /// The hub's envelope for `GET /auth/me`.
-    #[derive(Debug, Deserialize)]
-    struct MeResponse {
-        data: MeData,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct MeData {
-        email: String,
-    }
 
     /// The hub's envelope for `POST /auth/keys`.
     #[derive(Debug, Deserialize)]
@@ -478,12 +332,8 @@ mod http {
         manage_url: Option<String>,
     }
 
-    /// A [`HubIdentityExchange`] backed by `GET {api_url}/auth/me`.
-    ///
-    /// Deliberately the hub's *existing* session route rather than anything
-    /// built for tenants. There is no new endpoint to secure, no new token type
-    /// to expire, and no way for this call to learn more than the person who
-    /// presented the token already knows about themselves.
+    /// A [`HubIdentityExchange`] backed by the hub's own `POST /auth/keys` and
+    /// `GET /payments/summary`.
     pub struct HttpHubIdentityExchange {
         api_url: String,
         http: reqwest::Client,
@@ -493,7 +343,7 @@ mod http {
         /// Builds an exchange against `api_url`.
         pub fn new(api_url: impl Into<String>) -> Self {
             Self {
-                // Trailing slashes would produce `//auth/me`.
+                // Trailing slashes would produce `//auth/keys`.
                 api_url: api_url.into().trim_end_matches('/').to_string(),
                 http: reqwest::Client::new(),
             }
@@ -509,46 +359,14 @@ mod http {
 
     #[async_trait]
     impl HubIdentityExchange for HttpHubIdentityExchange {
-        async fn identify(&self, token: &str) -> Result<HubIdentity> {
-            let url = format!("{}/auth/me", self.api_url);
-            let (product_header_name, product_header_value) =
-                crate::product::product_identity_header();
-            let resp = self
-                .http
-                .get(&url)
-                .bearer_auth(token)
-                // `api_url` is the TinyHumans backend itself (`AppConfig::api_url`,
-                // defaulting to `crate::app::config::DEFAULT_API_URL`), so this is
-                // our own backend and is tagged like every other call we make to
-                // it. A bespoke `reqwest::Client`, not one built through
-                // `openhuman_core`'s `IntegrationClient`, so it never inherits the
-                // header `set_product_identity` attaches — see `crate::product`.
-                .header(product_header_name, product_header_value)
-                .send()
-                .await
-                .map_err(|e| Self::err("unreachable", e))?;
-
-            let status = resp.status();
-            if !status.is_success() {
-                // The hub's own message is safe to surface — it describes the
-                // token's standing, never the person's. The token itself is
-                // never echoed, and `reqwest`'s error Display would not carry
-                // it either (the bearer lives in a header, not the URL).
-                let detail = resp.text().await.unwrap_or_default();
-                return Err(Self::err(
-                    &format!("http_{}", status.as_u16()),
-                    truncate(&detail, 200),
-                ));
-            }
-
-            let parsed: MeResponse = resp.json().await.map_err(|e| Self::err("decode", e))?;
-            Ok(HubIdentity {
-                email: parsed.data.email,
-            })
-        }
-
         async fn redeem_key_grant(&self, code: &str, verifier: &str) -> Result<String> {
             let url = format!("{}/auth/keys", self.api_url);
+            // `api_url` is the TinyHumans backend itself (`AppConfig::api_url`,
+            // defaulting to `crate::app::config::DEFAULT_API_URL`), so this is
+            // our own backend and is tagged like every other call we make to
+            // it. A bespoke `reqwest::Client`, not one built through
+            // `openhuman_core`'s `IntegrationClient`, so it never inherits the
+            // header `set_product_identity` attaches — see `crate::product`.
             let (product_header_name, product_header_value) =
                 crate::product::product_identity_header();
             // No bearer: the hub's redemption route is unauthenticated, and the

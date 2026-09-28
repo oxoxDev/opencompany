@@ -29,6 +29,7 @@
 //   `#/company/desks`      the org chart
 //   `#/company/<deskId>`   the org chart, arriving at that desk (issue #485)
 //   `#/company/graph`      the knowledge graph (issue #1321)
+//   `#/company/comms`      who talks to whom — the comms graph
 //
 // which means the chart survives a reload, can be linked, and is reached by
 // asking for it rather than by flipping a switch and hoping.
@@ -43,6 +44,8 @@
 import type { OpenCompanyClient } from "@/api/client";
 import { Overview } from "@/views/Overview";
 import { OrgChartView } from "@/views/company/OrgChartView";
+import { CommsView } from "@/views/comms/CommsView";
+import type { CommsObservation } from "@/views/comms/model";
 import { TeamView } from "@/views/TeamView";
 
 /**
@@ -83,6 +86,13 @@ export const GRAPH_SEGMENT = "graph";
  * cannot be focused through its own link.
  */
 export const AGENTS_SEGMENT = "agents";
+
+/**
+ * The comms graph's segment — `#/company/comms`: who may reach whom, who has,
+ * and who spoke to whom inside an episode. Reserved like the others, with the
+ * same accepted collision for a desk literally named `comms`.
+ */
+export const COMMS_SEGMENT = "comms";
 
 interface Props {
   client: OpenCompanyClient;
@@ -126,6 +136,13 @@ interface Props {
    * stands alone, matching `Overview`'s own fallback chain.
    */
   companyName?: string;
+  /**
+   * What the live stream has said about who spoke to whom, folded by the shell
+   * (`lib/coordination.ts`), for the comms graph at `#/company/comms`.
+   */
+  commsObservations?: CommsObservation[];
+  /** See `OrgChartView`'s prop of the same name. */
+  deskRoutingTick?: number;
 }
 
 export function CompanyView({
@@ -137,9 +154,15 @@ export function CompanyView({
   refreshKey,
   onRunSetup,
   companyName,
+  commsObservations,
+  deskRoutingTick,
 }: Props) {
   if (sub === GRAPH_SEGMENT) {
     return <Overview client={client} company={company} companyName={companyName} />;
+  }
+
+  if (sub === COMMS_SEGMENT) {
+    return <CommsView client={client} company={company} observations={commsObservations} />;
   }
 
   if (sub && sub !== AGENTS_SEGMENT) {
@@ -149,6 +172,7 @@ export function CompanyView({
         company={company}
         // The reserved segment names the chart, not a desk on it.
         focusDeskId={sub === DESKS_SEGMENT ? null : sub}
+        deskRoutingTick={deskRoutingTick}
         onBack={() => onNavigate(null)}
         // The chart's own Add-teammate dialog lands a created teammate on its
         // detail page (issue #1989), the same `#/team/<agentId>` address the

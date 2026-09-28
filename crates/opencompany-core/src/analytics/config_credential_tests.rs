@@ -10,13 +10,13 @@ const TEST_ENDPOINT: &str = "https://collector.invalid/track";
 
 /// A fully configured reporting environment, which `pairs` then overrides.
 ///
-/// It takes three variables where it used to take one, and that is the
-/// shape of the change: an OpenPanel deployment configures a client id, a
-/// client secret and the address of the collector it self-hosts.
+/// It takes two variables, and that is the whole tenant contract: an
+/// OpenPanel deployment configures a client id and the address of the
+/// collector it self-hosts. There is no client secret — the collector's
+/// clients run with "ignore CORS and secret".
 fn configured(pairs: &[(&str, &str)]) -> MapEnv {
     let mut all = vec![
         (CLIENT_ID_ENV, "not-a-real-client-id"),
-        (CLIENT_SECRET_ENV, "not-a-real-client-secret"),
         (ENDPOINT_ENV, TEST_ENDPOINT),
     ];
     all.extend_from_slice(pairs);
@@ -54,57 +54,101 @@ fn a_hosted_tenant_with_a_credential_reports() {
         } => {
             assert_eq!(endpoint, TEST_ENDPOINT);
             assert_eq!(credentials.expose_id(), "not-a-real-client-id");
-            assert_eq!(credentials.expose_secret(), "not-a-real-client-secret");
         }
         other => panic!("{other:?}"),
     }
 }
 
-/// A hosted tenant with nothing configured is misconfigured, not reporting
-/// to nowhere — and the reason says so.
+/// **The client id alone is enough.** A leftover
+/// `OPENCOMPANY_ANALYTICS_CLIENT_SECRET` from before the collector's secret
+/// check was switched off is neither required nor read: its absence does not
+/// silence a tenant, and its presence changes nothing.
 #[test]
-fn a_hosted_tenant_without_a_credential_is_silent() {
+fn a_client_secret_is_neither_required_nor_read() {
+    let id_only = resolve(Deployment::HostedTenant, &configured(&[]));
+    assert!(id_only.reports(), "{id_only:?}");
+    let with_leftover = resolve(
+        Deployment::HostedTenant,
+        &configured(&[("OPENCOMPANY_ANALYTICS_CLIENT_SECRET", "not a header\nvalue")]),
+    );
+    assert_eq!(with_leftover, id_only);
+}
+
+/// **A hosted tenant with nothing configured reports to the TinyHumans
+/// collector as the TinyHumans client** — the compiled-in defaults, so the
+/// tenant image needs no injected analytics configuration.
+#[test]
+fn a_hosted_tenant_without_configuration_uses_the_defaults() {
+    match resolve(Deployment::HostedTenant, &MapEnv::default()) {
+        Decision::Report {
+            endpoint,
+            credentials,
+        } => {
+            assert_eq!(endpoint, DEFAULT_ENDPOINT);
+            assert_eq!(credentials.expose_id(), DEFAULT_CLIENT_ID);
+        }
+        other => panic!("{other:?}"),
+    }
+    // Blank is absent for both, and configuration outranks both defaults.
+    match resolve(
+        Deployment::HostedTenant,
+        &MapEnv::new([(CLIENT_ID_ENV, " \n"), (ENDPOINT_ENV, "  ")]),
+    ) {
+        Decision::Report {
+            endpoint,
+            credentials,
+        } => {
+            assert_eq!(endpoint, DEFAULT_ENDPOINT);
+            assert_eq!(credentials.expose_id(), DEFAULT_CLIENT_ID);
+        }
+        other => panic!("{other:?}"),
+    }
+    match resolve(Deployment::HostedTenant, &configured(&[])) {
+        Decision::Report {
+            endpoint,
+            credentials,
+        } => {
+            assert_eq!(endpoint, TEST_ENDPOINT);
+            assert_eq!(credentials.expose_id(), "not-a-real-client-id");
+        }
+        other => panic!("{other:?}"),
+    }
+    // `off` still wins over the defaults.
     assert_eq!(
-        resolve(Deployment::HostedTenant, &MapEnv::default()),
-        Decision::Silent(Silence::NoCredentials)
+        resolve(
+            Deployment::HostedTenant,
+            &MapEnv::new([(ENABLE_ENV, "off")])
+        ),
+        Decision::Silent(Silence::OptedOut)
     );
 }
 
-/// **Half a credential is a misconfiguration, and the reason names the half
-/// that is missing.**
-///
-/// OpenPanel authenticates a write client with an id *and* a secret, so
-/// there is no useful state in between. This is the shape a half-finished
-/// secret rollout has — the id is in the manifest, the secret is still in
-/// the vault — and telling that operator "no credential is configured"
-/// while `OPENCOMPANY_ANALYTICS_CLIENT_ID` is plainly set in their env file
-/// sends them to look at the wrong variable.
+/// A set-but-malformed endpoint is reported, never papered over by the
+/// default.
 #[test]
-fn half_a_credential_says_which_half_is_missing() {
-    let only_id = MapEnv::new([
-        (CLIENT_ID_ENV, "not-a-real-client-id"),
-        (ENDPOINT_ENV, TEST_ENDPOINT),
-    ]);
+fn a_malformed_endpoint_is_not_replaced_by_the_default() {
     assert_eq!(
-        resolve(Deployment::HostedTenant, &only_id),
-        Decision::Silent(Silence::NoClientSecret)
+        resolve(
+            Deployment::HostedTenant,
+            &MapEnv::new([(ENDPOINT_ENV, "collector.internal/track")])
+        ),
+        Decision::Silent(Silence::UnusableEndpoint)
     );
-    assert!(
-        Silence::NoClientSecret
-            .as_str()
-            .contains("OPENCOMPANY_ANALYTICS_CLIENT_SECRET"),
-        "the reason must name the variable to set: {}",
-        Silence::NoClientSecret.as_str()
-    );
+}
 
-    let only_secret = MapEnv::new([
-        (CLIENT_SECRET_ENV, "not-a-real-client-secret"),
-        (ENDPOINT_ENV, TEST_ENDPOINT),
-    ]);
-    assert_eq!(
-        resolve(Deployment::HostedTenant, &only_secret),
-        Decision::Silent(Silence::NoClientId)
-    );
+/// The compiled-in defaults pass the same validation configuration does.
+#[test]
+fn the_defaults_are_themselves_valid() {
+    assert!(is_usable_endpoint(DEFAULT_ENDPOINT));
+    assert!(is_secure_endpoint(DEFAULT_ENDPOINT));
+    assert!(is_header_safe(DEFAULT_CLIENT_ID));
+}
+
+/// The reason names the variable to set, and a blank id is no id: a value
+/// mounted from a file arrives with a trailing newline more often than not,
+/// and a launcher that exports an empty variable has configured nothing.
+#[test]
+fn a_missing_or_blank_client_id_names_the_variable() {
     assert!(
         Silence::NoClientId
             .as_str()
@@ -112,27 +156,11 @@ fn half_a_credential_says_which_half_is_missing() {
         "the reason must name the variable to set: {}",
         Silence::NoClientId.as_str()
     );
-}
-
-/// Blank is absent for both halves, and for the same reason it is for the
-/// switch: a secret mounted from a file arrives with a trailing newline
-/// more often than not, and a launcher that exports an empty variable has
-/// configured nothing.
-#[test]
-fn a_blank_half_is_no_half() {
     for blank in ["   ", "\n", "\t\n "] {
         assert_eq!(
             resolve(
-                Deployment::HostedTenant,
-                &configured(&[(CLIENT_SECRET_ENV, blank)])
-            ),
-            Decision::Silent(Silence::NoClientSecret),
-            "a secret of {blank:?} must not read as configured"
-        );
-        assert_eq!(
-            resolve(
-                Deployment::HostedTenant,
-                &configured(&[(CLIENT_ID_ENV, blank)])
+                Deployment::SelfHosted,
+                &configured(&[(CLIENT_ID_ENV, blank), (ENABLE_ENV, "on")])
             ),
             Decision::Silent(Silence::NoClientId),
             "an id of {blank:?} must not read as configured"
@@ -147,14 +175,10 @@ fn a_blank_half_is_no_half() {
 fn a_credential_is_trimmed() {
     match resolve(
         Deployment::HostedTenant,
-        &configured(&[
-            (CLIENT_ID_ENV, "  not-a-real-client-id\n"),
-            (CLIENT_SECRET_ENV, "\tnot-a-real-client-secret\n"),
-        ]),
+        &configured(&[(CLIENT_ID_ENV, "  not-a-real-client-id\n")]),
     ) {
         Decision::Report { credentials, .. } => {
             assert_eq!(credentials.expose_id(), "not-a-real-client-id");
-            assert_eq!(credentials.expose_secret(), "not-a-real-client-secret");
         }
         other => panic!("{other:?}"),
     }
@@ -164,30 +188,21 @@ fn a_credential_is_trimmed() {
 ///
 /// This is new with OpenPanel and is a consequence of where the credential
 /// now travels. Mixpanel's token rode in the JSON body, where any string is
-/// legal, so a mangled one was simply refused by the collector. These two
-/// ride in `openpanel-client-id` / `openpanel-client-secret` headers, and
-/// `reqwest` refuses to *build* a request whose header value holds a control
-/// byte — so a secret with an embedded newline (`kubectl create secret` over
-/// a wrapped file is the usual way one arrives) would install a tracker that
-/// never constructs a single request, forever, behind a `debug!` nobody has
+/// legal, so a mangled one was simply refused by the collector. The client
+/// id rides in the `openpanel-client-id` header, and `reqwest` refuses to
+/// *build* a request whose header value holds a control byte — so an id
+/// with an embedded newline (`kubectl create secret` over a wrapped file is
+/// the usual way one arrives) would install a tracker that never constructs a single request, forever, behind a `debug!` nobody has
 /// enabled. Trimming does not save it: the newline is in the middle.
 #[test]
 fn a_credential_that_cannot_go_in_a_header_is_silence() {
     for mangled in [
-        "not-a-real\nclient-secret",
-        "not-a-real\rclient-secret",
-        "not a real client secret",
-        "not-a-real-client-secret\u{0}",
-        "not-a-r\u{e9}al-client-secret",
+        "not-a-real\nclient-id",
+        "not-a-real\rclient-id",
+        "not a real client id",
+        "not-a-real-client-id\u{0}",
+        "not-a-r\u{e9}al-client-id",
     ] {
-        assert_eq!(
-            resolve(
-                Deployment::HostedTenant,
-                &configured(&[(CLIENT_SECRET_ENV, mangled)])
-            ),
-            Decision::Silent(Silence::UnusableCredential),
-            "a secret of {mangled:?} must not resolve to a report that cannot be built"
-        );
         assert_eq!(
             resolve(
                 Deployment::HostedTenant,
@@ -210,10 +225,7 @@ fn a_credential_that_cannot_go_in_a_header_is_silence() {
         assert!(
             resolve(
                 Deployment::HostedTenant,
-                &configured(&[
-                    (CLIENT_ID_ENV, real_shaped),
-                    (CLIENT_SECRET_ENV, real_shaped)
-                ])
+                &configured(&[(CLIENT_ID_ENV, real_shaped)])
             )
             .reports(),
             "{real_shaped:?} is the shape a real credential has and must still report"
@@ -237,25 +249,17 @@ fn the_unusable_credential_reason_never_quotes_the_credential() {
     );
 }
 
-/// **There is no default endpoint, and an absent one is silence with its
-/// own reason.**
+/// **Outside a hosted tenant there is no default, and an absent endpoint
+/// or id is silence with its own reason.**
 ///
-/// This replaced `https://api.mixpanel.com/track`, and dropping the default
-/// rather than re-pointing it is the deliberate half of that. OpenPanel is
-/// self-hosted: its address is whatever the operator runs it at, and any
-/// address this crate picked would be somebody else's collector. A tenant
-/// that configured a credential but no endpoint would then have shipped its
-/// telemetry to a third party nobody named — which is the accident
-/// `Silence::UnusableEndpoint` already refuses to make from the other
-/// direction.
+/// A self-hoster who opts in with `OPENCOMPANY_ANALYTICS=on` has asked to
+/// report to *their* collector; the TinyHumans default would be somebody
+/// else's, so it never applies to them.
 #[test]
 fn an_absent_endpoint_is_silence_rather_than_a_default() {
     let decision = resolve(
-        Deployment::HostedTenant,
-        &MapEnv::new([
-            (CLIENT_ID_ENV, "not-a-real-client-id"),
-            (CLIENT_SECRET_ENV, "not-a-real-client-secret"),
-        ]),
+        Deployment::SelfHosted,
+        &MapEnv::new([(CLIENT_ID_ENV, "not-a-real-client-id"), (ENABLE_ENV, "on")]),
     );
     assert_eq!(decision, Decision::Silent(Silence::NoEndpoint));
     assert!(!decision.reports());
@@ -266,6 +270,13 @@ fn an_absent_endpoint_is_silence_rather_than_a_default() {
         "the reason must name the variable to set: {}",
         Silence::NoEndpoint.as_str()
     );
+    assert_eq!(
+        resolve(
+            Deployment::SelfHosted,
+            &MapEnv::new([(ENDPOINT_ENV, TEST_ENDPOINT), (ENABLE_ENV, "on")]),
+        ),
+        Decision::Silent(Silence::NoClientId)
+    );
 }
 
 /// A blank endpoint is an absent one, not a broken one: a launcher that
@@ -275,8 +286,8 @@ fn an_absent_endpoint_is_silence_rather_than_a_default() {
 fn a_blank_endpoint_is_absent_rather_than_unusable() {
     assert_eq!(
         resolve(
-            Deployment::HostedTenant,
-            &configured(&[(ENDPOINT_ENV, "  \n")])
+            Deployment::SelfHosted,
+            &configured(&[(ENDPOINT_ENV, "  \n"), (ENABLE_ENV, "on")])
         ),
         Decision::Silent(Silence::NoEndpoint)
     );
@@ -347,7 +358,6 @@ fn a_non_unicode_switch_is_unreadable_rather_than_absent() {
             match key {
                 ENABLE_ENV => Some(OsString::from_vec(vec![0xff, 0xfe, 0x6f, 0x6e])),
                 CLIENT_ID_ENV => Some(OsString::from("not-a-real-client-id")),
-                CLIENT_SECRET_ENV => Some(OsString::from("not-a-real-client-secret")),
                 ENDPOINT_ENV => Some(OsString::from(TEST_ENDPOINT)),
                 _ => None,
             }
@@ -363,6 +373,44 @@ fn a_non_unicode_switch_is_unreadable_rather_than_absent() {
         Decision::Silent(Silence::Unreadable),
         "a switch set to bytes this process cannot read must not read as unset"
     );
+}
+
+/// **A client id that is set but is not text fails closed too.**
+///
+/// `non_blank` used to read the credential through [`EnvSource::get`], which
+/// maps a non-Unicode value to `None`. For a hosted tenant that `None` then
+/// fell to [`DEFAULT_CLIENT_ID`] — reporting under the compiled-in credential
+/// for a tenant that *did* configure one, just not one this process could
+/// read, rather than the `Silence::UnusableCredential` a malformed value
+/// should produce. Same leak as the switch above, by a different route.
+#[cfg(unix)]
+#[test]
+fn a_non_unicode_client_id_is_unusable_rather_than_the_default() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    struct NonUnicodeClientId;
+    impl EnvSource for NonUnicodeClientId {
+        fn get_os(&self, key: &str) -> Option<OsString> {
+            match key {
+                CLIENT_ID_ENV => Some(OsString::from_vec(vec![0xff, 0xfe])),
+                ENDPOINT_ENV => Some(OsString::from(TEST_ENDPOINT)),
+                _ => None,
+            }
+        }
+    }
+
+    // The premise: this really is a value `get` cannot see at all.
+    assert_eq!(NonUnicodeClientId.get(CLIENT_ID_ENV), None);
+    assert!(NonUnicodeClientId.get_os(CLIENT_ID_ENV).is_some());
+
+    let decision = resolve(Deployment::HostedTenant, &NonUnicodeClientId);
+    assert_eq!(
+        decision,
+        Decision::Silent(Silence::UnusableCredential),
+        "a client id set to bytes this process cannot read must not fall back to the default"
+    );
+    assert!(!decision.reports());
 }
 
 /// The near-miss control: `off` really is matched case-insensitively and

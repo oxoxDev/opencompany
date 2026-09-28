@@ -21,8 +21,8 @@ export type UserRole = "admin" | "member";
 /**
  * How a company signs people in.
  *
- * - `email` — magic link, optional password, ecosystem buttons. The default,
- *   and what every company did before this was configurable.
+ * - `email` — a password, plus a magic link where the host can mail one. The
+ *   default, and what every company did before this was configurable.
  * - `wallet` — a signed challenge from an Ed25519 (Solana-style) wallet. No
  *   mailbox is involved anywhere, so nothing is emailed and no password exists.
  * - `none` — there is no sign-in. The app on this device is the owner, and the
@@ -49,15 +49,22 @@ export interface AuthConfig {
   /** Whether a password may be offered. Only ever true in `email` mode. */
   passwords: boolean;
   /**
-   * Whether a magic link asked for here reaches anybody: the host has a mail
-   * transport, or it is loopback-bound and hands the code straight back.
+   * Whether a magic link asked for here reaches a mailbox — the host has a
+   * mail transport wired.
    *
-   * False is a routable host with no transport, and the console has to act on
-   * it — `auth/request` answers `sent: true` there exactly as it does on a host
-   * that delivered, so nothing else in the flow will ever reveal that the link
-   * went nowhere.
+   * False means the console draws no link form at all: the password is the
+   * only sign-in, and the screen must say so rather than offer "email me a
+   * link" on a host that emails nothing. `auth/request` answers `sent: true`
+   * there exactly as it does on a host that delivered, so nothing else in the
+   * flow would ever reveal that the link went nowhere.
    */
   magicLink: boolean;
+  /**
+   * Whether nobody has joined this company yet, so the first person in may
+   * pick the admin login and its password (`claimFirstAdmin`). True only in
+   * `email` mode, and only until the first user exists.
+   */
+  claimable: boolean;
 }
 
 /**
@@ -74,7 +81,9 @@ export interface AuthConfig {
  * `magicLink` defaults to true through both kinds of rollout skew — no route,
  * and a route that omits the field — because a host old enough not to report it
  * either mails links or echoes them. Assuming false there would withdraw a
- * working sign-in from every deployment that has not updated yet.
+ * working sign-in from every deployment that has not updated yet. `claimable`
+ * defaults to false for the opposite reason: a host too old to report it has
+ * no claim route to send anyone to.
  */
 export async function fetchAuthConfig(
   client: OpenCompanyClient,
@@ -88,9 +97,10 @@ export async function fetchAuthConfig(
       ...config,
       name: config.name?.trim() || undefined,
       magicLink: config.magicLink ?? true,
+      claimable: config.claimable ?? false,
     };
   } catch {
-    return { mode: "email", passwords: true, magicLink: true };
+    return { mode: "email", passwords: true, magicLink: true, claimable: false };
   }
 }
 
@@ -168,64 +178,24 @@ export async function verifyCode(
   return client.postSignIn<SignIn>(`${client.scopeFor(company)}/auth/verify`, { code });
 }
 
-/** One ecosystem sign-in button, as the host describes it. */
-export interface HubProvider {
-  /** The hub's provider slug (`google`, `github`, `twitter`). */
-  id: string;
-  /** What to put on the button. */
-  label: string;
-  /**
-   * Where to send the browser. Built by the host, never assembled here: only
-   * the host knows the hub's base URL and the origin the hub must return to,
-   * and a console guessing at either would aim a live sign-in at its guess.
-   */
-  startUrl: string;
-}
-
 /**
- * Asks the host which ecosystem providers it can sign someone in with.
+ * Claims the first admin account of a company nobody has joined yet, and
+ * signs in as them.
  *
- * An empty list is the normal answer on a self-hosted host and is not an
- * error — it means "no ecosystem here, show the magic-link form alone". So this
- * never throws for that case; callers only need to handle the network failing.
- *
- * `from`, when present, is the destination the host should put on the sign-in's
- * return URI — the console's own fragment cannot cross the OAuth round trip, so
- * the host carries it as a query parameter the landing reads back. Only setup's
- * dead-link recovery asks for one today (`from=setup`).
- */
-export async function fetchHubProviders(
-  client: OpenCompanyClient,
-  company: string | null,
-  from?: string,
-): Promise<HubProvider[]> {
-  const result = await client.get<{ providers: HubProvider[] }>(
-    `${client.scopeFor(company)}/auth/hub${from ? `?from=${encodeURIComponent(from)}` : ""}`,
-  );
-  return result.providers ?? [];
-}
-
-/**
- * Turns a platform token from the hub into a session on this company.
- *
- * The token arrives in the URL as `?token=…&key=auth` after the hub completes
- * OAuth and redirects back here. It is not an identity this console can read or
- * check — it is handed straight to the host, which asks the hub whose it is and
- * then applies this company's own roster. So this returns the same result a
- * magic link would, and the hub's token is spent here and stripped from the URL
- * rather than kept — whichever carrier the session itself comes back in.
- *
- * The distinguishable failures are `hub_rejected` (expired or forged — sign in
- * again), `not_a_member` (a real ecosystem account with no access here), and
- * `hub_unavailable` (this host has no ecosystem at all). Read them off
+ * Open only while `AuthConfig.claimable` is true. `email` is the login the
+ * person chose — an address, or on a host with no mail a plain username — and
+ * the password is theirs from then on. Refusals: `already_claimed` (somebody
+ * got there first — sign in instead), `not_the_named_admin` (the deployment
+ * already named its first admin and this is not that address). Read them off
  * {@link ApiError.code}.
  */
-export async function signInWithHubToken(
+export async function claimFirstAdmin(
   client: OpenCompanyClient,
   company: string | null,
-  token: string,
+  email: string,
+  password: string,
 ): Promise<SignIn> {
-  return client.postSignIn<SignIn>(`${client.scopeFor(company)}/auth/hub`, { token });
+  return client.postSignIn<SignIn>(`${client.scopeFor(company)}/auth/claim`, { email, password });
 }
 
 /** Exchanges an email and password for a session. */

@@ -38,9 +38,10 @@
 // that names the live session — and is never re-derived in TypeScript, because
 // a second spelling of a session's name is one that can drift from the runtime's.
 //
-// Nothing collapses. The referral and aside collapses the chat views reuse from
-// `StepTimeline` are summaries, and a summary is the thing this exists to get
-// out from behind, so they render as their own lines, in full.
+// Nothing collapses. The referral collapse the chat views reuse from
+// `StepTimeline` is a summary, and a summary is the thing this exists to get
+// out from behind, so it renders as its own lines, in full. An utterance chip
+// becomes the episode and round it was committed in, spelled out.
 
 import type { AgentSessionMessageDto, TurnStep } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
@@ -203,14 +204,19 @@ function RawTurn({
           )}
         </pre>
       ))}
-      {row.asideConversation?.lines.map((aside, index) => (
+      {row.episode && (
+        // The round and speech act, as the driver recorded them — the raw
+        // view's counterpart of the utterance chip. `to` is printed because a
+        // `dm`'s recipients are what narrowed its audience.
         <pre
-          key={`aside:${index}`}
           className="mt-1 font-mono text-2xs leading-relaxed whitespace-pre-wrap text-muted-foreground"
+          data-testid="agent-session-raw-episode"
         >
-          {cueLine("aside", aside.authorId, aside.text)}
+          {`[episode ${row.episode.id} · round ${row.episode.revision}] ${row.episode.kind}${
+            row.episode.to?.length ? ` → ${row.episode.to.join(", ")}` : ""
+          }`}
         </pre>
-      ))}
+      )}
     </li>
   );
 }
@@ -219,7 +225,7 @@ function RawTurn({
  * The host's own cue shape, reproduced.
  *
  * Kept as one function so the two places a turn renders an inbound line — the
- * turn body and the referral/aside lines under it — cannot disagree about what
+ * turn body and the referral lines under it — cannot disagree about what
  * a cue looks like. `render_cues` trims the text; so does this.
  */
 function cueLine(channel: string, author: string, text: string): string {

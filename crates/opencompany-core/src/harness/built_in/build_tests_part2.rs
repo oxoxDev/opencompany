@@ -359,13 +359,12 @@ fn mcp_registry_tools_fail_closed_with_no_registry_home() {
         &CompanyId::new("acme"),
         "Acme",
         &manifest_agent,
-        policy,
+        std::sync::Arc::new(policy),
         &deps,
         &grants,
         &[],
         &[],
         None,
-        false,
         false,
     )
     .expect("agent builds");
@@ -428,19 +427,18 @@ fn every_built_agent_states_a_raised_tool_iteration_cap() {
         &CompanyId::new("acme"),
         "Acme",
         &manifest_agent,
-        ApprovalPolicy::new(&Policy::default(), None),
+        std::sync::Arc::new(ApprovalPolicy::new(&Policy::default(), None)),
         &deps,
         &[],
         &[],
         &[],
         None,
         false,
-        /* speech_enabled */ false,
     )
     .expect("agent builds");
 
     assert_eq!(
-        agent.agent_config().max_tool_iterations,
+        agent.max_tool_iterations(),
         MAX_TOOL_ITERATIONS,
         "the built agent is not running on the cap this crate states"
     );

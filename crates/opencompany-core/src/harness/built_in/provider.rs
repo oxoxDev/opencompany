@@ -82,7 +82,8 @@ const OPENHUMAN_USAGE_META_KEY: &str = "openhuman_usage_meta";
 /// one bit the WS5 cost hook needs. It is read **live** after each turn (see
 /// [`HarnessPool::run`](crate::harness::HarnessPool)) so a console BYOK switch
 /// re-attributes spend on the next turn. `Arc<dyn HarnessModel>` upcasts to
-/// `Arc<dyn ChatModel<()>>` at the openhuman `AgentBuilder::chat_model` seam.
+/// `Arc<dyn ChatModel<()>>` where the loopback `model_bridge` serves it to
+/// the embedded runtime.
 pub trait HarnessModel: ChatModel<()> {
     /// Stable provider slug attributed to usage samples (e.g. `managed`, `byok`).
     fn telemetry_provider_id(&self) -> String;
@@ -554,6 +555,13 @@ fn wire_message(message: &Message) -> serde_json::Value {
             "tool_call_id": tool.tool_call_id,
             "content": message.text(),
         }),
+        // A host-defined message kind (tinyinference at the 1ecf1b0 pin). Its
+        // display text is what an OpenAI endpoint can carry; sent as a user
+        // turn so no provider rejects an unknown role.
+        Message::Custom(custom) => serde_json::json!({
+            "role": "user",
+            "content": custom.display.clone().unwrap_or_else(|| message.text()),
+        }),
     }
 }
 
@@ -817,6 +825,8 @@ fn parse_usage(payload: &serde_json::Value) -> Option<Usage> {
         cache_read_tokens,
         cache_creation_tokens: 0,
         reasoning_tokens: 0,
+        charged_amount: None,
+        context_window_tokens: None,
     })
 }
 
@@ -1086,6 +1096,27 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
     )
 }
 
+/// The tool names a request's system prompt advertises on the `opencompany`
+/// MCP server (plan hive-desks Phase 3), added to the salvage's `offered` set:
+/// a model that writes `web_search` as prose meant the served tool, and the
+/// brief is the only place the wire names it — the `tools` array carries
+/// `mcp_call_tool`, not the catalogue behind it. Read from the same messages
+/// that go on the wire, so it can never name a tool this turn did not offer.
+///
+/// User messages as well as the system prompt: a roster rebuilt under a
+/// resumed session re-announces the catalogue on the turn text
+/// (`build::opencompany_mcp_rebrief`), and that brief is the current one
+/// where the prompt's is pinned. A name a person typed under that heading
+/// buys nothing — a salvaged call is served only if the MCP host's
+/// allowlist names it.
+fn mcp_served_tools(messages: &[Message]) -> std::collections::BTreeSet<String> {
+    messages
+        .iter()
+        .filter(|message| matches!(message, Message::System(_) | Message::User(_)))
+        .flat_map(|message| crate::harness::build::tools_named_in_mcp_brief(&message.text()))
+        .collect()
+}
+
 /// [`model_response_from_payload`], plus the tool names **this turn offered the
 /// model**.
 ///
@@ -1314,7 +1345,25 @@ fn model_response_from_payload_offering(
         // it cannot cross there (Codex review on #2011).
         refuse_approval_siblings(&recovered)?;
         content = cleaned;
-        tool_calls = recovered;
+        // A recovered call to a tool on the wire keeps its own name; one the
+        // turn offers only through the `opencompany` MCP server (named in
+        // `offered` by `mcp_served_tools`) is dispatched as `mcp_call_tool`.
+        tool_calls = recovered
+            .into_iter()
+            .map(|call| {
+                let (name, arguments) = if schemas.contains_key(&call.name) {
+                    (call.name, call.arguments)
+                } else {
+                    crate::hive::tools::via_opencompany_mcp(&call.name, call.arguments)
+                };
+                ToolCall {
+                    id: call.id,
+                    name,
+                    arguments,
+                    invalid: None,
+                }
+            })
+            .collect();
     }
 
     // Only a genuinely empty turn (no text anywhere, no tool call) is an error.
@@ -1352,6 +1401,7 @@ fn model_response_from_payload_offering(
         content: blocks,
         tool_calls,
         usage,
+        origin: None,
     };
     let mut response = ModelResponse {
         message,
@@ -1361,6 +1411,8 @@ fn model_response_from_payload_offering(
         resolved_model: None,
         continue_turn: None,
         served_from_cache: false,
+        correlation: None,
+        resolved_route: None,
     };
     // `with_usage` mirrors usage onto both slots; call it only when present so
     // the billing-free path leaves `usage: None` intact.
@@ -1658,10 +1710,13 @@ impl ChatModel<()> for HostedProvider {
         // Captured from the same list and the same choice that go on the wire,
         // so what the response is allowed to name can never drift from what the
         // request authorized.
-        let offered = crate::harness::native_salvage::authorized_tool_names(
+        let mut offered = crate::harness::native_salvage::authorized_tool_names(
             &request.tools,
             &request.tool_choice,
         );
+        if offered.contains("mcp_call_tool") {
+            offered.extend(mcp_served_tools(&request.messages));
+        }
         let schemas = crate::harness::native_salvage::authorized_tool_schemas(
             &request.tools,
             &request.tool_choice,
@@ -2133,6 +2188,8 @@ async fn send_body(
                 retryable: status == reqwest::StatusCode::TOO_MANY_REQUESTS
                     || status.is_server_error(),
                 retry_after_ms: None,
+                partial_message: None,
+                stop_reason: None,
                 raw: None,
             })))
         };
@@ -2427,10 +2484,13 @@ impl ChatModel<()> for TenantProvider {
         .map_err(|e| InferenceError::Model(e.to_string()))?;
         // Captured from the same list and choice the plan puts on the wire —
         // see the matching lines in `HostedProvider::invoke`.
-        let offered = crate::harness::native_salvage::authorized_tool_names(
+        let mut offered = crate::harness::native_salvage::authorized_tool_names(
             &request.tools,
             &request.tool_choice,
         );
+        if offered.contains("mcp_call_tool") {
+            offered.extend(mcp_served_tools(&request.messages));
+        }
         let schemas = crate::harness::native_salvage::authorized_tool_schemas(
             &request.tools,
             &request.tool_choice,

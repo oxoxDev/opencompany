@@ -147,7 +147,7 @@ mod live {
 
     use std::path::PathBuf;
 
-    use openhuman_core::tools::Tool;
+    use tinytools::Tool;
 
     /// The hosting tools for one company, deploying out of `workspace`.
     ///

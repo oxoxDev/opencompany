@@ -1,5 +1,14 @@
 # retail-co
 
+> **Migration note.** The trace-grammar hive this bundle was written against
+> (`[group_chat.hive]`: quorum, turn budget, blind round, per-seat moves,
+> asides) has been replaced by completion-driven rooms — concurrent rounds,
+> speech as a tool call, Jev routing, referral — configured by
+> `[group_chat.routing]` ([`docs/spec/runtime/hive.md`](../../docs/spec/runtime/hive.md)).
+> A `[group_chat.hive]` block is refused at load with a migration hint; the
+> desks below keep their seats and their referral settings, and the grammar
+> paragraphs describe the design the bundle was tuned under, not what runs.
+
 The [tau2-bench](https://github.com/sierra-research/tau2-bench) **retail**
 domain, run as a company of three desks and five seats.
 
@@ -100,7 +109,7 @@ several tau2 companies on one `serve` means one `PUT` each.
 Then, against a running host:
 
 ```bash
-cargo run --features openhuman,hivemind,mcp --bin opencompany -- \
+cargo run --features openhuman,mcp --bin opencompany -- \
   serve --company companies/retail_co --home /tmp/retail
 python3 scripts/tau2-sim.py --domain retail --task 0
 ```

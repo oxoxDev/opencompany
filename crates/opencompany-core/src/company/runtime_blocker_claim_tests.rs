@@ -369,16 +369,8 @@ async fn an_unresolvable_thread_root_degrades_to_the_channel() {
     );
 }
 
-/// The General desk answers to four spellings, and a thread rooted in any
-/// of them keeps its parent (issue #435).
-///
-/// This is the case the fix was *most* likely to be handed and originally
-/// dropped: the chat route journals an unaddressed message as
-/// `chat: None` while the console renders it under `General` and replies to
-/// it there, so the comparison arrived as `None` vs `"General"`. A raw
-/// string compare rejected it, the parent was discarded, and the
-/// continuation resumed in the channel — #435's own symptom surviving
-/// inside #435's fix, on the default path rather than an exotic one.
+/// A thread rooted under any legacy spelling of #general keeps its parent
+/// when answered into #general.
 #[tokio::test]
 async fn a_root_in_any_spelling_of_the_general_desk_still_resolves() {
     use crate::ports::types::CompanyEvent;
@@ -408,16 +400,12 @@ async fn a_root_in_any_spelling_of_the_general_desk_still_resolves() {
         );
     }
 
-    // Every root resolves against every spelling of the channel it is
-    // answered into — including the pair that used to fail.
     for root in &roots {
-        for channel in ["General", "main", "general"] {
-            assert_eq!(
-                rt.resolvable_parent(Some(*root), channel).await,
-                Some(*root),
-                "root {root} must resolve when answered into `{channel}`",
-            );
-        }
+        assert_eq!(
+            rt.resolvable_parent(Some(*root), "general").await,
+            Some(*root),
+            "root {root} must resolve when answered into #general",
+        );
     }
 
     // …and the folding stops there. A real desk is still compared

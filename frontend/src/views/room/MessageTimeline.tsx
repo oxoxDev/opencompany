@@ -1,16 +1,19 @@
-import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
+import { useMemo } from "react";
 import { Bot, CircleDot, Hash, Lock, Send, UserPlus } from "lucide-react";
 
 import type { ApprovalSummary, CognitionState, DecideApproval, TurnStep, Verdict } from "@/api/types";
 import type { TaskStatus } from "@/api/tasks";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Skeleton } from "@/components/ui/skeleton";
+import { GENERAL_CHANNEL_ID } from "@/lib/chat";
 import { cn } from "@/lib/utils";
-import type { EpisodeTurn } from "@/lib/hive/episode";
 import { ApprovalRow } from "./ApprovalRow";
 import { ChatLiveReceipt, type ChatReceipt } from "./ChatLiveReceipt";
-import { EpisodeBlock } from "./EpisodeBlock";
+import { EpisodeCompleteMarker } from "./EpisodeCompleteMarker";
+import { EpisodeWaitingMarker } from "./EpisodeWaitingMarker";
+import { RoundBand } from "./RoundBand";
 import { MessageRow } from "./MessageRow";
+import { StepTimeline } from "./StepTimeline";
 import { WorkingIndicator } from "./WorkingIndicator";
 import {
   channelIntroSentence,
@@ -19,6 +22,8 @@ import {
   type Channel,
   type TimelineItem,
 } from "./model";
+import { JumpToLatest } from "./JumpToLatest";
+import { useBottomAnchor } from "./useBottomAnchor";
 
 interface Props {
   channel: Channel;
@@ -55,11 +60,28 @@ interface Props {
    * per-turn half of `liveSteps` above, which is the per-thread strip.
    *
    * Both exist because a frame only knows which query it belongs to when the
-   * host stamps `messageSeq` on it. One that does renders under its own
-   * message; one that does not (a relay, a dispatched card, an older host)
-   * falls back to the strip.
+   * host stamps `messageSeq` on it. One that does files under its query; one
+   * that does not (a relay, a dispatched card, an older host) falls back to
+   * the thread. They are filled exclusively — never both.
+   *
+   * The query decides which **bucket** the rows land in, never where they
+   * render: the live pair is pinned to the foot of the pane either way. A
+   * "happening now" row placed back at the asking message claims the work
+   * finished before every line beneath it, which is false the moment anything
+   * is journaled in between — a hive episode posts a seat's line per turn, so
+   * by convergence the pulsing row sits several messages up while everything
+   * below it has already happened.
    */
   liveStepsByMessage?: Record<string, TurnStep[]>;
+  /**
+   * Who last reported on each open turn, keyed exactly as its rows are.
+   *
+   * The live answer to "who is working", read in preference to
+   * {@link turnAgentId} — which names whoever the host started the turn on and
+   * never revises, so it cannot follow a desk hand-off or a room passing the
+   * floor between seats.
+   */
+  liveAgentByTurn?: Record<string, string>;
   /**
    * The live receipt for a synchronous chat turn this console just sent (issue
    * #1934). When present it supersedes {@link TypingRow} — it says "Sent →
@@ -126,16 +148,6 @@ interface Props {
   failedApprovals?: Record<string, string>;
   onDecideApproval?: DecideApproval;
   /**
-   * What each line did inside its room, keyed by message id.
-   *
-   * Absent for every ordinary reply — which is what keeps a DM, `#general` and a
-   * single-responder desk rendering exactly as they always have. A room's
-   * affordances are a question about the data, never about the channel.
-   */
-  episodeTurn?: Record<string, EpisodeTurn>;
-  /** Focus one option in the transcript. */
-  onSelectTopic?: (topic: string) => void;
-  /**
    * Whether this company's teammates can think (issue #1735). On either echo
    * state every company-side row below is a canned line rather than a
    * teammate's answer (issue #1734). Passed straight through to `MessageRow`,
@@ -163,14 +175,6 @@ interface Props {
    */
   latestBudgetPauseMessageIdByAgent?: Map<string, string>;
 }
-
-/**
- * How close to the bottom still counts as "parked at the bottom", in CSS
- * pixels. Sub-pixel layout and a fractional `clientHeight` mean the arithmetic
- * rarely lands on exactly zero, so a strict test would read a view that is
- * visibly at the bottom as scrolled away and stop following.
- */
-const BOTTOM_SLACK_PX = 32;
 
 /**
  * The scrolling body of a channel.
@@ -201,6 +205,7 @@ export function MessageTimeline({
   queued,
   liveSteps,
   liveStepsByMessage,
+  liveAgentByTurn,
   receipt,
   turnAgentId,
   agentNames,
@@ -221,21 +226,54 @@ export function MessageTimeline({
   decidingApprovals,
   failedApprovals,
   onDecideApproval,
-  episodeTurn,
-  onSelectTopic,
   cognition,
   onRedeemBudgetPause,
   redeemingBudgetPauseAgent,
   latestBudgetPauseMessageIdByAgent,
 }: Props) {
-  const scroller = useRef<HTMLDivElement>(null);
-  /** The inner column whose own height rule 2b's `ResizeObserver` watches. */
-  const content = useRef<HTMLDivElement>(null);
-  const liveStepCount = liveSteps?.length ?? 0;
+  /**
+   * The open turn's rows, whichever bucket the host's stamping filed them in.
+   *
+   * `liveStepsByMessage` and `liveStepsByThread` are filled **exclusively** — a
+   * frame carrying `messageSeq` files under its query, one without files under
+   * the thread (`AppShell.onTurnEvent`, whose own comment is "never both") — so
+   * one turn's rows live in exactly one of them and reading the union cannot
+   * double-count.
+   *
+   * Only half of it was reaching the live rows. `ChatLiveReceipt` reads these
+   * to reach its third state, "On step <label>"; given the thread half alone, a
+   * turn the host stamped left its bucket empty, so the receipt sat on "Picked
+   * up by <name>" for the whole turn while the steps surfaced somewhere else
+   * entirely.
+   *
+   * Newest first: a channel can hold rows for more than one query, and the open
+   * turn is the most recent that has any. Walking `items` rather than the map's
+   * own key order because only the timeline knows which question came last.
+   */
+  const openTurn = useMemo(() => {
+    if (liveSteps?.length) return { steps: liveSteps, key: undefined as string | undefined };
+    if (!liveStepsByMessage) return undefined;
+    for (let i = items.length - 1; i >= 0; i -= 1) {
+      const item = items[i];
+      if (item.kind !== "message") continue;
+      const id = item.entry.message.id;
+      const rows = liveStepsByMessage[id];
+      if (rows?.length) return { steps: rows, key: id };
+    }
+    return undefined;
+  }, [liveSteps, liveStepsByMessage, items]);
+  const openTurnSteps = openTurn?.steps;
+  const liveStepCount = openTurnSteps?.length ?? 0;
   // Resolved once, for both live rows below. Kept here rather than inside them
   // so the receipt's "never a raw id" rule holds in one place: an id this map
   // does not know yields no name, and the row says "Working…" as it always did.
-  const turnAgentName = turnAgentId ? agentNames?.[turnAgentId] : undefined;
+  // The live agent wins: `turnAgentId` names whoever the host started the turn
+  // on and is never revised, so on its own the row kept naming the opening
+  // responder through a hand-off and through every seat of a room. The
+  // fallback still covers the reload leg, whose re-armed row has no frames yet.
+  const liveAgentId = openTurn?.key ? liveAgentByTurn?.[openTurn.key] : undefined;
+  const resolvedTurnAgentId = liveAgentId ?? turnAgentId;
+  const turnAgentName = resolvedTurnAgentId ? agentNames?.[resolvedTurnAgentId] : undefined;
   // Rows that arrived locally — a message sent before hydration landed — are
   // still worth showing while the rest of the history is in flight. It is only
   // the *claim of emptiness* that has to wait.
@@ -248,161 +286,40 @@ export function MessageTimeline({
    * since #1323 — which end of the pane the whole block settles against.
    */
   const empty = items.length === 0 && !loading;
-  /**
-   * Is the view parked at the bottom, and therefore still following?
-   *
-   * A ref rather than state on purpose: it is read inside effects and written
-   * from a scroll handler that fires at frame rate. Making it state would
-   * re-render the whole transcript on every wheel tick to compute a value no
-   * rendered output depends on.
-   */
-  const following = useRef(true);
-  /** The channel the growth effect has already settled on. See rule 2. */
-  const settledOn = useRef<string | null>(null);
-
-  const trackFollowing = useCallback(() => {
-    const el = scroller.current;
-    if (!el) return;
-    const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    following.current = fromBottom <= BOTTOM_SLACK_PX;
-  }, []);
-
-  // Rule 1 — arriving at a channel. `useLayoutEffect` so the jump happens
-  // before paint: with `useEffect` the browser paints the un-anchored position
-  // first, which is the flash this issue is about. `channel.id` is the
-  // dependency, not `items.length` — two channels can hold the same number of
-  // rows, and an effect keyed on the count would not fire for that switch at
-  // all, leaving the new channel wearing the old one's scroll offset.
-  //
-  // `historyPending` is the second dependency, and it is what makes the rule
-  // true rather than merely well-intentioned (issue #1224). A cold load mounts
-  // this component *before* the transcript exists: history is still on the wire
-  // (`historyPending`), the box is one screen tall, and "scroll to the bottom"
-  // is a no-op against content that has not arrived. Keyed on the channel
-  // alone, this effect then never ran again, and the operator was left at the
-  // top of a transcript that appeared under them a hundred milliseconds later.
-  // Re-anchoring as the history lands is the same jump, against the real
-  // transcript this time.
-  useLayoutEffect(() => {
-    const el = scroller.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-    following.current = true;
-  }, [channel.id, historyPending]);
-
-  // Rule 2 — growth while the channel is open. Each new tool row grows the
-  // block at the bottom, so the scroll has to follow it as the turn works, not
-  // only when the reply lands. A card arriving counts too — it is the thing the
-  // operator has to act on. Skipped entirely when they have scrolled away.
-  //
-  // `channel.id` is a dependency so the first pass after a switch can *defer*:
-  // the layout effect above has already anchored this channel, and animating on
-  // top of that is the very travel rule 1 removes.
-  useEffect(() => {
-    const el = scroller.current;
-    if (!el) return;
-    if (settledOn.current !== channel.id) {
-      settledOn.current = channel.id;
-      return;
-    }
-    // Nothing to follow while the transcript is still on the wire (#1224).
-    // `scrollTo` captures a **pixel offset**, not the idea of "the bottom", so
-    // an animation started against a one-screen box eases to a number the
-    // arriving history makes meaningless — and the scroll events it emits on
-    // the way there are indistinguishable from a person scrolling, so
-    // `trackFollowing` reads the grown transcript as "they scrolled away" and
-    // the channel stops following for the rest of the session. Rule 1 above
-    // owns the anchor until the history has landed.
-    if (historyPending) return;
-    if (!following.current) return;
-    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [channel.id, historyPending, items.length, typing, liveStepCount]);
-
-  // Rule 3 — the *viewport* shrinking underneath (issue #1325).
-  //
-  // Rules 1 and 2 both watch the content. Neither watches the box, and the box
-  // moves: the composer below this pane grows with the draft (`field-sizing-
-  // content`, up to `max-h-48`), which takes its height out of this scroller's
-  // `clientHeight`. `scrollTop` is untouched by that, so the transcript slides
-  // up behind the composer — measured at 96px on a two-line draft and up to
-  // ~150px at the cap, which is often the very message being replied to,
-  // hidden for exactly as long as the draft is long.
-  //
-  // It could not be fixed by adding a dependency to rule 2: the composer is a
-  // sibling component and its height is not a value this one is given. The
-  // element's own size is, through `ResizeObserver` — and observing the box
-  // covers the window resizing and the thread panel opening as well, which want
-  // the same answer.
-  //
-  // `following.current` is the same gate rule 2 uses, so a reader who has
-  // deliberately scrolled up is left alone. Instant rather than smooth,
-  // unlike rule 2: this fires as the composer grows a line at a time, and an
-  // animation per keystroke would be a permanent wobble rather than a glide.
-  // Setting `scrollTop` does not resize anything, so there is no feedback loop.
-  useEffect(() => {
-    const el = scroller.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => {
-      if (!following.current) return;
-      el.scrollTop = el.scrollHeight;
-    });
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, []);
-
-  // Rule 2b — content that grows without moving any of rule 2's dependencies
-  // (issue #1935 review, coderabbit 3892517543). `ChatLiveReceipt`'s 30s
-  // "still waiting" note is timed by a clock entirely internal to that
-  // component: nothing here re-renders when it appears, so rule 2 never fires
-  // and the note can land under the fold with no follow-scroll to reveal it.
-  // A live receipt is the concrete case, but the same gap exists for any
-  // in-place child growth this component was not told about.
-  //
-  // Rule 3's `ResizeObserver` cannot double as this one — it watches the
-  // *scroller's own border box*, which content overflowing inside an
-  // `overflow-y-auto` container never changes; that is the whole reason the
-  // container scrolls instead of growing. This one watches the *content*
-  // column instead — the inner wrapper whose height the rows and receipt
-  // actually determine — so it fires on exactly the growth rule 3 cannot see,
-  // and stays silent on the box-only resizes (composer growing, window
-  // resizing) rule 3 exists for, which do not move this column's own height.
-  useEffect(() => {
-    const contentEl = content.current;
-    const scrollerEl = scroller.current;
-    if (!contentEl || !scrollerEl || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => {
-      // Nothing to follow while the transcript is still on the wire, same as
-      // rule 2 — a cold load's content grows repeatedly as history lands, and
-      // rule 1 owns the anchor until it has.
-      if (historyPending || !following.current) return;
-      scrollerEl.scrollTo({ top: scrollerEl.scrollHeight, behavior: "smooth" });
-    });
-    observer.observe(contentEl);
-    return () => observer.disconnect();
-  }, [historyPending]);
+  const { scroller, content, onScroll, atBottom, jumpToLatest } = useBottomAnchor({
+    key: channel.id,
+    pending: historyPending,
+    growth: [items.length, typing, liveStepCount],
+  });
 
   /**
    * One timeline row.
    *
-   * Extracted from the `items.map` it used to be inlined in so an
-   * {@link EpisodeBlock} can render the very same rows inside itself. A room's
-   * turns are ordinary messages — same avatar gutter, same hover actions, same
-   * thread affordances — and a second renderer for them would be a second place
-   * for those to drift.
+   * Extracted from the `items.map` it used to be inlined in so a
+   * {@link RoundBand} can render the very same rows inside itself. A round's
+   * utterances are ordinary messages — same avatar gutter, same hover actions,
+   * same thread affordances — and a second renderer for them would be a second
+   * place for those to drift.
    */
   const renderRow = (item: TimelineItem): React.ReactNode => {
-    if (item.kind === "episode") {
+    if (item.kind === "round") {
       return (
-        <EpisodeBlock
-          agentNames={agentNames}
+        <RoundBand
           key={item.key}
-          item={item}
+          episode={item.episode}
+          round={item.round}
+          items={item.items}
           renderRow={renderRow}
-          onSelectTopic={onSelectTopic}
-          // A desk channel's id is the desk id, and only a desk ever holds a
-          // room — `#general` and a DM fold to no episodes at all.
-          deskId={channel.kind === "channel" && !channel.system ? channel.id : undefined}
+          agentNames={agentNames}
         />
+      );
+    }
+    if (item.kind === "episode_complete") {
+      return <EpisodeCompleteMarker key={item.key} episode={item.episode} agentNames={agentNames} />;
+    }
+    if (item.kind === "episode_waiting") {
+      return (
+        <EpisodeWaitingMarker key={item.key} episode={item.episode} seats={item.seats} agentNames={agentNames} />
       );
     }
     if (item.kind === "message") {
@@ -411,11 +328,6 @@ export function MessageTimeline({
           {item.entry.dayLabel && <DayDivider label={item.entry.dayLabel} />}
           <MessageRow
             entry={item.entry}
-            // The turn this message asked for, while it runs. Keyed by the
-            // message's own id, so two questions in one channel each get their
-            // own timeline instead of sharing the foot-of-channel strip (and
-            // clearing each other's rows).
-            liveSteps={liveStepsByMessage?.[item.entry.message.id]}
             threadOpen={item.entry.message.id === openThreadId}
             onOpenThread={onOpenThread}
             onReact={onReact}
@@ -431,19 +343,7 @@ export function MessageTimeline({
             onRedeemBudgetPause={onRedeemBudgetPause}
             redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
             latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
-            // Issue #1986: read off `channel.system` here rather than threaded
-            // down from `RoomView`, because this component already holds the
-            // channel and that flag *is* the predicate `RoomView` derives its
-            // own `readOnly` from — a second prop carrying the same fact through
-            // the same tree is one more thing that can disagree with it. See
-            // `MessageRow`'s `readOnly` doc for what it takes away (adding a
-            // reaction) and what it deliberately leaves (reactions already
-            // there, and the way into a thread).
-            readOnly={Boolean(channel.system)}
-            // What this line did in the room, when it was a turn in one. Absent
-            // for every ordinary reply, which is what keeps a single-responder
-            // desk rendering exactly as it always has.
-            turn={episodeTurn?.[item.entry.message.id]}
+            agentNames={agentNames}
           />
         </div>
       );
@@ -473,74 +373,81 @@ export function MessageTimeline({
   };
 
   return (
-    <div ref={scroller} onScroll={trackFollowing} className="flex-1 overflow-y-auto">
-      {/*
-       * Which end short content settles against (issue #1323).
-       *
-       * `justify-end` is right for a *transcript* shorter than the viewport:
-       * three messages should sit above the composer the way every chat client
-       * puts them, not float in the middle of the pane. It is wrong for a
-       * channel with no transcript at all, because then the only thing being
-       * bottom-pinned is the intro — a heading, a sentence, and the two action
-       * cards that are the whole point of an empty channel — and they end up
-       * crushed against the composer under most of a screen of dead canvas.
-       * The cards are the primary invitation and they were the last thing the
-       * eye reached.
-       *
-       * So an empty channel reads downward from the top, as the design
-       * reference draws it. `empty` is the same value `ChannelIntro` gets, and
-       * it is lifted here rather than recomputed so the two cannot disagree
-       * about what "empty" means — a channel whose intro claimed emptiness
-       * while the wrapper anchored for content would jump on every load.
-       */}
-      <div
-        ref={content}
-        className={cn("flex min-h-full flex-col pb-4", empty ? "justify-start" : "justify-end")}
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      <div ref={scroller}
+        onScroll={onScroll}
+        data-testid="channel-transcript"
+        className="min-h-0 flex-1 overflow-y-auto"
       >
-        {/* `empty` only drives the top padding, and the skeleton fills the
-            same space real rows will — so a loading channel is spaced like a
-            full one and the intro does not jump down and back up. That is also
-            why `loading` keeps the *bottom* anchor above: flipping to the top
-            while history is in flight would move the intro up and then drop it
-            back down the moment the rows land. */}
-        <ChannelIntro
-          channel={channel}
-          empty={empty}
-          loading={loading}
-          onStartBrief={onStartBrief}
-          onAddPeople={onAddPeople}
-        />
-        {loading && <HistorySkeleton />}
-        {items.map(renderRow)}
-        {receipt ? (
-          // The receipt for our own in-flight send (issue #1934) supersedes the
-          // typing dots and carries the live steps itself. It now rides a
-          // detached turn past its 202 into the queued/working window too (issue
-          // #2021), so `queued` words its base line and stills its pulse rather
-          // than dropping it back to the bare "Queued…"/step row.
-          <ChatLiveReceipt
+        {/*
+         * Which end short content settles against (issue #1323).
+         *
+         * `justify-end` is right for a *transcript* shorter than the viewport:
+         * three messages should sit above the composer the way every chat client
+         * puts them, not float in the middle of the pane. It is wrong for a
+         * channel with no transcript at all, because then the only thing being
+         * bottom-pinned is the intro — a heading, a sentence, and the two action
+         * cards that are the whole point of an empty channel — and they end up
+         * crushed against the composer under most of a screen of dead canvas.
+         * The cards are the primary invitation and they were the last thing the
+         * eye reached.
+         *
+         * So an empty channel reads downward from the top, as the design
+         * reference draws it. `empty` is the same value `ChannelIntro` gets, and
+         * it is lifted here rather than recomputed so the two cannot disagree
+         * about what "empty" means — a channel whose intro claimed emptiness
+         * while the wrapper anchored for content would jump on every load.
+         */}
+        <div
+          ref={content}
+          className={cn("flex min-h-full flex-col pb-4", empty ? "justify-start" : "justify-end")}
+        >
+          {/* `empty` only drives the top padding, and the skeleton fills the
+              same space real rows will — so a loading channel is spaced like a
+              full one and the intro does not jump down and back up. That is also
+              why `loading` keeps the *bottom* anchor above: flipping to the top
+              while history is in flight would move the intro up and then drop it
+              back down the moment the rows land. */}
+          <ChannelIntro
             channel={channel}
-            receipt={receipt}
-            agentNames={agentNames}
-            steps={liveSteps ?? []}
-            queued={queued}
+            empty={empty}
+            loading={loading}
+            onStartBrief={onStartBrief}
+            onAddPeople={onAddPeople}
           />
-        ) : liveStepCount > 0 && !queued ? (
-          <LiveTurnRow
-            channel={channel}
-            steps={liveSteps ?? []}
-            name={turnAgentName}
-          />
-        ) : (
-          typing && (
-            <TypingRow
+          {loading && <HistorySkeleton />}
+          {items.map(renderRow)}
+          {receipt ? (
+            // The receipt for our own in-flight send (issue #1934) supersedes the
+            // typing dots and carries the live steps itself. It now rides a
+            // detached turn past its 202 into the queued/working window too (issue
+            // #2021), so `queued` words its base line and stills its pulse rather
+            // than dropping it back to the bare "Queued…"/step row.
+            <ChatLiveReceipt
               channel={channel}
+              receipt={receipt}
+              agentNames={agentNames}
+              steps={openTurnSteps ?? []}
               queued={queued}
+            />
+          ) : liveStepCount > 0 && !queued ? (
+            <LiveTurnRow
+              channel={channel}
+              steps={openTurnSteps ?? []}
               name={turnAgentName}
             />
-          )
-        )}
+          ) : (
+            typing && (
+              <TypingRow
+                channel={channel}
+                queued={queued}
+                name={turnAgentName}
+              />
+            )
+          )}
+        </div>
       </div>
+      {!atBottom && <JumpToLatest onClick={jumpToLatest} />}
     </div>
   );
 }
@@ -631,16 +538,8 @@ function ChannelIntro({
       {/* The two openings a new channel actually has. Held back until the
           history has answered, for the same reason the sentence above is:
           offering "add an agent here" over a channel that turns out to be full
-          of conversation reads as data loss.
-
-          Not on the read-only Operator feed (`channel.system`, the same
-          predicate `RoomView` derives `readOnly` from). Neither opening exists
-          there: "Give the team a brief" prefills a composer that channel does
-          not render, and "Add people" opens a members pane `RoomView` gates
-          off on the same flag — so both were controls offering an action that
-          could not happen, under a notice saying there is nothing to reply to
-          here. */}
-      {empty && !loading && channel.kind === "channel" && !channel.system && (
+          of conversation reads as data loss. */}
+      {empty && !loading && channel.kind === "channel" && (
         <ActionCards onStartBrief={onStartBrief} onAddPeople={onAddPeople} />
       )}
     </div>
@@ -679,8 +578,8 @@ function IntroMark({ channel }: { channel: Channel }) {
     );
   }
 
-  // The company's own line keeps the brand mark it has always had.
-  if (channel.id === "main") {
+  // `#general` wears the company brand mark.
+  if (channel.id === GENERAL_CHANNEL_ID) {
     return (
       <TeammateAvatar
         name={channel.voice ?? channel.name}
@@ -853,12 +752,23 @@ function LiveTurnRow({
         name={channel.voice ?? channel.name}
         tone={channel.tone}
         avatar={channel.member?.avatar}
-        company={channel.kind === "channel" && channel.id === "main"}
+        company={channel.kind === "channel" && channel.id === GENERAL_CHANNEL_ID}
         className="size-9 shrink-0"
       />
       <div className="min-w-0 flex-1 space-y-1.5">
-        {/* Chat names the current activity; Raw turns owns the detailed calls. */}
+        {/* The line says who and what; the timeline below says how far. */}
         <WorkingIndicator srLabel="Working…" steps={steps} name={name} label={label} />
+        {/* The steps of a turn **still running**, collapsed to "N steps" the
+            way a finished reply's are, and auto-opening on a failed or parked
+            one so a silent MCP failure is visible rather than buried (#411).
+
+            Raw turns still owns "what the agent saw" — the stored rows of a
+            settled turn, in one renderer, because a claim that reads
+            differently per screen is two claims. These are not that claim:
+            they exist only while the turn is open and they are gone the moment
+            it settles, replaced by the reply's own durable steps. Without them
+            chat could say a turn was running and never what it had done. */}
+        {!!steps.length && <StepTimeline steps={steps} />}
       </div>
     </div>
   );
@@ -883,7 +793,7 @@ function TypingRow({
         name={channel.voice ?? channel.name}
         tone={channel.tone}
         avatar={channel.member?.avatar}
-        company={channel.kind === "channel" && channel.id === "main"}
+        company={channel.kind === "channel" && channel.id === GENERAL_CHANNEL_ID}
         className="size-9"
       />
       <WorkingIndicator srLabel="Replying…" queued={queued} name={name} label={label} />

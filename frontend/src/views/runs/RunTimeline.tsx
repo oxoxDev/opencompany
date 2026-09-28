@@ -21,6 +21,7 @@ import {
   ChevronDown,
   ChevronRight,
   Hourglass,
+  Kanban,
   Loader2,
   MessageSquare,
   Play,
@@ -158,6 +159,7 @@ const KIND_ICON: Record<TimelineKind, ReactElement> = {
   tool_failed: <AlertCircle className="size-3.5" />,
   approval: <ShieldCheck className="size-3.5" />,
   completed: <CheckCircle2 className="size-3.5" />,
+  card: <Kanban className="size-3.5" />,
   // The run-trace kinds (#242). Same renderer, three more icon rows.
   tool_call: <Wrench className="size-3.5" />,
   thinking: <Brain className="size-3.5" />,
@@ -173,7 +175,7 @@ const KIND_ICON: Record<TimelineKind, ReactElement> = {
  * Task-timeline entries carry no `status`, so they fall through to the kind
  * icon exactly as before.
  */
-function rowIcon(kind: TimelineKind, status?: StepStatus): ReactElement {
+export function rowIcon(kind: TimelineKind, status?: StepStatus): ReactElement {
   if (status === "running")
     return <Loader2 className="size-3.5 animate-spin" />;
   // A parked step is waiting on a person, not broken — it takes the hourglass
@@ -197,6 +199,8 @@ function kindTone(kind: TimelineKind, status?: StepStatus): string {
       return "text-status-failed-text";
     case "approval":
       return "text-status-blocked-text";
+    case "card":
+      return "text-muted-foreground";
     default:
       return "text-muted-foreground";
   }

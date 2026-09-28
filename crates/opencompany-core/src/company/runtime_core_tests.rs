@@ -198,6 +198,64 @@ fn only_an_unlinked_park_with_a_run_id_names_a_workflow_run() {
     assert_eq!(super::workflow_run_of(&parked(None, Some("run-1"))), None);
 }
 
+/// A workflow run's park answers on its run even when the message that
+/// started the run was a #general conversation; a chat turn's park answers in
+/// the conversation it was raised in.
+#[test]
+fn a_workflow_continuation_answers_on_its_run_not_in_general() {
+    use crate::runtime::journal::{ApprovalOrigin, TaskLink};
+
+    let origin = |task: Option<TaskLink>, run_id: Option<&str>| ApprovalOrigin {
+        at_millis: 1,
+        kind: "web_fetch".to_string(),
+        task,
+        run_id: run_id.map(str::to_string),
+        thread: None,
+        parent: None,
+        cycle: None,
+    };
+    let general = Some("general".to_string());
+
+    assert_eq!(
+        super::continuation_chat_id(
+            general.clone(),
+            Some(&origin(Some(TaskLink::Unlinked), Some("run-9")))
+        ),
+        "run-9",
+    );
+    assert_eq!(
+        super::continuation_chat_id(
+            general.clone(),
+            Some(&origin(Some(TaskLink::Unlinked), None))
+        ),
+        "general",
+    );
+    assert_eq!(
+        super::continuation_chat_id(
+            Some("engineering".to_string()),
+            Some(&origin(
+                Some(TaskLink::Task {
+                    id: "card-3".to_string()
+                }),
+                Some("attempt-4")
+            ))
+        ),
+        "engineering",
+    );
+    assert_eq!(
+        super::continuation_chat_id(
+            None,
+            Some(&origin(
+                Some(TaskLink::Task {
+                    id: "card-3".to_string()
+                }),
+                Some("attempt-4")
+            ))
+        ),
+        "card-3",
+    );
+}
+
 /// Issue #1092: a continuation whose approval was raised in no conversation
 /// must never be journaled into the answering teammate's DM.
 ///
@@ -244,13 +302,13 @@ fn a_continuation_with_no_conversation_answers_outside_every_chat() {
     // — visible to the person who approved, and never a teammate's DM.
     assert_eq!(
         super::continuation_fallback_chat_id(Some(&origin(Some(TaskLink::Unlinked), None))),
-        "General",
+        "general",
     );
     assert_eq!(
         super::continuation_fallback_chat_id(Some(&origin(None, Some("run-9")))),
-        "General",
+        "general",
     );
-    assert_eq!(super::continuation_fallback_chat_id(None), "General");
+    assert_eq!(super::continuation_fallback_chat_id(None), "general");
 }
 
 /// Issue #1092, the property that actually matters: a workflow park's
@@ -279,6 +337,7 @@ fn a_workflow_parks_continuation_owns_no_desk_and_no_dm() {
         steps: Vec::new(),
         task_id: None,
         outputs: Vec::new(),
+        episode: None,
     };
     let origin = |task: Option<TaskLink>, run_id: Option<&str>| ApprovalOrigin {
         at_millis: 1,
@@ -310,8 +369,62 @@ fn a_workflow_parks_continuation_owns_no_desk_and_no_dm() {
     let unaddressed =
         super::continuation_fallback_chat_id(Some(&origin(Some(TaskLink::Unlinked), None)));
     assert!(
-        owns("main", "General", &reply(unaddressed.clone())),
+        owns("general", "General", &reply(unaddressed.clone())),
         "`{unaddressed}` must still be read as the operator's General line",
+    );
+}
+
+/// A conversation-less continuation that fails reports where a success would
+/// have: `#general`, since the park named neither a task nor a workflow run.
+#[cfg(feature = "openhuman")]
+#[tokio::test]
+async fn a_conversation_less_failure_answers_where_a_success_would_have() {
+    use crate::ports::types::{ApprovalId, CompanyEvent, Effect, EffectGroup};
+    use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+    let (runtime, _record, _home) = runtime_and_record().await;
+    let approval_id = ApprovalId::new("appr-1");
+    let effect = Effect {
+        kind: "publish_artifact".to_string(),
+        group: EffectGroup::Other,
+        amount_usd: None,
+        established_thread: false,
+        first_time_counterparty: false,
+        payload: serde_json::json!({}),
+        agent: Some("ceo".to_string()),
+        run_id: None,
+    };
+    runtime
+        .journal
+        .record_parked(
+            &approval_id,
+            &effect,
+            1,
+            TaskLink::Unlinked,
+            ApprovalConversation {
+                thread: None,
+                parent: None,
+            },
+            None,
+        )
+        .await
+        .expect("record_parked");
+
+    runtime.announce_continuation_failure(&approval_id).await;
+
+    let events = runtime
+        .events
+        .read_from(runtime.id(), crate::ports::types::EventSeq::new(0), 500)
+        .await
+        .expect("events");
+    let notice = events.into_iter().find_map(|stored| match stored.event {
+        CompanyEvent::AgentReply { chat_id, .. } => Some(chat_id),
+        _ => None,
+    });
+    assert_eq!(
+        notice.as_deref(),
+        Some(crate::server::ops::language::GENERAL_CHANNEL_ID),
+        "a failure notice for an unaddressed park lands where a success would have"
     );
 }
 

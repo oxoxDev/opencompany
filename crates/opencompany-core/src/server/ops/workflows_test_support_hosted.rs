@@ -53,6 +53,7 @@ pub(crate) async fn state_with_hosted_company_lifecycle(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
@@ -106,6 +107,7 @@ pub(crate) async fn hosted_state(home: &std::path::Path) -> (AppState, FsCompany
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
@@ -290,6 +292,7 @@ pub(crate) async fn seeded_state(home: &std::path::Path) -> (AppState, tempfile:
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: empty_manifest(),
@@ -374,6 +377,7 @@ pub(crate) async fn desk_state(home: &std::path::Path) -> AppState {
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),

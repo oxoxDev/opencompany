@@ -213,9 +213,15 @@ function render(ch: Channel, rows: TimelineItem[], historyPending = false) {
   });
 }
 
-/** The scrolling body is the component's outermost element. */
+/**
+ * The scrolling body.
+ *
+ * Addressed by its test id rather than as the outermost element: the jump
+ * control is its sibling, so the component's root is now the positioned
+ * wrapper holding both.
+ */
 function scroller(): HTMLElement {
-  return container.firstElementChild as HTMLElement;
+  return container.querySelector('[data-testid="channel-transcript"]') as HTMLElement;
 }
 
 /** The content column rule 2b observes — the scroller's one child. */

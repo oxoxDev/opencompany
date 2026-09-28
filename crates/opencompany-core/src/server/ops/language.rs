@@ -6,8 +6,8 @@
 //! internals. These consts are the single source for the strings the write
 //! plane emits, mirroring `frontend/src/lib/language.ts`.
 
-/// The default desk name attributed to chat turns with no explicit desk (and to
-/// pre-threading history). Prosumer word for a group-chat channel.
+/// The display name of the `#general` channel. A label, never a chat id: the
+/// id is [`GENERAL_CHANNEL_ID`].
 pub const DEFAULT_DESK: &str = "General";
 
 /// A teammate (never "agent") — the prosumer word for a roster member.
@@ -38,12 +38,18 @@ pub const MANIFEST_DESK_MEMBER_DELETE: &str =
 pub const MANIFEST_DESK_DELETE: &str =
     "This desk is part of your company's blueprint and can't be deleted here.";
 
-/// The name of the company-wide channel, rendered after the `#` in the console
-/// (`frontend/src/lib/desks.ts` `GENERAL_CHANNEL`). Not a desk id: every
-/// spelling of it folds to the General conversation through
-/// [`is_general_chat`](crate::server::chat_history::is_general_chat), which is
-/// what makes it addressable without anything being stored for it.
-pub const GENERAL_CHANNEL: &str = "general";
+/// The id of the company-wide `#general` channel, stamped on every message
+/// written to it. [`DEFAULT_DESK`] is its display name.
+pub use crate::ports::general_channel::GENERAL_CHANNEL_ID;
+
+const _: () = assert!(
+    matches!(DEFAULT_DESK.as_bytes(), b"General")
+        && matches!(
+            crate::ports::general_channel::GENERAL_CHANNEL_NAME.as_bytes(),
+            b"General"
+        ),
+    "the #general display name and the glossary word must agree",
+);
 
 /// Error shown when a write aims a desk mutation at the built-in `#general`
 /// channel — a delete, a membership add or removal, or a hierarchy reorder.
@@ -56,8 +62,8 @@ pub const GENERAL_CHANNEL: &str = "general";
 /// created (issue #1743).
 pub const GENERAL_CHANNEL_IMMUTABLE: &str = concat!(
     "#general is the company-wide channel every teammate is in. ",
-    "It isn't a desk — it has no lead and no membership of its own — ",
-    "so it can't be deleted, staffed, or reordered.",
+    "Its members follow the team roster, so it can't be deleted, ",
+    "staffed, or reordered by hand.",
 );
 
 /// Error shown when a desk create asks for an id that would shadow the built-in
@@ -79,3 +85,7 @@ pub const SKILL_NOT_IN_REGISTRY: &str = "That skill isn't in the registry.";
 /// Error shown when a workflow id is not safe to use as a filename.
 pub const WORKFLOW_ID_INVALID: &str =
     "A workflow id can't be empty or contain slashes or `..` — use a plain name.";
+
+#[cfg(test)]
+#[path = "language_tests.rs"]
+mod tests;
