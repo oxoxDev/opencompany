@@ -559,7 +559,7 @@ async fn cancelling_a_save_does_not_delete_a_temp_a_commit_still_owns() {
 
     // Park the metadata staging write, then abort the save while it is
     // held there — the update path stages meta.json first.
-    let gate = stall_probe::arm(&bundle.meta_json());
+    let gate = stall_probe::arm_scoped(&bundle.meta_json());
     let after = record_named("After");
     let reader = FsCompanyStore::new(&root);
     let handle = tokio::spawn(async move { store.save(&after).await });

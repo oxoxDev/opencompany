@@ -4,6 +4,8 @@ use std::sync::mpsc::{Receiver, SendError, Sender};
 use std::sync::{Arc, LazyLock, Mutex};
 use tokio::sync::Notify;
 
+static BLOCKED: LazyLock<Notify> = LazyLock::new(Notify::new);
+
 /// One armed stall, owned by the test that armed it. Carries both halves
 /// of the rendezvous: the `Notify` the parked write signals when it
 /// reaches the gate, and the sender that releases it again.
@@ -32,7 +34,19 @@ impl Gate {
     pub(crate) fn release(&self) -> Result<(), SendError<()>> {
         self.release.send(())
     }
+
+    /// Compatibility with the original commit-gate API.
+    pub(crate) async fn wait_blocked(&self) {
+        self.wait().await;
+    }
+
+    /// Compatibility with the original commit-gate API.
+    pub(crate) fn send(self, value: ()) -> Result<(), SendError<()>> {
+        self.release.send(value)
+    }
 }
+
+pub(crate) type CommitGate = Gate;
 
 type Armed = (Receiver<()>, Arc<Notify>);
 
@@ -60,14 +74,32 @@ fn block_in(gates: &Mutex<HashMap<PathBuf, Armed>>, path: &Path) {
         .remove(&key(path));
     if let Some((receiver, blocked)) = armed {
         blocked.notify_one();
+        BLOCKED.notify_one();
         let _ = receiver.recv();
     }
 }
 
 /// Arms a one-shot stall for the next [`stage_atomic_bytes`] write
 /// targeting `path`. Returns the gate the test waits on and releases.
-pub(crate) fn arm(path: &Path) -> Gate {
+pub(crate) fn arm_scoped(path: &Path) -> Gate {
     arm_in(&GATES, path)
+}
+
+/// Original sender API retained for existing callers.
+pub(crate) fn arm(path: &Path) -> Sender<()> {
+    let (release, receiver) = std::sync::mpsc::channel();
+    let blocked = Arc::new(Notify::new());
+    GATES
+        .lock()
+        .expect("stall-probe poisoned")
+        .insert(key(path), (receiver, blocked));
+    release
+}
+
+/// Original process-wide waiter retained for existing callers. New callers
+/// should use [`arm_scoped`] and wait on the returned gate.
+pub(crate) async fn wait_blocked() {
+    BLOCKED.notified().await;
 }
 
 /// Called from inside the blocking write closure. No-op unless `path`
@@ -86,7 +118,7 @@ static COMMIT_GATES: LazyLock<Mutex<HashMap<PathBuf, Armed>>> =
 /// because the two stall on the *same* destination path at different
 /// points in the same `save` call — arming one must not be consumed by
 /// the other.
-pub(crate) fn arm_commit(path: &Path) -> Gate {
+pub(crate) fn arm_commit(path: &Path) -> CommitGate {
     arm_in(&COMMIT_GATES, path)
 }
 
