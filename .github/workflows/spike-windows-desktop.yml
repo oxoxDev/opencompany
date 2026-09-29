@@ -48,7 +48,7 @@ jobs:
       # in `crates/opencompany-app/Cargo.toml`. Must stay equal to
       # `DESKTOP_RELEASE_FEATURES` in `build-desktop.yml` — a spike that proved
       # a DIFFERENT feature combination would prove nothing about the release.
-      DESKTOP_RELEASE_FEATURES: opencompany-core/acp,opencompany-core/composio
+      DESKTOP_RELEASE_FEATURES: opencompany-core/acp,opencompany-core/composio,opencompany-core/mcp
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
 
