@@ -48,7 +48,7 @@ impl Gate {
 
 pub(crate) type CommitGate = Gate;
 
-type Armed = (Receiver<()>, Arc<Notify>);
+type Armed = (Receiver<()>, Arc<Notify>, bool);
 
 static GATES: LazyLock<Mutex<HashMap<PathBuf, Armed>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -63,7 +63,7 @@ fn arm_in(gates: &Mutex<HashMap<PathBuf, Armed>>, path: &Path) -> Gate {
     gates
         .lock()
         .expect("stall-probe poisoned")
-        .insert(key(path), (receiver, Arc::clone(&blocked)));
+        .insert(key(path), (receiver, Arc::clone(&blocked), false));
     Gate { release, blocked }
 }
 
@@ -72,7 +72,7 @@ fn block_in(gates: &Mutex<HashMap<PathBuf, Armed>>, path: &Path, legacy_notify: 
         .lock()
         .expect("stall-probe poisoned")
         .remove(&key(path));
-    if let Some((receiver, blocked)) = armed {
+    if let Some((receiver, blocked, legacy_notify)) = armed {
         blocked.notify_one();
         if legacy_notify {
             BLOCKED.notify_one();
@@ -94,7 +94,7 @@ pub(crate) fn arm(path: &Path) -> Sender<()> {
     GATES
         .lock()
         .expect("stall-probe poisoned")
-        .insert(key(path), (receiver, blocked));
+        .insert(key(path), (receiver, blocked, true));
     release
 }
 
