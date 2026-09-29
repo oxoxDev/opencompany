@@ -67,14 +67,16 @@ fn arm_in(gates: &Mutex<HashMap<PathBuf, Armed>>, path: &Path) -> Gate {
     Gate { release, blocked }
 }
 
-fn block_in(gates: &Mutex<HashMap<PathBuf, Armed>>, path: &Path) {
+fn block_in(gates: &Mutex<HashMap<PathBuf, Armed>>, path: &Path, legacy_notify: bool) {
     let armed = gates
         .lock()
         .expect("stall-probe poisoned")
         .remove(&key(path));
     if let Some((receiver, blocked)) = armed {
         blocked.notify_one();
-        BLOCKED.notify_one();
+        if legacy_notify {
+            BLOCKED.notify_one();
+        }
         let _ = receiver.recv();
     }
 }
@@ -106,7 +108,7 @@ pub(crate) async fn wait_blocked() {
 /// was armed. Wakes that path's gate, then parks this blocking-pool
 /// thread until the test releases it.
 pub(crate) fn maybe_block(path: &Path) {
-    block_in(&GATES, path);
+    block_in(&GATES, path, true);
 }
 
 static COMMIT_GATES: LazyLock<Mutex<HashMap<PathBuf, Armed>>> =
@@ -126,5 +128,5 @@ pub(crate) fn arm_commit(path: &Path) -> CommitGate {
 /// rename. No-op unless `path` was armed. A gate armed here is reached
 /// only when the rename is genuinely about to run, not merely staged.
 pub(crate) fn maybe_block_commit(path: &Path) {
-    block_in(&COMMIT_GATES, path);
+    block_in(&COMMIT_GATES, path, false);
 }
